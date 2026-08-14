@@ -96,20 +96,23 @@ export function TradingProvider({ children }: { children: ReactNode }) {
         id: string; symbol: string; side: string; action?: string;
         sizeInUsd?: string; size?: string; price: string; pnl: string;
         strategy: string; timestamp: string; closeTime?: number;
+        gmxMarketAddress?: string | null; collateralToken?: string | null;
       }> | null) => {
         if (!rows || rows.length === 0) return;
         const loaded: Trade[] = rows.map(r => ({
-          id:            r.id,
-          symbol:        r.symbol,
-          displaySymbol: displaySymbol(r.symbol),
-          side:          r.side as 'LONG' | 'SHORT',
-          action:        (r.action ?? 'CLOSE') as 'OPEN' | 'CLOSE',
-          sizeInUsd:     parseFloat(r.sizeInUsd ?? r.size ?? '0'),
-          price:         parseFloat(r.price),
-          pnl:           parseFloat(r.pnl),
-          strategy:      r.strategy,
-          timestamp:     new Date(r.timestamp),
-          closeTime:     r.closeTime ?? 0,
+          id:               r.id,
+          symbol:           r.symbol,
+          displaySymbol:    displaySymbol(r.symbol),
+          side:             r.side as 'LONG' | 'SHORT',
+          action:           (r.action ?? 'CLOSE') as 'OPEN' | 'CLOSE',
+          sizeInUsd:        parseFloat(r.sizeInUsd ?? r.size ?? '0'),
+          price:            parseFloat(r.price),
+          pnl:              parseFloat(r.pnl),
+          strategy:         r.strategy,
+          timestamp:        new Date(r.timestamp),
+          closeTime:        r.closeTime ?? 0,
+          gmxMarketAddress: r.gmxMarketAddress ?? undefined,
+          collateralToken:  r.collateralToken ?? undefined,
         }));
         setClosedTrades(loaded);
         syncedIds.current = new Set(loaded.map(t => t.id));
@@ -333,6 +336,25 @@ export function TradingProvider({ children }: { children: ReactNode }) {
       availableBalance:   a.availableBalance   - collateralUsd,
       totalPositionValue: a.totalPositionValue + params.sizeInUsd,
     }));
+
+    // Record OPEN trade (matches mobile behaviour; persisted via the sync effect)
+    const openTrade: Trade = {
+      id:               `open-${Date.now()}`,
+      symbol:           sym,
+      displaySymbol:    displaySymbol(sym),
+      side:             params.side,
+      action:           'OPEN',
+      sizeInUsd:        params.sizeInUsd,
+      price:            entryPrice,
+      pnl:              0,
+      collateralToken:  collToken,
+      gmxMarketAddress: MARKET_BY_SYMBOL.get(sym)?.marketToken,
+      strategy:         params.orderType,
+      timestamp:        new Date(),
+      closeTime:        0,
+    };
+    setClosedTrades(ts => [openTrade, ...ts]);
+
     setLogs(l => [{
       id: `log-${Date.now()}`, level: 'TRADE' as const,
       message: `[PAPER] OPENED ${displaySymbol(sym)} ${params.side} $${params.sizeInUsd.toFixed(0)} × ${params.leverage}x (${params.orderType})`,

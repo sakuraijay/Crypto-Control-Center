@@ -132,20 +132,23 @@ export function TradingProvider({ children }: { children: React.ReactNode }) {
         id: string; symbol: string; side: string; action?: string;
         sizeInUsd?: string; size?: string; price: string; pnl: string;
         strategy: string; timestamp: string; closeTime?: number;
+        gmxMarketAddress?: string | null; collateralToken?: string | null;
       }> | null) => {
         if (!rows || rows.length === 0) return;
         const loaded: Trade[] = rows.map(r => ({
-          id:            r.id,
-          symbol:        r.symbol,
-          displaySymbol: displaySym(r.symbol),
-          side:          r.side as 'LONG' | 'SHORT',
-          action:        (r.action ?? 'CLOSE') as 'OPEN' | 'CLOSE',
-          sizeInUsd:     parseFloat(r.sizeInUsd ?? r.size ?? '0'),
-          price:         parseFloat(r.price),
-          pnl:           parseFloat(r.pnl),
-          strategy:      r.strategy,
-          timestamp:     new Date(r.timestamp),
-          closeTime:     r.closeTime ?? 0,
+          id:               r.id,
+          symbol:           r.symbol,
+          displaySymbol:    displaySym(r.symbol),
+          side:             r.side as 'LONG' | 'SHORT',
+          action:           (r.action ?? 'CLOSE') as 'OPEN' | 'CLOSE',
+          sizeInUsd:        parseFloat(r.sizeInUsd ?? r.size ?? '0'),
+          price:            parseFloat(r.price),
+          pnl:              parseFloat(r.pnl),
+          strategy:         r.strategy,
+          timestamp:        new Date(r.timestamp),
+          closeTime:        r.closeTime ?? 0,
+          gmxMarketAddress: r.gmxMarketAddress ?? undefined,
+          collateralToken:  r.collateralToken ?? undefined,
         }));
         setTrades(loaded);
         syncedIds.current = new Set(loaded.map(t => t.id));
