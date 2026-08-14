@@ -1,6 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { MOCK_ACCOUNT, MOCK_POSITIONS, MOCK_TRADES } from '@/constants/mockData';
 import { GmxPriceStream } from '@/services/gmxPriceStream';
+import { MARKET_BY_SYMBOL } from '@/lib/gmx/markets';
 
 // ── Types (GMX V2) ────────────────────────────────────────────────────────────
 
@@ -37,6 +38,7 @@ export interface Trade {
   price: number;
   pnl: number;
   collateralToken?: string;
+  gmxMarketAddress?: string; // GMX market token address (Arbitrum One)
   strategy: string;
   timestamp: Date;
   closeTime: number;
@@ -290,6 +292,7 @@ export function TradingProvider({ children }: { children: React.ReactNode }) {
       side: params.side, action: 'OPEN', sizeInUsd: params.sizeInUsd,
       price: entry, pnl: 0,
       collateralToken: params.collateralToken ?? 'USDC',
+      gmxMarketAddress: MARKET_BY_SYMBOL.get(sym)?.marketAddress,
       strategy: 'Manual', timestamp: new Date(), closeTime: 0,
     };
     setTrades(t => [trade, ...t]);
@@ -306,8 +309,9 @@ export function TradingProvider({ children }: { children: React.ReactNode }) {
           id: `${now}-close`, symbol: pos.symbol, displaySymbol: pos.displaySymbol,
           side: pos.side, action: 'CLOSE', sizeInUsd: pos.sizeInUsd,
           price: pos.markPrice, pnl: pos.unrealizedPnl,
-          collateralToken: pos.collateralToken, strategy: 'Manual',
-          timestamp: new Date(), closeTime: now,
+          collateralToken: pos.collateralToken,
+          gmxMarketAddress: MARKET_BY_SYMBOL.get(pos.symbol)?.marketAddress,
+          strategy: 'Manual', timestamp: new Date(), closeTime: now,
         };
         setTrades(t => [trade, ...t]);
         setAccount(a => ({

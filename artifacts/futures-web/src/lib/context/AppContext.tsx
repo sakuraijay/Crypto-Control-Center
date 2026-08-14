@@ -79,6 +79,7 @@ export interface Trade {
   price: number;            // execution price
   pnl: number;
   collateralToken?: string;
+  gmxMarketAddress?: string; // GMX market token address (Arbitrum One)
   strategy: string;
   timestamp: Date;
   closeTime?: number;

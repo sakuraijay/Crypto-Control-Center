@@ -6,7 +6,7 @@ import {
 } from './AppContext';
 import { useAppContext } from './AppContext';
 import { GmxPriceStream } from '../gmx/priceStream';
-import { FALLBACK_PRICES, displaySymbol } from '../gmx/markets';
+import { FALLBACK_PRICES, displaySymbol, MARKET_BY_SYMBOL } from '../gmx/markets';
 
 export interface PlaceOrderResult {
   success: boolean;
@@ -233,7 +233,9 @@ export function TradingProvider({ children }: { children: ReactNode }) {
               symbol: pos.symbol, displaySymbol: pos.displaySymbol, side: pos.side,
               action: 'CLOSE', sizeInUsd: pos.sizeInUsd,
               price: newMark, pnl: newPnl,
-              collateralToken: pos.collateralToken, strategy: closeReason,
+              collateralToken: pos.collateralToken,
+              gmxMarketAddress: MARKET_BY_SYMBOL.get(pos.symbol)?.marketToken,
+              strategy: closeReason,
               timestamp: new Date(), closeTime: Date.now(),
             };
             setClosedTrades(ts => [closedTrade, ...ts]);
@@ -366,7 +368,9 @@ export function TradingProvider({ children }: { children: ReactNode }) {
         id: `closed-${Date.now()}`, symbol: pos.symbol, displaySymbol: pos.displaySymbol,
         side: pos.side, action: 'CLOSE', sizeInUsd: pos.sizeInUsd,
         price: pos.markPrice, pnl: pos.unrealizedPnl,
-        collateralToken: pos.collateralToken, strategy: 'Manual',
+        collateralToken: pos.collateralToken,
+        gmxMarketAddress: MARKET_BY_SYMBOL.get(pos.symbol)?.marketToken,
+        strategy: 'Manual',
         timestamp: new Date(), closeTime: Date.now(),
       };
       setClosedTrades(ts => [trade, ...ts]);
@@ -387,7 +391,9 @@ export function TradingProvider({ children }: { children: ReactNode }) {
         id: `closed-${now}-${i}`, symbol: pos.symbol, displaySymbol: pos.displaySymbol,
         side: pos.side, action: 'CLOSE' as const, sizeInUsd: pos.sizeInUsd,
         price: pos.markPrice, pnl: pos.unrealizedPnl,
-        collateralToken: pos.collateralToken, strategy: 'Clear All',
+        collateralToken: pos.collateralToken,
+        gmxMarketAddress: MARKET_BY_SYMBOL.get(pos.symbol)?.marketToken,
+        strategy: 'Clear All',
         timestamp: new Date(), closeTime: now,
       }));
       setClosedTrades(ts => [...newTrades, ...ts]);
