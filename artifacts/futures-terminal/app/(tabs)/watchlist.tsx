@@ -4,14 +4,14 @@ import { useColors } from '@/hooks/useColors';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
-import { useWatchlist } from '@/contexts/WatchlistContext';
+import { useWatchlist, StreamStatus } from '@/contexts/WatchlistContext';
 import { WatchlistItem } from '@/components/WatchlistItem';
 import type { WatchlistSymbol } from '@/contexts/WatchlistContext';
 
 export default function WatchlistScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
-  const { symbols, addSymbol, removeSymbol } = useWatchlist();
+  const { symbols, streamStatus, addSymbol, removeSymbol } = useWatchlist();
   const [adding, setAdding] = useState(false);
   const [input, setInput] = useState('');
 
@@ -63,7 +63,14 @@ export default function WatchlistScreen() {
     <View style={[styles.root, { backgroundColor: colors.background }]}>
       {/* Header */}
       <View style={[styles.header, { paddingTop: topPad, backgroundColor: colors.card, borderBottomColor: colors.border }]}>
-        <Text style={[styles.headerTitle, { color: colors.foreground }]}>Watchlist</Text>
+        <View>
+          <Text style={[styles.headerTitle, { color: colors.foreground }]}>Watchlist</Text>
+          <Text style={[styles.headerSub, {
+            color: streamStatus === 'connected' ? colors.long : streamStatus === 'offline' ? colors.mutedForeground : colors.warning,
+          }]}>
+            {streamStatus === 'connected' ? '● LIVE' : streamStatus === 'connecting' || streamStatus === 'reconnecting' ? '◌ CONNECTING' : '○ SIMULATED'}
+          </Text>
+        </View>
         <TouchableOpacity
           style={[styles.addBtn, { backgroundColor: colors.primary + '22', borderColor: colors.primary + '55' }]}
           onPress={() => setAdding(!adding)}
@@ -130,6 +137,7 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
   },
   headerTitle: { fontFamily: 'Inter_700Bold', fontSize: 20 },
+  headerSub: { fontFamily: 'Inter_600SemiBold', fontSize: 10, marginTop: 2, letterSpacing: 1 },
   addBtn: {
     flexDirection: 'row',
     alignItems: 'center',

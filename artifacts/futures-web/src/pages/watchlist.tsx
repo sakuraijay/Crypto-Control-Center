@@ -3,7 +3,8 @@ import { useWatchlistContext } from '@/lib/context';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Plus, X, Search, TrendingUp, TrendingDown } from 'lucide-react';
+import { Plus, X, Search, TrendingUp, TrendingDown, Wifi, WifiOff, Loader2 } from 'lucide-react';
+import { cn } from '@/lib/utils';
 
 function ScoreBar({ score, label }: { score: number; label: string }) {
   const isPositive = score >= 0;
@@ -35,8 +36,23 @@ function ScoreBar({ score, label }: { score: number; label: string }) {
   );
 }
 
+function StreamBadge({ status }: { status: string }) {
+  const cfg = {
+    connected:    { icon: <Wifi className="w-3 h-3" />,    label: 'LIVE',          cls: 'text-[var(--color-long)] border-[var(--color-long)]/40 bg-[var(--color-long)]/10' },
+    connecting:   { icon: <Loader2 className="w-3 h-3 animate-spin" />, label: 'CONNECTING', cls: 'text-[var(--color-warning)] border-[var(--color-warning)]/40 bg-[var(--color-warning)]/10' },
+    reconnecting: { icon: <Loader2 className="w-3 h-3 animate-spin" />, label: 'RECONNECTING', cls: 'text-[var(--color-warning)] border-[var(--color-warning)]/40 bg-[var(--color-warning)]/10' },
+    offline:      { icon: <WifiOff className="w-3 h-3" />, label: 'SIMULATED',    cls: 'text-muted-foreground border-border bg-secondary' },
+  }[status] ?? { icon: <WifiOff className="w-3 h-3" />, label: 'OFFLINE', cls: 'text-muted-foreground border-border bg-secondary' };
+
+  return (
+    <div className={cn('flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-[10px] font-bold tracking-widest', cfg.cls)}>
+      {cfg.icon} {cfg.label}
+    </div>
+  );
+}
+
 export default function Watchlist() {
-  const { watchlist, addSymbol, removeSymbol } = useWatchlistContext();
+  const { watchlist, streamStatus, addSymbol, removeSymbol } = useWatchlistContext();
   const [newSymbol, setNewSymbol] = useState('');
 
   const handleAdd = (e: React.FormEvent) => {
@@ -49,6 +65,10 @@ export default function Watchlist() {
 
   return (
     <div className="animate-in fade-in duration-500 flex flex-col gap-6">
+      <div className="flex items-center justify-between">
+        <p className="text-xs text-muted-foreground">Multi-timeframe signals · Binance USD-M Futures</p>
+        <StreamBadge status={streamStatus} />
+      </div>
       <Card className="p-4 bg-card/50 border-border">
         <form onSubmit={handleAdd} className="flex gap-4">
           <div className="relative flex-1">

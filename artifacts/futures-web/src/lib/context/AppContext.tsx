@@ -40,6 +40,7 @@ export interface WatchlistSymbol {
   score4h: number;
   score1d: number;
   combinedScore: number;
+  fundingRate?: number;   // from Binance mark-price stream (8-hour rate)
 }
 
 export interface Trade {
