@@ -21,24 +21,25 @@ import { TradingProvider } from '@/contexts/TradingContext';
 import { WatchlistProvider } from '@/contexts/WatchlistContext';
 import { StrategyProvider } from '@/contexts/StrategyContext';
 import { VpsProvider } from '@/contexts/VpsContext';
+import { AiEngineProvider } from '@/contexts/AiEngineContext';
 import { RiskAlertMonitor } from '@/components/RiskAlertMonitor';
 import { setupAndroidChannel } from '@/services/notifications';
 
 SystemUI.setBackgroundColorAsync('#0A0B0E');
-
 SplashScreen.preventAutoHideAsync();
 
 const queryClient = new QueryClient();
 
 function RootLayoutNav() {
   const { isAuthenticated, isLoading } = useAuth();
-  const router = useRouter();
+  const router   = useRouter();
   const segments = useSegments();
 
   useEffect(() => {
     if (isLoading) return;
-    const inTabs = segments[0] === '(tabs)';
+    const inTabs  = segments[0] === '(tabs)';
     const inLogin = segments[0] === 'login';
+    // Login bypass: dev auth always passes, so we always route to tabs
     if (!isAuthenticated && !inLogin) {
       router.replace('/login');
     } else if (isAuthenticated && !inTabs) {
@@ -49,13 +50,13 @@ function RootLayoutNav() {
   return (
     <Stack screenOptions={{ headerShown: false, animation: 'fade' }}>
       <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-      <Stack.Screen name="login" options={{ headerShown: false }} />
+      <Stack.Screen name="login"  options={{ headerShown: false }} />
     </Stack>
   );
 }
 
 export default function RootLayout() {
-  // Setup Android notification channel once on app start
+  // Android notification channels — all three channels at startup
   useEffect(() => { setupAndroidChannel(); }, []);
 
   const [fontsLoaded, fontError] = useFonts({
@@ -66,9 +67,7 @@ export default function RootLayout() {
   });
 
   useEffect(() => {
-    if (fontsLoaded || fontError) {
-      SplashScreen.hideAsync();
-    }
+    if (fontsLoaded || fontError) SplashScreen.hideAsync();
   }, [fontsLoaded, fontError]);
 
   if (!fontsLoaded && !fontError) return null;
@@ -85,8 +84,14 @@ export default function RootLayout() {
                     <WatchlistProvider>
                       <TradingProvider>
                         <EngineProvider>
-                          <RiskAlertMonitor />
-                          <RootLayoutNav />
+                          {/*
+                            AiEngineProvider must be inside Engine, Trading, Strategy, Watchlist
+                            so it can read all upstream contexts.
+                          */}
+                          <AiEngineProvider>
+                            <RiskAlertMonitor />
+                            <RootLayoutNav />
+                          </AiEngineProvider>
                         </EngineProvider>
                       </TradingProvider>
                     </WatchlistProvider>

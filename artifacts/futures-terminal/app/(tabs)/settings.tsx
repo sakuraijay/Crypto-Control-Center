@@ -18,7 +18,7 @@ import * as Haptics from 'expo-haptics';
 import { useEngine, EngineState } from '@/contexts/EngineContext';
 import { useTrading } from '@/contexts/TradingContext';
 import { useAuth } from '@/contexts/AuthContext';
-import { useVps, STATE_COLORS, STATE_LABELS, timeAgo } from '@/contexts/VpsContext';
+import { useVps, STATE_COLORS, STATE_LABELS, timeAgo, type VpsConnectionStatus } from '@/contexts/VpsContext';
 import { VpsStatusCard } from '@/components/VpsStatusCard';
 import { EngineStatusBadge } from '@/components/EngineStatusBadge';
 import { ConfirmModal } from '@/components/ConfirmModal';
@@ -154,13 +154,13 @@ export default function SettingsScreen() {
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
   };
 
-  const statusColors: Record<VpsStatus, string> = {
+  const statusColors: Record<VpsConnectionStatus, string> = {
     connected: colors.long,
     connecting: colors.warning,
     error: colors.short,
     disconnected: colors.mutedForeground,
   };
-  const statusDotColor = statusColors[vpsStatus];
+  const statusDotColor = statusColors[vpsConnStatus];
 
   return (
     <KeyboardAvoidingView style={[styles.root, { backgroundColor: colors.background }]} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
