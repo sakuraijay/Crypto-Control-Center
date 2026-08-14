@@ -1,3 +1,4 @@
+- [Binance proxy routing](binance-proxy-routing.md) — Vite proxy won't work in Replit; use /api-server/api/binance/ from browser; fapi.binance.com for REST (not fstream)
 - [Template literal escaping bug](template-literal-bug.md) — previous codegen escaped `\${` instead of `${`; never repeat this
 - [Pre-existing TS errors](preexisting-ts-errors.md) — calendar.tsx and spinner.tsx have React 19 ref-type mismatches; ignore, they are not new
 - [VPS config pattern](vps-config-pattern.md) — web uses VpsContext/VpsProvider; mobile uses local useState + AsyncStorage (no context needed)

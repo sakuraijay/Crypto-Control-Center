@@ -160,7 +160,9 @@ export async function fetch24hStats(
   if (symbols.length === 0) return {};
   try {
     const param = encodeURIComponent(JSON.stringify(symbols));
-    const res = await fetch(`${REST_BASE}/ticker/24hr?symbols=${param}`, {
+    // Use the API server proxy (/api-server/ → port 8080) to avoid browser CORS.
+    // Replit's proxy strips the /api-server prefix before forwarding to Express.
+    const res = await fetch(`/api-server/api/binance/ticker24h?symbols=${param}`, {
       signal: AbortSignal.timeout(5_000),
     });
     if (!res.ok) return {};
@@ -186,7 +188,7 @@ export async function fetchMarkPrices(
 ): Promise<Record<string, number>> {
   if (symbols.length === 0) return {};
   try {
-    const res = await fetch(`${REST_BASE}/premiumIndex`, {
+    const res = await fetch(`/api-server/api/binance/markprices`, {
       signal: AbortSignal.timeout(5_000),
     });
     if (!res.ok) return {};

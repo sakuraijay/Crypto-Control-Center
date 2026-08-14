@@ -20,6 +20,7 @@ import { EngineProvider } from '@/contexts/EngineContext';
 import { TradingProvider } from '@/contexts/TradingContext';
 import { WatchlistProvider } from '@/contexts/WatchlistContext';
 import { StrategyProvider } from '@/contexts/StrategyContext';
+import { RiskAlertMonitor } from '@/components/RiskAlertMonitor';
 
 SystemUI.setBackgroundColorAsync('#0A0B0E');
 
@@ -78,6 +79,7 @@ export default function RootLayout() {
                   <WatchlistProvider>
                     <TradingProvider>
                       <EngineProvider>
+                        <RiskAlertMonitor />
                         <RootLayoutNav />
                       </EngineProvider>
                     </TradingProvider>

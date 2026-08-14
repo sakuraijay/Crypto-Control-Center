@@ -21,7 +21,8 @@ type UpdateCallback = (update: MarkPriceUpdate) => void;
 type StatusCallback = (status: StreamStatus) => void;
 
 const WS_BASE = 'wss://fstream.binance.com/stream';
-const REST_BASE = 'https://fstream.binance.com/fapi/v1';
+// REST API: fapi.binance.com — fstream.binance.com is WebSocket-only
+const REST_BASE = 'https://fapi.binance.com/fapi/v1';
 const MAX_RETRIES = 4;
 const RETRY_BASE_MS = 2_000;
 
