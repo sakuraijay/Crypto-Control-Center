@@ -9,3 +9,5 @@
 - [Express 5 wildcard routes](express5-wildcards.md) — `*` and `(.*)` both throw PathError in Express 5 + path-to-regexp@8; use named params `/{*path}` or regex `/\/.*/` for catch-all routes
 - [Live approval gate](live-approval-gate.md) — PendingLiveApproval in types.ts; approval queue in AiEngineContext; LiveApprovalCard on dashboard; VPS /execute endpoint in api-server vps.ts
 - [Risk enforcement architecture](risk-enforcement.md) — trailing stop ratchet in TradingContext price-tick loop; daily/weekly/consecutive loss → RISK_LOCKED watcher in AiEngineContext; consecutiveLosses exposed from TradingContext as reactive state
+- [VPS health monitor pattern](vps-health-monitor.md) — 30s poll; ≥2 consecutive errors before "down" alert fires; reset tracking refs on host change and testConnection() to avoid false positives
+- [Web VPS context extra exports](vps-context-exports.md) — VPS_STATE_LABELS constant in same file as VpsProvider causes Vite Fast Refresh "incompatible export" warning; benign (falls back to full reload), do not move
