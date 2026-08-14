@@ -2,6 +2,10 @@
  * Persistent storage routes for paper-trading data.
  * Stores trade history and strategy config in PostgreSQL so data
  * survives browser/app storage clears. No auth — single-user paper trading.
+ *
+ * GMX V2 note: trades are denominated in sizeInUsd (USD value) rather than
+ * a contract-qty "size". The legacy `size` column is kept NOT NULL for schema
+ * compatibility; it is populated from sizeInUsd when the legacy field is absent.
  */
 
 import { Router } from "express";
@@ -28,29 +32,42 @@ router.get("/data/trades", async (_req, res) => {
 /**
  * POST /api/data/trades/batch — upsert an array of trades.
  * Used for the initial bulk sync when the client loads.
+ * Accepts both legacy (size) and GMX-native (sizeInUsd, collateralToken,
+ * gmxMarketAddress) fields; size is derived from sizeInUsd when absent.
  */
 router.post("/data/trades/batch", async (req, res) => {
   try {
     const rows = req.body as Array<{
       id: string; symbol: string; side: string; action: string;
-      size: number; price: number; pnl: number; strategy: string;
-      timestamp: string; closeTime: number;
+      // GMX-native (preferred)
+      sizeInUsd?: number | string;
+      collateralToken?: string;
+      gmxMarketAddress?: string;
+      // Legacy fallback
+      size?: number | string;
+      price: number | string; pnl?: number | string; strategy?: string;
+      timestamp: string; closeTime?: number;
     }>;
     if (!Array.isArray(rows) || rows.length === 0) { res.json({ count: 0 }); return; }
 
     await db
       .insert(tradesTable)
       .values(rows.map(r => ({
-        id:        r.id,
-        symbol:    r.symbol,
-        side:      r.side,
-        action:    r.action,
-        size:      String(r.size),
-        price:     String(r.price),
-        pnl:       String(r.pnl ?? 0),
-        strategy:  r.strategy ?? "Manual",
-        timestamp: new Date(r.timestamp),
-        closeTime: r.closeTime ?? 0,
+        id:               r.id,
+        symbol:           r.symbol,
+        side:             r.side,
+        action:           r.action,
+        // size (NOT NULL legacy): derive from sizeInUsd when size is absent
+        size:             String(r.sizeInUsd ?? r.size ?? 0),
+        price:            String(r.price),
+        pnl:              String(r.pnl ?? 0),
+        strategy:         r.strategy ?? "Manual",
+        timestamp:        new Date(r.timestamp),
+        closeTime:        r.closeTime ?? 0,
+        // ── GMX V2 fields ─────────────────────────────────────────
+        sizeInUsd:        r.sizeInUsd != null ? String(r.sizeInUsd) : null,
+        collateralToken:  r.collateralToken ?? "USDC",
+        gmxMarketAddress: r.gmxMarketAddress ?? null,
       })))
       .onConflictDoNothing();
 
@@ -63,27 +80,45 @@ router.post("/data/trades/batch", async (req, res) => {
 /**
  * POST /api/data/trades — upsert a single trade.
  * Called when a position is opened or closed.
+ * Accepts both legacy (size) and GMX-native (sizeInUsd, collateralToken,
+ * gmxMarketAddress) fields; size is derived from sizeInUsd when absent.
  */
 router.post("/data/trades", async (req, res) => {
   try {
     const r = req.body;
+    const sizeVal        = String(r.sizeInUsd ?? r.size ?? 0);
+    const sizeInUsdVal   = r.sizeInUsd != null ? String(r.sizeInUsd) : null;
+    const collateral     = r.collateralToken ?? "USDC";
+    const marketAddress  = r.gmxMarketAddress ?? null;
+
     await db
       .insert(tradesTable)
       .values({
-        id:        r.id,
-        symbol:    r.symbol,
-        side:      r.side,
-        action:    r.action ?? "CLOSE",
-        size:      String(r.size),
-        price:     String(r.price),
-        pnl:       String(r.pnl ?? 0),
-        strategy:  r.strategy ?? "Manual",
-        timestamp: new Date(r.timestamp),
-        closeTime: r.closeTime ?? 0,
+        id:               r.id,
+        symbol:           r.symbol,
+        side:             r.side,
+        action:           r.action ?? "CLOSE",
+        // size (NOT NULL legacy): derive from sizeInUsd when size is absent
+        size:             sizeVal,
+        price:            String(r.price),
+        pnl:              String(r.pnl ?? 0),
+        strategy:         r.strategy ?? "Manual",
+        timestamp:        new Date(r.timestamp),
+        closeTime:        r.closeTime ?? 0,
+        // ── GMX V2 fields ─────────────────────────────────────────
+        sizeInUsd:        sizeInUsdVal,
+        collateralToken:  collateral,
+        gmxMarketAddress: marketAddress,
       })
       .onConflictDoUpdate({
         target: tradesTable.id,
-        set: { pnl: String(r.pnl ?? 0), strategy: r.strategy ?? "Manual" },
+        set: {
+          pnl:              String(r.pnl ?? 0),
+          strategy:         r.strategy ?? "Manual",
+          sizeInUsd:        sizeInUsdVal,
+          collateralToken:  collateral,
+          gmxMarketAddress: marketAddress,
+        },
       });
     res.json({ ok: true });
   } catch (err) {
