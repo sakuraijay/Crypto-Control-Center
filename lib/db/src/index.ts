@@ -1,6 +1,3 @@
-import { readFileSync, readdirSync } from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import * as schema from "./schema";
@@ -19,34 +16,35 @@ export const db = drizzle(pool, { schema });
 export * from "./schema";
 
 // ── Migration runner ────────────────────────────────────────────────────────
-// Resolves the migrations directory relative to this file so it works
-// regardless of where the package is invoked from.
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const MIGRATIONS_DIR = path.join(__dirname, "../../migrations");
+// SQL is embedded directly in code so the bundle can run it without any
+// file-system path resolution (the dist/ directory has no migrations/ sibling).
+// Each statement uses IF NOT EXISTS so re-running on startup is always safe.
+
+const MIGRATIONS: { name: string; sql: string }[] = [
+  {
+    name: "0001_gmx_trade_fields",
+    sql: `
+      ALTER TABLE trades
+        ADD COLUMN IF NOT EXISTS gmx_market_address text,
+        ADD COLUMN IF NOT EXISTS collateral_token    text DEFAULT 'USDC',
+        ADD COLUMN IF NOT EXISTS size_in_usd         numeric(18,4);
+    `,
+  },
+  // Add future migrations here in chronological order.
+];
 
 /**
- * Run all *.sql files from lib/db/migrations/ in lexicographic order.
- * Every SQL file uses IF NOT EXISTS / IF EXISTS guards so this is idempotent.
- * Call this once during API server startup before serving requests.
+ * Apply all embedded migrations against the database.
+ * Every statement is idempotent — safe to run on every API server startup.
+ * If any migration fails the error propagates and the caller should abort.
  */
 export async function runMigrations(): Promise<void> {
   const client = new Client({ connectionString: process.env.DATABASE_URL! });
   await client.connect();
   try {
-    let files: string[];
-    try {
-      files = readdirSync(MIGRATIONS_DIR)
-        .filter((f) => f.endsWith(".sql"))
-        .sort();
-    } catch {
-      // Migrations directory does not exist yet — nothing to apply.
-      return;
-    }
-
-    for (const file of files) {
-      const sql = readFileSync(path.join(MIGRATIONS_DIR, file), "utf-8");
+    for (const { name, sql } of MIGRATIONS) {
       await client.query(sql);
-      console.log(`[db] migration applied: ${file}`);
+      console.log(`[db] migration applied: ${name}`);
     }
   } finally {
     await client.end();
