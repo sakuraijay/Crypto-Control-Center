@@ -124,6 +124,44 @@ router.post("/vps/disarm", async (req, res) => {
   }
 });
 
+// ── GET /vps/subaccount-status ────────────────────────────────────────────────
+// Returns read-only subaccount metadata. NO private keys are ever returned.
+// The actual signer key lives on the VPS only and never leaves it.
+router.get("/vps/subaccount-status", async (req, res) => {
+  const { host, port, ssl } = req.query as Record<string, string | undefined>;
+
+  if (!host?.trim()) {
+    return res.status(400).json({ ok: false, error: "VPS host required" });
+  }
+
+  try {
+    const base     = buildBase(host, port ?? "8080", ssl);
+    const response = await fetch(`${base}/api/status`, {
+      signal: AbortSignal.timeout(TIMEOUT),
+    });
+
+    if (!response.ok) {
+      return res.status(502).json({ ok: false, error: `VPS returned HTTP ${response.status}` });
+    }
+
+    const data = (await response.json()) as Record<string, unknown>;
+
+    // Return ONLY authorization metadata — never any key material
+    return res.json({
+      ok: true,
+      configured:                  Boolean(data.subaccountAddress),
+      subaccountAddress:            data.subaccountAddress ?? null,
+      subaccountExpiresAt:          data.subaccountExpiresAt ?? null,
+      subaccountActionsRemaining:   data.subaccountActionsRemaining ?? null,
+      walletAddress:                data.walletAddress ?? null,
+      gmxConnected:                 data.gmxConnected ?? false,
+      networkChainId:               data.networkChainId ?? 42161,
+    });
+  } catch (e: unknown) {
+    return res.status(502).json({ ok: false, error: "VPS unreachable", detail: (e as Error).message });
+  }
+});
+
 // ── POST /vps/execute ─────────────────────────────────────────────────────────
 // Forwards an operator-approved AI decision to the VPS for live GMX execution.
 // The VPS holds only the GMX One-Click subaccount key; primary wallet stays safe.

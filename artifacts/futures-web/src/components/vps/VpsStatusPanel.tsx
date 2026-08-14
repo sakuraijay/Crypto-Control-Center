@@ -7,10 +7,17 @@
  * Architecture note:
  *   The VPS is the always-on trading authority. This panel is a monitoring
  *   surface only — it does not execute trades itself.
+ *
+ * SECURITY: No private keys or seed phrases are ever displayed, accepted, or
+ * transmitted here. Subaccount data is read-only metadata (address, expiry,
+ * quota) sourced from VPS health telemetry only.
  */
 
 import { useState } from 'react';
-import { useVpsContext, VpsEngineState, OperatingMode, timeAgo, formatUptime, VPS_STATE_LABELS } from '@/lib/context/VpsContext';
+import {
+  useVpsContext, VpsEngineState, OperatingMode,
+  timeAgo, formatUptime, VPS_STATE_LABELS,
+} from '@/lib/context/VpsContext';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import {
@@ -19,7 +26,8 @@ import {
 import {
   Server, Wifi, WifiOff, Loader2, AlertTriangle, ShieldCheck, ShieldOff,
   Radio, Activity, Clock, RefreshCw, Zap, CheckCircle2, XCircle,
-  Brain, UserCog, ShieldAlert,
+  Brain, UserCog, ShieldAlert, ExternalLink, X, KeyRound, Timer,
+  AlertCircle,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Link } from 'wouter';
@@ -115,6 +123,206 @@ function StatusDot({ state }: { state: VpsEngineState }) {
   );
 }
 
+/** Truncate 0x address to 0x1234…abcd */
+function truncAddr(addr: string | null | undefined): string {
+  if (!addr) return '—';
+  return addr.length > 12 ? `${addr.slice(0, 6)}…${addr.slice(-4)}` : addr;
+}
+
+/** Subaccount expiry status */
+function expiryInfo(expiresAt: string | null | undefined): {
+  label: string; severity: 'ok' | 'warn' | 'expired';
+} {
+  if (!expiresAt) return { label: '—', severity: 'ok' };
+  const ms   = new Date(expiresAt).getTime() - Date.now();
+  const days = Math.floor(ms / 86_400_000);
+  if (ms <= 0) return { label: 'EXPIRED', severity: 'expired' };
+  if (days <= 3) return { label: `${days}d left`, severity: 'warn' };
+  return { label: `${days}d left`, severity: 'ok' };
+}
+
+// ── Connection health banner ──────────────────────────────────────────────────
+
+function ConnectionHealthBanner() {
+  const { connectionHealthEvent, dismissHealthEvent } = useVpsContext();
+  if (!connectionHealthEvent) return null;
+
+  const { type, message, at } = connectionHealthEvent;
+  const cfg = {
+    down:      { bg: 'bg-[var(--color-short)]/10 border-[var(--color-short)]/30', icon: XCircle,       txt: 'text-[var(--color-short)]',   label: 'VPS Offline'   },
+    degraded:  { bg: 'bg-amber-500/10 border-amber-500/30',                       icon: AlertCircle,   txt: 'text-amber-400',              label: 'VPS Degraded'  },
+    recovered: { bg: 'bg-[var(--color-long)]/10 border-[var(--color-long)]/30',   icon: CheckCircle2,  txt: 'text-[var(--color-long)]',    label: 'VPS Recovered' },
+  }[type];
+
+  const Icon = cfg.icon;
+
+  return (
+    <div className={cn(
+      'flex items-start gap-3 px-4 py-2.5 border-b text-xs',
+      cfg.bg,
+    )}>
+      <Icon className={cn('w-4 h-4 shrink-0 mt-0.5', cfg.txt)} />
+      <div className="flex-1 min-w-0">
+        <span className={cn('font-bold', cfg.txt)}>{cfg.label} · </span>
+        <span className="text-muted-foreground">{message}</span>
+        <span className="text-muted-foreground ml-2 opacity-60">
+          {at.toLocaleTimeString()}
+        </span>
+      </div>
+      <button
+        onClick={dismissHealthEvent}
+        className="text-muted-foreground hover:text-foreground transition-colors shrink-0"
+        aria-label="Dismiss"
+      >
+        <X className="w-3.5 h-3.5" />
+      </button>
+    </div>
+  );
+}
+
+// ── GMX One-Click subaccount panel ────────────────────────────────────────────
+
+function SubaccountPanel({ configured }: { configured: boolean }) {
+  const { health } = useVpsContext();
+
+  if (!configured) return null;
+
+  const expiry = expiryInfo(health.subaccountExpiresAt);
+  const expiryColor = expiry.severity === 'expired' ? 'text-[var(--color-short)]'
+    : expiry.severity === 'warn' ? 'text-amber-400' : 'text-[var(--color-long)]';
+
+  const quotaColor = health.subaccountActionsRemaining != null
+    ? (health.subaccountActionsRemaining < 10 ? 'text-[var(--color-short)]'
+      : health.subaccountActionsRemaining < 50 ? 'text-amber-400' : 'text-[var(--color-long)]')
+    : 'text-muted-foreground';
+
+  return (
+    <div className="rounded-lg border border-border/60 bg-secondary/20 overflow-hidden">
+      {/* Header */}
+      <div className="flex items-center justify-between px-3 py-2 border-b border-border/40 bg-secondary/30">
+        <div className="flex items-center gap-2">
+          <KeyRound className="w-3.5 h-3.5 text-muted-foreground" />
+          <span className="text-[10px] font-bold tracking-wider text-muted-foreground uppercase">
+            GMX One-Click Subaccount
+          </span>
+        </div>
+        {health.subaccountAddress ? (
+          <div className="flex items-center gap-1 text-[10px] text-[var(--color-long)]">
+            <CheckCircle2 className="w-3 h-3" />
+            Delegated
+          </div>
+        ) : (
+          <div className="flex items-center gap-1 text-[10px] text-muted-foreground">
+            <XCircle className="w-3 h-3" />
+            Not configured
+          </div>
+        )}
+      </div>
+
+      {/* Body */}
+      <div className="px-3 py-2 space-y-1.5">
+        {health.subaccountAddress ? (
+          <>
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-muted-foreground">Subaccount</span>
+              <span className="font-mono text-foreground" title={health.subaccountAddress}>
+                {truncAddr(health.subaccountAddress)}
+              </span>
+            </div>
+
+            {health.walletAddress && (
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-muted-foreground">Primary wallet</span>
+                <span className="font-mono text-muted-foreground text-[10px]" title={health.walletAddress}>
+                  {truncAddr(health.walletAddress)}
+                </span>
+              </div>
+            )}
+
+            <div className="flex items-center justify-between text-xs">
+              <div className="flex items-center gap-1 text-muted-foreground">
+                <Timer className="w-3 h-3" />
+                Authorization
+              </div>
+              <span className={cn('font-mono font-bold', expiryColor)}>
+                {expiry.label}
+              </span>
+            </div>
+
+            {health.subaccountActionsRemaining != null && (
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-muted-foreground">Action quota</span>
+                <span className={cn('font-mono font-bold', quotaColor)}>
+                  {health.subaccountActionsRemaining.toLocaleString()} remaining
+                </span>
+              </div>
+            )}
+
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-muted-foreground">Network</span>
+              <span className="font-mono text-foreground">
+                Arbitrum One ({health.networkChainId})
+              </span>
+            </div>
+
+            {/* Expiry warning */}
+            {expiry.severity !== 'ok' && (
+              <div className={cn(
+                'flex items-center gap-2 mt-1 px-2 py-1.5 rounded text-[10px]',
+                expiry.severity === 'expired'
+                  ? 'bg-[var(--color-short)]/10 border border-[var(--color-short)]/30 text-[var(--color-short)]'
+                  : 'bg-amber-500/10 border border-amber-500/30 text-amber-400',
+              )}>
+                <AlertTriangle className="w-3 h-3 shrink-0" />
+                {expiry.severity === 'expired'
+                  ? 'Authorization expired — re-authorize on GMX to resume live trading.'
+                  : 'Authorization expiring soon — re-authorize on GMX before it lapses.'}
+              </div>
+            )}
+
+            {/* Re-authorize link */}
+            <a
+              href="https://app.gmx.io/#/trade"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-1.5 mt-1 text-[10px] text-primary hover:underline w-fit"
+            >
+              <ExternalLink className="w-3 h-3" />
+              Manage subaccount on GMX →
+            </a>
+          </>
+        ) : (
+          <div className="py-1 space-y-2">
+            <p className="text-[11px] text-muted-foreground leading-relaxed">
+              GMX One-Click Trading allows the VPS to sign orders without exposing your
+              primary wallet key. The delegated signer key lives only on the VPS.
+            </p>
+            <ol className="text-[10px] text-muted-foreground space-y-1 list-none">
+              <li>1. Open GMX and enable One-Click Trading (Settings → One-Click Trading)</li>
+              <li>2. Your VPS will receive a delegated subaccount address</li>
+              <li>3. Fund the subaccount with execution gas (ETH on Arbitrum)</li>
+              <li>4. The VPS uses <strong>only</strong> the delegated key — never your primary wallet</li>
+            </ol>
+            <div className="flex items-start gap-1.5 text-[10px] text-amber-400">
+              <AlertTriangle className="w-3 h-3 shrink-0 mt-0.5" />
+              <span>Never share your primary wallet key or seed phrase with any service.</span>
+            </div>
+            <a
+              href="https://app.gmx.io/#/trade"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-1.5 text-[10px] text-primary hover:underline w-fit"
+            >
+              <ExternalLink className="w-3 h-3" />
+              Open GMX to enable One-Click Trading →
+            </a>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
 
 interface VpsStatusPanelProps {
@@ -136,7 +344,7 @@ export function VpsStatusPanel({ showConfigLink = true, className }: VpsStatusPa
   const [actionError, setActionError] = useState('');
   const [actionLoading, setActionLoading] = useState(false);
 
-  const cls = STATE_CLASSES[vpsState];
+  const cls        = STATE_CLASSES[vpsState];
   const configured = Boolean(config.host.trim());
 
   const handleTest = async () => {
@@ -177,6 +385,10 @@ export function VpsStatusPanel({ showConfigLink = true, className }: VpsStatusPa
 
   return (
     <Card className={cn('overflow-hidden', cls.border, 'border', className)}>
+
+      {/* ── Connection health banner ──────────────────────────── */}
+      <ConnectionHealthBanner />
+
       {/* ── Header ─────────────────────────────────────────────── */}
       <div className="flex items-center justify-between px-4 py-3 bg-card/50 border-b border-border">
         <div className="flex items-center gap-2">
@@ -293,7 +505,7 @@ export function VpsStatusPanel({ showConfigLink = true, className }: VpsStatusPa
                     : health.reconciliation.status === 'in_progress'
                       ? 'In progress…'
                       : health.reconciliation.status === 'failed'
-                        ? `✗ failed`
+                        ? '✗ failed'
                         : '—'
                 }
                 fresh={health.reconciliation.status === 'complete' || null}
@@ -302,7 +514,7 @@ export function VpsStatusPanel({ showConfigLink = true, className }: VpsStatusPa
           </div>
         )}
 
-        {/* ── GMX connection status ────────────────────────────── */}
+        {/* ── GMX connection + risk status ─────────────────────── */}
         {configured && (
           <div className="grid grid-cols-2 gap-3">
             <div className="flex items-center gap-2 text-xs">
@@ -323,21 +535,11 @@ export function VpsStatusPanel({ showConfigLink = true, className }: VpsStatusPa
                 {health.riskLock ? `Risk lock: ${health.riskLock.reason}` : 'Risk lock: None'}
               </span>
             </div>
-            {health.walletAddress && (
-              <div className="flex items-center gap-2 text-xs col-span-2">
-                <CheckCircle2 className="w-3.5 h-3.5 text-muted-foreground" />
-                <span className="font-mono text-[10px] text-muted-foreground truncate">
-                  Wallet: {health.walletAddress.slice(0, 6)}…{health.walletAddress.slice(-4)}
-                </span>
-                {health.subaccountAddress && (
-                  <span className="font-mono text-[10px] text-muted-foreground ml-2 truncate">
-                    Sub: {health.subaccountAddress.slice(0, 6)}…{health.subaccountAddress.slice(-4)}
-                  </span>
-                )}
-              </div>
-            )}
           </div>
         )}
+
+        {/* ── GMX One-Click subaccount panel ───────────────────── */}
+        <SubaccountPanel configured={configured} />
 
         {/* ── RISK LOCKED banner ───────────────────────────────── */}
         {vpsState === 'RISK_LOCKED' && health.riskLock && (
@@ -377,7 +579,6 @@ export function VpsStatusPanel({ showConfigLink = true, className }: VpsStatusPa
             </Button>
           )}
 
-          {/* Warning note */}
           <div className="flex items-start gap-2 text-[10px] text-muted-foreground leading-relaxed">
             <AlertTriangle className="w-3 h-3 shrink-0 mt-0.5 text-amber-400" />
             <span>

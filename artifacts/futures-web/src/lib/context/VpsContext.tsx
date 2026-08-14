@@ -104,6 +104,13 @@ export interface SystemHealth {
   vpsReachable: boolean;
 }
 
+/** In-app connection health event (web doesn't have push — shown as a dismissible banner) */
+export interface ConnectionHealthEvent {
+  type: 'down' | 'degraded' | 'recovered';
+  message: string;
+  at: Date;
+}
+
 interface VpsContextType {
   /** Persisted connection config */
   config: VpsConfig;
@@ -122,6 +129,12 @@ interface VpsContextType {
   aiDecisions: AiDecision[];
   /** Today's AI decision stats */
   aiStats: AiDecisionStats;
+  /**
+   * Most recent connection health event — shown as a dismissible banner.
+   * null when no event has fired or the last one was dismissed.
+   */
+  connectionHealthEvent: ConnectionHealthEvent | null;
+  dismissHealthEvent: () => void;
   /** Save config and immediately re-poll */
   saveConfig: (c: VpsConfig) => void;
   /** Test connectivity to VPS (one-shot) */
@@ -159,7 +172,7 @@ const EMPTY_HEALTH: SystemHealth = {
   vpsReachable: false,
 };
 
-const POLL_INTERVAL_MS = 15_000; // poll VPS status every 15 s
+const POLL_INTERVAL_MS = 30_000; // poll VPS status every 30 s
 const LOCAL_STORAGE_KEY = 'futures_vps_config';
 
 function loadConfig(): VpsConfig {
@@ -188,11 +201,77 @@ export function VpsProvider({ children }: { children: ReactNode }) {
   const [health, setHealth] = useState<SystemHealth>(EMPTY_HEALTH);
   const [aiDecisions, setAiDecisions] = useState<AiDecision[]>([]);
   const [aiStats, setAiStats] = useState<AiDecisionStats>(EMPTY_AI_STATS);
-  const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const configRef = useRef(config);
-  configRef.current = config;
+  const [connectionHealthEvent, setConnectionHealthEvent] = useState<ConnectionHealthEvent | null>(null);
+
+  const pollingRef     = useRef<ReturnType<typeof setInterval> | null>(null);
+  const configRef      = useRef(config);
+  configRef.current    = config;
+
+  // ── Health-transition tracking ──────────────────────────────────────────────
+  const prevStatusRef      = useRef<VpsConnectionStatus>('disconnected');
+  const prevReachableRef   = useRef<boolean>(false);
+  const prevLastRestartRef = useRef<string | null>(null);
+  const errorStreakRef     = useRef(0);
+
+  const dismissHealthEvent = useCallback(() => setConnectionHealthEvent(null), []);
 
   const operatingMode = deriveOperatingMode(vpsState, unattendedArmed);
+
+  // ── Health-event emitter (web in-app banner, no push) ──────────────────────
+  const emitHealthEvent = useCallback((
+    newStatus: VpsConnectionStatus,
+    newReachable: boolean,
+    newLastRestart: string | null,
+  ) => {
+    const prev        = prevStatusRef.current;
+    const prevReach   = prevReachableRef.current;
+    const prevRestart = prevLastRestartRef.current;
+
+    // VPS restarted
+    if (newLastRestart && newLastRestart !== prevRestart && prevRestart !== null) {
+      setConnectionHealthEvent({
+        type: 'recovered',
+        message: `VPS restarted at ${new Date(newLastRestart).toLocaleTimeString()}. Verify arm/disarm state.`,
+        at: new Date(),
+      });
+    }
+
+    // Went down (debounce: require 2 consecutive errors)
+    if (newStatus === 'error' && prev !== 'error') {
+      errorStreakRef.current += 1;
+      if (errorStreakRef.current >= 2) {
+        setConnectionHealthEvent({
+          type: 'down',
+          message: !newReachable
+            ? 'VPS is unreachable. Check VPS power, network, and firewall settings.'
+            : 'API server cannot reach VPS. Verify VPS host/port in Settings.',
+          at: new Date(),
+        });
+      }
+    } else if (newStatus === 'error') {
+      errorStreakRef.current += 1;
+    } else {
+      errorStreakRef.current = 0;
+    }
+
+    // Recovered
+    if (newStatus === 'connected' && prev === 'error') {
+      setConnectionHealthEvent({ type: 'recovered', message: 'VPS connection restored.', at: new Date() });
+    }
+
+    // Degraded: API up but VPS unreachable
+    if (newStatus === 'connected' && !newReachable && prevReach) {
+      setConnectionHealthEvent({
+        type: 'degraded',
+        message: 'API server is up but VPS is unreachable. Live trading is paused.',
+        at: new Date(),
+      });
+    }
+
+    prevStatusRef.current      = newStatus;
+    prevReachableRef.current   = newReachable;
+    prevLastRestartRef.current = newLastRestart;
+  }, []);
 
   // ── Poll VPS status via API server proxy ──────────────────────────────────
   const pollStatus = useCallback(async () => {
@@ -201,6 +280,8 @@ export function VpsProvider({ children }: { children: ReactNode }) {
       setVpsState('OFF');
       setConnectionStatus('disconnected');
       setHealth(EMPTY_HEALTH);
+      prevStatusRef.current    = 'disconnected';
+      errorStreakRef.current   = 0;
       return;
     }
 
@@ -238,10 +319,14 @@ export function VpsProvider({ children }: { children: ReactNode }) {
         riskLock?: { reason: string; since: string } | null;
       };
 
+      const newStatus: VpsConnectionStatus = data.vpsReachable ? 'connected' : 'error';
+      const newReachable  = data.vpsReachable ?? false;
+      const newLastRestart = data.lastRestart ?? null;
+
       setVpsState((data.state as VpsEngineState) ?? 'OFF');
       setUnattendedArmed(data.unattendedArmed ?? false);
-      setConnectionStatus(data.vpsReachable ? 'connected' : 'error');
-      setConnectionError(data.vpsReachable ? '' : 'VPS unreachable');
+      setConnectionStatus(newStatus);
+      setConnectionError(newReachable ? '' : 'VPS unreachable');
 
       setHealth({
         lastHeartbeat:      data.lastHeartbeat ?? null,
@@ -249,7 +334,7 @@ export function VpsProvider({ children }: { children: ReactNode }) {
         lastMarketUpdate:   data.lastMarketUpdate ?? null,
         lastUserStream:     data.lastUserStream ?? null,
         lastStrategyCycle:  data.lastStrategyCycle ?? null,
-        lastRestart:        data.lastRestart ?? null,
+        lastRestart:        newLastRestart,
         uptimeSeconds:      data.uptimeSeconds ?? null,
         reconciliation:              data.reconciliation ?? EMPTY_HEALTH.reconciliation,
         gmxConnected:                data.gmxConnected ?? false,
@@ -260,15 +345,19 @@ export function VpsProvider({ children }: { children: ReactNode }) {
         networkChainId:              data.networkChainId ?? 42161,
         strategyVersion:             data.strategyVersion ?? null,
         riskLock:                    data.riskLock ?? null,
-        vpsReachable:                data.vpsReachable ?? false,
+        vpsReachable:                newReachable,
       });
+
+      emitHealthEvent(newStatus, newReachable, newLastRestart);
     } catch {
       if (cfg.host.trim()) {
-        setConnectionStatus('error');
+        const newStatus: VpsConnectionStatus = 'error';
+        setConnectionStatus(newStatus);
         setConnectionError('Cannot reach API server');
+        emitHealthEvent(newStatus, false, prevLastRestartRef.current);
       }
     }
-  }, []);
+  }, [emitHealthEvent]);
 
   // ── Start / restart polling whenever config.host changes ─────────────────
   useEffect(() => {
@@ -279,8 +368,16 @@ export function VpsProvider({ children }: { children: ReactNode }) {
       setConnectionStatus('disconnected');
       setConnectionError('');
       setHealth(EMPTY_HEALTH);
+      prevStatusRef.current    = 'disconnected';
+      prevReachableRef.current = false;
+      errorStreakRef.current   = 0;
       return;
     }
+
+    // Reset tracking when host changes to avoid false alerts on reconfigure
+    prevStatusRef.current    = 'disconnected';
+    prevReachableRef.current = false;
+    errorStreakRef.current   = 0;
 
     pollStatus(); // immediate first call
     pollingRef.current = setInterval(pollStatus, POLL_INTERVAL_MS);
@@ -302,6 +399,10 @@ export function VpsProvider({ children }: { children: ReactNode }) {
   const testConnection = useCallback(async () => {
     setConnectionStatus('connecting');
     setConnectionError('');
+    // Reset tracking so first result fires fresh alerts
+    prevStatusRef.current    = 'disconnected';
+    prevReachableRef.current = false;
+    errorStreakRef.current   = 0;
     await pollStatus();
   }, [pollStatus]);
 
@@ -312,6 +413,9 @@ export function VpsProvider({ children }: { children: ReactNode }) {
     setConnectionError('');
     setVpsState('OFF');
     setHealth(EMPTY_HEALTH);
+    prevStatusRef.current    = 'disconnected';
+    prevReachableRef.current = false;
+    errorStreakRef.current   = 0;
   }, []);
 
   // ── fetchAiDecisions ─────────────────────────────────────────────────────
@@ -385,6 +489,7 @@ export function VpsProvider({ children }: { children: ReactNode }) {
       config, vpsState, operatingMode, connectionStatus, connectionError,
       unattendedArmed, health,
       aiDecisions, aiStats,
+      connectionHealthEvent, dismissHealthEvent,
       saveConfig, testConnection, disconnect,
       armUnattended, disarmUnattended,
       fetchAiDecisions,

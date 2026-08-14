@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -18,7 +18,12 @@ import * as Haptics from 'expo-haptics';
 import { useEngine, EngineState } from '@/contexts/EngineContext';
 import { useTrading } from '@/contexts/TradingContext';
 import { useAuth } from '@/contexts/AuthContext';
-import { useVps, STATE_COLORS, STATE_LABELS, timeAgo, type VpsConnectionStatus } from '@/contexts/VpsContext';
+import { Linking } from 'react-native';
+import {
+  useVps, STATE_COLORS, STATE_LABELS, timeAgo,
+  truncateAddress, subaccountExpiryStatus,
+  type VpsConnectionStatus,
+} from '@/contexts/VpsContext';
 import { VpsStatusCard } from '@/components/VpsStatusCard';
 import { EngineStatusBadge } from '@/components/EngineStatusBadge';
 import { ConfirmModal } from '@/components/ConfirmModal';
@@ -71,6 +76,172 @@ function DangerButton({ label, icon, onPress, disabled }: {
     </TouchableOpacity>
   );
 }
+
+// ── GMX One-Click Subaccount panel ────────────────────────────────
+function GmxSubaccountPanel() {
+  const colors = useColors();
+  const { health, testConnection } = useVps();
+  const [refreshing, setRefreshing] = useState(false);
+
+  const handleRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await testConnection();
+    setRefreshing(false);
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+  }, [testConnection]);
+
+  const sub   = health.subaccountAddress;
+  const expiry = subaccountExpiryStatus(health.subaccountExpiresAt);
+
+  const expiryColor = expiry.severity === 'expired' ? colors.short
+    : expiry.severity === 'warn' ? colors.warning : colors.long;
+  const quotaColor = health.subaccountActionsRemaining == null
+    ? colors.mutedForeground
+    : health.subaccountActionsRemaining < 10 ? colors.short
+    : health.subaccountActionsRemaining < 50 ? colors.warning : colors.long;
+
+  return (
+    <View style={[gsa.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
+
+      {/* Security notice */}
+      <View style={[gsa.secNote, { backgroundColor: colors.warning + '11', borderColor: colors.warning + '33' }]}>
+        <Feather name="shield" size={12} color={colors.warning} />
+        <Text style={[gsa.secNoteTxt, { color: colors.warning }]}>
+          This panel shows read-only subaccount metadata only. Private keys and seed phrases are
+          never stored or requested here. The delegated signer key lives exclusively on the VPS.
+        </Text>
+      </View>
+
+      {/* Status rows */}
+      {sub ? (
+        <>
+          <GsaRow label="Delegated subaccount" value={truncateAddress(sub)} valueColor={colors.long} />
+          {health.walletAddress && (
+            <GsaRow label="Primary wallet" value={truncateAddress(health.walletAddress)} />
+          )}
+          <GsaRow
+            label="Authorization"
+            value={expiry.label}
+            valueColor={expiryColor}
+          />
+          {health.subaccountActionsRemaining != null && (
+            <GsaRow
+              label="Action quota"
+              value={`${health.subaccountActionsRemaining.toLocaleString()} remaining`}
+              valueColor={quotaColor}
+            />
+          )}
+          <GsaRow
+            label="Network"
+            value={`Arbitrum One (${health.networkChainId})`}
+          />
+          <GsaRow
+            label="GMX RPC"
+            value={health.gmxConnected ? 'Connected' : 'Disconnected'}
+            valueColor={health.gmxConnected ? colors.long : colors.short}
+          />
+
+          {/* Expiry warning */}
+          {expiry.severity !== 'ok' && (
+            <View style={[gsa.warnBox, {
+              backgroundColor: expiryColor + '11',
+              borderColor: expiryColor + '33',
+            }]}>
+              <Feather name="alert-triangle" size={12} color={expiryColor} />
+              <Text style={[gsa.warnTxt, { color: expiryColor }]}>
+                {expiry.severity === 'expired'
+                  ? 'Authorization expired. Re-authorize on GMX to resume live trading.'
+                  : 'Authorization expiring soon. Re-authorize on GMX before it lapses.'}
+              </Text>
+            </View>
+          )}
+
+          {/* Open GMX */}
+          <TouchableOpacity
+            onPress={() => Linking.openURL('https://app.gmx.io/#/trade')}
+            style={[gsa.linkBtn, { borderColor: colors.border }]}
+            activeOpacity={0.75}
+          >
+            <Feather name="external-link" size={12} color={colors.primary} />
+            <Text style={[gsa.linkTxt, { color: colors.primary }]}>Manage subaccount on GMX</Text>
+          </TouchableOpacity>
+        </>
+      ) : (
+        <>
+          {/* Not yet configured */}
+          <View style={gsa.stepsBox}>
+            <Text style={[gsa.stepsTitle, { color: colors.foreground }]}>How to set up One-Click Trading:</Text>
+            {[
+              'Open GMX and go to Settings → One-Click Trading',
+              'Authorize a delegated subaccount (generates a sub-key on the VPS)',
+              'Fund the subaccount with execution gas (ETH on Arbitrum)',
+              'The VPS uses only the delegated key — never your primary wallet',
+            ].map((step, i) => (
+              <Text key={i} style={[gsa.stepsTxt, { color: colors.mutedForeground }]}>
+                {i + 1}. {step}
+              </Text>
+            ))}
+          </View>
+
+          <TouchableOpacity
+            onPress={() => Linking.openURL('https://app.gmx.io/#/trade')}
+            style={[gsa.openGmxBtn, { backgroundColor: colors.primary }]}
+            activeOpacity={0.85}
+          >
+            <Feather name="external-link" size={14} color="#000" />
+            <Text style={[gsa.openGmxTxt, { color: '#000' }]}>Open GMX to Enable</Text>
+          </TouchableOpacity>
+        </>
+      )}
+
+      {/* Refresh */}
+      <TouchableOpacity
+        onPress={handleRefresh}
+        disabled={refreshing}
+        style={[gsa.refreshBtn, { borderColor: colors.border, opacity: refreshing ? 0.5 : 1 }]}
+        activeOpacity={0.75}
+      >
+        {refreshing
+          ? <ActivityIndicator size="small" color={colors.primary} />
+          : <Feather name="refresh-cw" size={13} color={colors.mutedForeground} />
+        }
+        <Text style={[gsa.refreshTxt, { color: colors.mutedForeground }]}>
+          {refreshing ? 'Refreshing…' : 'Refresh status from VPS'}
+        </Text>
+      </TouchableOpacity>
+    </View>
+  );
+}
+
+function GsaRow({ label, value, valueColor }: { label: string; value: string; valueColor?: string }) {
+  const colors = useColors();
+  return (
+    <View style={[gsa.row, { borderBottomColor: colors.border }]}>
+      <Text style={[gsa.rowLabel, { color: colors.mutedForeground }]}>{label}</Text>
+      <Text style={[gsa.rowValue, { color: valueColor ?? colors.foreground }]}>{value}</Text>
+    </View>
+  );
+}
+
+const gsa = StyleSheet.create({
+  card:        { marginHorizontal: 16, marginVertical: 6, borderRadius: 12, borderWidth: 1, overflow: 'hidden' },
+  secNote:     { flexDirection: 'row', alignItems: 'flex-start', gap: 8, padding: 10, borderBottomWidth: 1, borderColor: 'transparent' },
+  secNoteTxt:  { fontFamily: 'Inter_400Regular', fontSize: 10, lineHeight: 15, flex: 1 },
+  row:         { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 14, paddingVertical: 10, borderBottomWidth: StyleSheet.hairlineWidth },
+  rowLabel:    { fontFamily: 'Inter_400Regular', fontSize: 12 },
+  rowValue:    { fontFamily: 'Inter_600SemiBold', fontSize: 12, fontVariant: ['tabular-nums'] },
+  warnBox:     { flexDirection: 'row', alignItems: 'flex-start', gap: 8, padding: 10, borderWidth: 1, margin: 12, borderRadius: 8 },
+  warnTxt:     { fontFamily: 'Inter_400Regular', fontSize: 11, lineHeight: 15, flex: 1 },
+  linkBtn:     { flexDirection: 'row', alignItems: 'center', gap: 7, paddingHorizontal: 14, paddingVertical: 10, borderTopWidth: StyleSheet.hairlineWidth },
+  linkTxt:     { fontFamily: 'Inter_600SemiBold', fontSize: 12 },
+  stepsBox:    { padding: 14, gap: 6 },
+  stepsTitle:  { fontFamily: 'Inter_600SemiBold', fontSize: 12, marginBottom: 4 },
+  stepsTxt:    { fontFamily: 'Inter_400Regular', fontSize: 11, lineHeight: 17 },
+  openGmxBtn:  { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, marginHorizontal: 14, marginBottom: 12, padding: 12, borderRadius: 10 },
+  openGmxTxt:  { fontFamily: 'Inter_700Bold', fontSize: 13 },
+  refreshBtn:  { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 14, paddingVertical: 10, borderTopWidth: StyleSheet.hairlineWidth },
+  refreshTxt:  { fontFamily: 'Inter_400Regular', fontSize: 11 },
+});
 
 // ── Main screen ───────────────────────────────────────────────────
 export default function SettingsScreen() {
@@ -315,10 +486,14 @@ export default function SettingsScreen() {
             </Text>
           </TouchableOpacity>
 
-          {vpsConnError ? (
+            {vpsConnError ? (
             <Text style={{ fontFamily: 'Inter_400Regular', fontSize: 11, color: colors.short }}>{vpsConnError}</Text>
           ) : null}
         </View>
+
+        {/* ── GMX ONE-CLICK SUBACCOUNT ── */}
+        <SectionHeader title="GMX ONE-CLICK SUBACCOUNT" />
+        <GmxSubaccountPanel />
 
         {/* ── STOP CONTROLS ── */}
         <SectionHeader title="ENGINE CONTROLS" />
