@@ -73,7 +73,7 @@ export default defineConfig({
       strict: true,
     },
     // Note: Vite proxy does NOT work in Replit's path-based routing environment.
-    // Browser Binance REST calls go via /api-server/api/binance/* (Express proxy).
+    // All API calls go via /api-server/api/* (Express proxy) — GMX prices, markets, candles, VPS.
     proxy: {},
   },
   preview: {

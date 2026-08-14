@@ -57,7 +57,7 @@ async function loadDecimals(): Promise<Record<string, number>> {
   try {
     const r = await fetch(`${GMX_API}/tokens`, { signal: AbortSignal.timeout(8_000) });
     if (r.ok) {
-      const tokens: GmxToken[] = await r.json();
+      const tokens = (await r.json()) as GmxToken[];
       const m: Record<string, number> = { ...DECIMALS_FALLBACK };
       for (const t of tokens) m[t.symbol] = t.decimals;
       decimalsMap = m;
