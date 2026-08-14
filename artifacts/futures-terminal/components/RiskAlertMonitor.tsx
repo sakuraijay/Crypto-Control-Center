@@ -1,7 +1,8 @@
 /**
  * RiskAlertMonitor — invisible background component.
- * Runs 4 checks every 60 s and shows Alert.alert() when thresholds are breached.
- * 5-minute cooldown per alert type prevents spam.
+ * Runs 4 checks every 60 s. Uses expo-notifications for local push alerts
+ * that fire even when the app is backgrounded or terminated.
+ * Falls back gracefully to Alert.alert() when notifications are not permitted.
  *
  * Alert types:
  *   daily_loss    — today's realized loss ≥ 80% of dailyLossLimitUSDT
@@ -14,6 +15,10 @@ import { useEffect, useRef } from 'react';
 import { Alert } from 'react-native';
 import { useTrading } from '@/contexts/TradingContext';
 import { useStrategy } from '@/contexts/StrategyContext';
+import {
+  scheduleRiskAlert,
+  getNotificationPermission,
+} from '@/services/notifications';
 
 const COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
 
@@ -23,6 +28,7 @@ export function RiskAlertMonitor() {
   const { account, positions } = useTrading();
   const { config } = useStrategy();
   const { riskLimits } = config;
+
   const lastAlertAt = useRef<Record<AlertType, number>>({
     daily_loss:   0,
     margin_ratio: 0,
@@ -30,33 +36,50 @@ export function RiskAlertMonitor() {
     exposure:     0,
   });
 
+  // Cache permission status (re-checked every 5 min cycle to avoid async on every tick)
+  const notifPermission = useRef<'granted' | 'denied' | 'undetermined'>('undetermined');
   useEffect(() => {
-    const check = () => {
+    getNotificationPermission().then(p => { notifPermission.current = p; });
+  }, []);
+
+  useEffect(() => {
+    const fire = async (type: AlertType, title: string, message: string) => {
+      lastAlertAt.current[type] = Date.now();
+
+      if (notifPermission.current === 'granted') {
+        // Push notification — works even when backgrounded
+        await scheduleRiskAlert(`⚠️ ${title}`, message, `risk_alert_${type}`);
+      } else {
+        // Fallback: blocking Alert (only works when foregrounded)
+        Alert.alert(`⚠️ ${title}`, message, [{ text: 'Dismiss', style: 'cancel' }]);
+      }
+    };
+
+    const check = async () => {
       const now = Date.now();
       const canAlert = (type: AlertType) => now - lastAlertAt.current[type] > COOLDOWN_MS;
-      const fire = (type: AlertType, title: string, message: string) => {
-        lastAlertAt.current[type] = now;
-        Alert.alert(`⚠️ ${title}`, message, [{ text: 'Dismiss', style: 'cancel' }]);
-      };
+
+      // Refresh permission each cycle
+      notifPermission.current = await getNotificationPermission();
 
       // 1. Daily loss limit
       if (canAlert('daily_loss') && riskLimits.dailyLossLimitUSDT > 0) {
         const lossRatio = Math.abs(Math.min(0, account.realizedPnlToday)) / riskLimits.dailyLossLimitUSDT;
         if (lossRatio >= 0.80) {
-          fire(
+          await fire(
             'daily_loss',
             'Daily Loss Warning',
-            `Today's loss has reached ${(lossRatio * 100).toFixed(0)}% of your daily limit ($${riskLimits.dailyLossLimitUSDT.toFixed(0)}). Consider closing positions.`
+            `Today's loss has reached ${(lossRatio * 100).toFixed(0)}% of your daily limit ($${riskLimits.dailyLossLimitUSDT.toFixed(0)}).`
           );
         }
       }
 
       // 2. Margin ratio
       if (canAlert('margin_ratio') && account.marginRatio >= 0.70) {
-        fire(
+        await fire(
           'margin_ratio',
           'Margin Ratio High',
-          `Margin ratio is at ${(account.marginRatio * 100).toFixed(0)}%. Reduce exposure or add margin to avoid liquidation.`
+          `Margin ratio is ${(account.marginRatio * 100).toFixed(0)}%. Reduce exposure to avoid liquidation.`
         );
       }
 
@@ -64,7 +87,7 @@ export function RiskAlertMonitor() {
       if (canAlert('pos_count') && riskLimits.maxSimultaneousPositions > 0) {
         const posRatio = positions.length / riskLimits.maxSimultaneousPositions;
         if (posRatio >= 0.80) {
-          fire(
+          await fire(
             'pos_count',
             'Positions Near Limit',
             `${positions.length} of ${riskLimits.maxSimultaneousPositions} maximum positions are open.`
@@ -76,7 +99,7 @@ export function RiskAlertMonitor() {
       if (canAlert('exposure') && riskLimits.maxTotalExposureUSDT > 0) {
         const expRatio = account.totalPositionValue / riskLimits.maxTotalExposureUSDT;
         if (expRatio >= 0.90) {
-          fire(
+          await fire(
             'exposure',
             'Exposure Near Limit',
             `Total exposure is $${account.totalPositionValue.toFixed(0)} — ${(expRatio * 100).toFixed(0)}% of your $${riskLimits.maxTotalExposureUSDT.toFixed(0)} limit.`
@@ -85,12 +108,10 @@ export function RiskAlertMonitor() {
       }
     };
 
-    // Run immediately then every 60 s
     check();
     const id = setInterval(check, 60_000);
     return () => clearInterval(id);
   }, [account, positions, riskLimits]);
 
-  // Renders nothing — side-effect only
   return null;
 }

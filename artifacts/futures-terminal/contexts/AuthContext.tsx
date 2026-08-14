@@ -1,6 +1,15 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
+// ---------------------------------------------------------------------------
+// Dev bypass
+// Auth is skipped automatically when running in the Metro dev server (__DEV__).
+// To re-enable auth during development, add EXPO_PUBLIC_AUTH_ENABLED=true to .env.
+// Production builds always enforce auth (__DEV__ is false there).
+// ---------------------------------------------------------------------------
+const DEV_AUTH_BYPASS =
+  __DEV__ && process.env.EXPO_PUBLIC_AUTH_ENABLED !== 'true';
+
 const PIN_KEY = '@ft_pin';
 
 interface AuthContextType {
@@ -15,11 +24,13 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [isAuthenticated, setIsAuthenticated] = useState(DEV_AUTH_BYPASS);
   const [requiresSetup, setRequiresSetup] = useState(false);
-  const [isLoading, setIsLoading] = useState(true);
+  // In dev-bypass mode, skip the AsyncStorage loading phase entirely
+  const [isLoading, setIsLoading] = useState(!DEV_AUTH_BYPASS);
 
   useEffect(() => {
+    if (DEV_AUTH_BYPASS) return; // skip PIN check in dev
     AsyncStorage.getItem(PIN_KEY).then(pin => {
       if (!pin) setRequiresSetup(true);
       setIsLoading(false);
@@ -33,6 +44,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const verifyPin = useCallback(async (pin: string) => {
+    if (DEV_AUTH_BYPASS) return true;
     const stored = await AsyncStorage.getItem(PIN_KEY);
     if (stored === pin) {
       setIsAuthenticated(true);
@@ -42,6 +54,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const logout = useCallback(() => {
+    if (DEV_AUTH_BYPASS) return; // no-op in dev mode
     setIsAuthenticated(false);
   }, []);
 

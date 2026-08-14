@@ -5,14 +5,18 @@ import { Switch } from '@/components/ui/switch';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
-import { ShieldAlert, Server, Lock, AlertTriangle, AlertOctagon, Wifi, WifiOff, Loader2 } from 'lucide-react';
+import {
+  ShieldAlert, Server, Lock, AlertTriangle, AlertOctagon,
+  Wifi, WifiOff, Loader2, Info,
+} from 'lucide-react';
+import { VpsStatusPanel } from '@/components/vps/VpsStatusPanel';
 import { cn } from '@/lib/utils';
 
 export default function Settings() {
   const { engineState, stopNewOrders, toggleStopNewOrders, triggerEmergencyStop, resetFromEmergency } = useAppContext();
   const { logout } = useAuthContext();
   const { clearAllPositions, positions } = useTradingContext();
-  const { config, status, errorMsg, latencyMs, saveConfig, testConnection, disconnect } = useVpsContext();
+  const { config, connectionStatus, connectionError, health, saveConfig, testConnection, disconnect } = useVpsContext();
 
   const [closeAllPhase, setCloseAllPhase] = useState<0 | 1 | 2>(0);
   const [testing, setTesting] = useState(false);
@@ -20,14 +24,13 @@ export default function Settings() {
   // Local VPS form state
   const [vpsHost, setVpsHost] = useState(config.host);
   const [vpsPort, setVpsPort] = useState(config.port);
-  const [vpsKeyName, setVpsKeyName] = useState(config.apiKeyName);
   const [vpsSSL, setVpsSSL] = useState(config.useSSL);
   const [vpsFormDirty, setVpsFormDirty] = useState(false);
 
   const isEmergency = engineState === 'EMERGENCY_STOP';
 
   const handleVpsTest = async () => {
-    saveConfig({ host: vpsHost, port: vpsPort, apiKeyName: vpsKeyName, useSSL: vpsSSL });
+    saveConfig({ host: vpsHost, port: vpsPort, useSSL: vpsSSL });
     setVpsFormDirty(false);
     setTesting(true);
     await testConnection();
@@ -36,12 +39,12 @@ export default function Settings() {
 
   const StatusDot = () => {
     const colors: Record<string, string> = {
-      connected: 'bg-[var(--color-long)] shadow-[0_0_8px_rgba(0,200,83,0.5)]',
-      connecting: 'bg-[var(--color-warning)] animate-pulse',
-      error: 'bg-[var(--color-short)]',
+      connected:    'bg-[var(--color-long)] shadow-[0_0_8px_rgba(0,200,83,0.5)]',
+      connecting:   'bg-[var(--color-warning)] animate-pulse',
+      error:        'bg-[var(--color-short)]',
       disconnected: 'bg-muted-foreground',
     };
-    return <div className={cn('w-2.5 h-2.5 rounded-full shrink-0', colors[status] ?? 'bg-muted-foreground')} />;
+    return <div className={cn('w-2.5 h-2.5 rounded-full shrink-0', colors[connectionStatus] ?? 'bg-muted-foreground')} />;
   };
 
   return (
@@ -62,6 +65,17 @@ export default function Settings() {
         </div>
       )}
 
+      {/* ── Architecture note ── */}
+      <div className="flex items-start gap-3 px-4 py-3 rounded-lg border border-border bg-card/50 text-xs text-muted-foreground">
+        <Info className="w-4 h-4 shrink-0 mt-0.5 text-primary" />
+        <div className="leading-relaxed">
+          <strong className="text-foreground">This app is a monitoring and control interface only.</strong>
+          {' '}The private VPS is the 24/7 trading authority — it continues strategy evaluation, position management,
+          TP/SL handling, and (when armed) autonomous entries while you are offline or asleep.
+          Paper mode is always safe regardless of VPS state.
+        </div>
+      </div>
+
       {/* ── Engine Mode ── */}
       <section className="flex flex-col gap-4">
         <h2 className="font-semibold flex items-center gap-2 border-b border-border pb-2 text-lg">
@@ -69,7 +83,7 @@ export default function Settings() {
         </h2>
         <div className="grid grid-cols-2 gap-4">
           <Card className="p-5 bg-card/50">
-            <div className="text-xs text-muted-foreground uppercase tracking-wider mb-2 font-medium">Trading Mode</div>
+            <div className="text-xs text-muted-foreground uppercase tracking-wider mb-2 font-medium">Local Mode</div>
             <div className="flex items-center gap-3">
               <div className={cn('w-3 h-3 rounded-full', engineState === 'PAPER_TRADING' ? 'bg-accent shadow-[0_0_10px_rgba(240,185,11,0.5)]' : 'bg-muted')} />
               <span className="font-bold">{isEmergency ? 'EMERGENCY STOP' : 'PAPER TRADING'}</span>
@@ -80,39 +94,51 @@ export default function Settings() {
           </Card>
           <Card className="p-5 bg-card/50 opacity-60">
             <div className="text-xs text-muted-foreground uppercase tracking-wider mb-2 font-medium flex justify-between">
-              Live Execution VPS <Lock className="w-4 h-4" />
+              Live Execution (VPS) <Lock className="w-4 h-4" />
             </div>
             <div className="flex items-center gap-3">
               <div className="w-3 h-3 rounded-full bg-muted" />
-              <span className="font-bold text-muted-foreground">OFFLINE</span>
+              <span className="font-bold text-muted-foreground">NOT ENABLED BY DEFAULT</span>
             </div>
-            <p className="text-xs text-muted-foreground mt-2">Connect to VPS below to unlock live trading.</p>
+            <p className="text-xs text-muted-foreground mt-2">
+              Live trading requires a GMX One-Click subaccount configured on the VPS — never your primary wallet key.
+            </p>
           </Card>
         </div>
       </section>
 
-      {/* ── VPS Configuration ── */}
+      {/* ── VPS Live Status Panel ── */}
       <section className="flex flex-col gap-4">
         <h2 className="font-semibold flex items-center gap-2 border-b border-border pb-2 text-lg">
-          <Server className="w-5 h-5 text-primary" /> VPS Execution Service
+          <Server className="w-5 h-5 text-primary" /> VPS Engine Status
+        </h2>
+        <VpsStatusPanel showConfigLink={false} />
+      </section>
+
+      {/* ── VPS Configuration ── */}
+      <section className="flex flex-col gap-4">
+        <h2 className="font-semibold flex items-center gap-2 border-b border-border pb-2 text-base text-muted-foreground">
+          VPS Connection Settings
         </h2>
 
         {/* Status bar */}
         <div className={cn('flex items-center gap-3 px-4 py-3 rounded-lg border text-sm', {
-          'border-[var(--color-long)]/30 bg-[var(--color-long)]/5': status === 'connected',
-          'border-[var(--color-warning)]/30 bg-[var(--color-warning)]/5': status === 'connecting',
-          'border-destructive/30 bg-destructive/5': status === 'error',
-          'border-border bg-card/50': status === 'disconnected',
+          'border-[var(--color-long)]/30 bg-[var(--color-long)]/5': connectionStatus === 'connected',
+          'border-[var(--color-warning)]/30 bg-[var(--color-warning)]/5': connectionStatus === 'connecting',
+          'border-destructive/30 bg-destructive/5': connectionStatus === 'error',
+          'border-border bg-card/50': connectionStatus === 'disconnected',
         })}>
           <StatusDot />
           <span className="font-semibold uppercase tracking-wider text-xs">
-            {status === 'connected' ? `Connected` : status === 'connecting' ? 'Connecting…' : status === 'error' ? 'Connection Failed' : 'Disconnected'}
+            {connectionStatus === 'connected' ? 'Connected' :
+             connectionStatus === 'connecting' ? 'Connecting…' :
+             connectionStatus === 'error' ? 'Connection Failed' : 'Disconnected'}
           </span>
-          {status === 'connected' && latencyMs && (
-            <span className="text-muted-foreground text-xs ml-1">· {latencyMs}ms</span>
+          {connectionStatus === 'connected' && health.heartbeatLatencyMs != null && (
+            <span className="text-muted-foreground text-xs ml-1">· {health.heartbeatLatencyMs}ms</span>
           )}
-          {errorMsg && <span className="text-destructive text-xs ml-2">{errorMsg}</span>}
-          {status === 'connected' && (
+          {connectionError && <span className="text-destructive text-xs ml-2">{connectionError}</span>}
+          {connectionStatus === 'connected' && (
             <Button size="sm" variant="ghost" className="ml-auto h-6 text-xs" onClick={disconnect}>
               Disconnect
             </Button>
@@ -122,7 +148,7 @@ export default function Settings() {
         <Card className="p-5 flex flex-col gap-4">
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <AlertOctagon className="w-3.5 h-3.5 text-[var(--color-warning)]" />
-            API keys and credentials are configured on the VPS — never entered here. This UI stores only connection metadata.
+            API keys and credentials are configured on the VPS — never entered here. This stores only connection metadata.
           </div>
 
           <div className="grid grid-cols-3 gap-3">
@@ -146,16 +172,6 @@ export default function Settings() {
             </div>
           </div>
 
-          <div className="flex flex-col gap-1.5">
-            <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">API Key Name / Label</label>
-            <Input
-              value={vpsKeyName}
-              onChange={e => { setVpsKeyName(e.target.value); setVpsFormDirty(true); }}
-              placeholder="e.g. futures-bot-key (label only, never the actual key)"
-              className="font-mono text-sm"
-            />
-          </div>
-
           <div className="flex items-center gap-3">
             <Switch checked={vpsSSL} onCheckedChange={v => { setVpsSSL(v); setVpsFormDirty(true); }} />
             <span className="text-sm text-foreground">Use SSL / TLS</span>
@@ -165,7 +181,7 @@ export default function Settings() {
           <div className="flex gap-3 pt-1">
             {vpsFormDirty && (
               <Button variant="outline" size="sm" onClick={() => {
-                saveConfig({ host: vpsHost, port: vpsPort, apiKeyName: vpsKeyName, useSSL: vpsSSL });
+                saveConfig({ host: vpsHost, port: vpsPort, useSSL: vpsSSL });
                 setVpsFormDirty(false);
               }}>
                 Save
@@ -173,13 +189,13 @@ export default function Settings() {
             )}
             <Button
               size="sm"
-              variant={status === 'connected' ? 'outline' : 'default'}
+              variant={connectionStatus === 'connected' ? 'outline' : 'default'}
               onClick={handleVpsTest}
               disabled={testing || !vpsHost.trim()}
               className="flex items-center gap-2"
             >
-              {testing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : status === 'connected' ? <Wifi className="w-3.5 h-3.5" /> : <WifiOff className="w-3.5 h-3.5" />}
-              {testing ? 'Testing…' : status === 'connected' ? 'Re-test' : 'Test Connection'}
+              {testing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : connectionStatus === 'connected' ? <Wifi className="w-3.5 h-3.5" /> : <WifiOff className="w-3.5 h-3.5" />}
+              {testing ? 'Testing…' : connectionStatus === 'connected' ? 'Re-test' : 'Test Connection'}
             </Button>
           </div>
         </Card>
@@ -231,6 +247,15 @@ export default function Settings() {
             )}
           </div>
         </Card>
+
+        {/* Unattended trading context note */}
+        <div className="flex items-start gap-2 px-3 py-2 rounded-lg border border-amber-500/20 bg-amber-500/5 text-xs text-amber-300/80">
+          <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5 text-amber-400" />
+          <span>
+            Emergency Stop applies to this app's local engine only. If the VPS is armed for unattended trading,
+            use the Disarm button in the VPS Engine Status panel above to stop autonomous VPS activity.
+          </span>
+        </div>
       </section>
 
       {/* ── Lock ── */}

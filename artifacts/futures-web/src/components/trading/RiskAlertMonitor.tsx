@@ -57,7 +57,7 @@ export function RiskAlertMonitor() {
       }
 
       // Total exposure ≥ 90%
-      const totalExposure = positions.reduce((s, p) => s + p.markPrice * p.size, 0);
+      const totalExposure = positions.reduce((s, p) => s + p.sizeInUsd, 0);
       if (limits.maxTotalExposureUSDT > 0 && totalExposure >= limits.maxTotalExposureUSDT * 0.9) {
         maybeToast(
           'total-exposure',

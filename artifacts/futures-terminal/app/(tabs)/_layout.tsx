@@ -27,6 +27,14 @@ function NativeTabLayout() {
         <Icon sf={{ default: 'slider.horizontal.3', selected: 'slider.horizontal.3' }} />
         <Label>Strategy</Label>
       </NativeTabs.Trigger>
+      <NativeTabs.Trigger name="ai-log">
+        <Icon sf={{ default: 'cpu', selected: 'cpu' }} />
+        <Label>AI Log</Label>
+      </NativeTabs.Trigger>
+      <NativeTabs.Trigger name="backtest">
+        <Icon sf={{ default: 'chart.xyaxis.line', selected: 'chart.xyaxis.line' }} />
+        <Label>Backtest</Label>
+      </NativeTabs.Trigger>
       <NativeTabs.Trigger name="history">
         <Icon sf={{ default: 'clock', selected: 'clock.fill' }} />
         <Label>History</Label>
@@ -61,11 +69,7 @@ function ClassicTabLayout() {
         },
         tabBarBackground: () =>
           isIOS ? (
-            <BlurView
-              intensity={90}
-              tint="dark"
-              style={StyleSheet.absoluteFill}
-            />
+            <BlurView intensity={90} tint="dark" style={StyleSheet.absoluteFill} />
           ) : isWeb ? (
             <View style={[StyleSheet.absoluteFill, { backgroundColor: colors.card }]} />
           ) : null,
@@ -80,11 +84,7 @@ function ClassicTabLayout() {
         options={{
           title: 'Dashboard',
           tabBarIcon: ({ color }) =>
-            isIOS ? (
-              <SymbolView name="house" tintColor={color} size={22} />
-            ) : (
-              <Feather name="home" size={20} color={color} />
-            ),
+            isIOS ? <SymbolView name="house" tintColor={color} size={22} /> : <Feather name="home" size={20} color={color} />,
         }}
       />
       <Tabs.Screen
@@ -92,11 +92,7 @@ function ClassicTabLayout() {
         options={{
           title: 'Positions',
           tabBarIcon: ({ color }) =>
-            isIOS ? (
-              <SymbolView name="briefcase" tintColor={color} size={22} />
-            ) : (
-              <Feather name="briefcase" size={20} color={color} />
-            ),
+            isIOS ? <SymbolView name="briefcase" tintColor={color} size={22} /> : <Feather name="briefcase" size={20} color={color} />,
         }}
       />
       <Tabs.Screen
@@ -104,11 +100,7 @@ function ClassicTabLayout() {
         options={{
           title: 'Watchlist',
           tabBarIcon: ({ color }) =>
-            isIOS ? (
-              <SymbolView name="eye" tintColor={color} size={22} />
-            ) : (
-              <Feather name="eye" size={20} color={color} />
-            ),
+            isIOS ? <SymbolView name="eye" tintColor={color} size={22} /> : <Feather name="eye" size={20} color={color} />,
         }}
       />
       <Tabs.Screen
@@ -116,11 +108,23 @@ function ClassicTabLayout() {
         options={{
           title: 'Strategy',
           tabBarIcon: ({ color }) =>
-            isIOS ? (
-              <SymbolView name="slider.horizontal.3" tintColor={color} size={22} />
-            ) : (
-              <Feather name="sliders" size={20} color={color} />
-            ),
+            isIOS ? <SymbolView name="slider.horizontal.3" tintColor={color} size={22} /> : <Feather name="sliders" size={20} color={color} />,
+        }}
+      />
+      <Tabs.Screen
+        name="ai-log"
+        options={{
+          title: 'AI Log',
+          tabBarIcon: ({ color }) =>
+            isIOS ? <SymbolView name="cpu" tintColor={color} size={22} /> : <Feather name="cpu" size={20} color={color} />,
+        }}
+      />
+      <Tabs.Screen
+        name="backtest"
+        options={{
+          title: 'Backtest',
+          tabBarIcon: ({ color }) =>
+            isIOS ? <SymbolView name="chart.xyaxis.line" tintColor={color} size={22} /> : <Feather name="bar-chart-2" size={20} color={color} />,
         }}
       />
       <Tabs.Screen
@@ -128,11 +132,7 @@ function ClassicTabLayout() {
         options={{
           title: 'History',
           tabBarIcon: ({ color }) =>
-            isIOS ? (
-              <SymbolView name="clock" tintColor={color} size={22} />
-            ) : (
-              <Feather name="clock" size={20} color={color} />
-            ),
+            isIOS ? <SymbolView name="clock" tintColor={color} size={22} /> : <Feather name="clock" size={20} color={color} />,
         }}
       />
       <Tabs.Screen
@@ -140,11 +140,7 @@ function ClassicTabLayout() {
         options={{
           title: 'Settings',
           tabBarIcon: ({ color }) =>
-            isIOS ? (
-              <SymbolView name="gearshape" tintColor={color} size={22} />
-            ) : (
-              <Feather name="settings" size={20} color={color} />
-            ),
+            isIOS ? <SymbolView name="gearshape" tintColor={color} size={22} /> : <Feather name="settings" size={20} color={color} />,
         }}
       />
     </Tabs>

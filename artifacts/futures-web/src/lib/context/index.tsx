@@ -5,6 +5,7 @@ import { WatchlistProvider } from './WatchlistContext';
 import { StrategyProvider } from './StrategyContext';
 import { AuthProvider } from './AuthContext';
 import { VpsProvider } from './VpsContext';
+import { AiEngineProvider } from './AiEngineContext';
 
 export function GlobalProviders({ children }: { children: ReactNode }) {
   return (
@@ -14,7 +15,10 @@ export function GlobalProviders({ children }: { children: ReactNode }) {
           <WatchlistProvider>
             <StrategyProvider>
               <VpsProvider>
-                {children}
+                {/* AiEngineProvider must be inside Trading + Watchlist + Strategy */}
+                <AiEngineProvider>
+                  {children}
+                </AiEngineProvider>
               </VpsProvider>
             </StrategyProvider>
           </WatchlistProvider>
@@ -30,3 +34,4 @@ export * from './WatchlistContext';
 export * from './StrategyContext';
 export * from './AuthContext';
 export * from './VpsContext';
+export * from './AiEngineContext';

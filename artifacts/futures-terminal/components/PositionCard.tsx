@@ -85,7 +85,7 @@ export function PositionCard({ position, onClose }: Props) {
         {/* Footer row */}
         <View style={styles.footerRow}>
           <Text style={[styles.sizeText, { color: colors.mutedForeground }]}>
-            {position.size} · ${position.marginUsed.toFixed(2)} margin
+            ${position.sizeInUsd.toFixed(0)} · ${position.collateralUsd.toFixed(2)} collateral
           </Text>
           <View style={styles.pnlRow}>
             <Text style={[styles.pnlAmt, { color: pnlColor }]}>

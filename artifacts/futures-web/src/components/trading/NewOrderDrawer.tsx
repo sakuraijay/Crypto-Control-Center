@@ -3,7 +3,8 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { AlertCircle, TrendingUp, TrendingDown, Info } from 'lucide-react';
-import { useTradingContext, useWatchlistContext, useStrategyContext, useAppContext, NewOrderParams } from '@/lib/context';
+import { useTradingContext, useWatchlistContext, useStrategyContext, useAppContext } from '@/lib/context';
+import type { NewOrderParams } from '@/lib/context/AppContext';
 import { useToast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
 
@@ -13,7 +14,8 @@ interface Props {
   defaultSymbol?: string;
 }
 
-const POPULAR = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'ADAUSDT', 'DOGEUSDT', 'XRPUSDT'];
+// GMX V2 markets on Arbitrum One
+const POPULAR = ['BTC', 'ETH', 'SOL', 'ARB', 'LINK', 'AVAX', 'DOGE'];
 
 function Field({ label, children, hint }: { label: string; children: React.ReactNode; hint?: string }) {
   return (
@@ -34,62 +36,66 @@ export function NewOrderDrawer({ open, onClose, defaultSymbol }: Props) {
   const { engineState, stopNewOrders } = useAppContext();
   const { toast } = useToast();
 
-  const [symbol, setSymbol] = useState(defaultSymbol ?? 'BTCUSDT');
-  const [side, setSide] = useState<'LONG' | 'SHORT'>('LONG');
-  const [orderType, setOrderType] = useState<'MARKET' | 'LIMIT'>('MARKET');
-  const [size, setSize] = useState('0.01');
-  const [leverage, setLeverage] = useState('10');
-  const [limitPrice, setLimitPrice] = useState('');
-  const [tpPrice, setTpPrice] = useState('');
-  const [slPrice, setSlPrice] = useState('');
+  const [symbol, setSymbol]           = useState(defaultSymbol ?? 'BTC');
+  const [side, setSide]               = useState<'LONG' | 'SHORT'>('LONG');
+  const [orderType, setOrderType]     = useState<'MarketIncrease' | 'LimitIncrease'>('MarketIncrease');
+  const [sizeUsd, setSizeUsd]         = useState('500');    // USD position size
+  const [leverage, setLeverage]       = useState('10');
+  const [limitPrice, setLimitPrice]   = useState('');
+  const [tpPrice, setTpPrice]         = useState('');
+  const [slPrice, setSlPrice]         = useState('');
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
+  const [submitting, setSubmitting]   = useState(false);
 
-  const wlEntry = watchlist.find(w => w.symbol === symbol.toUpperCase());
-  const refPrice = wlEntry?.price ?? (orderType === 'LIMIT' ? parseFloat(limitPrice) || 0 : 0);
-  const sizeNum = parseFloat(size) || 0;
-  const levNum = Math.min(parseInt(leverage) || 10, limits.maxLeverage);
-  const effectivePrice = orderType === 'MARKET' ? refPrice : (parseFloat(limitPrice) || 0);
-  const estimatedMargin = effectivePrice > 0 && sizeNum > 0 ? (effectivePrice * sizeNum) / levNum : 0;
-  const estimatedExposure = effectivePrice * sizeNum;
+  // Normalise: uppercase, strip USDT suffix if pasted
+  const sym = symbol.toUpperCase().replace(/USDT$/, '').replace(/\/USD$/, '');
+
+  const wlEntry     = watchlist.find(w => w.symbol === sym);
+  const sizeUsdNum  = parseFloat(sizeUsd) || 0;
+  const levNum      = Math.min(parseInt(leverage) || 10, limits.maxLeverage);
+  const refPrice    = wlEntry?.price ?? 0;
+
+  // GMX collateral = sizeInUsd / leverage
+  const collateralUsd = sizeUsdNum > 0 && levNum > 0 ? sizeUsdNum / levNum : 0;
 
   const validationErrors = useMemo(() => {
     const errs: string[] = [];
     if (engineState === 'EMERGENCY_STOP') errs.push('Emergency stop is active');
     if (stopNewOrders) errs.push('New orders are disabled');
-    if (!symbol.trim()) errs.push('Symbol is required');
-    if (sizeNum <= 0) errs.push('Size must be > 0');
+    if (!sym.trim()) errs.push('Symbol is required');
+    if (sizeUsdNum <= 0) errs.push('Position size must be > 0');
     if (levNum < 1 || levNum > limits.maxLeverage) errs.push(`Leverage must be 1–${limits.maxLeverage}x`);
-    if (orderType === 'LIMIT' && !(parseFloat(limitPrice) > 0)) errs.push('Limit price required');
-    if (estimatedMargin > limits.maxMarginPerTrade) errs.push(`Margin ${estimatedMargin.toFixed(0)} exceeds limit ${limits.maxMarginPerTrade}`);
-    if (estimatedMargin > account.availableBalance) errs.push('Insufficient available balance');
+    if (orderType === 'LimitIncrease' && !(parseFloat(limitPrice) > 0)) errs.push('Limit price required');
+    if (collateralUsd > limits.maxMarginPerTrade) errs.push(`Collateral $${collateralUsd.toFixed(0)} exceeds limit $${limits.maxMarginPerTrade}`);
+    if (collateralUsd > account.availableBalance) errs.push('Insufficient available balance');
     if (positions.length >= limits.maxSimultaneousPositions) errs.push(`Max positions (${limits.maxSimultaneousPositions}) reached`);
-    if (estimatedExposure > 0 && estimatedExposure + positions.reduce((s, p) => s + p.markPrice * p.size, 0) > limits.maxTotalExposureUSDT) {
-      errs.push(`Total exposure would exceed ${limits.maxTotalExposureUSDT.toLocaleString()} USDT`);
+    const totalExposure = positions.reduce((s, p) => s + p.sizeInUsd, 0) + sizeUsdNum;
+    if (sizeUsdNum > 0 && totalExposure > limits.maxTotalExposureUSDT) {
+      errs.push(`Total exposure $${totalExposure.toFixed(0)} would exceed limit $${limits.maxTotalExposureUSDT.toLocaleString()}`);
     }
     return errs;
-  }, [engineState, stopNewOrders, symbol, sizeNum, levNum, orderType, limitPrice, estimatedMargin, estimatedExposure, limits, account, positions]);
+  }, [engineState, stopNewOrders, sym, sizeUsdNum, levNum, orderType, limitPrice, collateralUsd, limits, account, positions]);
 
   const handleSubmit = async () => {
     if (validationErrors.length > 0) return;
     setSubmitting(true);
     const params: NewOrderParams = {
-      symbol: symbol.toUpperCase(),
+      symbol: sym,
       side,
       orderType,
-      size: sizeNum,
+      sizeInUsd: sizeUsdNum,
       leverage: levNum,
-      limitPrice: orderType === 'LIMIT' ? parseFloat(limitPrice) : undefined,
+      limitPrice: orderType === 'LimitIncrease' ? parseFloat(limitPrice) : undefined,
       tpPrice: tpPrice ? parseFloat(tpPrice) : undefined,
       slPrice: slPrice ? parseFloat(slPrice) : undefined,
     };
-    await new Promise(r => setTimeout(r, 200)); // simulate network feel
+    await new Promise(r => setTimeout(r, 200));
     const result = placeOrder(params);
     setSubmitting(false);
     if (result.success) {
       toast({
         title: '[PAPER] Order Placed',
-        description: `${side} ${sizeNum} ${symbol.toUpperCase()} @ ${orderType === 'MARKET' ? 'Market' : limitPrice} × ${levNum}x`,
+        description: `${side} $${sizeUsdNum.toFixed(0)} ${sym}/USD @ ${orderType === 'MarketIncrease' ? 'Market' : limitPrice} × ${levNum}x`,
       });
       onClose();
     } else {
@@ -107,16 +113,18 @@ export function NewOrderDrawer({ open, onClose, defaultSymbol }: Props) {
           <DialogTitle className="text-base font-bold tracking-widest uppercase flex items-center gap-2">
             <span className="text-[var(--color-primary)]">⬡</span> New Paper Order
           </DialogTitle>
-          <p className="text-xs text-muted-foreground mt-0.5">Orders are simulated — no real funds involved</p>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            Simulated GMX V2 order · Arbitrum One · No real funds
+          </p>
         </DialogHeader>
 
         <div className="px-6 py-5 flex flex-col gap-4 overflow-y-auto max-h-[75vh]">
           {/* Symbol */}
-          <Field label="Symbol">
+          <Field label="Market">
             <Input
               value={symbol}
               onChange={e => setSymbol(e.target.value.toUpperCase())}
-              placeholder="BTCUSDT"
+              placeholder="ETH"
               className="font-mono font-bold text-sm"
             />
             <div className="flex flex-wrap gap-1.5 mt-1">
@@ -126,15 +134,20 @@ export function NewOrderDrawer({ open, onClose, defaultSymbol }: Props) {
                   onClick={() => setSymbol(s)}
                   className={cn(
                     'text-[10px] font-mono px-2 py-0.5 rounded border transition-colors',
-                    symbol === s
+                    sym === s
                       ? 'bg-primary/20 border-primary/40 text-primary'
                       : 'bg-secondary border-border text-muted-foreground hover:text-foreground'
                   )}
                 >
-                  {s.replace('USDT', '')}
+                  {s}
                 </button>
               ))}
             </div>
+            {wlEntry && (
+              <div className="text-[10px] text-muted-foreground font-mono mt-1">
+                Oracle: ${wlEntry.price.toLocaleString('en-US', { maximumFractionDigits: 2 })}
+              </div>
+            )}
           </Field>
 
           {/* Side */}
@@ -165,10 +178,10 @@ export function NewOrderDrawer({ open, onClose, defaultSymbol }: Props) {
             </div>
           </Field>
 
-          {/* Order type */}
+          {/* Order type — GMX V2 names */}
           <Field label="Order Type">
             <div className="flex gap-2">
-              {(['MARKET', 'LIMIT'] as const).map(t => (
+              {(['MarketIncrease', 'LimitIncrease'] as const).map(t => (
                 <button
                   key={t}
                   onClick={() => setOrderType(t)}
@@ -179,20 +192,21 @@ export function NewOrderDrawer({ open, onClose, defaultSymbol }: Props) {
                       : 'bg-secondary border-border text-muted-foreground hover:text-foreground'
                   )}
                 >
-                  {t}
+                  {t === 'MarketIncrease' ? 'Market' : 'Limit'}
                 </button>
               ))}
             </div>
           </Field>
 
-          {/* Size + Leverage */}
+          {/* Size (USD) + Leverage */}
           <div className="grid grid-cols-2 gap-3">
-            <Field label="Size" hint={wlEntry ? `≈ $${(sizeNum * wlEntry.price).toFixed(0)}` : undefined}>
+            <Field label="Size (USD)" hint={collateralUsd > 0 ? `Collateral: $${collateralUsd.toFixed(0)}` : undefined}>
               <Input
-                type="number" min="0" step="0.001"
-                value={size}
-                onChange={e => setSize(e.target.value)}
+                type="number" min="0" step="10"
+                value={sizeUsd}
+                onChange={e => setSizeUsd(e.target.value)}
                 className="font-mono"
+                placeholder="500"
               />
             </Field>
             <Field label="Leverage" hint={`Max ${limits.maxLeverage}x`}>
@@ -216,7 +230,7 @@ export function NewOrderDrawer({ open, onClose, defaultSymbol }: Props) {
           </div>
 
           {/* Limit price (conditional) */}
-          {orderType === 'LIMIT' && (
+          {orderType === 'LimitIncrease' && (
             <Field label="Limit Price">
               <Input
                 type="number" min="0" step="0.01"
@@ -228,12 +242,14 @@ export function NewOrderDrawer({ open, onClose, defaultSymbol }: Props) {
             </Field>
           )}
 
-          {/* Margin estimate */}
-          {estimatedMargin > 0 && (
+          {/* Collateral estimate */}
+          {collateralUsd > 0 && (
             <div className="flex items-center justify-between text-xs p-3 bg-secondary rounded-md border border-border">
-              <span className="text-muted-foreground flex items-center gap-1.5"><Info className="w-3 h-3" /> Estimated Margin</span>
-              <span className={cn('font-mono font-bold', estimatedMargin > limits.maxMarginPerTrade ? 'text-[var(--color-short)]' : 'text-foreground')}>
-                ${estimatedMargin.toFixed(2)}
+              <span className="text-muted-foreground flex items-center gap-1.5">
+                <Info className="w-3 h-3" /> Required Collateral (USDC)
+              </span>
+              <span className={cn('font-mono font-bold', collateralUsd > limits.maxMarginPerTrade ? 'text-[var(--color-short)]' : 'text-foreground')}>
+                ${collateralUsd.toFixed(2)}
               </span>
             </div>
           )}

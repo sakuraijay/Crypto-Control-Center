@@ -58,4 +58,31 @@ router.get("/binance/markprices", async (_req, res) => {
   }
 });
 
+/**
+ * GET /api/binance/klines
+ * Query params: symbol, interval (1m|5m|15m|1h|4h|1d), limit (max 1500), startTime, endTime
+ * Returns OHLCV kline data for backtesting.
+ */
+router.get("/binance/klines", async (req, res) => {
+  try {
+    const { symbol, interval = "1h", limit = "500", startTime, endTime } = req.query as Record<string, string>;
+    if (!symbol) { res.status(400).json({ error: "symbol is required" }); return; }
+
+    const params = new URLSearchParams({ symbol, interval, limit: String(Math.min(Number(limit), 1500)) });
+    if (startTime) params.set("startTime", startTime);
+    if (endTime) params.set("endTime", endTime);
+
+    const upstream = await fetch(`${FSTREAM}/klines?${params}`, {
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!upstream.ok) { res.status(upstream.status).json({ error: "upstream error from Binance" }); return; }
+    const data = await upstream.json();
+    // Cache 5 min — historical candles don't change
+    res.setHeader("Cache-Control", "public, max-age=300");
+    res.json(data);
+  } catch {
+    res.status(502).json({ error: "Failed to fetch klines from Binance" });
+  }
+});
+
 export default router;

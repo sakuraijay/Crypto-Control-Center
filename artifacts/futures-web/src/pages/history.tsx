@@ -10,13 +10,13 @@ import { Download, X } from 'lucide-react';
 
 // ── CSV export ──────────────────────────────────────────────────────────────
 function downloadCSV(trades: ReturnType<typeof useTradingContext>['closedTrades']) {
-  const header = 'Date,Symbol,Side,Size,Close Price,Realized PnL,Strategy';
+  const header = 'Date,Symbol,Side,SizeUSD,Close Price,Realized PnL,Strategy';
   const rows = trades.map(t =>
     [
       format(new Date(t.timestamp), 'yyyy-MM-dd HH:mm:ss'),
-      t.symbol,
+      t.displaySymbol ?? t.symbol,
       t.side,
-      t.size,
+      t.sizeInUsd?.toFixed(2) ?? '0',
       t.price.toFixed(2),
       t.pnl.toFixed(2),
       `"${t.strategy}"`,
@@ -114,7 +114,7 @@ export default function HistoryPage() {
                 <SelectContent>
                   {uniqueSymbols.map(s => (
                     <SelectItem key={s} value={s} className="text-xs">
-                      {s === 'ALL' ? 'All Symbols' : s.replace('USDT', '/USDT')}
+                      {s === 'ALL' ? 'All Symbols' : s}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -218,7 +218,7 @@ export default function HistoryPage() {
                             <span className="text-xs text-muted-foreground">/USDT</span>
                           </div>
                         </td>
-                        <td className="py-3 px-6 text-right font-mono">{trade.size}</td>
+                        <td className="py-3 px-6 text-right font-mono">${(trade.sizeInUsd ?? 0).toFixed(0)}</td>
                         <td className="py-3 px-6 text-right font-mono">{trade.price.toFixed(2)}</td>
                         <td className="py-3 px-6 text-right">
                           <span className={`font-mono font-medium ${

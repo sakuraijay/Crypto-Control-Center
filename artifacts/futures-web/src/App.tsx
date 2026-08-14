@@ -15,6 +15,8 @@ import Watchlist from '@/pages/watchlist';
 import Strategy from '@/pages/strategy';
 import HistoryPage from '@/pages/history';
 import Settings from '@/pages/settings';
+import Backtest from '@/pages/backtest';
+import AiLog from '@/pages/ai-log';
 import { AlertCircle } from 'lucide-react';
 
 function EmergencyBanner() {
@@ -50,6 +52,8 @@ function Router() {
           <Route path="/strategy" component={Strategy} />
           <Route path="/history" component={HistoryPage} />
           <Route path="/settings" component={Settings} />
+          <Route path="/backtest" component={Backtest} />
+          <Route path="/ai-log" component={AiLog} />
           <Route component={NotFound} />
         </Switch>
       </Shell>

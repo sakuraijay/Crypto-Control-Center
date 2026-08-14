@@ -11,7 +11,6 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useColors } from '@/hooks/useColors';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
@@ -19,8 +18,15 @@ import * as Haptics from 'expo-haptics';
 import { useEngine, EngineState } from '@/contexts/EngineContext';
 import { useTrading } from '@/contexts/TradingContext';
 import { useAuth } from '@/contexts/AuthContext';
+import { useVps, STATE_COLORS, STATE_LABELS, timeAgo } from '@/contexts/VpsContext';
+import { VpsStatusCard } from '@/components/VpsStatusCard';
 import { EngineStatusBadge } from '@/components/EngineStatusBadge';
 import { ConfirmModal } from '@/components/ConfirmModal';
+import {
+  getNotificationPermission,
+  requestNotificationPermission,
+  type NotificationPermission,
+} from '@/services/notifications';
 
 // ── Tiny UI helpers ───────────────────────────────────────────────
 function SectionHeader({ title }: { title: string }) {
@@ -66,14 +72,6 @@ function DangerButton({ label, icon, onPress, disabled }: {
   );
 }
 
-// ── VPS storage key ───────────────────────────────────────────────
-const VPS_KEY = '@futures_vps_config';
-
-interface VpsConfig { host: string; port: string; keyName: string; useSSL: boolean }
-const VPS_DEFAULTS: VpsConfig = { host: '', port: '8080', keyName: '', useSSL: true };
-
-type VpsStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
-
 // ── Main screen ───────────────────────────────────────────────────
 export default function SettingsScreen() {
   const colors = useColors();
@@ -82,55 +80,50 @@ export default function SettingsScreen() {
   const { clearAllPositions } = useTrading();
   const { logout } = useAuth();
 
+  // VPS context — polls live status from API server proxy
+  const {
+    config: vpsConfig, vpsState, connectionStatus: vpsConnStatus,
+    connectionError: vpsConnError, health: vpsHealth,
+    saveConfig: saveVpsConfig, testConnection: testVpsConn, disconnect: disconnectVps,
+  } = useVps();
+
+  // Local form state (mirrors context config; saves on blur/test)
+  const [vpsHost, setVpsHost] = useState(vpsConfig.host);
+  const [vpsPort, setVpsPort] = useState(vpsConfig.port);
+  const [vpsSSL, setVpsSSL] = useState(vpsConfig.useSSL);
+  const [vpsTesting, setVpsTesting] = useState(false);
+
   const [cancelConfirm, setCancelConfirm] = useState(false);
   const [closeStep, setCloseStep] = useState<0 | 1 | 2>(0);
   const [emergencyConfirm, setEmergencyConfirm] = useState(false);
   const [processing, setProcessing] = useState(false);
 
-  // VPS config state
-  const [vps, setVps] = useState<VpsConfig>(VPS_DEFAULTS);
-  const [vpsStatus, setVpsStatus] = useState<VpsStatus>('disconnected');
-  const [vpsLatency, setVpsLatency] = useState<number | null>(null);
-  const [vpsError, setVpsError] = useState('');
-  const [vpsTesting, setVpsTesting] = useState(false);
-
   const isEmergency = engineState === EngineState.EMERGENCY_STOP;
   const topPad = insets.top + (Platform.OS === 'web' ? 67 : 0);
   const botPad = insets.bottom + (Platform.OS === 'web' ? 34 : 0);
 
-  // Load VPS config from storage
+  // ── Notification permission ────────────────────────────────────
+  const [notifPermission, setNotifPermission] = useState<NotificationPermission>('undetermined');
+  const [notifRequesting, setNotifRequesting] = useState(false);
+
   useEffect(() => {
-    AsyncStorage.getItem(VPS_KEY).then(raw => {
-      if (raw) {
-        try { setVps(JSON.parse(raw)); } catch {}
-      }
-    });
+    getNotificationPermission().then(setNotifPermission);
   }, []);
 
-  const saveVps = async (updated: VpsConfig) => {
-    setVps(updated);
-    await AsyncStorage.setItem(VPS_KEY, JSON.stringify(updated));
+  const handleRequestNotif = async () => {
+    setNotifRequesting(true);
+    const status = await requestNotificationPermission();
+    setNotifPermission(status);
+    setNotifRequesting(false);
+    if (status === 'granted') Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
   };
 
   const handleTestVps = async () => {
-    if (!vps.host.trim()) { setVpsError('Enter a host address first'); return; }
+    await saveVpsConfig({ host: vpsHost, port: vpsPort, useSSL: vpsSSL });
     setVpsTesting(true);
-    setVpsStatus('connecting');
-    setVpsError('');
-    await AsyncStorage.setItem(VPS_KEY, JSON.stringify(vps));
-    const delay = 800 + Math.random() * 600;
-    await new Promise(r => setTimeout(r, delay));
-    // Paper mode: always succeeds
-    setVpsStatus('connected');
-    setVpsLatency(Math.round(delay * 0.3 + 20));
+    await testVpsConn();
     setVpsTesting(false);
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-  };
-
-  const handleDisconnectVps = () => {
-    setVpsStatus('disconnected');
-    setVpsLatency(null);
-    setVpsError('');
   };
 
   const handleCancelOrders = async () => {
@@ -210,52 +203,63 @@ export default function SettingsScreen() {
           </Text>
         </View>
 
-        {/* ── VPS CONNECTION ── */}
-        <SectionHeader title="VPS EXECUTION SERVICE" />
-
-        {/* Status bar */}
-        <View style={[styles.vpsStatusBar, { backgroundColor: colors.secondary, borderColor: colors.border }]}>
-          <View style={[styles.vpsStatusDot, {
-            backgroundColor: statusDotColor,
-            shadowColor: statusDotColor,
-            shadowOpacity: vpsStatus === 'connected' ? 0.8 : 0,
-            shadowRadius: 4,
-            shadowOffset: { width: 0, height: 0 },
-          }]} />
-          <Text style={[styles.vpsStatusTxt, { color: statusDotColor }]}>
-            {vpsStatus === 'connected' ? 'CONNECTED' :
-             vpsStatus === 'connecting' ? 'CONNECTING...' :
-             vpsStatus === 'error' ? 'ERROR' : 'DISCONNECTED'}
-          </Text>
-          {vpsStatus === 'connected' && vpsLatency && (
-            <Text style={[styles.vpsLatency, { color: colors.mutedForeground }]}>{vpsLatency}ms</Text>
-          )}
-          {vpsError ? <Text style={[styles.vpsErrorTxt, { color: colors.short }]}>{vpsError}</Text> : null}
-          {vpsStatus === 'connected' && (
-            <TouchableOpacity
-              onPress={handleDisconnectVps}
-              style={[styles.vpsDisconnectBtn, { borderColor: colors.border }]}
+        {/* ── NOTIFICATIONS ── */}
+        {Platform.OS !== 'web' && (
+          <>
+            <SectionHeader title="NOTIFICATIONS" />
+            <SettingRow
+              label="Risk Alert Notifications"
+              sub="Get alerts for margin, loss, and exposure limits even when the app is backgrounded"
             >
-              <Text style={[styles.vpsDisconnectTxt, { color: colors.mutedForeground }]}>Disconnect</Text>
-            </TouchableOpacity>
-          )}
-        </View>
+              {notifPermission === 'granted' ? (
+                <View style={[styles.activeBadge, { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: colors.long + '22', borderColor: colors.long + '44' }]}>
+                  <Feather name="check" size={11} color={colors.long} />
+                  <Text style={[styles.activeTxt, { color: colors.long }]}>ON</Text>
+                </View>
+              ) : notifRequesting ? (
+                <ActivityIndicator size="small" color={colors.primary} />
+              ) : (
+                <TouchableOpacity
+                  onPress={handleRequestNotif}
+                  style={{ paddingHorizontal: 14, paddingVertical: 6, borderRadius: 16, borderWidth: 1, backgroundColor: colors.primary + '20', borderColor: colors.primary + '50' }}
+                >
+                  <Text style={{ fontFamily: 'Inter_600SemiBold', fontSize: 12, color: colors.primary }}>Enable</Text>
+                </TouchableOpacity>
+              )}
+            </SettingRow>
+            {notifPermission === 'denied' && (
+              <View style={[styles.infoBox, { backgroundColor: colors.warning + '11', borderColor: colors.warning + '33' }]}>
+                <Feather name="info" size={14} color={colors.warning} />
+                <Text style={[styles.infoTxt, { color: colors.warning }]}>
+                  Notifications are blocked. Enable them in your device Settings → Notifications.
+                </Text>
+              </View>
+            )}
+          </>
+        )}
 
-        {/* VPS form */}
+        {/* ── VPS TRADING ENGINE — live status + arm/disarm ── */}
+        <SectionHeader title="VPS TRADING ENGINE" />
+
+        {/* Live VPS status card — includes health grid, arm/disarm, architecture note */}
+        <VpsStatusCard />
+
+        {/* VPS connection settings */}
+        <SectionHeader title="VPS CONNECTION SETTINGS" />
         <View style={[styles.vpsForm, { backgroundColor: colors.card, borderColor: colors.border }]}>
           <View style={[styles.vpsNote, { backgroundColor: colors.warning + '11', borderColor: colors.warning + '33' }]}>
             <Feather name="alert-triangle" size={12} color={colors.warning} />
             <Text style={[styles.vpsNoteTxt, { color: colors.warning }]}>
-              API keys are configured on the VPS — not here. Only connection metadata is stored locally.
+              The VPS holds only a delegated GMX subaccount key — never your primary wallet. Only connection metadata is stored here.
             </Text>
           </View>
 
           <View style={styles.vpsField}>
             <Text style={[styles.vpsLabel, { color: colors.mutedForeground }]}>HOST / IP ADDRESS</Text>
             <TextInput
-              value={vps.host}
-              onChangeText={t => setVps(v => ({ ...v, host: t }))}
-              onBlur={() => AsyncStorage.setItem(VPS_KEY, JSON.stringify(vps))}
+              value={vpsHost}
+              onChangeText={setVpsHost}
+              onBlur={() => saveVpsConfig({ host: vpsHost, port: vpsPort, useSSL: vpsSSL })}
               placeholder="e.g. 192.168.1.100 or my-vps.example.com"
               placeholderTextColor={colors.mutedForeground}
               style={[styles.vpsInput, { color: colors.foreground, backgroundColor: colors.background, borderColor: colors.border }]}
@@ -269,58 +273,51 @@ export default function SettingsScreen() {
             <View style={[styles.vpsField, { flex: 1 }]}>
               <Text style={[styles.vpsLabel, { color: colors.mutedForeground }]}>PORT</Text>
               <TextInput
-                value={vps.port}
-                onChangeText={t => setVps(v => ({ ...v, port: t }))}
-                onBlur={() => AsyncStorage.setItem(VPS_KEY, JSON.stringify(vps))}
+                value={vpsPort}
+                onChangeText={setVpsPort}
+                onBlur={() => saveVpsConfig({ host: vpsHost, port: vpsPort, useSSL: vpsSSL })}
                 placeholder="8080"
                 placeholderTextColor={colors.mutedForeground}
                 style={[styles.vpsInput, { color: colors.foreground, backgroundColor: colors.background, borderColor: colors.border }]}
                 keyboardType="number-pad"
               />
             </View>
-            <View style={[styles.vpsField, { flex: 2 }]}>
-              <Text style={[styles.vpsLabel, { color: colors.mutedForeground }]}>API KEY LABEL</Text>
-              <TextInput
-                value={vps.keyName}
-                onChangeText={t => setVps(v => ({ ...v, keyName: t }))}
-                onBlur={() => AsyncStorage.setItem(VPS_KEY, JSON.stringify(vps))}
-                placeholder="e.g. futures-bot-key"
-                placeholderTextColor={colors.mutedForeground}
-                style={[styles.vpsInput, { color: colors.foreground, backgroundColor: colors.background, borderColor: colors.border }]}
-                autoCapitalize="none"
-                autoCorrect={false}
-              />
-            </View>
+
           </View>
 
           <View style={[styles.settRow, { borderBottomColor: 'transparent', paddingHorizontal: 0 }]}>
             <Text style={[styles.settLabel, { color: colors.foreground }]}>Use SSL / TLS</Text>
             <Switch
-              value={vps.useSSL}
-              onValueChange={v => saveVps({ ...vps, useSSL: v })}
+              value={vpsSSL}
+              onValueChange={v => { setVpsSSL(v); saveVpsConfig({ host: vpsHost, port: vpsPort, useSSL: v }); }}
               trackColor={{ false: '#2A2D3A', true: colors.primary + '44' }}
-              thumbColor={vps.useSSL ? colors.primary : '#6B7280'}
+              thumbColor={vpsSSL ? colors.primary : '#6B7280'}
             />
           </View>
 
           <TouchableOpacity
             style={[styles.vpsTestBtn, {
-              backgroundColor: vpsStatus === 'connected' ? colors.secondary : colors.primary,
-              opacity: vpsTesting || !vps.host.trim() ? 0.6 : 1,
+              backgroundColor: vpsConnStatus === 'connected' ? colors.secondary : colors.primary,
+              opacity: vpsTesting || !vpsHost.trim() ? 0.6 : 1,
             }]}
             onPress={handleTestVps}
-            disabled={vpsTesting || !vps.host.trim()}
+            disabled={vpsTesting || !vpsHost.trim()}
             activeOpacity={0.85}
           >
             {vpsTesting ? (
               <ActivityIndicator size="small" color={colors.background} />
             ) : (
-              <Feather name={vpsStatus === 'connected' ? 'wifi' : 'wifi-off'} size={15} color={vpsStatus === 'connected' ? colors.mutedForeground : colors.background} />
+              <Feather name={vpsConnStatus === 'connected' ? 'wifi' : 'wifi-off'} size={15}
+                color={vpsConnStatus === 'connected' ? colors.mutedForeground : colors.background} />
             )}
-            <Text style={[styles.vpsTestTxt, { color: vpsStatus === 'connected' ? colors.mutedForeground : colors.background }]}>
-              {vpsTesting ? 'Testing...' : vpsStatus === 'connected' ? 'Re-test Connection' : 'Test Connection'}
+            <Text style={[styles.vpsTestTxt, { color: vpsConnStatus === 'connected' ? colors.mutedForeground : colors.background }]}>
+              {vpsTesting ? 'Testing...' : vpsConnStatus === 'connected' ? 'Re-test Connection' : 'Test Connection'}
             </Text>
           </TouchableOpacity>
+
+          {vpsConnError ? (
+            <Text style={{ fontFamily: 'Inter_400Regular', fontSize: 11, color: colors.short }}>{vpsConnError}</Text>
+          ) : null}
         </View>
 
         {/* ── STOP CONTROLS ── */}
@@ -393,7 +390,7 @@ export default function SettingsScreen() {
 
         {/* ── ABOUT ── */}
         <SectionHeader title="ABOUT" />
-        <SettingRow label="Version" sub="Futures Terminal v1.0.0 — Paper Trading" />
+        <SettingRow label="Version" sub="Crypto Control Center v1.0.0 — Paper Trading" />
         <SettingRow label="Mode" sub="Standalone local app — no cloud sync" />
         <SettingRow label="Architecture" sub="VPS connection ready (configure above)" />
       </ScrollView>

@@ -1,5 +1,11 @@
 - [Binance proxy routing](binance-proxy-routing.md) — Vite proxy won't work in Replit; use /api-server/api/binance/ from browser; fapi.binance.com for REST (not fstream)
+- [AI Engine Context](ai-engine-context.md) — WatchlistSymbol uses `change24h`; MARKET_BY_SYMBOL is a Map (use .get()); EngineState has no 'RUNNING' value; uuid needs Vite dep-optimization on first load
 - [Template literal escaping bug](template-literal-bug.md) — previous codegen escaped `\${` instead of `${`; never repeat this
 - [Pre-existing TS errors](preexisting-ts-errors.md) — calendar.tsx and spinner.tsx have React 19 ref-type mismatches; ignore, they are not new
-- [VPS config pattern](vps-config-pattern.md) — web uses VpsContext/VpsProvider; mobile uses local useState + AsyncStorage (no context needed)
+- [VPS config pattern](vps-config-pattern.md) — both web and mobile use VpsContext/VpsProvider; settings form has local mirror state that saves to context on blur/test
 - [Mobile EngineContext API](mobile-engine-api.md) — uses `closeAllPositions` (not `clearAllPositions`); TradingContext uses `clearAllPositions`
+- [expo-notifications version](expo-notifications-version.md) — must be `~0.32.17` for expo@54; v57.x causes Metro watcher ENOENT crashes
+- [API server CORS for Expo web](api-server-cors.md) — Expo web runs on `*.expo.sisko.replit.dev`; use `cors({ origin: true, credentials: true })` via `app.use()` only — Express 5 rejects `app.options('*', ...)` and `app.options('(.*)', ...)`; CORS preflight handled automatically by cors middleware `preflightContinue: false` default
+- [Express 5 wildcard routes](express5-wildcards.md) — `*` and `(.*)` both throw PathError in Express 5 + path-to-regexp@8; use named params `/{*path}` or regex `/\/.*/` for catch-all routes
+- [Live approval gate](live-approval-gate.md) — PendingLiveApproval in types.ts; approval queue in AiEngineContext; LiveApprovalCard on dashboard; VPS /execute endpoint in api-server vps.ts
+- [Risk enforcement architecture](risk-enforcement.md) — trailing stop ratchet in TradingContext price-tick loop; daily/weekly/consecutive loss → RISK_LOCKED watcher in AiEngineContext; consecutiveLosses exposed from TradingContext as reactive state

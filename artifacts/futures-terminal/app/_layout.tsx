@@ -20,7 +20,9 @@ import { EngineProvider } from '@/contexts/EngineContext';
 import { TradingProvider } from '@/contexts/TradingContext';
 import { WatchlistProvider } from '@/contexts/WatchlistContext';
 import { StrategyProvider } from '@/contexts/StrategyContext';
+import { VpsProvider } from '@/contexts/VpsContext';
 import { RiskAlertMonitor } from '@/components/RiskAlertMonitor';
+import { setupAndroidChannel } from '@/services/notifications';
 
 SystemUI.setBackgroundColorAsync('#0A0B0E');
 
@@ -53,6 +55,9 @@ function RootLayoutNav() {
 }
 
 export default function RootLayout() {
+  // Setup Android notification channel once on app start
+  useEffect(() => { setupAndroidChannel(); }, []);
+
   const [fontsLoaded, fontError] = useFonts({
     Inter_400Regular,
     Inter_500Medium,
@@ -75,16 +80,18 @@ export default function RootLayout() {
           <GestureHandlerRootView style={{ flex: 1 }}>
             <KeyboardProvider>
               <AuthProvider>
-                <StrategyProvider>
-                  <WatchlistProvider>
-                    <TradingProvider>
-                      <EngineProvider>
-                        <RiskAlertMonitor />
-                        <RootLayoutNav />
-                      </EngineProvider>
-                    </TradingProvider>
-                  </WatchlistProvider>
-                </StrategyProvider>
+                <VpsProvider>
+                  <StrategyProvider>
+                    <WatchlistProvider>
+                      <TradingProvider>
+                        <EngineProvider>
+                          <RiskAlertMonitor />
+                          <RootLayoutNav />
+                        </EngineProvider>
+                      </TradingProvider>
+                    </WatchlistProvider>
+                  </StrategyProvider>
+                </VpsProvider>
               </AuthProvider>
             </KeyboardProvider>
           </GestureHandlerRootView>

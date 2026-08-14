@@ -1,49 +1,94 @@
-# See https://docs.github.com/en/get-started/getting-started-with-git/ignoring-files for more about ignoring files.
+# ── Dependencies ──────────────────────────────────────────────────────────────
+node_modules/
+.pnpm-store/
 
-# compiled output
-dist
-tmp
-out-tsc
+# ── Build output ──────────────────────────────────────────────────────────────
+dist/
+build/
+out/
+tmp/
+out-tsc/
 *.tsbuildinfo
-.expo
-.expo-shared
+.expo/
+.expo-shared/
 
-# dependencies
-node_modules
+# ── Environment & Secrets — NEVER COMMIT ──────────────────────────────────────
+# Wallet private keys, seed phrases, API secrets must NEVER appear in git.
+.env
+.env.*
+.env.local
+.env.development
+.env.production
+.env.staging
+*.env
+secrets.json
+secrets.*.json
+*.pem
+*.key
+*.p12
+*.pfx
+*.cert
 
-# IDEs and editors
-/.idea
-.project
-.classpath
-.c9/
-*.launch
-.settings/
-*.sublime-workspace
+# ── Replit internals ──────────────────────────────────────────────────────────
+.cache/
+.local/
+.upm/
+.config/
+replit.nix
+__pycache__/
+.pythonlibs/
 
-# IDE - VSCode
+# ── Replit agent memory (agent working notes — not part of the product) ────────
+.agents/
+
+# ── IDE & editor ──────────────────────────────────────────────────────────────
+.idea/
 .vscode/*
 !.vscode/settings.json
 !.vscode/tasks.json
 !.vscode/launch.json
 !.vscode/extensions.json
+*.sublime-workspace
+*.sublime-project
+.project
+.classpath
+.c9/
+*.launch
+.settings/
 
-# misc
-/.sass-cache
-/connect.lock
-/coverage
-/libpeerconnection.log
-npm-debug.log
-yarn-error.log
-testem.log
-/typings
-
-# System Files
+# ── OS ────────────────────────────────────────────────────────────────────────
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V{100}
+.Trashes
 Thumbs.db
+Desktop.ini
 
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# ── Test & coverage ───────────────────────────────────────────────────────────
+coverage/
+.nyc_output/
+*.lcov
+
+# ── TypeScript ────────────────────────────────────────────────────────────────
+*.js.map
+*.d.ts.map
+
+# ── Misc ──────────────────────────────────────────────────────────────────────
+.sass-cache/
+connect.lock
+libpeerconnection.log
+testem.log
+typings/
+
+# ── Cursor / GitHub Copilot config that contains workspace paths ───────────────
 .cursor/rules/nx-rules.mdc
 .github/instructions/nx.instructions.md
-
-# Replit
-.cache/
-.local/

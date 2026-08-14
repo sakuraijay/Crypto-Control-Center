@@ -1,4 +1,13 @@
-import { createContext, useContext, useState, ReactNode, useCallback, useEffect } from 'react';
+import { createContext, useContext, useState, ReactNode, useCallback } from 'react';
+
+// ---------------------------------------------------------------------------
+// Dev bypass
+// Auth is skipped automatically in the Vite dev server (import.meta.env.DEV).
+// To re-enable auth during development, add VITE_AUTH_ENABLED=true to .env.
+// Production builds always enforce auth (import.meta.env.DEV is false there).
+// ---------------------------------------------------------------------------
+const DEV_AUTH_BYPASS =
+  import.meta.env.DEV && import.meta.env.VITE_AUTH_ENABLED !== 'true';
 
 interface AuthContextType {
   isAuthenticated: boolean;
@@ -11,11 +20,13 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [storedPin, setStoredPin] = useState<string | null>(() => localStorage.getItem('futures_pin'));
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+  const [storedPin, setStoredPin] = useState<string | null>(() =>
+    DEV_AUTH_BYPASS ? '__dev__' : localStorage.getItem('futures_pin')
+  );
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(DEV_AUTH_BYPASS);
 
   const login = useCallback((pin: string) => {
-    if (pin === storedPin) {
+    if (DEV_AUTH_BYPASS || pin === storedPin) {
       setIsAuthenticated(true);
       return true;
     }
@@ -23,6 +34,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [storedPin]);
 
   const logout = useCallback(() => {
+    if (DEV_AUTH_BYPASS) return; // no-op in dev mode
     setIsAuthenticated(false);
   }, []);
 

@@ -28,11 +28,11 @@ function isoDate(d: Date) {
 }
 
 function buildCSV(trades: Trade[]): string {
-  const header = 'Date,Symbol,Side,Size,Close Price,Realized PnL,Strategy';
+  const header = 'Date,Symbol,Side,SizeUSD,Close Price,Realized PnL,Strategy';
   const rows = trades.map(t =>
     [
       isoDate(new Date(t.timestamp)),
-      t.symbol, t.side, t.size,
+      t.displaySymbol ?? t.symbol, t.side, (t.sizeInUsd ?? 0).toFixed(2),
       t.price.toFixed(2), t.pnl.toFixed(2), t.strategy,
     ].join(',')
   );
@@ -51,7 +51,7 @@ function TradeRow({ trade }: { trade: Trade }) {
       <View style={styles.tradeLeft}>
         <View style={styles.tradeSymbolRow}>
           <Text style={[styles.tradeSymbol, { color: colors.foreground }]}>
-            {trade.symbol.replace('USDT', '')}
+            {trade.displaySymbol ?? trade.symbol}
           </Text>
           <View style={[styles.sidePill, { backgroundColor: sideColor + '22', borderColor: sideColor + '44' }]}>
             <Text style={[styles.sideText, { color: sideColor }]}>{trade.side}</Text>
@@ -66,7 +66,7 @@ function TradeRow({ trade }: { trade: Trade }) {
           {trade.pnl >= 0 ? '+' : ''}${trade.pnl.toFixed(2)}
         </Text>
         <Text style={[styles.tradeDetail, { color: colors.mutedForeground }]}>
-          @ {trade.price.toFixed(2)} · {trade.size}
+          @ {trade.price.toFixed(2)} · ${(trade.sizeInUsd ?? 0).toFixed(0)}
         </Text>
       </View>
     </View>
@@ -83,8 +83,8 @@ function ActivityRow({ trade }: { trade: Trade }) {
     : colors.primary;
   const label = isClose ? (trade.pnl >= 0 ? 'WIN' : 'LOSS') : 'OPEN';
   const msg = isClose
-    ? `[PAPER] CLOSED ${trade.symbol} ${trade.side} @ ${trade.price.toFixed(2)} — PnL $${trade.pnl >= 0 ? '+' : ''}${trade.pnl.toFixed(2)}`
-    : `[PAPER] OPENED ${trade.symbol} ${trade.side} ${trade.size} @ ${trade.price.toFixed(2)} (${trade.strategy})`;
+    ? `[PAPER] CLOSED ${trade.displaySymbol ?? trade.symbol} ${trade.side} @ ${trade.price.toFixed(2)} — PnL $${trade.pnl >= 0 ? '+' : ''}${trade.pnl.toFixed(2)}`
+    : `[PAPER] OPENED ${trade.displaySymbol ?? trade.symbol} ${trade.side} $${(trade.sizeInUsd ?? 0).toFixed(0)} @ ${trade.price.toFixed(2)} (${trade.strategy})`;
 
   return (
     <View style={[styles.logRow, { borderBottomColor: colors.border }]}>
@@ -124,7 +124,7 @@ export default function HistoryScreen() {
   );
 
   const uniqueSymbols = useMemo(
-    () => ['ALL', ...Array.from(new Set(closedTrades.map(t => t.symbol.replace('USDT', ''))))],
+    () => ['ALL', ...Array.from(new Set(closedTrades.map(t => t.displaySymbol ?? t.symbol)))],
     [closedTrades]
   );
 

@@ -15,36 +15,35 @@ interface Props {
   defaultSymbol?: string;
 }
 
-const POPULAR = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'ADAUSDT', 'DOGEUSDT', 'XRPUSDT'];
-const MAX_LEVERAGE = 125;
+// GMX V2 markets on Arbitrum One
+const POPULAR = ['BTC', 'ETH', 'SOL', 'ARB', 'LINK', 'AVAX', 'DOGE'];
+const MAX_LEVERAGE = 100;
 
-export function NewOrderModal({ visible, onClose, defaultSymbol = 'BTCUSDT' }: Props) {
+export function NewOrderModal({ visible, onClose, defaultSymbol = 'ETH' }: Props) {
   const colors = useColors();
   const { placeOrder, account } = useTrading();
   const { engineState, stopNewOrdersActive } = useEngine();
 
-  const [symbol, setSymbol] = useState(defaultSymbol);
-  const [side, setSide] = useState<'LONG' | 'SHORT'>('LONG');
-  const [orderType, setOrderType] = useState<'MARKET' | 'LIMIT'>('MARKET');
-  const [size, setSize] = useState('0.01');
-  const [leverage, setLeverage] = useState('10');
+  const [symbol, setSymbol]       = useState(defaultSymbol);
+  const [side, setSide]           = useState<'LONG' | 'SHORT'>('LONG');
+  const [orderType, setOrderType] = useState<'MarketIncrease' | 'LimitIncrease'>('MarketIncrease');
+  const [sizeUsd, setSizeUsd]     = useState('500');   // USD position size
+  const [leverage, setLeverage]   = useState('10');
   const [limitPrice, setLimitPrice] = useState('');
-  const [tpPrice, setTpPrice] = useState('');
-  const [slPrice, setSlPrice] = useState('');
+  const [tpPrice, setTpPrice]     = useState('');
+  const [slPrice, setSlPrice]     = useState('');
   const [showRiskOrders, setShowRiskOrders] = useState(false);
-  const [error, setError] = useState('');
-  const [success, setSuccess] = useState('');
+  const [error, setError]         = useState('');
+  const [success, setSuccess]     = useState('');
 
-  const levNum = Math.min(parseInt(leverage) || 1, MAX_LEVERAGE);
-  const sizeNum = parseFloat(size) || 0;
+  const levNum      = Math.min(parseInt(leverage) || 1, MAX_LEVERAGE);
+  const sizeUsdNum  = parseFloat(sizeUsd) || 0;
 
-  const SYMBOL_PRICES: Record<string, number> = {
-    BTCUSDT: 43856, ETHUSDT: 2356, SOLUSDT: 101,
-    BNBUSDT: 312, ADAUSDT: 0.48, DOGEUSDT: 0.093, XRPUSDT: 0.56,
-  };
-  const refPrice = SYMBOL_PRICES[symbol] ?? 100;
-  const effectivePrice = orderType === 'MARKET' ? refPrice : (parseFloat(limitPrice) || 0);
-  const estimatedMargin = effectivePrice > 0 && sizeNum > 0 ? (effectivePrice * sizeNum) / levNum : 0;
+  // GMX: collateral = sizeInUsd / leverage
+  const collateralUsd = sizeUsdNum > 0 && levNum > 0 ? sizeUsdNum / levNum : 0;
+
+  // Normalise: uppercase, strip USDT/USD suffix if pasted
+  const sym = symbol.toUpperCase().replace(/USDT$/, '').replace(/\/USD$/, '');
 
   const cannotTrade = useMemo(() => {
     if (engineState === EngineState.EMERGENCY_STOP) return 'Emergency stop is active';
@@ -58,15 +57,19 @@ export function NewOrderModal({ visible, onClose, defaultSymbol = 'BTCUSDT' }: P
     setSuccess('');
 
     if (cannotTrade) { setError(cannotTrade); return; }
-    if (sizeNum <= 0) { setError('Enter a valid size > 0'); return; }
+    if (!sym.trim()) { setError('Enter a symbol'); return; }
+    if (sizeUsdNum <= 0) { setError('Position size must be > $0'); return; }
     if (levNum < 1 || levNum > MAX_LEVERAGE) { setError(`Leverage must be 1–${MAX_LEVERAGE}x`); return; }
-    if (orderType === 'LIMIT' && !(parseFloat(limitPrice) > 0)) { setError('Set a limit price'); return; }
-    if (estimatedMargin > account.availableBalance) { setError('Insufficient available balance'); return; }
+    if (orderType === 'LimitIncrease' && !(parseFloat(limitPrice) > 0)) { setError('Set a limit price'); return; }
+    if (collateralUsd > account.availableBalance) { setError('Insufficient available balance'); return; }
 
     const params: NewOrderParams = {
-      symbol: symbol.trim().toUpperCase(),
-      side, orderType, size: sizeNum, leverage: levNum,
-      limitPrice: orderType === 'LIMIT' ? parseFloat(limitPrice) : undefined,
+      symbol: sym,
+      side,
+      orderType,
+      sizeInUsd: sizeUsdNum,
+      leverage: levNum,
+      limitPrice: orderType === 'LimitIncrease' ? parseFloat(limitPrice) : undefined,
       tpPrice: tpPrice ? parseFloat(tpPrice) : undefined,
       slPrice: slPrice ? parseFloat(slPrice) : undefined,
     };
@@ -74,7 +77,7 @@ export function NewOrderModal({ visible, onClose, defaultSymbol = 'BTCUSDT' }: P
     const result = placeOrder(params);
     if (result.success) {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      setSuccess(`[PAPER] ${side} ${sizeNum} ${symbol} placed ✓`);
+      setSuccess(`[PAPER] ${side} $${sizeUsdNum.toFixed(0)} ${sym}/USD placed ✓`);
       setTimeout(() => { setSuccess(''); onClose(); }, 1200);
     } else {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
@@ -97,7 +100,7 @@ export function NewOrderModal({ visible, onClose, defaultSymbol = 'BTCUSDT' }: P
           <View style={[styles.header, { borderBottomColor: colors.border }]}>
             <View>
               <Text style={[styles.title, { color: colors.foreground }]}>New Paper Order</Text>
-              <Text style={[styles.sub, { color: colors.mutedForeground }]}>Simulated — no real funds</Text>
+              <Text style={[styles.sub, { color: colors.mutedForeground }]}>GMX V2 · Arbitrum One · No real funds</Text>
             </View>
             <TouchableOpacity onPress={onClose} style={[styles.closeBtn, { backgroundColor: colors.secondary }]}>
               <Feather name="x" size={16} color={colors.mutedForeground} />
@@ -108,13 +111,13 @@ export function NewOrderModal({ visible, onClose, defaultSymbol = 'BTCUSDT' }: P
 
             {/* Symbol */}
             <View style={styles.field}>
-              <Text style={[styles.label, { color: colors.mutedForeground }]}>SYMBOL</Text>
+              <Text style={[styles.label, { color: colors.mutedForeground }]}>MARKET</Text>
               <TextInput
                 value={symbol}
-                onChangeText={t => setSymbol(t.toUpperCase())}
+                onChangeText={t => setSymbol(t.toUpperCase().replace(/USDT$/, '').replace(/\/USD$/, ''))}
                 style={[styles.input, { color: colors.foreground, backgroundColor: colors.background, borderColor: colors.border }]}
                 autoCapitalize="characters"
-                placeholder="BTCUSDT"
+                placeholder="ETH"
                 placeholderTextColor={colors.mutedForeground}
               />
               <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chips}>
@@ -122,10 +125,13 @@ export function NewOrderModal({ visible, onClose, defaultSymbol = 'BTCUSDT' }: P
                   <TouchableOpacity
                     key={s}
                     onPress={() => setSymbol(s)}
-                    style={[styles.chip, { backgroundColor: symbol === s ? colors.primary + '22' : colors.secondary, borderColor: symbol === s ? colors.primary + '66' : colors.border }]}
+                    style={[styles.chip, {
+                      backgroundColor: sym === s ? colors.primary + '22' : colors.secondary,
+                      borderColor: sym === s ? colors.primary + '66' : colors.border,
+                    }]}
                   >
-                    <Text style={[styles.chipTxt, { color: symbol === s ? colors.primary : colors.mutedForeground }]}>
-                      {s.replace('USDT', '')}
+                    <Text style={[styles.chipTxt, { color: sym === s ? colors.primary : colors.mutedForeground }]}>
+                      {s}
                     </Text>
                   </TouchableOpacity>
                 ))}
@@ -161,8 +167,9 @@ export function NewOrderModal({ visible, onClose, defaultSymbol = 'BTCUSDT' }: P
             <View style={styles.field}>
               <Text style={[styles.label, { color: colors.mutedForeground }]}>ORDER TYPE</Text>
               <View style={styles.toggleRow}>
-                {(['MARKET', 'LIMIT'] as const).map(t => {
+                {(['MarketIncrease', 'LimitIncrease'] as const).map(t => {
                   const active = orderType === t;
+                  const label = t === 'MarketIncrease' ? 'MARKET' : 'LIMIT';
                   return (
                     <TouchableOpacity
                       key={t}
@@ -173,28 +180,28 @@ export function NewOrderModal({ visible, onClose, defaultSymbol = 'BTCUSDT' }: P
                         flex: 1,
                       }]}
                     >
-                      <Text style={[styles.toggleTxt, { color: active ? colors.primary : colors.mutedForeground }]}>{t}</Text>
+                      <Text style={[styles.toggleTxt, { color: active ? colors.primary : colors.mutedForeground }]}>{label}</Text>
                     </TouchableOpacity>
                   );
                 })}
               </View>
             </View>
 
-            {/* Size + Leverage */}
+            {/* Size (USD) + Leverage */}
             <View style={styles.row}>
               <View style={[styles.field, { flex: 1 }]}>
-                <Text style={[styles.label, { color: colors.mutedForeground }]}>SIZE</Text>
+                <Text style={[styles.label, { color: colors.mutedForeground }]}>SIZE (USD)</Text>
                 <TextInput
-                  value={size}
-                  onChangeText={setSize}
+                  value={sizeUsd}
+                  onChangeText={setSizeUsd}
                   keyboardType="decimal-pad"
                   style={[styles.input, { color: colors.foreground, backgroundColor: colors.background, borderColor: colors.border }]}
-                  placeholder="0.01"
+                  placeholder="500"
                   placeholderTextColor={colors.mutedForeground}
                 />
               </View>
               <View style={[styles.field, { flex: 1 }]}>
-                <Text style={[styles.label, { color: colors.mutedForeground }]}>LEVERAGE</Text>
+                <Text style={[styles.label, { color: colors.mutedForeground }]}>LEVERAGE (max {MAX_LEVERAGE}x)</Text>
                 <View style={styles.stepperRow}>
                   <TouchableOpacity onPress={() => setLeverage(String(Math.max(1, levNum - 1)))} style={[styles.stepBtn, { backgroundColor: colors.secondary, borderColor: colors.border }]}>
                     <Text style={{ color: colors.foreground, fontSize: 16, fontWeight: 'bold' }}>−</Text>
@@ -215,7 +222,7 @@ export function NewOrderModal({ visible, onClose, defaultSymbol = 'BTCUSDT' }: P
             </View>
 
             {/* Limit price */}
-            {orderType === 'LIMIT' && (
+            {orderType === 'LimitIncrease' && (
               <View style={styles.field}>
                 <Text style={[styles.label, { color: colors.mutedForeground }]}>LIMIT PRICE</Text>
                 <TextInput
@@ -229,11 +236,11 @@ export function NewOrderModal({ visible, onClose, defaultSymbol = 'BTCUSDT' }: P
               </View>
             )}
 
-            {/* Margin estimate */}
-            {estimatedMargin > 0 && (
+            {/* Collateral estimate */}
+            {collateralUsd > 0 && (
               <View style={[styles.marginInfo, { backgroundColor: colors.secondary, borderColor: colors.border }]}>
-                <Text style={[styles.marginLabel, { color: colors.mutedForeground }]}>Estimated Margin</Text>
-                <Text style={[styles.marginValue, { color: colors.foreground }]}>${estimatedMargin.toFixed(2)}</Text>
+                <Text style={[styles.marginLabel, { color: colors.mutedForeground }]}>Required Collateral (USDC)</Text>
+                <Text style={[styles.marginValue, { color: colors.foreground }]}>${collateralUsd.toFixed(2)}</Text>
               </View>
             )}
 

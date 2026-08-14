@@ -1,78 +1,394 @@
-import { createContext, useContext, useState, useCallback, ReactNode } from 'react';
+/**
+ * VpsContext — web
+ *
+ * The private VPS is the 24/7 trading authority. This client is a monitoring
+ * and control interface only. The VPS continues strategy evaluation, position
+ * monitoring, TP/SL/trailing-stop management, and (when armed) autonomous
+ * entries even when every client app is closed.
+ *
+ * States
+ *   OFF          VPS not configured or unreachable
+ *   ARMED        VPS connected + unattended trading authorised; awaiting cycle
+ *   RECONCILING  VPS reconnected; reconciling live positions with GMX V2
+ *   RUNNING      VPS actively executing strategy cycles
+ *   RISK_LOCKED  VPS paused by risk engine (drawdown / daily loss / etc.)
+ */
+
+import {
+  createContext, useCallback, useContext, useEffect, useRef, useState, ReactNode,
+} from 'react';
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+export type VpsEngineState = 'OFF' | 'ARMED' | 'RECONCILING' | 'RUNNING' | 'RISK_LOCKED';
+export type VpsConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
+
+/**
+ * Operating mode — the user-facing representation of what the system is doing.
+ *   AUTONOMOUS_AI   — VPS AI is selecting symbols, deciding direction, sizing
+ *                     positions and managing TP/SL/trailing-stops 24/7.
+ *                     No per-trade confirmation required.
+ *   MANUAL_OVERRIDE — AI is paused; user places trades manually.
+ *   RISK_LOCKED     — Deterministic risk controls vetoed all activity.
+ */
+export type OperatingMode = 'AUTONOMOUS_AI' | 'MANUAL_OVERRIDE' | 'RISK_LOCKED';
+
+/** Single AI decision record from the VPS */
+export interface AiDecision {
+  id: number;
+  ts: string;
+  symbol: string;
+  direction: 'LONG' | 'SHORT' | 'NO_TRADE' | 'CLOSE' | 'REVERSE';
+  confidence: number;  // 0.0–1.0
+  rationale: string;
+  strategy: string;
+  entryPrice: number | null;
+  exitPrice: number | null;
+  size: number | null;
+  riskResult: 'APPROVED' | 'VETOED' | 'MODIFIED';
+  riskNote: string | null;
+  executionOutcome: 'FILLED' | 'REJECTED' | 'PENDING' | 'CANCELLED' | 'SIMULATED';
+  pnl: number | null;
+  durationMs: number | null;
+  createdAt: string;
+}
+
+export interface AiDecisionStats {
+  today: number;
+  todayApproved: number;
+  todayVetoed: number;
+  todayFilled: number;
+  avgConfidence: number;
+}
+
+/** Derive operating mode from VPS engine state + armed flag */
+export function deriveOperatingMode(state: VpsEngineState, armed: boolean): OperatingMode {
+  if (state === 'RISK_LOCKED') return 'RISK_LOCKED';
+  if ((state === 'RUNNING' || state === 'ARMED') && armed) return 'AUTONOMOUS_AI';
+  return 'MANUAL_OVERRIDE';
+}
 
 export interface VpsConfig {
   host: string;
   port: string;
-  /** Reference name for the API key — never the actual key value */
-  apiKeyName: string;
   useSSL: boolean;
+  /** Optional human label for the active GMX subaccount (informational only) */
+  subaccountLabel?: string;
 }
 
-export type VpsStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
+export interface ReconciliationInfo {
+  status: 'idle' | 'in_progress' | 'complete' | 'failed';
+  matchedPositions: number;
+  totalPositions: number;
+  lastAt: string | null;
+}
+
+export interface SystemHealth {
+  lastHeartbeat: string | null;
+  heartbeatLatencyMs: number | null;
+  lastMarketUpdate: string | null;
+  lastUserStream: string | null;
+  lastStrategyCycle: string | null;
+  lastRestart: string | null;
+  uptimeSeconds: number | null;
+  reconciliation: ReconciliationInfo;
+  // GMX connection status (replaces binanceConnected)
+  gmxConnected: boolean;
+  walletAddress: string | null;
+  subaccountAddress: string | null;
+  subaccountExpiresAt: string | null;
+  subaccountActionsRemaining: number | null;
+  networkChainId: number;
+  strategyVersion: string | null;
+  riskLock: { reason: string; since: string } | null;
+  vpsReachable: boolean;
+}
 
 interface VpsContextType {
+  /** Persisted connection config */
   config: VpsConfig;
-  status: VpsStatus;
-  errorMsg: string;
-  latencyMs: number | null;
+  /** Current VPS engine state */
+  vpsState: VpsEngineState;
+  /** High-level operating mode (derived from vpsState + unattendedArmed) */
+  operatingMode: OperatingMode;
+  /** Client ↔ API-server connection */
+  connectionStatus: VpsConnectionStatus;
+  connectionError: string;
+  /** Unattended trading authorised flag (local — also reflected in vpsState) */
+  unattendedArmed: boolean;
+  /** System health telemetry from VPS */
+  health: SystemHealth;
+  /** AI decision log (most recent first) */
+  aiDecisions: AiDecision[];
+  /** Today's AI decision stats */
+  aiStats: AiDecisionStats;
+  /** Save config and immediately re-poll */
   saveConfig: (c: VpsConfig) => void;
+  /** Test connectivity to VPS (one-shot) */
   testConnection: () => Promise<void>;
   disconnect: () => void;
+  /** Arm / disarm unattended autonomous trading on VPS */
+  armUnattended: () => Promise<{ ok: boolean; error?: string }>;
+  disarmUnattended: () => Promise<{ ok: boolean; error?: string }>;
+  /** Refresh AI decision log from API server */
+  fetchAiDecisions: () => Promise<void>;
 }
 
-const DEFAULT_CONFIG: VpsConfig = { host: '', port: '8080', apiKeyName: '', useSSL: true };
+// ── Defaults ──────────────────────────────────────────────────────────────────
+
+const DEFAULT_CONFIG: VpsConfig = { host: '', port: '8080', useSSL: true };
+
+const EMPTY_HEALTH: SystemHealth = {
+  lastHeartbeat: null,
+  heartbeatLatencyMs: null,
+  lastMarketUpdate: null,
+  lastUserStream: null,
+  lastStrategyCycle: null,
+  lastRestart: null,
+  uptimeSeconds: null,
+  reconciliation: { status: 'idle', matchedPositions: 0, totalPositions: 0, lastAt: null },
+  // GMX
+  gmxConnected: false,
+  walletAddress: null,
+  subaccountAddress: null,
+  subaccountExpiresAt: null,
+  subaccountActionsRemaining: null,
+  networkChainId: 42161,
+  strategyVersion: null,
+  riskLock: null,
+  vpsReachable: false,
+};
+
+const POLL_INTERVAL_MS = 15_000; // poll VPS status every 15 s
+const LOCAL_STORAGE_KEY = 'futures_vps_config';
 
 function loadConfig(): VpsConfig {
   try {
-    const s = localStorage.getItem('futures_vps_config');
-    return s ? (JSON.parse(s) as VpsConfig) : DEFAULT_CONFIG;
+    const raw = localStorage.getItem(LOCAL_STORAGE_KEY);
+    return raw ? (JSON.parse(raw) as VpsConfig) : DEFAULT_CONFIG;
   } catch {
     return DEFAULT_CONFIG;
   }
 }
 
+// ── Context ───────────────────────────────────────────────────────────────────
+
 const VpsContext = createContext<VpsContextType | undefined>(undefined);
+
+const EMPTY_AI_STATS: AiDecisionStats = {
+  today: 0, todayApproved: 0, todayVetoed: 0, todayFilled: 0, avgConfidence: 0,
+};
 
 export function VpsProvider({ children }: { children: ReactNode }) {
   const [config, setConfig] = useState<VpsConfig>(loadConfig);
-  const [status, setStatus] = useState<VpsStatus>('disconnected');
-  const [errorMsg, setErrorMsg] = useState('');
-  const [latencyMs, setLatencyMs] = useState<number | null>(null);
+  const [vpsState, setVpsState] = useState<VpsEngineState>('OFF');
+  const [connectionStatus, setConnectionStatus] = useState<VpsConnectionStatus>('disconnected');
+  const [connectionError, setConnectionError] = useState('');
+  const [unattendedArmed, setUnattendedArmed] = useState(false);
+  const [health, setHealth] = useState<SystemHealth>(EMPTY_HEALTH);
+  const [aiDecisions, setAiDecisions] = useState<AiDecision[]>([]);
+  const [aiStats, setAiStats] = useState<AiDecisionStats>(EMPTY_AI_STATS);
+  const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const configRef = useRef(config);
+  configRef.current = config;
 
-  const saveConfig = useCallback((c: VpsConfig) => {
-    setConfig(c);
-    try { localStorage.setItem('futures_vps_config', JSON.stringify(c)); } catch { /* noop */ }
-    setStatus('disconnected');
-    setErrorMsg('');
-    setLatencyMs(null);
-  }, []);
+  const operatingMode = deriveOperatingMode(vpsState, unattendedArmed);
 
-  const testConnection = useCallback(async () => {
-    if (!config.host.trim()) {
-      setStatus('error');
-      setErrorMsg('Host address is required.');
+  // ── Poll VPS status via API server proxy ──────────────────────────────────
+  const pollStatus = useCallback(async () => {
+    const cfg = configRef.current;
+    if (!cfg.host.trim()) {
+      setVpsState('OFF');
+      setConnectionStatus('disconnected');
+      setHealth(EMPTY_HEALTH);
       return;
     }
-    setStatus('connecting');
-    setErrorMsg('');
-    setLatencyMs(null);
-    // Simulate network round-trip — no actual connection in paper mode
-    const start = Date.now();
-    await new Promise(res => setTimeout(res, 800 + Math.random() * 600));
-    const elapsed = Date.now() - start;
-    // Paper mode always returns "success" — real implementation would hit the VPS endpoint
-    setLatencyMs(elapsed);
-    setStatus('connected');
-  }, [config.host]);
 
-  const disconnect = useCallback(() => {
-    setStatus('disconnected');
-    setLatencyMs(null);
-    setErrorMsg('');
+    try {
+      const params = new URLSearchParams({
+        host: cfg.host,
+        port: cfg.port,
+        ssl: String(cfg.useSSL),
+      });
+      const res = await fetch(`/api-server/api/vps/status?${params}`, {
+        signal: AbortSignal.timeout(8_000),
+      });
+
+      if (!res.ok) throw new Error(`API ${res.status}`);
+
+      const data = await res.json() as {
+        state?: string;
+        unattendedArmed?: boolean;
+        vpsReachable?: boolean;
+        lastHeartbeat?: string | null;
+        heartbeatLatencyMs?: number | null;
+        lastMarketUpdate?: string | null;
+        lastUserStream?: string | null;
+        lastStrategyCycle?: string | null;
+        lastRestart?: string | null;
+        uptimeSeconds?: number | null;
+        reconciliation?: ReconciliationInfo;
+        gmxConnected?: boolean;
+        walletAddress?: string | null;
+        subaccountAddress?: string | null;
+        subaccountExpiresAt?: string | null;
+        subaccountActionsRemaining?: number | null;
+        networkChainId?: number;
+        strategyVersion?: string | null;
+        riskLock?: { reason: string; since: string } | null;
+      };
+
+      setVpsState((data.state as VpsEngineState) ?? 'OFF');
+      setUnattendedArmed(data.unattendedArmed ?? false);
+      setConnectionStatus(data.vpsReachable ? 'connected' : 'error');
+      setConnectionError(data.vpsReachable ? '' : 'VPS unreachable');
+
+      setHealth({
+        lastHeartbeat:      data.lastHeartbeat ?? null,
+        heartbeatLatencyMs: data.heartbeatLatencyMs ?? null,
+        lastMarketUpdate:   data.lastMarketUpdate ?? null,
+        lastUserStream:     data.lastUserStream ?? null,
+        lastStrategyCycle:  data.lastStrategyCycle ?? null,
+        lastRestart:        data.lastRestart ?? null,
+        uptimeSeconds:      data.uptimeSeconds ?? null,
+        reconciliation:              data.reconciliation ?? EMPTY_HEALTH.reconciliation,
+        gmxConnected:                data.gmxConnected ?? false,
+        walletAddress:               data.walletAddress ?? null,
+        subaccountAddress:           data.subaccountAddress ?? null,
+        subaccountExpiresAt:         data.subaccountExpiresAt ?? null,
+        subaccountActionsRemaining:  data.subaccountActionsRemaining ?? null,
+        networkChainId:              data.networkChainId ?? 42161,
+        strategyVersion:             data.strategyVersion ?? null,
+        riskLock:                    data.riskLock ?? null,
+        vpsReachable:                data.vpsReachable ?? false,
+      });
+    } catch {
+      if (cfg.host.trim()) {
+        setConnectionStatus('error');
+        setConnectionError('Cannot reach API server');
+      }
+    }
   }, []);
 
+  // ── Start / restart polling whenever config.host changes ─────────────────
+  useEffect(() => {
+    if (pollingRef.current) clearInterval(pollingRef.current);
+
+    if (!config.host.trim()) {
+      setVpsState('OFF');
+      setConnectionStatus('disconnected');
+      setConnectionError('');
+      setHealth(EMPTY_HEALTH);
+      return;
+    }
+
+    pollStatus(); // immediate first call
+    pollingRef.current = setInterval(pollStatus, POLL_INTERVAL_MS);
+    return () => { if (pollingRef.current) clearInterval(pollingRef.current); };
+  }, [config.host, pollStatus]);
+
+  // ── saveConfig ────────────────────────────────────────────────────────────
+  const saveConfig = useCallback((c: VpsConfig) => {
+    setConfig(c);
+    configRef.current = c;
+    try { localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(c)); } catch { /* noop */ }
+    setConnectionStatus('disconnected');
+    setConnectionError('');
+    setVpsState('OFF');
+    setHealth(EMPTY_HEALTH);
+  }, []);
+
+  // ── testConnection (one-shot) ─────────────────────────────────────────────
+  const testConnection = useCallback(async () => {
+    setConnectionStatus('connecting');
+    setConnectionError('');
+    await pollStatus();
+  }, [pollStatus]);
+
+  // ── disconnect ────────────────────────────────────────────────────────────
+  const disconnect = useCallback(() => {
+    if (pollingRef.current) clearInterval(pollingRef.current);
+    setConnectionStatus('disconnected');
+    setConnectionError('');
+    setVpsState('OFF');
+    setHealth(EMPTY_HEALTH);
+  }, []);
+
+  // ── fetchAiDecisions ─────────────────────────────────────────────────────
+  const fetchAiDecisions = useCallback(async () => {
+    try {
+      const res = await fetch('/api-server/api/ai/decisions?limit=200', {
+        signal: AbortSignal.timeout(8_000),
+      });
+      if (!res.ok) return;
+      const data = await res.json() as { decisions: AiDecision[]; stats: AiDecisionStats };
+      setAiDecisions(data.decisions ?? []);
+      setAiStats(data.stats ?? EMPTY_AI_STATS);
+    } catch { /* noop */ }
+  }, []);
+
+  // ── armUnattended ─────────────────────────────────────────────────────────
+  const armUnattended = useCallback(async (): Promise<{ ok: boolean; error?: string }> => {
+    const cfg = configRef.current;
+    if (!cfg.host.trim()) return { ok: false, error: 'VPS host not configured' };
+
+    try {
+      const res = await fetch('/api-server/api/vps/arm', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host: cfg.host, port: cfg.port, ssl: cfg.useSSL }),
+        signal: AbortSignal.timeout(8_000),
+      });
+
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({})) as { error?: string };
+        return { ok: false, error: e.error ?? `HTTP ${res.status}` };
+      }
+
+      // Refresh status after arming
+      await pollStatus();
+      setUnattendedArmed(true);
+      return { ok: true };
+    } catch (e: unknown) {
+      return { ok: false, error: (e as Error).message };
+    }
+  }, [pollStatus]);
+
+  // ── disarmUnattended ──────────────────────────────────────────────────────
+  const disarmUnattended = useCallback(async (): Promise<{ ok: boolean; error?: string }> => {
+    const cfg = configRef.current;
+    if (!cfg.host.trim()) return { ok: false, error: 'VPS host not configured' };
+
+    try {
+      const res = await fetch('/api-server/api/vps/disarm', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host: cfg.host, port: cfg.port, ssl: cfg.useSSL }),
+        signal: AbortSignal.timeout(8_000),
+      });
+
+      if (!res.ok) {
+        const e = await res.json().catch(() => ({})) as { error?: string };
+        return { ok: false, error: e.error ?? `HTTP ${res.status}` };
+      }
+
+      await pollStatus();
+      setUnattendedArmed(false);
+      return { ok: true };
+    } catch (e: unknown) {
+      return { ok: false, error: (e as Error).message };
+    }
+  }, [pollStatus]);
+
   return (
-    <VpsContext.Provider value={{ config, status, errorMsg, latencyMs, saveConfig, testConnection, disconnect }}>
+    <VpsContext.Provider value={{
+      config, vpsState, operatingMode, connectionStatus, connectionError,
+      unattendedArmed, health,
+      aiDecisions, aiStats,
+      saveConfig, testConnection, disconnect,
+      armUnattended, disarmUnattended,
+      fetchAiDecisions,
+    }}>
       {children}
     </VpsContext.Provider>
   );
@@ -83,3 +399,31 @@ export function useVpsContext() {
   if (!ctx) throw new Error('useVpsContext must be used within VpsProvider');
   return ctx;
 }
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+export function timeAgo(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const diff = Date.now() - new Date(iso).getTime();
+  if (diff < 5_000) return 'just now';
+  if (diff < 60_000) return `${Math.floor(diff / 1_000)}s ago`;
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
+  return `${Math.floor(diff / 86_400_000)}d ago`;
+}
+
+export function formatUptime(seconds: number | null | undefined): string {
+  if (!seconds) return '—';
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3_600) return `${Math.floor(seconds / 60)}m`;
+  if (seconds < 86_400) return `${Math.floor(seconds / 3_600)}h ${Math.floor((seconds % 3_600) / 60)}m`;
+  return `${Math.floor(seconds / 86_400)}d ${Math.floor((seconds % 86_400) / 3_600)}h`;
+}
+
+export const VPS_STATE_LABELS: Record<VpsEngineState, string> = {
+  OFF:          'OFF',
+  ARMED:        'ARMED',
+  RECONCILING:  'RECONCILING',
+  RUNNING:      'RUNNING',
+  RISK_LOCKED:  'RISK LOCKED',
+};

@@ -8,6 +8,10 @@ import { ArrowRight, TrendingUp, TrendingDown, Activity, Clock, ShieldAlert, Lay
 import { format } from 'date-fns';
 import { AreaChart, Area, XAxis, Tooltip, ResponsiveContainer } from 'recharts';
 import { NewOrderDrawer } from '@/components/trading/NewOrderDrawer';
+import { VpsStatusPanel } from '@/components/vps/VpsStatusPanel';
+import { DailyTargetCard } from '@/components/dashboard/DailyTargetCard';
+import { AiStateCard } from '@/components/dashboard/AiStateCard';
+import { LiveApprovalCard } from '@/components/dashboard/LiveApprovalCard';
 import { cn } from '@/lib/utils';
 
 function KpiCard({ label, value, sub, color }: { label: string; value: string; sub?: string; color?: string }) {
@@ -40,18 +44,29 @@ export default function Dashboard() {
   const [orderOpen, setOrderOpen] = useState(false);
 
   const minScore = (indicators.find(i => i.id === 'combined')?.params.minScore as number) ?? 60;
-  const signals = watchlist.filter(w => Math.abs(w.combinedScore) >= minScore / 2); // halved for display
+  const signals = watchlist.filter(w => Math.abs(w.combinedScore) >= minScore / 2);
   const recentLogs = logs.slice(0, 6);
 
   const winRate = todayStats.count > 0 ? ((todayStats.wins / todayStats.count) * 100).toFixed(0) : '—';
-  const equityData = equityHistory.slice(-48); // last 24 h
-
+  const equityData = equityHistory.slice(-48);
   const isEquityUp = equityData.length >= 2
     ? equityData[equityData.length - 1].equity >= equityData[0].equity
     : true;
 
   return (
     <div className="flex flex-col gap-5 animate-in fade-in duration-500">
+
+      {/* ── Live operator approval gate (shown in LIVE_TRADING mode) ────────── */}
+      <LiveApprovalCard />
+
+      {/* ── AI 5-State Engine Card (primary monitoring surface) ──────────────── */}
+      <AiStateCard />
+
+      {/* ── VPS Engine Status ──────────────────────────────────────────────────── */}
+      <VpsStatusPanel />
+
+      {/* ── Daily Performance KPI ─────────────────────────────────────────────── */}
+      <DailyTargetCard />
 
       {/* ── Row 1: Account KPIs ── */}
       <div className="grid grid-cols-4 gap-3">
@@ -188,10 +203,10 @@ export default function Dashboard() {
                           <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${pos.side === 'LONG' ? 'bg-[var(--color-long)]/20 text-[var(--color-long)]' : 'bg-[var(--color-short)]/20 text-[var(--color-short)]'}`}>
                             {pos.side}
                           </span>
-                          <span className="font-bold">{pos.symbol}</span>
+                          <span className="font-bold">{pos.displaySymbol ?? pos.symbol}</span>
                           <span className="text-xs text-muted-foreground">{pos.leverage}x</span>
                         </td>
-                        <td className="py-3 px-4 text-right font-mono">{pos.size}</td>
+                        <td className="py-3 px-4 text-right font-mono">${pos.sizeInUsd.toFixed(0)}</td>
                         <td className="py-3 px-4 text-right font-mono">{pos.entryPrice.toFixed(2)}</td>
                         <td className="py-3 px-4 text-right font-mono">{pos.markPrice.toFixed(2)}</td>
                         <td className="py-3 px-4 text-right">

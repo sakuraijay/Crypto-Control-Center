@@ -85,7 +85,7 @@ export default function WatchlistScreen() {
         <View style={[styles.addRow, { backgroundColor: colors.card, borderBottomColor: colors.border }]}>
           <TextInput
             style={[styles.addInput, { backgroundColor: colors.secondary, color: colors.foreground, borderColor: colors.border }]}
-            placeholder="e.g. BTC or BTCUSDT"
+            placeholder="e.g. ETH, BTC, SOL, ARB"
             placeholderTextColor={colors.mutedForeground}
             value={input}
             onChangeText={setInput}

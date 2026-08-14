@@ -1,11 +1,11 @@
 {
   "expo": {
-    "name": "Futures Terminal",
-    "slug": "futures-terminal",
+    "name": "Crypto Control Center",
+    "slug": "crypto-control-center",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
-    "scheme": "futures-terminal",
+    "scheme": "crypto-control-center",
     "userInterfaceStyle": "dark",
     "newArchEnabled": true,
     "splash": {

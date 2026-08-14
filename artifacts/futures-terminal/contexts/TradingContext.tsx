@@ -1,19 +1,27 @@
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { MOCK_ACCOUNT, MOCK_POSITIONS, MOCK_TRADES } from '@/constants/mockData';
-import { MarkPriceStream } from '@/services/binanceMarkPriceStream';
+import { GmxPriceStream } from '@/services/gmxPriceStream';
+
+// ── Types (GMX V2) ────────────────────────────────────────────────────────────
 
 export interface Position {
   id: string;
-  symbol: string;
+  symbol: string;          // GMX index symbol: "ETH", "BTC"
+  displaySymbol: string;   // "ETH/USD"
   side: 'LONG' | 'SHORT';
-  size: number;
+  isLong: boolean;
+  // USD-denominated (GMX native)
+  sizeInUsd: number;       // total position value in USD
+  collateralUsd: number;   // deposited collateral in USD
+  collateralToken: string; // "USDC", "WBTC.b", "WETH"
+  leverage: number;
   entryPrice: number;
   markPrice: number;
-  leverage: number;
-  marginUsed: number;
-  unrealizedPnl: number;
-  roe: number;
   liquidationPrice: number;
+  unrealizedPnl: number;
+  roe: number;             // return on collateral %
+  pendingBorrowingFeeUsd: number;
+  pendingFundingFeeUsd: number;
   openTime: Date;
   tpPrice?: number;
   slPrice?: number;
@@ -22,19 +30,21 @@ export interface Position {
 export interface Trade {
   id: string;
   symbol: string;
+  displaySymbol: string;
   side: 'LONG' | 'SHORT';
   action: 'OPEN' | 'CLOSE';
-  size: number;
+  sizeInUsd: number;
   price: number;
   pnl: number;
+  collateralToken?: string;
   strategy: string;
   timestamp: Date;
-  closeTime: number; // unix ms — used for today-stats filtering
+  closeTime: number;
 }
 
 export interface AccountSummary {
   balance: number;
-  marginBalance: number;
+  collateralBalanceUsd: number;  // replaces marginBalance (GMX: deposited USDC)
   availableBalance: number;
   unrealizedPnl: number;
   realizedPnlToday: number;
@@ -46,9 +56,10 @@ export interface AccountSummary {
 export interface NewOrderParams {
   symbol: string;
   side: 'LONG' | 'SHORT';
-  orderType: 'MARKET' | 'LIMIT';
-  size: number;
+  orderType: 'MarketIncrease' | 'LimitIncrease' | 'MarketDecrease' | 'LimitDecrease';
+  sizeInUsd: number;          // GMX-native: position size in USD
   leverage: number;
+  collateralToken?: string;   // default "USDC"
   limitPrice?: number;
   tpPrice?: number;
   slPrice?: number;
@@ -65,102 +76,163 @@ interface TradingContextType {
   trades: Trade[];
   placeOrder: (params: NewOrderParams) => PlaceOrderResult;
   closePosition: (id: string) => void;
+  closeAllPositions: () => void;  // alias expected by EngineContext
   clearAllPositions: () => void;
   updatePositionRisk: (id: string, tp: number | null, sl: number | null) => void;
 }
 
 const TradingContext = createContext<TradingContextType | undefined>(undefined);
 
-// Fallback prices used before live WS data arrives
+// API server base
+const API_BASE = process.env.EXPO_PUBLIC_DOMAIN
+  ? `https://${process.env.EXPO_PUBLIC_DOMAIN}/api-server/api`
+  : '/api-server/api';
+
+// GMX fallback prices (before live feed arrives)
 const FALLBACK_PRICES: Record<string, number> = {
-  BTCUSDT: 43856, ETHUSDT: 2356, SOLUSDT: 101,
-  BNBUSDT: 312, ADAUSDT: 0.48, DOGEUSDT: 0.093, XRPUSDT: 0.56,
+  ETH: 1877, BTC: 43856, SOL: 101,
+  ARB: 0.52, LINK: 14.5, AVAX: 25, DOGE: 0.093,
 };
 
-function calcLiqPrice(side: 'LONG' | 'SHORT', entry: number, lev: number) {
+function calcLiqPrice(side: 'LONG' | 'SHORT', entry: number, lev: number): number {
+  const mm = 0.01; // 1% GMX maintenance margin
   return side === 'LONG'
-    ? entry * (1 - 1 / lev + 0.005)
-    : entry * (1 + 1 / lev - 0.005);
+    ? entry * (1 - (1 / lev - mm))
+    : entry * (1 + (1 / lev - mm));
+}
+
+function displaySym(sym: string): string {
+  return `${sym}/USD`;
+}
+
+function persistTrade(trade: Trade) {
+  fetch(`${API_BASE}/data/trades`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...trade, timestamp: trade.timestamp.toISOString() }),
+  }).catch(() => {});
 }
 
 export function TradingProvider({ children }: { children: React.ReactNode }) {
   const [positions, setPositions] = useState<Position[]>(MOCK_POSITIONS as Position[]);
-  const [trades, setTrades] = useState<Trade[]>(MOCK_TRADES as Trade[]);
-  const [account, setAccount] = useState<AccountSummary>(MOCK_ACCOUNT);
+  const [trades, setTrades]       = useState<Trade[]>(MOCK_TRADES as Trade[]);
+  const [account, setAccount]     = useState<AccountSummary>(MOCK_ACCOUNT as AccountSummary);
 
-  // Live mark prices from Binance WebSocket
-  const liveMarkPrices = useRef<Map<string, number>>(new Map());
-  const posStreamRef = useRef<MarkPriceStream | null>(null);
+  const syncedIds  = useRef<Set<string>>(new Set((MOCK_TRADES as Trade[]).map(t => t.id)));
+  const livePrices = useRef<Map<string, number>>(new Map());
+  const streamRef  = useRef<GmxPriceStream | null>(null);
 
-  // ── Binance WS for active position symbols ──────────────────────
+  // ── Load persisted trades on mount ──────────────────────────────
+  useEffect(() => {
+    fetch(`${API_BASE}/data/trades`, { signal: AbortSignal.timeout(6_000) })
+      .then(r => r.ok ? r.json() : null)
+      .then((rows: Array<{
+        id: string; symbol: string; side: string; action?: string;
+        sizeInUsd?: string; size?: string; price: string; pnl: string;
+        strategy: string; timestamp: string; closeTime?: number;
+      }> | null) => {
+        if (!rows || rows.length === 0) return;
+        const loaded: Trade[] = rows.map(r => ({
+          id:            r.id,
+          symbol:        r.symbol,
+          displaySymbol: displaySym(r.symbol),
+          side:          r.side as 'LONG' | 'SHORT',
+          action:        (r.action ?? 'CLOSE') as 'OPEN' | 'CLOSE',
+          sizeInUsd:     parseFloat(r.sizeInUsd ?? r.size ?? '0'),
+          price:         parseFloat(r.price),
+          pnl:           parseFloat(r.pnl),
+          strategy:      r.strategy,
+          timestamp:     new Date(r.timestamp),
+          closeTime:     r.closeTime ?? 0,
+        }));
+        setTrades(loaded);
+        syncedIds.current = new Set(loaded.map(t => t.id));
+      })
+      .catch(() => {});
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Sync new trades to server ────────────────────────────────────
+  useEffect(() => {
+    for (const trade of trades) {
+      if (!syncedIds.current.has(trade.id)) {
+        syncedIds.current.add(trade.id);
+        persistTrade(trade);
+      }
+    }
+  }, [trades]);
+
+  // ── GMX price stream for open position symbols ──────────────────
   const posSymbolsKey = [...new Set(positions.map(p => p.symbol))].sort().join(',');
   useEffect(() => {
     const syms = [...new Set(positions.map(p => p.symbol))];
-    if (syms.length === 0) {
-      posStreamRef.current?.disconnect();
-      return;
-    }
-    if (!posStreamRef.current) {
-      posStreamRef.current = new MarkPriceStream(
-        upd => { liveMarkPrices.current.set(upd.symbol, upd.markPrice); },
+    if (syms.length === 0) { streamRef.current?.disconnect(); return; }
+    if (!streamRef.current) {
+      streamRef.current = new GmxPriceStream(
+        tick => { livePrices.current.set(tick.tokenSymbol, tick.priceUsd); },
         () => {},
       );
-      posStreamRef.current.connect(syms);
+      streamRef.current.connect(syms);
     } else {
-      posStreamRef.current.updateSymbols(syms);
+      streamRef.current.updateSymbols(syms);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [posSymbolsKey]);
 
-  useEffect(() => {
-    return () => { posStreamRef.current?.disconnect(); posStreamRef.current = null; };
-  }, []);
+  useEffect(() => () => { streamRef.current?.disconnect(); streamRef.current = null; }, []);
 
-  // ── Price tick every 1 s (live price preferred, random walk fallback) ─
+  // ── 1-second price tick ──────────────────────────────────────────
   useEffect(() => {
     const interval = setInterval(() => {
       setPositions(prev => {
         const closed: Position[] = [];
-        const next: Position[] = [];
+        const next:   Position[] = [];
 
         for (const pos of prev) {
-          const livePrice = liveMarkPrices.current.get(pos.symbol);
-          const newMark = livePrice !== undefined
-            ? livePrice + livePrice * (Math.random() * 0.0001 - 0.00005)
+          const live = livePrices.current.get(pos.symbol);
+          const newMark = live !== undefined
+            ? live + live * (Math.random() * 0.0001 - 0.00005)
             : pos.markPrice + pos.markPrice * (Math.random() * 0.004 - 0.002);
 
-          const pnlPerUnit = pos.side === 'LONG' ? newMark - pos.entryPrice : pos.entryPrice - newMark;
-          const unrealizedPnl = pnlPerUnit * pos.size;
-          const roe = (unrealizedPnl / pos.marginUsed) * 100;
+          const ratio  = pos.side === 'LONG'
+            ? (newMark - pos.entryPrice) / pos.entryPrice
+            : (pos.entryPrice - newMark) / pos.entryPrice;
+          const pnl = ratio * pos.sizeInUsd;
+          const roe = pos.collateralUsd > 0 ? (pnl / pos.collateralUsd) * 100 : 0;
+
+          const borrow = pos.pendingBorrowingFeeUsd + pos.sizeInUsd * 0.00003 / 3600;
 
           // TP/SL check
           let shouldClose = false;
-          let closeReason = '';
-          if (pos.tpPrice && pos.side === 'LONG' && newMark >= pos.tpPrice) { shouldClose = true; closeReason = 'TP/SL'; }
-          if (pos.tpPrice && pos.side === 'SHORT' && newMark <= pos.tpPrice) { shouldClose = true; closeReason = 'TP/SL'; }
-          if (pos.slPrice && pos.side === 'LONG' && newMark <= pos.slPrice) { shouldClose = true; closeReason = 'TP/SL'; }
-          if (pos.slPrice && pos.side === 'SHORT' && newMark >= pos.slPrice) { shouldClose = true; closeReason = 'TP/SL'; }
+          if (pos.tpPrice) {
+            if (pos.side === 'LONG'  && newMark >= pos.tpPrice) shouldClose = true;
+            if (pos.side === 'SHORT' && newMark <= pos.tpPrice) shouldClose = true;
+          }
+          if (pos.slPrice) {
+            if (pos.side === 'LONG'  && newMark <= pos.slPrice) shouldClose = true;
+            if (pos.side === 'SHORT' && newMark >= pos.slPrice) shouldClose = true;
+          }
 
           if (shouldClose) {
-            closed.push({ ...pos, markPrice: newMark, unrealizedPnl, roe });
+            closed.push({ ...pos, markPrice: newMark, unrealizedPnl: pnl, roe });
           } else {
-            next.push({ ...pos, markPrice: newMark, unrealizedPnl, roe });
+            next.push({ ...pos, markPrice: newMark, unrealizedPnl: pnl, roe, pendingBorrowingFeeUsd: borrow });
           }
         }
 
         if (closed.length > 0) {
           const now = Date.now();
           const newTrades: Trade[] = closed.map(pos => ({
-            id: `${now}-${pos.id}`,
-            symbol: pos.symbol, side: pos.side, action: 'CLOSE' as const,
-            size: pos.size, price: pos.markPrice, pnl: pos.unrealizedPnl,
-            strategy: 'TP/SL', timestamp: new Date(), closeTime: now,
+            id: `${now}-${pos.id}`, symbol: pos.symbol, displaySymbol: pos.displaySymbol,
+            side: pos.side, action: 'CLOSE' as const, sizeInUsd: pos.sizeInUsd,
+            price: pos.markPrice, pnl: pos.unrealizedPnl,
+            collateralToken: pos.collateralToken, strategy: 'TP/SL',
+            timestamp: new Date(), closeTime: now,
           }));
           setTrades(t => [...newTrades, ...t]);
           setAccount(a => ({
             ...a,
             realizedPnlToday: a.realizedPnlToday + closed.reduce((s, p) => s + p.unrealizedPnl, 0),
-            availableBalance: a.availableBalance + closed.reduce((s, p) => s + p.marginUsed + p.unrealizedPnl, 0),
+            availableBalance:  a.availableBalance  + closed.reduce((s, p) => s + p.collateralUsd + p.unrealizedPnl, 0),
           }));
         }
 
@@ -170,75 +242,112 @@ export function TradingProvider({ children }: { children: React.ReactNode }) {
     return () => clearInterval(interval);
   }, []);
 
-  // ── Keep account unrealizedPnl in sync ──────────────────────────
+  // ── Keep account in sync with positions ──────────────────────────
   useEffect(() => {
-    const total = positions.reduce((s, p) => s + p.unrealizedPnl, 0);
-    const posValue = positions.reduce((s, p) => s + p.markPrice * p.size, 0);
-    const marginUsed = positions.reduce((s, p) => s + p.marginUsed, 0);
+    const total    = positions.reduce((s, p) => s + p.unrealizedPnl, 0);
+    const posValue = positions.reduce((s, p) => s + p.sizeInUsd + p.unrealizedPnl, 0);
+    const colUsed  = positions.reduce((s, p) => s + p.collateralUsd, 0);
     setAccount(prev => ({
       ...prev,
-      unrealizedPnl: total,
+      unrealizedPnl:      total,
       totalPositionValue: posValue,
-      marginRatio: prev.marginBalance > 0 ? marginUsed / prev.marginBalance : 0,
+      marginRatio:        prev.collateralBalanceUsd > 0 ? colUsed / prev.collateralBalanceUsd : 0,
     }));
   }, [positions]);
 
-  // ── placeOrder ──────────────────────────────────────────────────
+  // ── placeOrder ───────────────────────────────────────────────────
   const placeOrder = useCallback((params: NewOrderParams): PlaceOrderResult => {
-    const entry = params.orderType === 'MARKET'
-      ? (liveMarkPrices.current.get(params.symbol) ?? FALLBACK_PRICES[params.symbol] ?? 100)
+    const isMarket = params.orderType === 'MarketIncrease';
+    const entry = isMarket
+      ? (livePrices.current.get(params.symbol) ?? FALLBACK_PRICES[params.symbol] ?? 100)
       : (params.limitPrice ?? 0);
     if (entry <= 0) return { success: false, error: 'Invalid entry price.' };
 
-    const marginUsed = (entry * params.size) / params.leverage;
-    const now = Date.now();
+    const collateralUsd = params.sizeInUsd / params.leverage;
+    const sym           = params.symbol.toUpperCase();
+    const now           = Date.now();
+
     const newPos: Position = {
-      id: `pos-${now}`,
-      symbol: params.symbol, side: params.side, size: params.size,
-      entryPrice: entry, markPrice: entry, leverage: params.leverage,
-      marginUsed, unrealizedPnl: 0, roe: 0,
+      id: `pos-${now}`, symbol: sym, displaySymbol: displaySym(sym),
+      side: params.side, isLong: params.side === 'LONG',
+      sizeInUsd: params.sizeInUsd, collateralUsd,
+      collateralToken: params.collateralToken ?? 'USDC',
+      leverage: params.leverage, entryPrice: entry, markPrice: entry,
       liquidationPrice: calcLiqPrice(params.side, entry, params.leverage),
+      unrealizedPnl: 0, roe: 0,
+      pendingBorrowingFeeUsd: 0, pendingFundingFeeUsd: 0,
       openTime: new Date(), tpPrice: params.tpPrice, slPrice: params.slPrice,
     };
 
     setPositions(prev => [...prev, newPos]);
-    setAccount(a => ({ ...a, availableBalance: a.availableBalance - marginUsed, totalPositionValue: a.totalPositionValue + entry * params.size }));
-    const trade: Trade = { id: `${now}-open`, symbol: params.symbol, side: params.side, action: 'OPEN', size: params.size, price: entry, pnl: 0, strategy: 'Manual', timestamp: new Date(), closeTime: 0 };
+    setAccount(a => ({
+      ...a,
+      availableBalance:   a.availableBalance   - collateralUsd,
+      totalPositionValue: a.totalPositionValue + params.sizeInUsd,
+    }));
+    const trade: Trade = {
+      id: `${now}-open`, symbol: sym, displaySymbol: displaySym(sym),
+      side: params.side, action: 'OPEN', sizeInUsd: params.sizeInUsd,
+      price: entry, pnl: 0,
+      collateralToken: params.collateralToken ?? 'USDC',
+      strategy: 'Manual', timestamp: new Date(), closeTime: 0,
+    };
     setTrades(t => [trade, ...t]);
     return { success: true };
   }, []);
 
-  // ── closePosition ───────────────────────────────────────────────
+  // ── closePosition ────────────────────────────────────────────────
   const closePosition = useCallback((id: string) => {
     setPositions(prev => {
       const pos = prev.find(p => p.id === id);
       if (pos) {
         const now = Date.now();
-        const trade: Trade = { id: `${now}-close`, symbol: pos.symbol, side: pos.side, action: 'CLOSE', size: pos.size, price: pos.markPrice, pnl: pos.unrealizedPnl, strategy: 'Manual', timestamp: new Date(), closeTime: now };
+        const trade: Trade = {
+          id: `${now}-close`, symbol: pos.symbol, displaySymbol: pos.displaySymbol,
+          side: pos.side, action: 'CLOSE', sizeInUsd: pos.sizeInUsd,
+          price: pos.markPrice, pnl: pos.unrealizedPnl,
+          collateralToken: pos.collateralToken, strategy: 'Manual',
+          timestamp: new Date(), closeTime: now,
+        };
         setTrades(t => [trade, ...t]);
-        setAccount(a => ({ ...a, realizedPnlToday: a.realizedPnlToday + pos.unrealizedPnl, weeklyPnl: a.weeklyPnl + pos.unrealizedPnl, availableBalance: a.availableBalance + pos.marginUsed + pos.unrealizedPnl }));
+        setAccount(a => ({
+          ...a,
+          realizedPnlToday: a.realizedPnlToday + pos.unrealizedPnl,
+          weeklyPnl:        a.weeklyPnl        + pos.unrealizedPnl,
+          availableBalance:  a.availableBalance  + pos.collateralUsd + pos.unrealizedPnl,
+        }));
       }
       return prev.filter(p => p.id !== id);
     });
   }, []);
 
-  // ── clearAllPositions ───────────────────────────────────────────
+  // ── clearAllPositions / closeAllPositions ────────────────────────
   const clearAllPositions = useCallback(() => {
     setPositions(prev => {
       const totalPnl = prev.reduce((s, p) => s + p.unrealizedPnl, 0);
-      const totalMargin = prev.reduce((s, p) => s + p.marginUsed, 0);
-      setAccount(a => ({ ...a, realizedPnlToday: a.realizedPnlToday + totalPnl, weeklyPnl: a.weeklyPnl + totalPnl, availableBalance: a.availableBalance + totalMargin + totalPnl }));
+      const totalCol = prev.reduce((s, p) => s + p.collateralUsd,  0);
+      setAccount(a => ({
+        ...a,
+        realizedPnlToday: a.realizedPnlToday + totalPnl,
+        weeklyPnl:        a.weeklyPnl        + totalPnl,
+        availableBalance:  a.availableBalance  + totalCol + totalPnl,
+      }));
       return [];
     });
   }, []);
 
-  // ── updatePositionRisk ──────────────────────────────────────────
+  const closeAllPositions = clearAllPositions; // alias expected by EngineContext
+
+  // ── updatePositionRisk ───────────────────────────────────────────
   const updatePositionRisk = useCallback((id: string, tp: number | null, sl: number | null) => {
     setPositions(prev => prev.map(p => p.id === id ? { ...p, tpPrice: tp ?? undefined, slPrice: sl ?? undefined } : p));
   }, []);
 
   return (
-    <TradingContext.Provider value={{ account, positions, trades, placeOrder, closePosition, clearAllPositions, updatePositionRisk }}>
+    <TradingContext.Provider value={{
+      account, positions, trades,
+      placeOrder, closePosition, closeAllPositions, clearAllPositions, updatePositionRisk,
+    }}>
       {children}
     </TradingContext.Provider>
   );

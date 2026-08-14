@@ -69,11 +69,11 @@ export default function Positions() {
             <thead className="bg-secondary/50 sticky top-0 z-10 backdrop-blur-md">
               <tr>
                 <th className="text-left font-medium text-muted-foreground py-3 px-4 whitespace-nowrap">Symbol / Side</th>
-                <th className="text-right font-medium text-muted-foreground py-3 px-4 whitespace-nowrap">Size</th>
+                <th className="text-right font-medium text-muted-foreground py-3 px-4 whitespace-nowrap">Size (USD)</th>
                 <th className="text-right font-medium text-muted-foreground py-3 px-4 whitespace-nowrap">Entry</th>
                 <th className="text-right font-medium text-muted-foreground py-3 px-4 whitespace-nowrap">Mark</th>
                 <th className="text-right font-medium text-muted-foreground py-3 px-4 whitespace-nowrap">Liq.</th>
-                <th className="text-right font-medium text-muted-foreground py-3 px-4 whitespace-nowrap">Margin</th>
+                <th className="text-right font-medium text-muted-foreground py-3 px-4 whitespace-nowrap">Collateral</th>
                 <th className="text-right font-medium text-muted-foreground py-3 px-4 whitespace-nowrap">PnL (ROE)</th>
                 <th className="text-center font-medium text-muted-foreground py-3 px-4 whitespace-nowrap">TP / SL</th>
                 <th className="text-right font-medium text-muted-foreground py-3 px-4 whitespace-nowrap">Opened</th>
@@ -99,18 +99,18 @@ export default function Positions() {
                       <div className="flex items-center gap-2">
                         <div className={`w-1 h-8 rounded-full ${pos.side === 'LONG' ? 'bg-[var(--color-long)]' : 'bg-[var(--color-short)]'}`} />
                         <div>
-                          <div className="font-bold">{pos.symbol}</div>
+                          <div className="font-bold">{pos.displaySymbol ?? pos.symbol}</div>
                           <div className={cn('text-[10px] font-bold tracking-widest', pos.side === 'LONG' ? 'text-[var(--color-long)]' : 'text-[var(--color-short)]')}>
                             {pos.side} {pos.leverage}x
                           </div>
                         </div>
                       </div>
                     </td>
-                    <td className="py-3 px-4 text-right font-mono">{pos.size}</td>
+                    <td className="py-3 px-4 text-right font-mono">${pos.sizeInUsd.toLocaleString("en-US", { maximumFractionDigits: 0 })}</td>
                     <td className="py-3 px-4 text-right font-mono">{pos.entryPrice.toFixed(2)}</td>
                     <td className="py-3 px-4 text-right font-mono">{pos.markPrice.toFixed(2)}</td>
                     <td className="py-3 px-4 text-right font-mono text-[var(--color-warning)] text-xs">{pos.liquidationPrice.toFixed(2)}</td>
-                    <td className="py-3 px-4 text-right font-mono text-xs">${pos.marginUsed.toFixed(2)}</td>
+                    <td className="py-3 px-4 text-right font-mono text-xs">${pos.collateralUsd.toFixed(2)}</td>
                     <td className="py-3 px-4 text-right">
                       <div className={cn('font-mono font-bold text-sm', pos.unrealizedPnl >= 0 ? 'text-[var(--color-long)]' : 'text-[var(--color-short)]')}>
                         {pos.unrealizedPnl >= 0 ? '+' : ''}{pos.unrealizedPnl.toFixed(2)}

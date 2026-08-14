@@ -8,6 +8,8 @@ import { useEngine, EngineState } from '@/contexts/EngineContext';
 import { useTrading } from '@/contexts/TradingContext';
 import { EngineStatusBadge } from '@/components/EngineStatusBadge';
 import { ConfirmModal } from '@/components/ConfirmModal';
+import { VpsStatusCard } from '@/components/VpsStatusCard';
+import { DailyTargetCard } from '@/components/DailyTargetCard';
 
 export default function DashboardScreen() {
   const colors = useColors();
@@ -78,6 +80,12 @@ export default function DashboardScreen() {
             </TouchableOpacity>
           </View>
         )}
+
+        {/* VPS Engine Status — always visible, trading authority */}
+        <VpsStatusCard />
+
+        {/* Daily Performance KPI — monitoring only, never drives risk */}
+        <DailyTargetCard />
 
         {/* Account card */}
         <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
@@ -158,9 +166,9 @@ export default function DashboardScreen() {
             <View style={[styles.posDivider, { backgroundColor: colors.border }]} />
             <View style={styles.posStat}>
               <Text style={[styles.posStatNum, { color: colors.foreground }]}>
-                ${positions.reduce((s, p) => s + p.marginUsed, 0).toFixed(0)}
+                ${positions.reduce((s, p) => s + p.collateralUsd, 0).toFixed(0)}
               </Text>
-              <Text style={[styles.posStatLbl, { color: colors.mutedForeground }]}>Margin Used</Text>
+              <Text style={[styles.posStatLbl, { color: colors.mutedForeground }]}>Collateral</Text>
             </View>
             <View style={[styles.posDivider, { backgroundColor: colors.border }]} />
             <View style={styles.posStat}>

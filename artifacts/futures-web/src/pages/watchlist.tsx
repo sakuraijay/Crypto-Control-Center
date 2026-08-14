@@ -66,7 +66,7 @@ export default function Watchlist() {
   return (
     <div className="animate-in fade-in duration-500 flex flex-col gap-6">
       <div className="flex items-center justify-between">
-        <p className="text-xs text-muted-foreground">Multi-timeframe signals · Binance USD-M Futures</p>
+        <p className="text-xs text-muted-foreground">Multi-timeframe signals · GMX Perpetuals · Arbitrum One</p>
         <StreamBadge status={streamStatus} />
       </div>
       <Card className="p-4 bg-card/50 border-border">
@@ -76,7 +76,7 @@ export default function Watchlist() {
             <Input
               value={newSymbol}
               onChange={e => setNewSymbol(e.target.value.toUpperCase())}
-              placeholder="Add symbol (e.g. BTCUSDT or BTC)..."
+              placeholder="Add symbol (e.g. ETH, BTC, SOL, ARB)..."
               className="pl-9 bg-background border-border"
               data-testid="input-add-symbol"
             />
