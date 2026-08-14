@@ -7,6 +7,7 @@ import NotFound from '@/pages/not-found';
 import { GlobalProviders, useAppContext } from '@/lib/context';
 import { Shell } from '@/components/shell';
 import { AuthOverlay } from '@/components/auth/AuthOverlay';
+import { RiskAlertMonitor } from '@/components/trading/RiskAlertMonitor';
 
 import Dashboard from '@/pages/dashboard';
 import Positions from '@/pages/positions';
@@ -18,19 +19,17 @@ import { AlertCircle } from 'lucide-react';
 
 function EmergencyBanner() {
   const { engineState, resetFromEmergency } = useAppContext();
-  
   if (engineState !== 'EMERGENCY_STOP') return null;
-  
   return (
     <div className="fixed top-0 left-0 right-0 z-[60] bg-destructive text-destructive-foreground px-4 py-3 flex items-center justify-between shadow-lg">
       <div className="flex items-center gap-3">
-        <AlertCircle className="w-5 h-5" />
+        <AlertCircle className="w-5 h-5 shrink-0" />
         <div className="flex flex-col">
           <span className="font-bold uppercase tracking-widest text-sm">Emergency Stop Active</span>
           <span className="text-xs opacity-90">All new orders are blocked. Open positions remain until closed.</span>
         </div>
       </div>
-      <button 
+      <button
         onClick={resetFromEmergency}
         className="px-4 py-1.5 bg-background text-foreground text-xs font-bold rounded hover:bg-background/90 transition-colors"
       >
@@ -68,6 +67,7 @@ function AppContent() {
     <>
       <AuthOverlay />
       <EmergencyBanner />
+      <RiskAlertMonitor />
       <Router />
     </>
   );

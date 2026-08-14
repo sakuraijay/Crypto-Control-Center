@@ -4,6 +4,7 @@ import { TradingProvider } from './TradingContext';
 import { WatchlistProvider } from './WatchlistContext';
 import { StrategyProvider } from './StrategyContext';
 import { AuthProvider } from './AuthContext';
+import { VpsProvider } from './VpsContext';
 
 export function GlobalProviders({ children }: { children: ReactNode }) {
   return (
@@ -12,7 +13,9 @@ export function GlobalProviders({ children }: { children: ReactNode }) {
         <TradingProvider>
           <WatchlistProvider>
             <StrategyProvider>
-              {children}
+              <VpsProvider>
+                {children}
+              </VpsProvider>
             </StrategyProvider>
           </WatchlistProvider>
         </TradingProvider>
@@ -26,3 +29,4 @@ export * from './TradingContext';
 export * from './WatchlistContext';
 export * from './StrategyContext';
 export * from './AuthContext';
+export * from './VpsContext';

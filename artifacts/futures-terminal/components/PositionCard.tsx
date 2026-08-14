@@ -22,6 +22,7 @@ export function PositionCard({ position, onClose }: Props) {
   const isLong = position.side === 'LONG';
   const sideColor = isLong ? colors.long : colors.short;
   const pnlColor = position.unrealizedPnl >= 0 ? colors.long : colors.short;
+  const hasRiskOrders = position.tpPrice || position.slPrice;
 
   const handleClose = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
@@ -51,8 +52,8 @@ export function PositionCard({ position, onClose }: Props) {
         <View style={styles.pricesRow}>
           {[
             { label: 'ENTRY', value: fmtPrice(position.entryPrice), color: colors.foreground },
-            { label: 'MARK', value: fmtPrice(position.markPrice), color: colors.primary },
-            { label: 'LIQ', value: fmtPrice(position.liquidationPrice), color: colors.warning },
+            { label: 'MARK',  value: fmtPrice(position.markPrice),  color: colors.primary },
+            { label: 'LIQ',   value: fmtPrice(position.liquidationPrice), color: colors.warning },
           ].map(col => (
             <View key={col.label}>
               <Text style={[styles.priceLabel, { color: colors.mutedForeground }]}>{col.label}</Text>
@@ -60,6 +61,26 @@ export function PositionCard({ position, onClose }: Props) {
             </View>
           ))}
         </View>
+
+        {/* TP/SL row — shown only when set */}
+        {hasRiskOrders && (
+          <View style={[styles.riskRow, { borderTopColor: colors.border }]}>
+            {position.tpPrice ? (
+              <View style={styles.riskItem}>
+                <Feather name="target" size={10} color={colors.long} />
+                <Text style={[styles.riskLabel, { color: colors.mutedForeground }]}>TP</Text>
+                <Text style={[styles.riskVal, { color: colors.long }]}>{fmtPrice(position.tpPrice)}</Text>
+              </View>
+            ) : null}
+            {position.slPrice ? (
+              <View style={styles.riskItem}>
+                <Feather name="shield" size={10} color={colors.short} />
+                <Text style={[styles.riskLabel, { color: colors.mutedForeground }]}>SL</Text>
+                <Text style={[styles.riskVal, { color: colors.short }]}>{fmtPrice(position.slPrice)}</Text>
+              </View>
+            ) : null}
+          </View>
+        )}
 
         {/* Footer row */}
         <View style={styles.footerRow}>
@@ -103,6 +124,13 @@ const styles = StyleSheet.create({
   pricesRow: { flexDirection: 'row', gap: 20 },
   priceLabel: { fontFamily: 'Inter_500Medium', fontSize: 9, letterSpacing: 0.4, marginBottom: 2 },
   priceVal: { fontFamily: 'Inter_600SemiBold', fontSize: 13 },
+  riskRow: {
+    flexDirection: 'row', gap: 16,
+    paddingTop: 8, borderTopWidth: 1, marginTop: -2,
+  },
+  riskItem: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  riskLabel: { fontFamily: 'Inter_500Medium', fontSize: 10 },
+  riskVal: { fontFamily: 'Inter_600SemiBold', fontSize: 11 },
   footerRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   sizeText: { fontFamily: 'Inter_400Regular', fontSize: 11 },
   pnlRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },

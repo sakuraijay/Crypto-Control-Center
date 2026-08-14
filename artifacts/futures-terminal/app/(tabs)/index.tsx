@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { Platform, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { useColors } from '@/hooks/useColors';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -13,7 +13,7 @@ export default function DashboardScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
   const { engineState, stopNewOrdersActive, toggleStopNewOrders, cancelOpenOrders, triggerEmergencyStop, resetFromEmergency } = useEngine();
-  const { account, positions } = useTrading();
+  const { account, positions, trades } = useTrading();
 
   const [cancelConfirm, setCancelConfirm] = useState(false);
   const [emergencyConfirm, setEmergencyConfirm] = useState(false);
@@ -23,6 +23,16 @@ export default function DashboardScreen() {
   const todayPnlColor = account.realizedPnlToday >= 0 ? colors.long : colors.short;
   const unrealizedColor = account.unrealizedPnl >= 0 ? colors.long : colors.short;
   const weeklyColor = account.weeklyPnl >= 0 ? colors.long : colors.short;
+
+  // Compute today's stats from trades
+  const todayStats = useMemo(() => {
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const todayTrades = trades.filter(t => t.closeTime >= todayStart.getTime());
+    const wins = todayTrades.filter(t => t.realizedPnl > 0).length;
+    const count = todayTrades.length;
+    return { count, wins, losses: count - wins, winRate: count > 0 ? (wins / count) * 100 : null };
+  }, [trades]);
 
   const handleCancelOrders = async () => {
     setCancelConfirm(false);
@@ -45,26 +55,24 @@ export default function DashboardScreen() {
       <View style={[styles.header, { paddingTop: topPad, backgroundColor: colors.card, borderBottomColor: colors.border }]}>
         <View>
           <Text style={[styles.headerTitle, { color: colors.foreground }]}>FUTURES</Text>
-          <Text style={[styles.headerSub, { color: colors.accent }]}>TERMINAL</Text>
+          <Text style={[styles.headerSub, { color: colors.mutedForeground }]}>TERMINAL</Text>
         </View>
-        <EngineStatusBadge state={engineState} />
+        <EngineStatusBadge state={engineState} size="sm" />
       </View>
 
-      <ScrollView style={styles.scroll} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-
-        {/* Emergency banner */}
+      <ScrollView
+        style={styles.scroll}
+        contentContainerStyle={styles.content}
+        showsVerticalScrollIndicator={false}
+      >
+        {/* Emergency stop banner */}
         {isEmergency && (
-          <View style={[styles.emergencyBanner, { backgroundColor: colors.destructive + '22', borderColor: colors.destructive }]}>
+          <View style={[styles.emergencyBanner, { backgroundColor: colors.destructive + '18', borderColor: colors.destructive + '55' }]}>
             <Feather name="alert-octagon" size={16} color={colors.destructive} />
-            <Text style={[styles.emergencyBannerTxt, { color: colors.destructive }]}>
-              EMERGENCY STOP ACTIVE — All trading halted
-            </Text>
+            <Text style={[styles.emergencyBannerTxt, { color: colors.destructive }]}>EMERGENCY STOP ACTIVE</Text>
             <TouchableOpacity
               style={[styles.resetBtn, { backgroundColor: colors.warning }]}
-              onPress={() => {
-                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-                resetFromEmergency();
-              }}
+              onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy); resetFromEmergency(); }}
             >
               <Text style={[styles.resetBtnTxt, { color: '#000' }]}>Reset</Text>
             </TouchableOpacity>
@@ -75,7 +83,9 @@ export default function DashboardScreen() {
         <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
           <View style={styles.cardHeader}>
             <Text style={[styles.cardLabel, { color: colors.mutedForeground }]}>ACCOUNT BALANCE</Text>
-            <Text style={[styles.modePill, { color: colors.accent, backgroundColor: colors.accent + '18' }]}>PAPER</Text>
+            <View style={[styles.modePill, { backgroundColor: colors.accent + '22' }]}>
+              <Text style={[styles.modePill, { color: colors.accent, paddingHorizontal: 8, paddingVertical: 2 }]}>PAPER</Text>
+            </View>
           </View>
           <Text style={[styles.balanceBig, { color: colors.foreground }]}>
             ${account.balance.toLocaleString('en-US', { minimumFractionDigits: 2 })}
@@ -112,6 +122,30 @@ export default function DashboardScreen() {
               </Text>
             </View>
           ))}
+        </View>
+
+        {/* Today performance row */}
+        <View style={styles.statsRow}>
+          <View style={[styles.statCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
+            <Text style={[styles.statLabel, { color: colors.mutedForeground }]}>WIN RATE</Text>
+            <Text style={[styles.statValue, { color: todayStats.winRate !== null ? (todayStats.winRate >= 50 ? colors.long : colors.short) : colors.mutedForeground }]}>
+              {todayStats.winRate !== null ? `${todayStats.winRate.toFixed(0)}%` : '—'}
+            </Text>
+          </View>
+          <View style={[styles.statCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
+            <Text style={[styles.statLabel, { color: colors.mutedForeground }]}>TRADES TODAY</Text>
+            <Text style={[styles.statValue, { color: colors.foreground }]}>
+              {todayStats.count}
+            </Text>
+          </View>
+          <View style={[styles.statCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
+            <Text style={[styles.statLabel, { color: colors.mutedForeground }]}>W / L</Text>
+            <Text style={[styles.statValue, { color: colors.foreground }]}>
+              <Text style={{ color: colors.long }}>{todayStats.wins}</Text>
+              {' / '}
+              <Text style={{ color: colors.short }}>{todayStats.losses}</Text>
+            </Text>
+          </View>
         </View>
 
         {/* Positions summary */}
@@ -241,7 +275,7 @@ const styles = StyleSheet.create({
   card: { borderRadius: 12, borderWidth: 1, padding: 16 },
   cardHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 },
   cardLabel: { fontFamily: 'Inter_500Medium', fontSize: 10, letterSpacing: 0.5 },
-  modePill: { fontFamily: 'Inter_700Bold', fontSize: 10, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 10, letterSpacing: 0.5 },
+  modePill: { fontFamily: 'Inter_700Bold', fontSize: 10, borderRadius: 10, letterSpacing: 0.5 },
   balanceBig: { fontFamily: 'Inter_700Bold', fontSize: 32, marginBottom: 12 },
   balRow: { flexDirection: 'row', gap: 0 },
   balItem: { flex: 1 },

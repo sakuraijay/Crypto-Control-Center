@@ -14,6 +14,8 @@ export interface Position {
   roe: number;
   liquidationPrice: number;
   openTime: Date;
+  tpPrice?: number;
+  slPrice?: number;
 }
 
 export interface Trade {
@@ -39,22 +41,62 @@ export interface AccountSummary {
   totalPositionValue: number;
 }
 
+export interface NewOrderParams {
+  symbol: string;
+  side: 'LONG' | 'SHORT';
+  orderType: 'MARKET' | 'LIMIT';
+  size: number;
+  leverage: number;
+  limitPrice?: number;
+  tpPrice?: number;
+  slPrice?: number;
+}
+
+export interface PlaceOrderResult {
+  success: boolean;
+  error?: string;
+}
+
 interface TradingContextType {
   account: AccountSummary;
   positions: Position[];
   trades: Trade[];
+  placeOrder: (params: NewOrderParams) => PlaceOrderResult;
   closePosition: (id: string) => void;
   clearAllPositions: () => void;
+  updatePositionRisk: (id: string, tp: number | null, sl: number | null) => void;
 }
 
 const TradingContext = createContext<TradingContextType | undefined>(undefined);
 
-function tickPosition(pos: Position): Position {
+const SYMBOL_PRICES: Record<string, number> = {
+  BTCUSDT: 43856, ETHUSDT: 2356, SOLUSDT: 101,
+  BNBUSDT: 312, ADAUSDT: 0.48, DOGEUSDT: 0.093, XRPUSDT: 0.56,
+};
+
+function calcLiqPrice(side: 'LONG' | 'SHORT', entry: number, lev: number) {
+  return side === 'LONG'
+    ? entry * (1 - 1 / lev + 0.005)
+    : entry * (1 + 1 / lev - 0.005);
+}
+
+function tickPosition(pos: Position): Position | null {
   const change = pos.markPrice * (Math.random() * 0.004 - 0.002);
   const newMark = pos.markPrice + change;
   const pnlPerUnit = pos.side === 'LONG' ? newMark - pos.entryPrice : pos.entryPrice - newMark;
   const unrealizedPnl = pnlPerUnit * pos.size;
   const roe = (unrealizedPnl / pos.marginUsed) * 100;
+
+  // TP/SL auto-close
+  if (pos.tpPrice) {
+    if (pos.side === 'LONG' && newMark >= pos.tpPrice) return null;
+    if (pos.side === 'SHORT' && newMark <= pos.tpPrice) return null;
+  }
+  if (pos.slPrice) {
+    if (pos.side === 'LONG' && newMark <= pos.slPrice) return null;
+    if (pos.side === 'SHORT' && newMark >= pos.slPrice) return null;
+  }
+
   return { ...pos, markPrice: newMark, unrealizedPnl, roe };
 }
 
@@ -63,10 +105,32 @@ export function TradingProvider({ children }: { children: React.ReactNode }) {
   const [trades, setTrades] = useState<Trade[]>(MOCK_TRADES as Trade[]);
   const [account, setAccount] = useState<AccountSummary>(MOCK_ACCOUNT);
 
-  // Simulate live price ticks
+  // Simulate live price ticks + TP/SL checks
   useEffect(() => {
     const interval = setInterval(() => {
-      setPositions(prev => prev.map(tickPosition));
+      setPositions(prev => {
+        const closed: Position[] = [];
+        const next: Position[] = [];
+        for (const p of prev) {
+          const ticked = tickPosition(p);
+          if (ticked === null) { closed.push(p); } else { next.push(ticked); }
+        }
+        if (closed.length > 0) {
+          const newTrades: Trade[] = closed.map(pos => ({
+            id: `${Date.now()}-${pos.id}`,
+            symbol: pos.symbol, side: pos.side, action: 'CLOSE' as const,
+            size: pos.size, price: pos.markPrice, pnl: pos.unrealizedPnl,
+            strategy: 'TP/SL', timestamp: new Date(),
+          }));
+          setTrades(t => [...newTrades, ...t]);
+          setAccount(a => ({
+            ...a,
+            realizedPnlToday: a.realizedPnlToday + closed.reduce((s, p) => s + p.unrealizedPnl, 0),
+            availableBalance: a.availableBalance + closed.reduce((s, p) => s + p.marginUsed + p.unrealizedPnl, 0),
+          }));
+        }
+        return next;
+      });
     }, 3000);
     return () => clearInterval(interval);
   }, []);
@@ -77,20 +141,55 @@ export function TradingProvider({ children }: { children: React.ReactNode }) {
     setAccount(prev => ({ ...prev, unrealizedPnl: total }));
   }, [positions]);
 
+  const placeOrder = useCallback((params: NewOrderParams): PlaceOrderResult => {
+    const entry = params.orderType === 'MARKET'
+      ? SYMBOL_PRICES[params.symbol] ?? 100
+      : (params.limitPrice ?? 0);
+    if (entry <= 0) return { success: false, error: 'Invalid entry price.' };
+
+    const marginUsed = (entry * params.size) / params.leverage;
+    const newPos: Position = {
+      id: `pos-${Date.now()}`,
+      symbol: params.symbol,
+      side: params.side,
+      size: params.size,
+      entryPrice: entry,
+      markPrice: entry,
+      leverage: params.leverage,
+      marginUsed,
+      unrealizedPnl: 0,
+      roe: 0,
+      liquidationPrice: calcLiqPrice(params.side, entry, params.leverage),
+      openTime: new Date(),
+      tpPrice: params.tpPrice,
+      slPrice: params.slPrice,
+    };
+
+    setPositions(prev => [...prev, newPos]);
+    setAccount(a => ({
+      ...a,
+      availableBalance: a.availableBalance - marginUsed,
+      totalPositionValue: a.totalPositionValue + entry * params.size,
+    }));
+    const trade: Trade = {
+      id: `${Date.now()}-open`,
+      symbol: params.symbol, side: params.side, action: 'OPEN',
+      size: params.size, price: entry, pnl: 0,
+      strategy: 'Manual', timestamp: new Date(),
+    };
+    setTrades(t => [trade, ...t]);
+    return { success: true };
+  }, []);
+
   const closePosition = useCallback((id: string) => {
     setPositions(prev => {
       const pos = prev.find(p => p.id === id);
       if (pos) {
         const trade: Trade = {
-          id: Date.now().toString() + Math.random().toString(36).substr(2, 5),
-          symbol: pos.symbol,
-          side: pos.side,
-          action: 'CLOSE',
-          size: pos.size,
-          price: pos.markPrice,
-          pnl: pos.unrealizedPnl,
-          strategy: 'Manual',
-          timestamp: new Date(),
+          id: `${Date.now()}-close`,
+          symbol: pos.symbol, side: pos.side, action: 'CLOSE',
+          size: pos.size, price: pos.markPrice, pnl: pos.unrealizedPnl,
+          strategy: 'Manual', timestamp: new Date(),
         };
         setTrades(t => [trade, ...t]);
         setAccount(a => ({
@@ -118,8 +217,14 @@ export function TradingProvider({ children }: { children: React.ReactNode }) {
     });
   }, []);
 
+  const updatePositionRisk = useCallback((id: string, tp: number | null, sl: number | null) => {
+    setPositions(prev => prev.map(p =>
+      p.id === id ? { ...p, tpPrice: tp ?? undefined, slPrice: sl ?? undefined } : p
+    ));
+  }, []);
+
   return (
-    <TradingContext.Provider value={{ account, positions, trades, closePosition, clearAllPositions }}>
+    <TradingContext.Provider value={{ account, positions, trades, placeOrder, closePosition, clearAllPositions, updatePositionRisk }}>
       {children}
     </TradingContext.Provider>
   );

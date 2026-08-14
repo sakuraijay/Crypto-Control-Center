@@ -13,11 +13,16 @@ export default function HistoryPage() {
       <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 flex flex-col">
         <div className="flex items-center justify-between mb-6">
           <TabsList className="bg-card border border-border">
-            <TabsTrigger value="trades" className="data-[state=active]:bg-primary/20 data-[state=active]:text-primary w-32">Trade History</TabsTrigger>
-            <TabsTrigger value="logs" className="data-[state=active]:bg-primary/20 data-[state=active]:text-primary w-32">Strategy Logs</TabsTrigger>
+            <TabsTrigger value="trades" className="data-[state=active]:bg-primary/20 data-[state=active]:text-primary w-36">
+              Trade History ({closedTrades.length})
+            </TabsTrigger>
+            <TabsTrigger value="logs" className="data-[state=active]:bg-primary/20 data-[state=active]:text-primary w-36">
+              Strategy Logs
+            </TabsTrigger>
           </TabsList>
         </div>
 
+        {/* ── Trade History ── */}
         <TabsContent value="trades" className="flex-1 mt-0">
           <Card className="h-full flex flex-col overflow-hidden">
             <div className="overflow-auto flex-1">
@@ -36,7 +41,7 @@ export default function HistoryPage() {
                   {closedTrades.length === 0 ? (
                     <tr>
                       <td colSpan={6} className="py-12 text-center text-muted-foreground">
-                        No closed trades
+                        No closed trades yet
                       </td>
                     </tr>
                   ) : (
@@ -45,16 +50,24 @@ export default function HistoryPage() {
                         <td className="py-3 px-6 text-muted-foreground font-mono text-xs">
                           {format(trade.timestamp, 'yyyy-MM-dd HH:mm:ss')}
                         </td>
-                        <td className="py-3 px-6 flex items-center gap-3">
-                          <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded \${trade.side === 'LONG' ? 'bg-[var(--color-long)]/20 text-[var(--color-long)]' : 'bg-[var(--color-short)]/20 text-[var(--color-short)]'}`}>
-                            {trade.side}
-                          </span>
-                          <span className="font-bold">{trade.symbol}</span>
+                        <td className="py-3 px-6">
+                          <div className="flex items-center gap-3">
+                            <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                              trade.side === 'LONG'
+                                ? 'bg-[var(--color-long)]/20 text-[var(--color-long)]'
+                                : 'bg-[var(--color-short)]/20 text-[var(--color-short)]'
+                            }`}>
+                              {trade.side}
+                            </span>
+                            <span className="font-bold">{trade.symbol}</span>
+                          </div>
                         </td>
                         <td className="py-3 px-6 text-right font-mono">{trade.size}</td>
                         <td className="py-3 px-6 text-right font-mono">{trade.price.toFixed(2)}</td>
                         <td className="py-3 px-6 text-right">
-                          <div className={`font-mono font-medium \${trade.pnl >= 0 ? 'text-[var(--color-long)]' : 'text-[var(--color-short)]'}`}>
+                          <div className={`font-mono font-medium ${
+                            trade.pnl >= 0 ? 'text-[var(--color-long)]' : 'text-[var(--color-short)]'
+                          }`}>
                             {trade.pnl >= 0 ? '+' : ''}${trade.pnl.toFixed(2)}
                           </div>
                         </td>
@@ -70,6 +83,7 @@ export default function HistoryPage() {
           </Card>
         </TabsContent>
 
+        {/* ── Strategy Logs ── */}
         <TabsContent value="logs" className="flex-1 mt-0">
           <Card className="h-full flex flex-col overflow-hidden">
             <div className="overflow-auto flex-1 p-0">
@@ -77,7 +91,7 @@ export default function HistoryPage() {
                 <thead className="bg-secondary/50 sticky top-0 z-10 backdrop-blur-md border-b border-border">
                   <tr>
                     <th className="text-left font-medium text-muted-foreground py-3 px-6 w-48">Time</th>
-                    <th className="text-left font-medium text-muted-foreground py-3 px-6 w-32">Level</th>
+                    <th className="text-left font-medium text-muted-foreground py-3 px-6 w-28">Level</th>
                     <th className="text-left font-medium text-muted-foreground py-3 px-6">Message</th>
                   </tr>
                 </thead>
@@ -88,17 +102,15 @@ export default function HistoryPage() {
                         {format(log.timestamp, 'yyyy-MM-dd HH:mm:ss')}
                       </td>
                       <td className="py-2.5 px-6">
-                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded tracking-widest \${
-                          log.level === 'INFO' ? 'bg-blue-500/20 text-blue-400' :
-                          log.level === 'WARN' ? 'bg-[var(--color-warning)]/20 text-[var(--color-warning)]' :
-                          'bg-[var(--color-long)]/20 text-[var(--color-long)]'
+                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded tracking-widest ${
+                          log.level === 'INFO'  ? 'bg-blue-500/20 text-blue-400' :
+                          log.level === 'WARN'  ? 'bg-[var(--color-warning)]/20 text-[var(--color-warning)]' :
+                                                  'bg-[var(--color-long)]/20 text-[var(--color-long)]'
                         }`}>
                           {log.level}
                         </span>
                       </td>
-                      <td className="py-2.5 px-6 font-mono text-sm">
-                        {log.message}
-                      </td>
+                      <td className="py-2.5 px-6 font-mono text-sm">{log.message}</td>
                     </tr>
                   ))}
                 </tbody>

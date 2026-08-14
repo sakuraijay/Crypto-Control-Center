@@ -1,4 +1,3 @@
-import { ReactNode } from 'react';
 import { Link, useLocation } from 'wouter';
 import { LayoutDashboard, List, Activity, Settings, History, Layers } from 'lucide-react';
 import { useAppContext } from '@/lib/context';
@@ -17,19 +16,19 @@ export function Sidebar() {
   const { engineState } = useAppContext();
 
   const getEngineColor = () => {
-    switch(engineState) {
-      case 'OFFLINE': return 'bg-muted text-muted-foreground border-transparent';
-      case 'MONITORING': return 'bg-blue-500/10 text-blue-500 border-blue-500/20';
-      case 'PAPER_TRADING': return 'bg-accent/10 text-accent border-accent/20';
-      case 'LIVE_READY': return 'bg-transparent text-green-500 border-green-500';
-      case 'LIVE_TRADING': return 'bg-green-500 text-white border-green-500';
-      case 'RISK_LOCKED': return 'bg-orange-500/10 text-orange-500 border-orange-500/20';
-      case 'EMERGENCY_STOP': return 'bg-destructive text-destructive-foreground border-destructive';
-      default: return 'bg-muted';
+    switch (engineState) {
+      case 'OFFLINE':         return 'bg-muted text-muted-foreground border-transparent';
+      case 'MONITORING':      return 'bg-blue-500/10 text-blue-400 border-blue-500/20';
+      case 'PAPER_TRADING':   return 'bg-accent/10 text-accent border-accent/20';
+      case 'LIVE_READY':      return 'bg-transparent text-green-400 border-green-500';
+      case 'LIVE_TRADING':    return 'bg-green-500 text-white border-green-500';
+      case 'RISK_LOCKED':     return 'bg-orange-500/10 text-orange-400 border-orange-500/20';
+      case 'EMERGENCY_STOP':  return 'bg-destructive text-destructive-foreground border-destructive';
+      default:                return 'bg-muted';
     }
   };
 
-  const getEngineText = () => engineState.replace('_', ' ');
+  const getEngineText = () => engineState.replaceAll('_', ' ');
 
   return (
     <div className="w-[220px] shrink-0 border-r border-border bg-sidebar flex flex-col h-[100dvh] fixed left-0 top-0 z-40">
@@ -38,21 +37,30 @@ export function Sidebar() {
           FUTURES <span className="text-primary">TERM</span>
         </span>
       </div>
-      
-      <div className="flex-1 py-6 px-3 flex flex-col gap-1 overflow-y-auto">
+
+      <nav className="flex-1 py-6 px-3 flex flex-col gap-1 overflow-y-auto">
         {navItems.map((item) => {
           const isActive = location === item.href;
           return (
-            <Link key={item.href} href={item.href} className={`flex items-center gap-3 px-3 py-2 rounded-md transition-colors \${isActive ? 'bg-sidebar-accent text-sidebar-accent-foreground font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/50'}`}>
-              <item.icon className="w-4 h-4" />
+            <Link
+              key={item.href}
+              href={item.href}
+              className={`flex items-center gap-3 px-3 py-2 rounded-md transition-colors ${
+                isActive
+                  ? 'bg-sidebar-accent text-sidebar-accent-foreground font-medium'
+                  : 'text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/50'
+              }`}
+              data-testid={`nav-${item.label.toLowerCase()}`}
+            >
+              <item.icon className="w-4 h-4 shrink-0" />
               <span className="text-sm">{item.label}</span>
             </Link>
           );
         })}
-      </div>
+      </nav>
 
       <div className="p-4 border-t border-border">
-        <div className={`px-3 py-2 rounded-md border text-xs font-bold tracking-widest text-center uppercase \${getEngineColor()}`}>
+        <div className={`px-3 py-2 rounded-md border text-xs font-bold tracking-widest text-center uppercase ${getEngineColor()}`}>
           {getEngineText()}
         </div>
       </div>

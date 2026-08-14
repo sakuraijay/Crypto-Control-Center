@@ -1,0 +1,4 @@
+- [Template literal escaping bug](template-literal-bug.md) — previous codegen escaped `\${` instead of `${`; never repeat this
+- [Pre-existing TS errors](preexisting-ts-errors.md) — calendar.tsx and spinner.tsx have React 19 ref-type mismatches; ignore, they are not new
+- [VPS config pattern](vps-config-pattern.md) — web uses VpsContext/VpsProvider; mobile uses local useState + AsyncStorage (no context needed)
+- [Mobile EngineContext API](mobile-engine-api.md) — uses `closeAllPositions` (not `clearAllPositions`); TradingContext uses `clearAllPositions`
