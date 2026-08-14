@@ -159,11 +159,11 @@ export async function fetch24hStats(
 ): Promise<Record<string, { changePercent: number; volume: number }>> {
   if (symbols.length === 0) return {};
   try {
-    const param = encodeURIComponent(JSON.stringify(symbols));
     // Use the API server proxy (/api-server/ → port 8080) to avoid browser CORS.
     // Replit's proxy strips the /api-server prefix before forwarding to Express.
-    const res = await fetch(`/api-server/api/binance/ticker24h?symbols=${param}`, {
-      signal: AbortSignal.timeout(5_000),
+    // The server returns ALL symbols (Binance ignores array filters); filter here.
+    const res = await fetch(`/api-server/api/binance/ticker24h`, {
+      signal: AbortSignal.timeout(8_000),
     });
     if (!res.ok) return {};
     const data = await res.json() as Array<{
@@ -171,11 +171,14 @@ export async function fetch24hStats(
       priceChangePercent: string;
       quoteVolume: string;
     }>;
+    const set = new Set(symbols);
     return Object.fromEntries(
-      data.map(d => [d.symbol, {
-        changePercent: parseFloat(d.priceChangePercent),
-        volume: parseFloat(d.quoteVolume),
-      }]),
+      data
+        .filter(d => set.has(d.symbol))
+        .map(d => [d.symbol, {
+          changePercent: parseFloat(d.priceChangePercent),
+          volume: parseFloat(d.quoteVolume),
+        }]),
     );
   } catch {
     return {};

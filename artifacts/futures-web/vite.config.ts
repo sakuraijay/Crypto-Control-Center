@@ -72,17 +72,9 @@ export default defineConfig({
     fs: {
       strict: true,
     },
-    // Proxy Binance REST calls through Vite to avoid browser CORS restrictions.
-    // The Express API server (/api-server) also has proxy routes for production.
-    proxy: {
-      // Proxy Binance REST calls — fapi.binance.com for REST, fstream is WebSocket-only
-      '/binance-proxy': {
-        target: 'https://fapi.binance.com',
-        changeOrigin: true,
-        secure: true,
-        rewrite: (path) => path.replace(/^\/binance-proxy/, '/fapi/v1'),
-      },
-    },
+    // Note: Vite proxy does NOT work in Replit's path-based routing environment.
+    // Browser Binance REST calls go via /api-server/api/binance/* (Express proxy).
+    proxy: {},
   },
   preview: {
     port,

@@ -13,15 +13,16 @@ const FSTREAM = "https://fapi.binance.com/fapi/v1";
 
 /**
  * GET /api/binance/ticker24h
- * Query params: symbols = JSON-encoded array, e.g. ["BTCUSDT","ETHUSDT"]
- * Returns Binance 24h ticker stats for the requested symbols.
+ * Returns Binance 24h ticker stats for ALL USD-M futures symbols.
+ * Clients should filter the response to the symbols they care about.
+ *
+ * Note: Binance's `symbols` array filter param is silently ignored regardless
+ * of encoding — the endpoint always returns all symbols. Client-side filtering
+ * is the only reliable approach (same pattern as /api/binance/markprices).
  */
-router.get("/binance/ticker24h", async (req, res) => {
+router.get("/binance/ticker24h", async (_req, res) => {
   try {
-    const { symbols } = req.query as { symbols?: string };
-    const url = symbols
-      ? `${FSTREAM}/ticker/24hr?symbols=${encodeURIComponent(symbols)}`
-      : `${FSTREAM}/ticker/24hr`;
+    const url = `${FSTREAM}/ticker/24hr`;
 
     const upstream = await fetch(url);
     if (!upstream.ok) {
