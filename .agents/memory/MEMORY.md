@@ -1,4 +1,4 @@
-- [Binance proxy routing](binance-proxy-routing.md) — Vite proxy won't work in Replit; use /api-server/api/binance/ from browser; fapi.binance.com for REST (not fstream)
+- [GMX migration patterns](gmx-migration-patterns.md) — embedded SQL migration runner (not file-based); trade DTO round-trip; mobile market address source of truth is web markets.ts
 - [AI Engine Context](ai-engine-context.md) — WatchlistSymbol uses `change24h`; MARKET_BY_SYMBOL is a Map (use .get()); EngineState has no 'RUNNING' value; uuid needs Vite dep-optimization on first load
 - [Template literal escaping bug](template-literal-bug.md) — previous codegen escaped `\${` instead of `${`; never repeat this
 - [Pre-existing TS errors](preexisting-ts-errors.md) — calendar.tsx and spinner.tsx have React 19 ref-type mismatches; ignore, they are not new
