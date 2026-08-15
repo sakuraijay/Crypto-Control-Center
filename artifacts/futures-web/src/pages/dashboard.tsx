@@ -23,6 +23,7 @@ import { NewOrderDrawer } from '@/components/trading/NewOrderDrawer';
 import { DailyTargetCard } from '@/components/dashboard/DailyTargetCard';
 import { AiStateCard } from '@/components/dashboard/AiStateCard';
 import { LiveApprovalCard } from '@/components/dashboard/LiveApprovalCard';
+import { LiveApprovalBanner } from '@/components/dashboard/LiveApprovalBanner';
 import { SystemHealthBanner } from '@/components/dashboard/SystemHealthBanner';
 import { AiMarketRankingCard } from '@/components/dashboard/AiMarketRankingCard';
 import { ExecutorStatusWidget } from '@/components/dashboard/ExecutorStatusWidget';
@@ -85,6 +86,8 @@ export default function Dashboard() {
 
       {/* ── Full-width alerts ─────────────────────────────────────────────── */}
       <SystemHealthBanner />
+      {/* LiveApprovalBanner: fallback for denied/unsupported notification environments */}
+      <LiveApprovalBanner />
       <LiveApprovalCard />
 
       {/* ── Primary monitoring: 2-column desktop grid ─────────────────────── */}

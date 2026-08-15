@@ -1,10 +1,11 @@
 import { useState, useEffect } from 'react';
 import { useAppContext, useAuthContext, useTradingContext, useWallet } from '@/lib/context';
+import { useAiEngine } from '@/lib/context/AiEngineContext';
 import { Card } from '@/components/ui/card';
 import { Switch } from '@/components/ui/switch';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
-import { ShieldAlert, Server, Lock, AlertTriangle, AlertOctagon, Info, CheckCircle2, XCircle, Cpu, Loader2, Wallet, Key, FlaskConical, ChevronRight, AlertCircle, RefreshCw } from 'lucide-react';
+import { ShieldAlert, Server, Lock, AlertTriangle, AlertOctagon, Info, CheckCircle2, XCircle, Cpu, Loader2, Wallet, Key, FlaskConical, ChevronRight, AlertCircle, RefreshCw, Bell, BellOff, ExternalLink } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 // ── Executor status hook (fetches /api/executor/status directly) ───────────────
@@ -43,6 +44,7 @@ export default function Settings() {
   const { clearAllPositions, positions } = useTradingContext();
   const { health, loading: healthLoading, refresh: refreshHealth } = useExecutorHealth();
   const wallet = useWallet();
+  const { notificationPermission, requestNotificationPermission } = useAiEngine();
 
   const [closeAllPhase, setCloseAllPhase] = useState<0 | 1 | 2>(0);
 
@@ -373,6 +375,99 @@ export default function Settings() {
             </div>
           ) : (
             <div className="text-xs text-muted-foreground">Executor status unavailable</div>
+          )}
+        </Card>
+      </section>
+
+      {/* ── 브라우저 알림 ── */}
+      <section className="flex flex-col gap-4">
+        <h2 className="font-semibold flex items-center gap-2 border-b border-border pb-2 text-lg">
+          <Bell className="w-5 h-5 text-primary" /> 브라우저 알림
+        </h2>
+        <Card className="p-4 flex flex-col gap-3">
+          <div className="flex items-center justify-between">
+            <span className="text-sm font-semibold">LIVE 승인 알림</span>
+            {/* Current permission badge */}
+            {notificationPermission === 'granted' && (
+              <span className="flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1 rounded-lg border border-[var(--color-long)]/30 bg-[var(--color-long)]/5 text-[var(--color-long)]">
+                <CheckCircle2 className="w-3.5 h-3.5" /> 허용됨
+              </span>
+            )}
+            {notificationPermission === 'denied' && (
+              <span className="flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1 rounded-lg border border-[var(--color-short)]/30 bg-[var(--color-short)]/5 text-[var(--color-short)]">
+                <BellOff className="w-3.5 h-3.5" /> 차단됨
+              </span>
+            )}
+            {notificationPermission === 'default' && (
+              <span className="flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1 rounded-lg border border-border bg-card/50 text-muted-foreground">
+                <Bell className="w-3.5 h-3.5" /> 미설정
+              </span>
+            )}
+            {notificationPermission === 'unsupported' && (
+              <span className="flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1 rounded-lg border border-border bg-card/50 text-muted-foreground">
+                <XCircle className="w-3.5 h-3.5" /> 미지원
+              </span>
+            )}
+          </div>
+
+          <p className="text-xs text-muted-foreground leading-relaxed">
+            LIVE 승인 요청이 도착하면 브라우저 데스크탑 알림이 발화됩니다.
+            탭이 백그라운드이거나 다른 창이 활성화되어 있어도 알림이 전달됩니다.
+          </p>
+
+          {/* Permission-specific actions */}
+          {notificationPermission === 'default' && (
+            <div className="flex flex-col gap-2 pt-1">
+              <p className="text-xs text-foreground/80">
+                아직 알림 권한을 허용하지 않았습니다.
+                아래 버튼을 클릭하면 브라우저가 권한을 요청합니다.
+              </p>
+              <Button
+                size="sm"
+                variant="outline"
+                className="w-fit h-8 text-xs gap-1.5"
+                onClick={requestNotificationPermission}
+              >
+                <Bell className="w-3.5 h-3.5" />
+                알림 권한 허용하기
+              </Button>
+            </div>
+          )}
+
+          {notificationPermission === 'denied' && (
+            <div className="flex flex-col gap-2 pt-1">
+              <p className="text-xs text-[var(--color-short)]/80">
+                알림이 브라우저에서 차단되어 있습니다.
+                대시보드에 대체 배너가 표시되지만 탭이 비활성일 때는 놓칠 수 있습니다.
+              </p>
+              <a
+                href="https://support.google.com/chrome/answer/3220216"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 text-xs text-primary hover:underline w-fit"
+              >
+                <ExternalLink className="w-3 h-3" />
+                Chrome 알림 설정 안내 (사이트 권한 재설정)
+              </a>
+              <p className="text-[10px] text-muted-foreground">
+                Chrome: 주소창 왼쪽 자물쇠 아이콘 → 사이트 설정 → 알림 → 허용
+              </p>
+            </div>
+          )}
+
+          {notificationPermission === 'granted' && (
+            <p className="text-xs text-[var(--color-long)]/80">
+              LIVE 승인 요청 시 데스크탑 알림이 자동으로 발화됩니다.
+              알림을 끄려면 브라우저 주소창 자물쇠 아이콘 → 알림 → 차단을 선택하세요.
+            </p>
+          )}
+
+          {notificationPermission === 'unsupported' && (
+            <p className="text-xs text-muted-foreground">
+              이 브라우저는 Notification API를 지원하지 않습니다.
+              대시보드 배너가 대체 알림 역할을 합니다.
+              Chrome 또는 Edge 사용을 권장합니다.
+            </p>
           )}
         </Card>
       </section>

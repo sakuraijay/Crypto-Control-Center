@@ -93,6 +93,18 @@ interface AiEngineContextType {
   pendingCount: number;
   /** Load the next page (200 rows) of older decisions from the server. */
   loadMoreHistory: () => Promise<boolean>;
+
+  // ── Browser notification ─────────────────────────────────────────────────
+  /**
+   * Current browser Notification permission.
+   * 'unsupported' is a synthetic value used when the Notification API is absent.
+   */
+  notificationPermission: NotificationPermission | 'unsupported';
+  /**
+   * User-driven permission request. Only prompts if current permission is 'default'.
+   * Call this from a button click — never automatically.
+   */
+  requestNotificationPermission: () => Promise<void>;
 }
 
 const AiEngineContext = createContext<AiEngineContextType | undefined>(undefined);
@@ -267,12 +279,19 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── Browser Notification permission request (on first LIVE approval queue) ──
-  const notifPermissionRef = useRef<NotificationPermission>('default');
-  useEffect(() => {
-    if (typeof Notification !== 'undefined') {
-      notifPermissionRef.current = Notification.permission;
-    }
+  // ── Browser Notification permission state ────────────────────────────────
+  // Reactive state (not just a ref) so consumers can show fallback UI.
+  // 'unsupported' is a synthetic value for environments without the Notification API.
+  const [notificationPermission, setNotificationPermission] = useState<
+    NotificationPermission | 'unsupported'
+  >(() => (typeof Notification !== 'undefined' ? Notification.permission : 'unsupported'));
+
+  // User-driven permission request — must never be called automatically.
+  const requestNotificationPermission = useCallback(async () => {
+    if (typeof Notification === 'undefined') return;
+    if (Notification.permission !== 'default') return;
+    const perm = await Notification.requestPermission();
+    setNotificationPermission(perm);
   }, []);
 
   // ── Toast + browser notification when a new LIVE approval enters the queue ──
@@ -289,7 +308,7 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
       const expiresMs  = new Date(approval.expiresAt).getTime() - Date.now();
       const expiresMins = Math.max(1, Math.round(expiresMs / 60_000));
 
-      // In-app toast
+      // In-app toast (always shown — covers background-tab and no-permission cases)
       toast({
         title:       '⚡ LIVE Trade Approval Required',
         description: `${state} ${sym}/USD${size} — expires in ${expiresMins}m · Approve on Dashboard`,
@@ -297,25 +316,20 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
         duration:    15_000,
       });
 
-      // Browser push notification (request permission lazily on first event)
-      if (typeof Notification !== 'undefined') {
-        const fireNotif = () => {
-          try {
-            new Notification('⚡ LIVE 승인 필요 — Crypto Control Center', {
-              body: `${state} ${sym}/USD${size} — ${expiresMins}분 내 승인`,
-              tag:  `live-approval-${approval.id}`,
-              icon: '/favicon.ico',
-            });
-          } catch { /* non-fatal */ }
-        };
-        if (Notification.permission === 'granted') {
-          fireNotif();
-        } else if (Notification.permission === 'default') {
-          Notification.requestPermission().then(perm => {
-            notifPermissionRef.current = perm;
-            if (perm === 'granted') fireNotif();
+      // Browser desktop notification — fires when permission is granted.
+      // The Notification API works regardless of document.visibilityState:
+      // a notification created in a hidden tab still appears on the OS desktop.
+      // We do NOT auto-request permission here; requestNotificationPermission()
+      // must be called explicitly by the user via the Settings page button.
+      if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+        try {
+          new Notification('⚡ LIVE 승인 필요 — Crypto Control Center', {
+            body:              `${state} ${sym}/USD${size} — ${expiresMins}분 내 승인`,
+            tag:               `live-approval-${approval.id}`,
+            icon:              '/futures-web/favicon.ico',
+            requireInteraction: true,
           });
-        }
+        } catch { /* non-fatal — some browsers restrict in iframes */ }
       }
     }
   }, [pendingApprovals, toast]);
@@ -770,6 +784,7 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
       benchmarkDailyMin:    BENCHMARK_DAILY_MIN,
       benchmarkDailyMax:    BENCHMARK_DAILY_MAX,
       pendingApprovals, approveLiveOrder, rejectLiveOrder, pendingCount, loadMoreHistory,
+      notificationPermission, requestNotificationPermission,
     }}>
       {children}
     </AiEngineContext.Provider>
