@@ -6,6 +6,7 @@ import { StrategyProvider } from './StrategyContext';
 import { AuthProvider } from './AuthContext';
 import { AiEngineProvider } from './AiEngineContext';
 import { WalletProvider } from './WalletContext';
+import { GmxAccountProvider } from './GmxAccountContext';
 
 export function GlobalProviders({ children }: { children: ReactNode }) {
   return (
@@ -18,7 +19,10 @@ export function GlobalProviders({ children }: { children: ReactNode }) {
               <AiEngineProvider>
                 {/* WalletProvider: read-only EIP-1193 browser wallet, no signing */}
                 <WalletProvider>
-                  {children}
+                  {/* GmxAccountProvider: depends on WalletProvider for address */}
+                  <GmxAccountProvider>
+                    {children}
+                  </GmxAccountProvider>
                 </WalletProvider>
               </AiEngineProvider>
             </StrategyProvider>
@@ -36,3 +40,4 @@ export * from './StrategyContext';
 export * from './AuthContext';
 export * from './AiEngineContext';
 export * from './WalletContext';
+export * from './GmxAccountContext';

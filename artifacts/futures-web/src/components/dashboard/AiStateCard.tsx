@@ -218,7 +218,7 @@ export function AiStateCard() {
         </div>
       )}
 
-      {/* ── System paused overlay (VPS fail-closed in LIVE mode) ────────────── */}
+      {/* ── System paused overlay (AI paused / approval gate) ───────────────── */}
       {systemPaused && !isEmergency && (
         <div className="mt-3 flex items-center gap-2 px-3 py-2 rounded-md bg-[var(--color-warning)]/10 border border-[var(--color-warning)]/30">
           <AlertTriangle className="w-4 h-4 text-[var(--color-warning)] animate-pulse shrink-0" />

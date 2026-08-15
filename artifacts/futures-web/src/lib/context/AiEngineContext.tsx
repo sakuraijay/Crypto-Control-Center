@@ -341,8 +341,11 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const t = setInterval(() => {
       const now = Date.now();
+      const newlyExpiredIds: string[] = [];
+
       setPendingApprovals(prev => prev.map(a => {
         if (a.status === 'PENDING' && new Date(a.expiresAt).getTime() <= now) {
+          newlyExpiredIds.push(a.id);
           return { ...a, status: 'EXPIRED' as ApprovalStatus };
         }
         return a;
@@ -350,6 +353,15 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
         a.status === 'PENDING' ||
         new Date(a.createdAt).getTime() > now - APPROVAL_HISTORY_KEEP_MS
       ));
+
+      // DB에도 EXPIRED 상태 동기화 (non-fatal)
+      for (const id of newlyExpiredIds) {
+        fetch(`/api-server/api/ai/approvals/${id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: 'EXPIRED' }),
+        }).catch(() => { /* non-fatal */ });
+      }
     }, 15_000);
     return () => clearInterval(t);
   }, []);

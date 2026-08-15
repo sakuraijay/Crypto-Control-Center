@@ -26,6 +26,7 @@ import { LiveApprovalCard } from '@/components/dashboard/LiveApprovalCard';
 import { SystemHealthBanner } from '@/components/dashboard/SystemHealthBanner';
 import { AiMarketRankingCard } from '@/components/dashboard/AiMarketRankingCard';
 import { ExecutorStatusWidget } from '@/components/dashboard/ExecutorStatusWidget';
+import { GmxOnchainCard } from '@/components/dashboard/GmxOnchainCard';
 import { cn } from '@/lib/utils';
 
 // ── KPI card ─────────────────────────────────────────────────────────────────
@@ -167,6 +168,9 @@ export default function Dashboard() {
           color={account.weeklyPnl >= 0 ? 'text-[var(--color-long)]' : 'text-[var(--color-short)]'}
         />
       </div>
+
+      {/* ── GMX 온체인 계정 (Read-only) ──────────────────────────────────── */}
+      <GmxOnchainCard />
 
       {/* ── Data grid: charts/tables left, signals/logs right ────────────── */}
       <div className="grid grid-cols-3 gap-5">
