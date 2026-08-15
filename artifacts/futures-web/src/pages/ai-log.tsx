@@ -16,10 +16,58 @@ import {
   Brain, ShieldAlert, RefreshCw, Trash2,
   TrendingUp, TrendingDown, CheckCircle2, XCircle,
   AlertTriangle, ChevronRight, Zap, ZapOff, BarChart2,
-  ChevronDown, ServerCrash,
+  ChevronDown, ServerCrash, Download, RotateCcw, BellOff,
 } from 'lucide-react';
 import { format, formatDistanceToNowStrict } from 'date-fns';
-import type { AiEngineDecision, AiOperatingState, RiskLevel } from '@/lib/ai/types';
+import type { AiEngineDecision, AiOperatingState, RiskLevel, PendingLiveApproval } from '@/lib/ai/types';
+
+// ── CSV export helpers ────────────────────────────────────────────────────────
+
+function downloadDecisionsCSV(decisions: AiEngineDecision[]) {
+  const header = ['Time', 'Cycle', 'State', 'Symbol', 'Confidence%', 'RiskLevel', 'SizeUSD', 'RiskApproved', 'PaperExecuted', 'Rationale'].join(',');
+  const rows = decisions.map(d => [
+    format(new Date(d.createdAt), 'yyyy-MM-dd HH:mm:ss'),
+    d.cycleNumber ?? '',
+    d.operatingState,
+    d.primarySymbol ?? '',
+    d.confidence,
+    d.riskLevel,
+    d.sizeUsd ?? '',
+    d.riskApproved ? 'true' : 'false',
+    d.paperExecuted ? 'true' : 'false',
+    `"${(d.stateRationale ?? '').replace(/"/g, '""')}"`,
+  ].join(','));
+  const csv = [header, ...rows].join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href = url;
+  a.download = `ai-decisions-${format(new Date(), 'yyyy-MM-dd')}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function downloadApprovalsCSV(approvals: PendingLiveApproval[]) {
+  const header = ['Time', 'Cycle', 'Symbol', 'ExecutionType', 'Status', 'RetryCount', 'ExecutionFeedback', 'RejectionReason'].join(',');
+  const rows = approvals.map(a => [
+    format(new Date(a.createdAt), 'yyyy-MM-dd HH:mm:ss'),
+    a.decision.cycleNumber ?? '',
+    a.decision.primarySymbol ? `${a.decision.primarySymbol}/USD` : '',
+    a.decision.executionType?.replace(/_/g, ' ') ?? '',
+    a.status,
+    a.retryCount ?? 0,
+    a.executionFeedback ?? '',
+    `"${(a.rejectionReason ?? '').replace(/"/g, '""')}"`,
+  ].join(','));
+  const csv = [header, ...rows].join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href = url;
+  a.download = `ai-approvals-${format(new Date(), 'yyyy-MM-dd')}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
 
 // ── State display config ───────────────────────────────────────────────────────
 
@@ -213,7 +261,7 @@ export default function AiLogPage() {
   const {
     currentDecision, decisionHistory, stats, running, autoExecute,
     setAutoExecute, triggerCycle, clearHistory, loadMoreHistory,
-    pendingApprovals,
+    pendingApprovals, notificationPermission,
   } = useAiEngine();
   const { engineState, triggerEmergencyStop } = useAppContext();
 
@@ -288,6 +336,9 @@ export default function AiLogPage() {
           </Button>
           <Button size="sm" variant="outline" onClick={clearHistory} disabled={decisionHistory.length === 0} className="gap-1.5 text-muted-foreground">
             <Trash2 className="w-3.5 h-3.5" /> Clear
+          </Button>
+          <Button size="sm" variant="outline" onClick={() => downloadDecisionsCSV(filtered)} disabled={filtered.length === 0} className="gap-1.5 text-muted-foreground" title="현재 필터 적용된 결정 이력 CSV 다운로드">
+            <Download className="w-3.5 h-3.5" /> Export CSV
           </Button>
           <Button size="sm" variant="destructive" onClick={triggerEmergencyStop} className="gap-1.5 font-bold tracking-wider text-[10px]">
             <ShieldAlert className="w-3.5 h-3.5" /> EMERGENCY STOP
@@ -515,18 +566,39 @@ export default function AiLogPage() {
 
       {/* ── LIVE 승인 이력 ────────────────────────────────────────────────────────── */}
       <Card className="overflow-hidden">
-        <div className="p-4 border-b border-border bg-card/50 flex items-center justify-between">
-          <h3 className="font-semibold text-sm flex items-center gap-2">
-            <CheckCircle2 className="w-4 h-4 text-primary" /> LIVE 승인 이력
-            <span className="text-[9px] px-1.5 py-0.5 rounded-full border bg-blue-500/10 text-blue-400 border-blue-500/30 font-bold">
-              PAPER — 실제 주문 없음
-            </span>
-          </h3>
-          <span className="text-[10px] text-muted-foreground">
-            {pendingApprovals.filter(a => a.status === 'APPROVED').length}건 승인 ·{' '}
-            {pendingApprovals.filter(a => a.status === 'REJECTED').length}건 거절 ·{' '}
-            {pendingApprovals.filter(a => a.status === 'PENDING').length}건 대기
-          </span>
+        <div className="p-4 border-b border-border bg-card/50 flex flex-col gap-2">
+          <div className="flex items-center justify-between">
+            <h3 className="font-semibold text-sm flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-primary" /> LIVE 승인 이력
+              <span className="text-[9px] px-1.5 py-0.5 rounded-full border bg-blue-500/10 text-blue-400 border-blue-500/30 font-bold">
+                PAPER — 실제 주문 없음
+              </span>
+            </h3>
+            <div className="flex items-center gap-3">
+              <span className="text-[10px] text-muted-foreground">
+                {pendingApprovals.filter(a => a.status === 'APPROVED').length}건 승인 ·{' '}
+                {pendingApprovals.filter(a => a.status === 'REJECTED').length}건 거절 ·{' '}
+                {pendingApprovals.filter(a => a.status === 'PENDING').length}건 대기
+              </span>
+              <Button
+                size="sm" variant="outline"
+                onClick={() => downloadApprovalsCSV(pendingApprovals)}
+                disabled={pendingApprovals.length === 0}
+                className="gap-1 h-6 text-[10px] text-muted-foreground px-2"
+                title="승인 이력 CSV 다운로드"
+              >
+                <Download className="w-3 h-3" /> CSV
+              </Button>
+            </div>
+          </div>
+          {/* Notification permission hint — only shown when there are PENDING approvals */}
+          {notificationPermission !== 'granted' && notificationPermission !== 'unsupported'
+            && pendingApprovals.some(a => a.status === 'PENDING') && (
+            <div className="flex items-center gap-2 text-[10px] text-amber-400/80 bg-amber-500/5 border border-amber-500/20 rounded px-2.5 py-1.5">
+              <BellOff className="w-3 h-3 shrink-0" />
+              <span>데스크탑 알림 권한이 없습니다 — 탭 내 토스트로만 알립니다. Settings에서 알림 허용 버튼을 누르세요.</span>
+            </div>
+          )}
         </div>
         {pendingApprovals.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-10 text-muted-foreground gap-2">
@@ -539,7 +611,7 @@ export default function AiLogPage() {
             <table className="w-full text-xs">
               <thead className="bg-secondary/50 border-b border-border">
                 <tr>
-                  {['시간', '결정 #', '심볼', '실행 유형', '상태'].map(h => (
+                  {['시간', '결정 #', '심볼', '실행 유형', '상태', '재시도'].map(h => (
                     <th key={h} className="text-left font-medium text-muted-foreground py-2 px-3 text-[10px] uppercase tracking-wider whitespace-nowrap">{h}</th>
                   ))}
                 </tr>
@@ -575,6 +647,35 @@ export default function AiLogPage() {
                         {a.status === 'REJECTED' && a.rejectionReason && (
                           <div className="text-[9px] text-muted-foreground mt-0.5 max-w-[120px] truncate">{a.rejectionReason}</div>
                         )}
+                        {a.executionFeedback === 'failed' && a.executionError && (
+                          <div className="text-[9px] text-[var(--color-short)]/80 mt-0.5 max-w-[120px] truncate" title={a.executionError}>
+                            ✗ {a.executionError}
+                          </div>
+                        )}
+                      </td>
+                      {/* ── 재시도 횟수 — 0=neutral, 1=amber, ≥2=orange, ≥3=red+상한 ── */}
+                      <td className="px-3 py-2">
+                        {(() => {
+                          const count = a.retryCount ?? 0;
+                          if (count === 0) return (
+                            <span className="text-[10px] text-muted-foreground font-mono">—</span>
+                          );
+                          if (count >= 3) return (
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-[10px] font-bold bg-[var(--color-short)]/10 border-[var(--color-short)]/30 text-[var(--color-short)]">
+                              <RotateCcw className="w-2.5 h-2.5" />{count} 상한
+                            </span>
+                          );
+                          if (count >= 2) return (
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-[10px] font-bold bg-orange-500/10 border-orange-500/30 text-orange-400">
+                              <RotateCcw className="w-2.5 h-2.5" />{count}
+                            </span>
+                          );
+                          return (
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-[10px] font-bold bg-amber-500/10 border-amber-500/30 text-amber-400">
+                              <RotateCcw className="w-2.5 h-2.5" />{count}
+                            </span>
+                          );
+                        })()}
                       </td>
                     </tr>
                   );

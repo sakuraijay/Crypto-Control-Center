@@ -256,6 +256,12 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     };
   }, [state.status, state.isArbitrum, fetchBalances]);
 
+  // ── Always-current ref for refreshChainStatus (used inside event listeners) ─
+  // Prevents stale closure inside the chainChanged handler without adding
+  // refreshChainStatus to the event-listener effect's dependency array.
+  const refreshChainStatusRef = useRef(refreshChainStatus);
+  refreshChainStatusRef.current = refreshChainStatus;
+
   // ── Listen for account / chain changes ───────────────────────────────────
   useEffect(() => {
     const provider = (window as any).ethereum;
@@ -284,6 +290,10 @@ export function WalletProvider({ children }: { children: ReactNode }) {
         error: isArbitrum ? null : `네트워크 불일치: Arbitrum One으로 전환해주세요.`,
       }));
       if (isArbitrum && addressRef.current) fetchBalances(addressRef.current);
+      // Secondary verification after MetaMask internal state has settled.
+      // Fixes the edge case where chainChanged fires before MetaMask's
+      // eth_chainId reflects the new chain, causing 'wrong_network' to stick.
+      setTimeout(() => void refreshChainStatusRef.current(), 1_500);
     };
 
     provider.on('accountsChanged', onAccountsChanged);

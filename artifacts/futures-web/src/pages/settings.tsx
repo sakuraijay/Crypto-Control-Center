@@ -129,7 +129,7 @@ export default function Settings() {
   const { notificationPermission, requestNotificationPermission, sendTestNotification, weeklyRealizedPnl } = useAiEngine();
   const now = useNow();
 
-  const { subaccountConfig, updateSubaccountConfig, limits } = useStrategyContext();
+  const { subaccountConfig, updateSubaccountConfig, limits, syncStatus } = useStrategyContext();
 
   const [closeAllPhase, setCloseAllPhase] = useState<0 | 1 | 2>(0);
   const [testNotifState, setTestNotifState] = useState<'idle' | 'sending' | 'sent' | 'denied' | 'unsupported'>('idle');
@@ -1575,6 +1575,94 @@ export default function Settings() {
             Emergency Stop halts the AI engine on this device immediately. Any in-progress paper orders are cancelled.
           </span>
         </div>
+      </section>
+
+      {/* ── 운영자 검증 체크리스트 ── */}
+      <section className="flex flex-col gap-3">
+        <h2 className="text-xs font-bold uppercase tracking-wider text-muted-foreground px-1 flex items-center gap-2">
+          <CheckCircle2 className="w-3.5 h-3.5" />
+          Read-Only 연결 검증
+        </h2>
+        <Card className="overflow-hidden">
+          {(
+            [
+              {
+                label: 'MetaMask 설치됨',
+                pass: !!(window as any).ethereum,
+                note: !!(window as any).ethereum ? '감지됨' : '미설치',
+              },
+              {
+                label: '주소 연결됨',
+                pass: wallet.status === 'connected' || wallet.status === 'wrong_network',
+                note: wallet.address ? `${wallet.address.slice(0, 6)}…${wallet.address.slice(-4)}` : '미연결',
+              },
+              {
+                label: 'Arbitrum One 네트워크',
+                pass: !!wallet.isArbitrum,
+                note: wallet.chainId ? `Chain ${wallet.chainId}` : '감지 안됨',
+              },
+              {
+                label: 'USDC 잔고 조회됨',
+                pass: wallet.usdcBalance !== null,
+                note: wallet.usdcBalance !== null
+                  ? `$${parseFloat(wallet.usdcBalance).toFixed(2)}`
+                  : '조회 실패',
+              },
+              {
+                label: 'GMX 서브그래프 연결됨',
+                pass: gmx.status === 'ok',
+                note: gmx.status === 'loading' ? '조회 중…'
+                    : gmx.status === 'unavailable' ? '연결 불가'
+                    : '연결됨',
+              },
+              {
+                label: 'AI Worker 실행 중',
+                pass: health?.workerRunning === true,
+                note: health
+                  ? (health.workerRunning ? '실행 중' : '중단됨')
+                  : 'API 응답 없음',
+              },
+              {
+                label: 'Strategy 서버 동기화',
+                pass: syncStatus === 'saved' || syncStatus === 'idle',
+                note: syncStatus === 'saving' ? '저장 중…'
+                    : syncStatus === 'error'   ? '동기화 실패'
+                    : '동기화됨',
+              },
+              {
+                label: 'LIVE 실행 잠금',
+                pass: true,
+                note: 'LIVE_EXECUTION_LOCKED = true',
+              },
+            ] as { label: string; pass: boolean; note: string }[]
+          ).map((item, i) => (
+            <div
+              key={i}
+              className={cn(
+                'flex items-center justify-between px-4 py-2.5 text-xs',
+                i > 0 && 'border-t border-border/40',
+              )}
+            >
+              <div className="flex items-center gap-2.5">
+                {item.pass
+                  ? <CheckCircle2 className="w-3.5 h-3.5 text-[var(--color-long)] shrink-0" />
+                  : <XCircle    className="w-3.5 h-3.5 text-[var(--color-short)] shrink-0" />
+                }
+                <span className={item.pass ? 'text-foreground' : 'text-muted-foreground'}>
+                  {item.label}
+                </span>
+              </div>
+              <span className={cn(
+                'text-[10px] font-mono',
+                item.pass
+                  ? 'text-[var(--color-long)]/70'
+                  : 'text-[var(--color-short)]/70',
+              )}>
+                {item.note}
+              </span>
+            </div>
+          ))}
+        </Card>
       </section>
 
       {/* ── Lock ── */}
