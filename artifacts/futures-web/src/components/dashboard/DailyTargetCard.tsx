@@ -9,12 +9,13 @@
  *     retains absolute veto authority regardless of target state.
  */
 
+import { useEffect, useState } from 'react';
 import { useTradingContext } from '@/lib/context';
 import { useStrategyContext } from '@/lib/context/StrategyContext';
 import { useAppContext } from '@/lib/context/AppContext';
 import { useAiEngine } from '@/lib/context/AiEngineContext';
 import { cn } from '@/lib/utils';
-import { CheckCircle2, ShieldAlert, TrendingDown, TrendingUp, Info, Lock } from 'lucide-react';
+import { CheckCircle2, ShieldAlert, TrendingDown, TrendingUp, Info, Lock, Timer } from 'lucide-react';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -67,7 +68,19 @@ export function DailyTargetCard({ className }: { className?: string }) {
   const { todayStats, account } = useTradingContext();
   const { limits } = useStrategyContext();
   const { engineState } = useAppContext();
-  const { profitLockStage } = useAiEngine();
+  const { profitLockStage, cooldownEndsAt, tradesThisHour, weeklyRealizedPnl } = useAiEngine();
+
+  // 1-second ticker for live cooldown countdown
+  const [nowMs, setNowMs] = useState(Date.now());
+  useEffect(() => {
+    if (cooldownEndsAt === 0) { setNowMs(Date.now()); return; }
+    const t = setInterval(() => setNowMs(Date.now()), 1_000);
+    return () => clearInterval(t);
+  }, [cooldownEndsAt]);
+
+  const cooldownRemainingMs  = Math.max(0, cooldownEndsAt - nowMs);
+  const cooldownRemainingMin = Math.ceil(cooldownRemainingMs / 60_000);
+  const inCooldown = cooldownRemainingMs > 0;
 
   const realized    = todayStats?.realized    ?? 0;
   const unrealized  = account?.unrealizedPnl  ?? 0;
@@ -226,6 +239,41 @@ export function DailyTargetCard({ className }: { className?: string }) {
           cls={drawdownPct > limits.maxDrawdownPercent ? 'text-[var(--color-short)]' : 'text-muted-foreground'}
         />
       </div>
+
+      {/* ── Risk Guard meters — cooldown, weekly loss, hourly rate ── */}
+      {(inCooldown || limits.weeklyLossLimitUSDT > 0 || limits.maxTradesPerHour > 0) && (
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 pt-1.5 border-t border-border/60 text-[9px] font-mono">
+          {limits.weeklyLossLimitUSDT > 0 && (
+            <span className={cn(
+              'flex items-center gap-1',
+              weeklyRealizedPnl < 0 && Math.abs(weeklyRealizedPnl) >= limits.weeklyLossLimitUSDT * 0.8
+                ? 'text-[var(--color-short)] font-bold'
+                : weeklyRealizedPnl >= 0 ? 'text-[var(--color-long)]' : 'text-muted-foreground',
+            )}>
+              주간&nbsp;{weeklyRealizedPnl >= 0 ? '+' : ''}{weeklyRealizedPnl.toFixed(0)}
+              <span className="text-muted-foreground/50 font-normal">/ −{limits.weeklyLossLimitUSDT.toLocaleString()}</span>
+            </span>
+          )}
+          {limits.maxTradesPerHour > 0 && (
+            <span className={cn(
+              'flex items-center gap-1',
+              tradesThisHour >= limits.maxTradesPerHour
+                ? 'text-[var(--color-short)] font-bold'
+                : tradesThisHour >= Math.ceil(limits.maxTradesPerHour * 0.8) ? 'text-[var(--color-warning)]' : 'text-muted-foreground',
+            )}>
+              {tradesThisHour}/{limits.maxTradesPerHour}&thinsp;tr/h
+            </span>
+          )}
+          {inCooldown && (
+            <span className="flex items-center gap-1 text-amber-400 font-bold animate-pulse">
+              <Timer className="w-2.5 h-2.5" />
+              쿨다운&nbsp;{cooldownRemainingMin > 1
+                ? `${cooldownRemainingMin}분`
+                : `${Math.ceil(cooldownRemainingMs / 1000)}초`}
+            </span>
+          )}
+        </div>
+      )}
 
       {/* ── Risk Engine independence disclaimer ── */}
       <div className="flex items-start gap-1.5 text-[10px] text-muted-foreground border-t border-border pt-2">

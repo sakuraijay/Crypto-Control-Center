@@ -119,7 +119,12 @@ function calcSizeUsd(
     ? limits.maxMarginPerTrade * 3       // SPOT: larger collateral, no leverage
     : limits.maxMarginPerTrade;          // LONG/SHORT/HEDGE: limited by margin per trade
 
-  return Math.max(50, Math.min(maxByConf, maxByLimits, limits.maxTotalExposureUSDT * 0.35));
+  // When deployable balance is zero or negative (all cash reserved), return 0
+  // so the engine holds rather than using protected reserve funds.
+  if (availableBalance <= 0) return 0;
+  // Never impose a hard minimum that could exceed the available balance.
+  // $50 floor only applies when we actually have deployable capital.
+  return Math.max(Math.min(50, availableBalance), Math.min(maxByConf, maxByLimits, limits.maxTotalExposureUSDT * 0.35));
 }
 
 // ── TP / SL generation ───────────────────────────────────────────────────────
@@ -161,7 +166,11 @@ function buildHedgeParams(
     target.sizeInUsd * 0.5,     // partial hedge — 50% of exposure
     limits.maxMarginPerTrade * 5,
   );
-  const hedgeLeverage = Math.max(2, Math.min(5, target.leverage * 0.5));
+  // maxLeverage is an absolute cap — it must be respected even for hedge orders.
+  // We aim for 50% of the existing position's leverage (min 2x preferred), but
+  // the operator-configured maxLeverage is the hard ceiling with no exceptions.
+  const maxLev = limits.maxLeverage ?? 5;
+  const hedgeLeverage = Math.min(Math.max(2, Math.min(5, target.leverage * 0.5)), maxLev);
 
   return {
     symbol: target.symbol,
@@ -352,6 +361,13 @@ export function runAiEngine(input: EngineInput): Omit<AiEngineDecision, 'id' | '
 
   const hasOpenPositions = positions.length > 0;
 
+  // ── Reserve-cash adjusted deployable balance ─────────────────────────────
+  // reserveCashPct% of tradingCapital must remain as liquid cash at all times.
+  // We subtract the reserved amount from the account's available balance so
+  // calcSizeUsd never allocates capital into the cash reserve.
+  const reservedCash = (limits.tradingCapital ?? 10_000) * ((limits.reserveCashPct ?? 0) / 100);
+  const deployableBalance = Math.max(0, account.availableBalance - reservedCash);
+
   // Priority 1: HEDGE — protect at-risk positions
   if (
     riskPositions.length > 0 &&
@@ -388,8 +404,8 @@ export function runAiEngine(input: EngineInput): Omit<AiEngineDecision, 'id' | '
   else if (bullishScore >= longBullishMin && avgAtr >= THRESHOLDS.SPOT_ATR_MAX) {
     state = 'LONG';
     confidence = Math.min(95, bullishScore + (directionalBias > 40 ? 10 : 0));
-    leverage = LEVERAGE_BY_CONFIDENCE(confidence, avgAtr);
-    sizeUsd = calcSizeUsd('LONG', confidence, limits, account.availableBalance) * leverage;
+    leverage = Math.min(LEVERAGE_BY_CONFIDENCE(confidence, avgAtr), limits.maxLeverage ?? 10);
+    sizeUsd = calcSizeUsd('LONG', confidence, limits, deployableBalance) * leverage;
     executionType = hasOpenPositions ? 'scale_in' : 'perp_long_open';
     entryStyle = confidence >= 80 ? 'immediate' : 'scaled';
 
@@ -403,8 +419,8 @@ export function runAiEngine(input: EngineInput): Omit<AiEngineDecision, 'id' | '
   else if (bearishScore >= shortBearishMin && avgAtr >= THRESHOLDS.SPOT_ATR_MAX) {
     state = 'SHORT';
     confidence = Math.min(95, bearishScore + (directionalBias < -40 ? 10 : 0));
-    leverage = LEVERAGE_BY_CONFIDENCE(confidence, avgAtr);
-    sizeUsd = calcSizeUsd('SHORT', confidence, limits, account.availableBalance) * leverage;
+    leverage = Math.min(LEVERAGE_BY_CONFIDENCE(confidence, avgAtr), limits.maxLeverage ?? 10);
+    sizeUsd = calcSizeUsd('SHORT', confidence, limits, deployableBalance) * leverage;
     executionType = hasOpenPositions ? 'scale_in' : 'perp_short_open';
     entryStyle = confidence >= 80 ? 'immediate' : 'scaled';
 
@@ -418,7 +434,9 @@ export function runAiEngine(input: EngineInput): Omit<AiEngineDecision, 'id' | '
   else if (bullishScore >= spotBullishMin && avgAtr < THRESHOLDS.SPOT_ATR_MAX) {
     state = 'SPOT';
     confidence = Math.min(90, bullishScore);
-    sizeUsd = calcSizeUsd('SPOT', confidence, limits, account.availableBalance) * 3; // no leverage → larger notional
+    // calcSizeUsd already applies maxMarginPerTrade * 3 for SPOT internally.
+    // Do NOT multiply again here — that was a double-application of the 3× factor.
+    sizeUsd = calcSizeUsd('SPOT', confidence, limits, deployableBalance);
     executionType = 'spot_swap';
     entryStyle = 'immediate';
   }
@@ -467,6 +485,30 @@ export function runAiEngine(input: EngineInput): Omit<AiEngineDecision, 'id' | '
     }
   }
 
+  // ── Final reserve guard ─────────────────────────────────────────────────────
+  // Cap every order's committed notional against deployableBalance so that
+  // HEDGE, SPOT, LONG, and SHORT orders can never consume protected cash reserves.
+  // This is the absolute last line of defence — applied after profit-lock reductions.
+  if (sizeUsd !== null && sizeUsd !== undefined && sizeUsd > 0 && state !== 'CASH') {
+    // For leveraged orders the cash commitment is sizeUsd / leverage (margin).
+    // For SPOT (leverage=undefined/null) the whole sizeUsd is cash.
+    const cashNeeded = (leverage ?? 0) > 0
+      ? sizeUsd / (leverage as number)
+      : sizeUsd;
+    if (cashNeeded > deployableBalance) {
+      if (deployableBalance <= 0) {
+        // No deployable capital at all — hold regardless of order type
+        sizeUsd = 0;
+        state = 'CASH';
+        executionType = 'hold';
+      } else {
+        // Scale size down to exactly fit within deployable balance
+        const scaleFactor = deployableBalance / cashNeeded;
+        sizeUsd = Math.floor(sizeUsd * scaleFactor);
+      }
+    }
+  }
+
   // ── Risk gate (secondary) ───────────────────────────────────────────────────
   let riskApproved = true;
   let riskVetoReason: string | undefined;
@@ -490,6 +532,27 @@ export function runAiEngine(input: EngineInput): Omit<AiEngineDecision, 'id' | '
       riskVetoReason = `Max simultaneous positions (${limits.maxSimultaneousPositions}) reached`;
       state = 'CASH';
       executionType = 'hold';
+    }
+
+    // Per-symbol margin exposure check (maxRiskPerSymbolPct).
+    // Caps how much margin (collateral) can be committed to any one symbol as a
+    // percentage of tradingCapital — independent of notional size or leverage.
+    // HEDGE is intentionally exempt: protecting at-risk positions always takes priority.
+    if (riskApproved && state !== 'CASH' && state !== 'HEDGE' && (limits.maxRiskPerSymbolPct ?? 0) > 0) {
+      const primarySym = best?.symbol ?? null;
+      if (primarySym) {
+        const existingSymbolMargin = positions
+          .filter(p => p.symbol === primarySym)
+          .reduce((s, p) => s + (p.collateralUsd ?? 0), 0);
+        const newMargin = (sizeUsd ?? 0) / Math.max(1, leverage ?? 1);
+        const symbolMarginLimit = (limits.tradingCapital ?? 10_000) * (limits.maxRiskPerSymbolPct / 100);
+        if (existingSymbolMargin + newMargin > symbolMarginLimit) {
+          riskApproved = false;
+          riskVetoReason = `${best?.displaySymbol ?? primarySym} margin $${(existingSymbolMargin + newMargin).toFixed(0)} would exceed ${limits.maxRiskPerSymbolPct}% cap ($${symbolMarginLimit.toFixed(0)})`;
+          state = 'CASH';
+          executionType = 'hold';
+        }
+      }
     }
   }
 
