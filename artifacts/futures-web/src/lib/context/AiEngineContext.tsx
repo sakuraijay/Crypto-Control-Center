@@ -159,7 +159,7 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     (async () => {
       try {
-        const res = await fetch('/api-server/api/ai/decisions?limit=200');
+        const res = await fetch('/api/ai/decisions?limit=200');
         if (!res.ok) return;
         const { decisions } = await res.json() as {
           decisions: Array<{
@@ -206,7 +206,7 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     (async () => {
       try {
-        const res = await fetch('/api-server/api/ai/approvals?limit=200');
+        const res = await fetch('/api/ai/approvals?limit=200');
         if (!res.ok) return;
         const { approvals } = await res.json() as {
           approvals: Array<{
@@ -363,7 +363,7 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
 
       // DB에도 EXPIRED 상태 동기화 (non-fatal)
       for (const id of newlyExpiredIds) {
-        fetch(`/api-server/api/ai/approvals/${id}`, {
+        fetch(`/api/ai/approvals/${id}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ status: 'EXPIRED' }),
@@ -400,7 +400,7 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
   // ── Persist decision to API ─────────────────────────────────────────────────
   const persistDecision = useCallback(async (decision: AiEngineDecision) => {
     try {
-      await fetch('/api-server/api/ai/decisions', {
+      await fetch('/api/ai/decisions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -462,14 +462,14 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
     ));
 
     // Step 2 — DB APPROVED (non-fatal)
-    fetch(`/api-server/api/ai/approvals/${id}`, {
+    fetch(`/api/ai/approvals/${id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ status: 'APPROVED' }),
     }).catch(() => { /* non-fatal */ });
 
     // Audit trail — AI decisions log에도 기록
-    fetch('/api-server/api/ai/decisions', {
+    fetch('/api/ai/decisions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -488,7 +488,7 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
     // Step 3 — paper dry-run: validate params via executor (NO real order placed)
     try {
       const d = approval.decision;
-      const dryRunRes = await fetch('/api-server/api/executor/execute', {
+      const dryRunRes = await fetch('/api/executor/execute', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -518,7 +518,7 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
       ));
 
       // Step 5 — persist outcome to DB (non-fatal)
-      fetch(`/api-server/api/ai/approvals/${id}`, {
+      fetch(`/api/ai/approvals/${id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -535,7 +535,7 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
           : a
       ));
       // Persist failure outcome to DB (non-fatal) — catch path must also sync
-      fetch(`/api-server/api/ai/approvals/${id}`, {
+      fetch(`/api/ai/approvals/${id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: 'APPROVED', executionOutcome: 'failed' }),
@@ -551,7 +551,7 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
         : a
     ));
     // DB에 REJECTED 상태 업데이트 (non-fatal)
-    fetch(`/api-server/api/ai/approvals/${id}`, {
+    fetch(`/api/ai/approvals/${id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ status: 'REJECTED', rejectionReason: reason ?? null }),
@@ -613,7 +613,7 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
           setPendingApprovals(prev => [...prev, approval]);
 
           // DB에 영속 저장 (non-fatal)
-          fetch('/api-server/api/ai/approvals', {
+          fetch('/api/ai/approvals', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -716,7 +716,7 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
   const loadMoreHistory = useCallback(async (): Promise<boolean> => {
     try {
       const offset = dbPage.current * 200;
-      const res = await fetch(`/api-server/api/ai/decisions?limit=200&offset=${offset}`);
+      const res = await fetch(`/api/ai/decisions?limit=200&offset=${offset}`);
       if (!res.ok) return false;
       const { decisions } = await res.json() as {
         decisions: Array<{

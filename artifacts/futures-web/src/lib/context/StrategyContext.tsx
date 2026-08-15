@@ -84,7 +84,7 @@ export function StrategyProvider({ children }: { children: ReactNode }) {
 
   // ── Load from server on mount (server overrides localStorage if found) ───
   useEffect(() => {
-    fetch('/api-server/api/data/strategy', { signal: AbortSignal.timeout(5_000) })
+    fetch('/api/data/strategy', { signal: AbortSignal.timeout(5_000) })
       .then(r => r.ok ? r.json() : null)
       .then(data => {
         if (!data) return;
@@ -109,7 +109,7 @@ export function StrategyProvider({ children }: { children: ReactNode }) {
     if (!initializedFromServer.current) return; // don't push until we've pulled
     if (serverSyncTimer.current) clearTimeout(serverSyncTimer.current);
     serverSyncTimer.current = setTimeout(() => {
-      fetch('/api-server/api/data/strategy', {
+      fetch('/api/data/strategy', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ indicators, limits }),
@@ -123,7 +123,7 @@ export function StrategyProvider({ children }: { children: ReactNode }) {
     if (!initializedFromServer.current) return;
     if (serverSyncTimer.current) clearTimeout(serverSyncTimer.current);
     serverSyncTimer.current = setTimeout(() => {
-      fetch('/api-server/api/data/strategy', {
+      fetch('/api/data/strategy', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ indicators, limits }),

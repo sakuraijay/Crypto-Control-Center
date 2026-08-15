@@ -105,7 +105,7 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const fetch24h = async () => {
       try {
-        const res = await fetch('/api-server/api/gmx/change24h');
+        const res = await fetch('/api/gmx/change24h');
         if (!res.ok) return;
         const data = await res.json() as { symbol: string; change24hPct: number }[];
         if (!Array.isArray(data) || data.length === 0) return;

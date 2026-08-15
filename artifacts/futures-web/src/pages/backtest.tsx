@@ -74,7 +74,7 @@ export default function BacktestPage() {
       const countBack = Math.min(iv.countBack, Math.ceil(period * 24 / (interval === '1d' ? 24 : interval === '4h' ? 4 : 1)));
 
       const res = await fetch(
-        `/api-server/api/gmx/candles?symbol=${symbol}&period=${interval}&countBack=${countBack}`,
+        `/api/gmx/candles?symbol=${symbol}&period=${interval}&countBack=${countBack}`,
         { signal: AbortSignal.timeout(20_000) },
       );
       if (!res.ok) throw new Error(`GMX candle fetch failed: ${res.status}`);

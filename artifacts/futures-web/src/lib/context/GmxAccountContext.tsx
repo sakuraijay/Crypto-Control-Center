@@ -11,7 +11,7 @@
  *
  * 데이터 소스:
  *   - GMX Synthetics Subgraph (Satsuma) — 포지션 목록
- *   - /api-server/api/gmx/markets       — 마켓 주소 → 심볼 매핑
+ *   - /api/gmx/markets       — 마켓 주소 → 심볼 매핑
  */
 
 import {
@@ -95,7 +95,7 @@ function parseBigIntUsd(raw: string | null | undefined, precision: number): numb
 const GmxAccountContext = createContext<GmxAccountContextType | undefined>(undefined);
 
 // ── Market registry ───────────────────────────────────────────────────────────
-// Populated from /api-server/api/gmx/markets (marketToken → indexToken → symbol)
+// Populated from /api/gmx/markets (marketToken → indexToken → symbol)
 
 let marketSymbolCache: Record<string, string> | null = null;
 let marketCacheAt = 0;
@@ -104,8 +104,8 @@ async function getMarketSymbols(): Promise<Record<string, string>> {
   if (marketSymbolCache && Date.now() - marketCacheAt < 300_000) return marketSymbolCache;
   try {
     const [marketsRes, tokensRes] = await Promise.all([
-      fetch('/api-server/api/gmx/markets', { signal: AbortSignal.timeout(5_000) }),
-      fetch('/api-server/api/gmx/tokens',  { signal: AbortSignal.timeout(5_000) }),
+      fetch('/api/gmx/markets', { signal: AbortSignal.timeout(5_000) }),
+      fetch('/api/gmx/tokens',  { signal: AbortSignal.timeout(5_000) }),
     ]);
     if (!marketsRes.ok || !tokensRes.ok) throw new Error('markets/tokens fetch failed');
 

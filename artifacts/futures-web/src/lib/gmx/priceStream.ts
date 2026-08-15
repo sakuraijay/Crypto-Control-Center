@@ -17,7 +17,7 @@ export type { GmxOraclePrice };
 const POLL_MS    = 3_000;
 const RETRY_BASE = 2_000;
 const MAX_RETRY  = 5;
-const ENDPOINT   = '/api-server/api/gmx/prices';
+const ENDPOINT   = '/api/gmx/prices';
 
 type UpdateCallback = (prices: Map<string, GmxOraclePrice>) => void;
 type StatusCallback = (status: StreamStatus) => void;

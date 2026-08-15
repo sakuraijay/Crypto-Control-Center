@@ -24,7 +24,7 @@ function useExecutorHealth() {
   const refresh = async () => {
     setLoading(true);
     try {
-      const res = await fetch('/api-server/api/executor/status');
+      const res = await fetch('/api/executor/status');
       if (res.ok) setHealth(await res.json());
     } catch { /* non-fatal */ }
     setLoading(false);

@@ -58,7 +58,7 @@ function generateInitialEquity(balance: number): EquityPoint[] {
 }
 
 function persistTrade(trade: Trade) {
-  fetch('/api-server/api/data/trades', {
+  fetch('/api/data/trades', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -90,7 +90,7 @@ export function TradingProvider({ children }: { children: ReactNode }) {
 
   // ── Load persisted trades from server on mount ─────────────────
   useEffect(() => {
-    fetch('/api-server/api/data/trades', { signal: AbortSignal.timeout(5_000) })
+    fetch('/api/data/trades', { signal: AbortSignal.timeout(5_000) })
       .then(r => r.ok ? r.json() : null)
       .then((rows: Array<{
         id: string; symbol: string; side: string; action?: string;

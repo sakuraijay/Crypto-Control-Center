@@ -10,11 +10,11 @@
  *   - LIVE 실행은 GMX One-Click 서브계정 구성 후 수행됩니다.
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { Link } from 'wouter';
 import {
   Server, CheckCircle2, XCircle, Loader2,
-  ExternalLink, Cpu, Eye, Clock, Wallet, Key, FlaskConical,
+  ExternalLink, Cpu, Eye, Clock, Wallet, Key, FlaskConical, WifiOff,
 } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -26,6 +26,9 @@ import { format } from 'date-fns';
 // ── Executor health type ──────────────────────────────────────────────────────
 
 interface ExecutorHealth {
+  /** Present when the server returned an error payload (HTTP 200 with ok:false) */
+  ok?: boolean;
+  error?: string;
   gmxConnected: boolean;
   rpcUrl?: string;
   networkChainId?: number;
@@ -60,30 +63,77 @@ function StatRow({ label, value, cls }: { label: string; value: React.ReactNode;
 
 // ── Main widget ───────────────────────────────────────────────────────────────
 
+// Polling intervals
+const POLL_NORMAL_MS  = 30_000;
+const POLL_OFFLINE_MS = 60_000;
+const OFFLINE_THRESHOLD = 2; // consecutive failures before showing offline
+
 export function ExecutorStatusWidget() {
-  const [health, setHealth]     = useState<ExecutorHealth | null>(null);
-  const [loading, setLoading]   = useState(true);
+  const [health, setHealth]       = useState<ExecutorHealth | null>(null);
+  const [loading, setLoading]     = useState(true);
   const [lastFetch, setLastFetch] = useState<Date | null>(null);
+  const [isOffline, setIsOffline] = useState(false);
+
+  const consecutiveFailures = useRef(0);
+  const pollTimer           = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Keep a stable ref to fetchStatus so the self-scheduling closure doesn't go stale
+  const fetchRef = useRef<(() => Promise<void>) | null>(null);
 
   const { currentDecision, stats, nextCycleMs, running, operatingMode } = useAiEngine();
   const wallet = useWallet();
 
   const fetchStatus = useCallback(async () => {
     try {
-      const res = await fetch('/api-server/api/executor/status');
-      if (res.ok) {
-        setHealth(await res.json());
+      const res = await fetch('/api/executor/status');
+      // The server always returns HTTP 200 (including error cases).
+      // We must inspect the payload: `ok: false` in the body means the executor
+      // status could not be read — treat that as a poll failure, not success.
+      const data = await res.json() as ExecutorHealth;
+      const isPayloadOk = res.ok && data.ok !== false;
+
+      if (isPayloadOk) {
+        setHealth(data);
         setLastFetch(new Date());
+        consecutiveFailures.current = 0;
+        setIsOffline(false);
+      } else {
+        // HTTP error or {ok:false} payload — stale health data preserved
+        consecutiveFailures.current += 1;
+        if (consecutiveFailures.current >= OFFLINE_THRESHOLD) setIsOffline(true);
       }
-    } catch { /* non-fatal */ }
+    } catch {
+      // Network / JSON parse error — do not rethrow; stale data preserved
+      consecutiveFailures.current += 1;
+      if (consecutiveFailures.current >= OFFLINE_THRESHOLD) setIsOffline(true);
+    }
     setLoading(false);
   }, []);
 
+  // Keep fetchRef up to date
+  fetchRef.current = fetchStatus;
+
+  // Self-scheduling poll — backoff to POLL_OFFLINE_MS after ≥ OFFLINE_THRESHOLD failures
   useEffect(() => {
-    fetchStatus();
-    const t = setInterval(fetchStatus, 30_000);
-    return () => clearInterval(t);
-  }, [fetchStatus]);
+    let mounted = true;
+
+    const run = async () => {
+      if (!mounted) return;
+      await fetchRef.current?.();
+      if (!mounted) return;
+      const delay = consecutiveFailures.current >= OFFLINE_THRESHOLD
+        ? POLL_OFFLINE_MS
+        : POLL_NORMAL_MS;
+      pollTimer.current = setTimeout(run, delay);
+    };
+
+    void run();
+
+    return () => {
+      mounted = false;
+      if (pollTimer.current) clearTimeout(pollTimer.current);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const MODE_BADGE: Record<string, string> = {
     AUTONOMOUS_AI:   'bg-[var(--color-long)]/10 text-[var(--color-long)] border-[var(--color-long)]/30',
@@ -109,7 +159,14 @@ export function ExecutorStatusWidget() {
           </span>
         </div>
         <div className="flex items-center gap-2">
-          {health?.uptimeSeconds != null && (
+          {/* Offline badge — shown after ≥2 consecutive fetch failures */}
+          {isOffline && (
+            <div className="flex items-center gap-1 px-1.5 py-0.5 rounded-full border border-[var(--color-short)]/40 bg-[var(--color-short)]/5 text-[var(--color-short)] text-[9px] font-bold">
+              <WifiOff className="w-2.5 h-2.5" />
+              오프라인
+            </div>
+          )}
+          {health?.uptimeSeconds != null && !isOffline && (
             <span className="text-[10px] text-muted-foreground font-mono">
               ↑ {formatUptime(health.uptimeSeconds)}
             </span>
@@ -258,12 +315,20 @@ export function ExecutorStatusWidget() {
           </div>
         )}
 
-        {/* Last fetch */}
-        {lastFetch && (
-          <div className="text-[9px] text-muted-foreground text-right">
-            {format(lastFetch, 'HH:mm:ss')} 기준 · 30s 자동 갱신
-          </div>
-        )}
+        {/* Last fetch / offline state */}
+        <div className="text-[9px] text-right">
+          {isOffline ? (
+            <span className="text-[var(--color-short)]/70">
+              상태 조회 실패
+              {lastFetch ? ` · 마지막 성공 ${format(lastFetch, 'HH:mm:ss')}` : ''}
+               · 60s 재시도 중
+            </span>
+          ) : lastFetch ? (
+            <span className="text-muted-foreground">
+              {format(lastFetch, 'HH:mm:ss')} 기준 · 30s 자동 갱신
+            </span>
+          ) : null}
+        </div>
 
         {/* Settings link */}
         <Button asChild variant="ghost" size="sm" className="h-7 text-xs text-muted-foreground hover:text-foreground w-full justify-start">
