@@ -225,6 +225,152 @@ export function getCachedChange24h(): Record<string, number> | null {
  */
 export { ensurePoller as ensureGmxPoller };
 
+// ── Positions proxy ──────────────────────────────────────────────────────────
+//
+// Browser → GET /api/gmx/positions?account=0x…  →  server → Satsuma GraphQL
+//
+// Rationale: Satsuma's CORS policy blocks direct browser requests in many
+// environments. Proxying through the API server removes that restriction and
+// lets the server add retry / fallback logic without affecting the browser.
+// The per-account 30s cache prevents excessive upstream calls.
+
+const SATSUMA_URL =
+  'https://subgraph.satsuma-prod.com/3b2ced13c8d9/gmx/synthetics-arbitrum-stats/api';
+
+const POSITIONS_QUERY_FULL = `
+  query AccountPositions($account: String!) {
+    positions(first: 20, where: { account: $account, sizeInUsd_gt: "0" }) {
+      id account market collateralToken sizeInUsd sizeInTokens
+      collateralAmount realisedPnlUsd isLong increasedAtTime liquidationPrice
+    }
+  }
+`;
+
+const POSITIONS_QUERY_BASIC = `
+  query AccountPositions($account: String!) {
+    positions(first: 20, where: { account: $account, sizeInUsd_gt: "0" }) {
+      id account market collateralToken sizeInUsd sizeInTokens
+      collateralAmount realisedPnlUsd isLong increasedAtTime
+    }
+  }
+`;
+
+/** Raw position shape returned by the Satsuma GraphQL schema. */
+type SubgraphPosition = {
+  id:               string;
+  account:          string;
+  market:           string;
+  collateralToken:  string;
+  sizeInUsd:        string;
+  sizeInTokens?:    string | null;
+  collateralAmount: string;
+  realisedPnlUsd:   string;
+  isLong:           boolean;
+  increasedAtTime?: string | null;
+  liquidationPrice?: string | null;
+};
+
+export interface PositionsResult {
+  positions: SubgraphPosition[];
+  /** 'subgraph' when Satsuma responded, 'unavailable' when all upstreams failed. */
+  source: 'subgraph' | 'unavailable';
+}
+
+/** Per-account cache (account → CacheEntry). TTL = 30 s. */
+const positionsCache = new Map<string, CacheEntry<PositionsResult>>();
+const POSITIONS_CACHE_TTL = 30_000;
+
+/** Server-side flag: false once we confirm the Satsuma schema lacks liquidationPrice. */
+let sgSupportsLiqPrice = true;
+
+function isValidAddress(addr: string): boolean {
+  return /^0x[0-9a-fA-F]{40}$/.test(addr);
+}
+
+/** Query Satsuma from the server side (no CORS). Returns null on any failure. */
+async function fetchFromSatsuma(account: string): Promise<SubgraphPosition[] | null> {
+  const query = sgSupportsLiqPrice ? POSITIONS_QUERY_FULL : POSITIONS_QUERY_BASIC;
+  try {
+    const r = await fetch(SATSUMA_URL, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ query, variables: { account } }),
+      signal:  AbortSignal.timeout(10_000),
+    });
+    if (!r.ok) return null;
+
+    const json = await r.json() as {
+      data?:   { positions?: SubgraphPosition[] };
+      errors?: Array<{ message: string }>;
+    };
+
+    // Detect missing liquidationPrice field and retry without it once.
+    if (
+      json.errors?.length &&
+      sgSupportsLiqPrice &&
+      json.errors.some(e =>
+        e.message.toLowerCase().includes('liquidationprice') ||
+        e.message.toLowerCase().includes('cannot query field')
+      )
+    ) {
+      sgSupportsLiqPrice = false;
+      const r2 = await fetch(SATSUMA_URL, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ query: POSITIONS_QUERY_BASIC, variables: { account } }),
+        signal:  AbortSignal.timeout(10_000),
+      });
+      if (!r2.ok) return null;
+      const j2 = await r2.json() as typeof json;
+      if (j2.errors?.length && !j2.data?.positions) return null;
+      return j2.data?.positions ?? null;
+    }
+
+    if (json.errors?.length && !json.data?.positions) return null;
+    return json.data?.positions ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * GET /api/gmx/positions?account=0x…
+ *
+ * Returns positions for the given wallet address by querying the GMX Synthetics
+ * subgraph (Satsuma) server-side.  Avoids browser CORS restrictions on Satsuma.
+ * Per-account 30 s cache.  Returns { positions: [], source: "unavailable" } when
+ * all upstreams are unreachable — never throws.
+ *
+ * Privacy: only the wallet address is sent in the query parameter.
+ * No private keys, balances, or signatures are accepted or stored.
+ */
+router.get("/gmx/positions", async (req, res) => {
+  const account = String(req.query.account ?? "").toLowerCase();
+  if (!isValidAddress(account)) {
+    return res
+      .status(400)
+      .json({ error: "Invalid account address — must be 0x + 40 hex chars" });
+  }
+
+  // Serve from cache when fresh
+  const cached = positionsCache.get(account);
+  if (cached && Date.now() < cached.expiresAt) {
+    res.setHeader("Cache-Control", "no-cache");
+    return res.json(cached.data);
+  }
+
+  // Try Satsuma (server-side → no CORS)
+  const fetched = await fetchFromSatsuma(account);
+  const result: PositionsResult =
+    fetched != null
+      ? { positions: fetched, source: "subgraph" }
+      : { positions: [], source: "unavailable" };
+
+  positionsCache.set(account, { data: result, expiresAt: Date.now() + POSITIONS_CACHE_TTL });
+  res.setHeader("Cache-Control", "no-cache");
+  return res.json(result);
+});
+
 // ── Routes ───────────────────────────────────────────────────────────────────
 
 /**

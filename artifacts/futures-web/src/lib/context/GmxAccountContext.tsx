@@ -20,64 +20,31 @@ import {
 } from 'react';
 import { useWallet } from './WalletContext';
 
-// ── Subgraph ──────────────────────────────────────────────────────────────────
-const SUBGRAPH_URL =
-  'https://subgraph.satsuma-prod.com/3b2ced13c8d9/gmx/synthetics-arbitrum-stats/api';
+// ── Positions are fetched via the API server proxy (/api/gmx/positions) ───────
+//
+// The browser no longer calls the Satsuma subgraph directly.  Reasons:
+//   1. Satsuma's CORS policy blocks browser requests in many environments.
+//   2. Proxying through the API server lets the server handle schema fallbacks
+//      (liquidationPrice) and retry logic without involving the browser.
+//
+// The API server returns { positions: SubgraphPosition[], source: 'subgraph'|'unavailable' }.
+// When source = 'unavailable' the positions array is empty and subgraphOk=false
+// is reported to the wallet diagnostic.
 
-/**
- * Full query — includes liquidationPrice.
- * GMX V2 Synthetics subgraph (Satsuma) may or may not expose this field depending on
- * deployment version. We try this first and fall back to POSITIONS_QUERY_BASIC on a
- * schema error to avoid breaking position display entirely.
- */
-const POSITIONS_QUERY_FULL = `
-  query AccountPositions($account: String!) {
-    positions(
-      first: 20
-      where: { account: $account, sizeInUsd_gt: "0" }
-    ) {
-      id
-      account
-      market
-      collateralToken
-      sizeInUsd
-      sizeInTokens
-      collateralAmount
-      realisedPnlUsd
-      isLong
-      increasedAtTime
-      liquidationPrice
-    }
-  }
-`;
-
-/** Fallback query — omits liquidationPrice when the subgraph schema does not support it. */
-const POSITIONS_QUERY_BASIC = `
-  query AccountPositions($account: String!) {
-    positions(
-      first: 20
-      where: { account: $account, sizeInUsd_gt: "0" }
-    ) {
-      id
-      account
-      market
-      collateralToken
-      sizeInUsd
-      sizeInTokens
-      collateralAmount
-      realisedPnlUsd
-      isLong
-      increasedAtTime
-    }
-  }
-`;
-
-/**
- * Module-level flag: start optimistic (try liquidationPrice).
- * Set to false once we confirm the subgraph schema does not expose that field —
- * avoids sending a known-failing query on every subsequent poll.
- */
-let sgSupportsLiqPrice = true;
+/** Raw position shape as returned by /api/gmx/positions (mirrors Satsuma GraphQL). */
+type ProxyPosition = {
+  id:               string;
+  account:          string;
+  market:           string;
+  collateralToken:  string;
+  sizeInUsd:        string;
+  sizeInTokens?:    string | null;
+  collateralAmount: string;
+  realisedPnlUsd:   string;
+  isLong:           boolean;
+  increasedAtTime?: string | null;
+  liquidationPrice?: string | null;
+};
 
 // ── GMX precision: sizeInUsd / realisedPnlUsd use 30 decimals ────────────────
 const GMX_PRECISION = 1e30;
@@ -185,8 +152,9 @@ async function getMarketSymbols(): Promise<Record<string, string>> {
     ]);
     if (!marketsRes.ok || !tokensRes.ok) throw new Error('markets/tokens fetch failed');
 
-    const { markets } = await marketsRes.json() as { markets: Array<{ marketToken: string; indexToken: string }> };
-    const { tokens }  = await tokensRes.json()  as { tokens:  Array<{ address: string; symbol: string }> };
+    // /api/gmx/markets and /api/gmx/tokens return raw arrays (not wrapped objects)
+    const markets = await marketsRes.json() as Array<{ marketToken: string; indexToken: string }>;
+    const tokens  = await tokensRes.json()  as Array<{ address: string; symbol: string }>;
 
     // Build: token address (lowercase) → symbol
     const tokenMap: Record<string, string> = {};
@@ -236,29 +204,25 @@ export function GmxAccountProvider({ children }: { children: ReactNode }) {
     const fetchStart = Date.now();
 
     try {
-      // ── Choose query based on cached schema-support flag ─────────────────
-      const activeQuery = sgSupportsLiqPrice
-        ? POSITIONS_QUERY_FULL
-        : POSITIONS_QUERY_BASIC;
-
-      // Load market → symbol registry AND current GMX mark prices in parallel with subgraph query
-      const [symbolMap, pricesRes, sgRes] = await Promise.all([
+      // ── Fetch via API server proxy (no direct Satsuma call from browser) ──
+      // The server handles CORS, schema fallback, and caching.
+      const [symbolMap, pricesRes, posRes] = await Promise.all([
         getMarketSymbols(),
         fetch('/api/gmx/prices', { signal: AbortSignal.timeout(5_000) }).catch(() => null),
-        fetch(SUBGRAPH_URL, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            query: activeQuery,
-            variables: { account: address.toLowerCase() },
-          }),
-          signal: AbortSignal.timeout(12_000),
-        }),
+        fetch(
+          `/api/gmx/positions?account=${encodeURIComponent(address.toLowerCase())}`,
+          { signal: ctrl.signal },
+        ),
       ]);
 
-      if (!sgRes.ok) throw new Error(`Subgraph HTTP ${sgRes.status}`);
+      if (!posRes.ok) throw new Error(`Positions proxy HTTP ${posRes.status}`);
 
-      // Parse mark prices (silently ignore on error — unrealizedPnl will be null)
+      const { positions: rawPositions, source } = await posRes.json() as {
+        positions: ProxyPosition[];
+        source:    string;
+      };
+
+      // Parse mark prices (non-fatal — unrealizedPnl stays null on error)
       let markPriceBySymbol: Record<string, number> = {};
       try {
         if (pricesRes?.ok) {
@@ -268,55 +232,6 @@ export function GmxAccountProvider({ children }: { children: ReactNode }) {
           }
         }
       } catch { /* non-fatal */ }
-
-      const json = await sgRes.json() as {
-        data?: {
-          positions?: Array<{
-            id: string; account: string; market: string;
-            collateralToken: string; sizeInUsd: string;
-            sizeInTokens?: string | null; collateralAmount: string;
-            realisedPnlUsd: string;
-            isLong: boolean; increasedAtTime?: string | null;
-            liquidationPrice?: string | null;
-          }>;
-        };
-        errors?: Array<{ message: string }>;
-      };
-
-      // ── Detect "liquidationPrice not in schema" error and retry ──────────
-      // When the subgraph schema doesn't expose liquidationPrice, GraphQL returns
-      // an errors array with "Cannot query field" and no data. We flip the flag
-      // and immediately retry with the basic query so positions still display.
-      if (
-        json.errors?.length &&
-        sgSupportsLiqPrice &&
-        json.errors.some(e =>
-          e.message.toLowerCase().includes('liquidationprice') ||
-          e.message.toLowerCase().includes('cannot query field')
-        )
-      ) {
-        console.info('[GmxAccount] subgraph does not support liquidationPrice — falling back to basic query');
-        sgSupportsLiqPrice = false;
-
-        const fallbackRes = await fetch(SUBGRAPH_URL, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            query: POSITIONS_QUERY_BASIC,
-            variables: { account: address.toLowerCase() },
-          }),
-          signal: AbortSignal.timeout(12_000),
-        });
-        if (!fallbackRes.ok) throw new Error(`Subgraph HTTP ${fallbackRes.status}`);
-        const fallbackJson = await fallbackRes.json() as typeof json;
-        if (fallbackJson.errors?.length) throw new Error(fallbackJson.errors[0].message);
-        // Overwrite json so the rest of the processing is identical
-        Object.assign(json, fallbackJson);
-      } else if (json.errors?.length) {
-        throw new Error(json.errors[0].message);
-      }
-
-      const rawPositions = json.data?.positions ?? [];
 
       const positions: GmxOnchainPosition[] = rawPositions.map(p => {
         const sym = symbolMap[p.market?.toLowerCase()] ?? 'Unknown';
@@ -396,14 +311,17 @@ export function GmxAccountProvider({ children }: { children: ReactNode }) {
         lastFetchMs:        Date.now() - fetchStart,
       });
 
-      // ── Diagnostic snapshot — subgraph result only, no financial amounts ──
+      // ── Diagnostic snapshot — boolean flags only, no financial amounts ──────
+      // subgraphOk = true when the server proxy reached the subgraph (source='subgraph').
+      // Even 'unavailable' (all upstream sources failed) is a valid outcome —
+      // it clears the "fetch failed" error log and gives a meaningful diagnostic signal.
       void fetch('/api/wallet/diagnostic', {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           walletConnected:    true,
           addressFingerprint: `${address.slice(0, 6)}\u2026${address.slice(-4)}`,
-          subgraphOk:         true,
+          subgraphOk:         source !== 'unavailable',
           positionCount:      positions.length,
           lastRefreshAt:      now.toISOString(),
         }),
