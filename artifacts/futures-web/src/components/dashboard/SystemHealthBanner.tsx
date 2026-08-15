@@ -1,9 +1,10 @@
 /**
- * SystemHealthBanner — shows a dismissible warning when VPS / API connectivity
- * is degraded or lost.
+ * SystemHealthBanner — dismissible warning when execution connectivity is degraded.
  *
- * In LIVE_TRADING mode: fail-closed message — no new live orders will be queued.
- * In other modes:       informational only — paper trades continue locally.
+ * In LIVE_TRADING mode: fail-closed — no new live orders will be queued.
+ * In other modes:       informational — paper trades continue locally.
+ *
+ * Works for both Internal Replit Executor and External VPS modes.
  */
 
 import { WifiOff, AlertTriangle, X } from 'lucide-react';
@@ -13,21 +14,22 @@ import { useAiEngine } from '@/lib/context/AiEngineContext';
 import { cn } from '@/lib/utils';
 
 export function SystemHealthBanner() {
-  const { connectionStatus, connectionHealthEvent, dismissHealthEvent, config } = useVpsContext();
+  const { connectionStatus, connectionHealthEvent, dismissHealthEvent, config, executorMode } = useVpsContext();
   const { engineState } = useAppContext();
   const { systemPaused, pauseReason } = useAiEngine();
 
-  const isLive      = engineState === 'LIVE_TRADING';
-  const isVpsDown   = connectionStatus === 'disconnected' || connectionStatus === 'error';
-  const hasNoHost   = !config.host.trim();
+  const isLive       = engineState === 'LIVE_TRADING';
+  const isDown       = connectionStatus === 'disconnected' || connectionStatus === 'error';
+  const isError      = connectionStatus === 'error';
+  // Internal executor is always "configured" — no host needed
+  const isUnconfigured = executorMode === 'external' && !config.host.trim();
 
-  // Nothing to show when VPS is healthy and no active health event and engine is not paused
-  if (!isVpsDown && !connectionHealthEvent && !systemPaused) return null;
+  // Nothing to show when executor is healthy, no active event, and engine not paused
+  if (!isDown && !connectionHealthEvent && !systemPaused) return null;
+  // Skip if external VPS isn't configured and engine is not paused
+  if (isUnconfigured && !systemPaused) return null;
 
-  // Skip if VPS isn't configured yet (user hasn't set it up)
-  if (hasNoHost && !systemPaused) return null;
-
-  const isError = connectionStatus === 'error';
+  const executorLabel = executorMode === 'internal' ? 'Internal Executor' : 'External VPS';
 
   return (
     <div
@@ -40,7 +42,7 @@ export function SystemHealthBanner() {
     >
       {/* Icon */}
       <div className="mt-0.5 shrink-0">
-        {isVpsDown
+        {isDown
           ? <WifiOff className={cn('w-4 h-4 animate-pulse', isLive ? 'text-[var(--color-short)]' : 'text-[var(--color-warning)]')} />
           : <AlertTriangle className="w-4 h-4 text-[var(--color-warning)] animate-pulse" />
         }
@@ -53,8 +55,8 @@ export function SystemHealthBanner() {
           isLive ? 'text-[var(--color-short)]' : 'text-[var(--color-warning)]',
         )}>
           {isLive
-            ? (isVpsDown ? 'FAIL-CLOSED — LIVE MODE' : 'AI PAUSED — LIVE MODE')
-            : (isError ? 'VPS CONNECTION ERROR' : 'VPS DISCONNECTED')
+            ? (isDown ? 'FAIL-CLOSED — LIVE MODE' : 'AI PAUSED — LIVE MODE')
+            : (isError ? `${executorLabel.toUpperCase()} ERROR` : `${executorLabel.toUpperCase()} OFFLINE`)
           }
           {' — '}
         </span>
@@ -62,19 +64,19 @@ export function SystemHealthBanner() {
           {systemPaused && pauseReason
             ? pauseReason
             : isLive
-              ? 'No new live orders will be queued until VPS reconnects. Open positions continue to be tracked locally.'
-              : 'Paper trading continues locally. AI decisions are recorded. Reconnect VPS to enable live order forwarding.'
+              ? `No new live orders will be queued until ${executorLabel} reconnects. Open positions continue to be tracked locally.`
+              : `Paper trading continues locally. AI decisions are recorded. Reconnect ${executorLabel} to enable live order forwarding.`
           }
         </span>
-        {!config.host.trim() && (
+        {isUnconfigured && (
           <span className="block text-[10px] text-muted-foreground/70 mt-0.5">
-            → Configure VPS host in Settings to enable connectivity monitoring.
+            → Configure External VPS host in Settings → Advanced to enable connectivity monitoring.
           </span>
         )}
       </div>
 
-      {/* Dismiss button (only for transient health events, not persistent down state) */}
-      {connectionHealthEvent && !isVpsDown && (
+      {/* Dismiss button (only for transient events, not persistent down state) */}
+      {connectionHealthEvent && !isDown && (
         <button
           onClick={dismissHealthEvent}
           className="shrink-0 p-1 rounded-md hover:bg-white/10 transition-colors"

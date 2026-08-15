@@ -290,7 +290,7 @@ export default function SettingsScreen() {
   };
 
   const handleTestVps = async () => {
-    await saveVpsConfig({ host: vpsHost, port: vpsPort, useSSL: vpsSSL });
+    await saveVpsConfig({ ...vpsConfig, host: vpsHost, port: vpsPort, useSSL: vpsSSL });
     setVpsTesting(true);
     await testVpsConn();
     setVpsTesting(false);
@@ -430,7 +430,7 @@ export default function SettingsScreen() {
             <TextInput
               value={vpsHost}
               onChangeText={setVpsHost}
-              onBlur={() => saveVpsConfig({ host: vpsHost, port: vpsPort, useSSL: vpsSSL })}
+              onBlur={() => saveVpsConfig({ ...vpsConfig, host: vpsHost, port: vpsPort, useSSL: vpsSSL })}
               placeholder="e.g. 192.168.1.100 or my-vps.example.com"
               placeholderTextColor={colors.mutedForeground}
               style={[styles.vpsInput, { color: colors.foreground, backgroundColor: colors.background, borderColor: colors.border }]}
@@ -446,7 +446,7 @@ export default function SettingsScreen() {
               <TextInput
                 value={vpsPort}
                 onChangeText={setVpsPort}
-                onBlur={() => saveVpsConfig({ host: vpsHost, port: vpsPort, useSSL: vpsSSL })}
+                onBlur={() => saveVpsConfig({ ...vpsConfig, host: vpsHost, port: vpsPort, useSSL: vpsSSL })}
                 placeholder="8080"
                 placeholderTextColor={colors.mutedForeground}
                 style={[styles.vpsInput, { color: colors.foreground, backgroundColor: colors.background, borderColor: colors.border }]}
@@ -460,7 +460,7 @@ export default function SettingsScreen() {
             <Text style={[styles.settLabel, { color: colors.foreground }]}>Use SSL / TLS</Text>
             <Switch
               value={vpsSSL}
-              onValueChange={v => { setVpsSSL(v); saveVpsConfig({ host: vpsHost, port: vpsPort, useSSL: v }); }}
+              onValueChange={v => { setVpsSSL(v); saveVpsConfig({ ...vpsConfig, host: vpsHost, port: vpsPort, useSSL: v }); }}
               trackColor={{ false: '#2A2D3A', true: colors.primary + '44' }}
               thumbColor={vpsSSL ? colors.primary : '#6B7280'}
             />

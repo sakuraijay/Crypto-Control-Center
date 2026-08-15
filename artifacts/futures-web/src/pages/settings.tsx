@@ -7,7 +7,8 @@ import { Input } from '@/components/ui/input';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
 import {
   ShieldAlert, Server, Lock, AlertTriangle, AlertOctagon,
-  Wifi, WifiOff, Loader2, Info,
+  Wifi, WifiOff, Loader2, Info, CheckCircle2, XCircle,
+  Globe, Cpu, ChevronDown, ChevronUp,
 } from 'lucide-react';
 import { VpsStatusPanel } from '@/components/vps/VpsStatusPanel';
 import { cn } from '@/lib/utils';
@@ -16,12 +17,17 @@ export default function Settings() {
   const { engineState, stopNewOrders, toggleStopNewOrders, triggerEmergencyStop, resetFromEmergency } = useAppContext();
   const { logout } = useAuthContext();
   const { clearAllPositions, positions } = useTradingContext();
-  const { config, connectionStatus, connectionError, health, saveConfig, testConnection, disconnect } = useVpsContext();
+  const {
+    config, connectionStatus, connectionError, health, saveConfig, testConnection, disconnect,
+    executorMode, setExecutorMode,
+    internalReady, internalSignerConfigured, internalDeploymentMode,
+  } = useVpsContext();
 
   const [closeAllPhase, setCloseAllPhase] = useState<0 | 1 | 2>(0);
   const [testing, setTesting] = useState(false);
+  const [showAdvancedVps, setShowAdvancedVps] = useState(executorMode === 'external');
 
-  // Local VPS form state
+  // Local VPS form state (external mode)
   const [vpsHost, setVpsHost] = useState(config.host);
   const [vpsPort, setVpsPort] = useState(config.port);
   const [vpsSSL, setVpsSSL] = useState(config.useSSL);
@@ -30,7 +36,7 @@ export default function Settings() {
   const isEmergency = engineState === 'EMERGENCY_STOP';
 
   const handleVpsTest = async () => {
-    saveConfig({ host: vpsHost, port: vpsPort, useSSL: vpsSSL });
+    saveConfig({ host: vpsHost, port: vpsPort, useSSL: vpsSSL, executorMode });
     setVpsFormDirty(false);
     setTesting(true);
     await testConnection();
@@ -69,10 +75,10 @@ export default function Settings() {
       <div className="flex items-start gap-3 px-4 py-3 rounded-lg border border-border bg-card/50 text-xs text-muted-foreground">
         <Info className="w-4 h-4 shrink-0 mt-0.5 text-primary" />
         <div className="leading-relaxed">
-          <strong className="text-foreground">This app is a monitoring and control interface only.</strong>
-          {' '}The private VPS is the 24/7 trading authority — it continues strategy evaluation, position management,
-          TP/SL handling, and (when armed) autonomous entries while you are offline or asleep.
-          Paper mode is always safe regardless of VPS state.
+          <strong className="text-foreground">Replit Executor is the primary 24/7 execution authority.</strong>
+          {' '}It runs inside this deployment and continues strategy evaluation, position management,
+          TP/SL handling, and (when armed) autonomous entries — even while you are offline or asleep.
+          An optional External VPS can be configured as an advanced alternative. Paper mode is always safe.
         </div>
       </div>
 
@@ -92,113 +98,238 @@ export default function Settings() {
               {isEmergency ? 'All trading halted. Reset to resume.' : 'Mock execution only — no real orders placed.'}
             </p>
           </Card>
-          <Card className="p-5 bg-card/50 opacity-60">
+          <Card className="p-5 bg-card/50">
             <div className="text-xs text-muted-foreground uppercase tracking-wider mb-2 font-medium flex justify-between">
-              Live Execution (VPS) <Lock className="w-4 h-4" />
+              Live Execution (Executor) <Lock className="w-4 h-4" />
             </div>
             <div className="flex items-center gap-3">
               <div className="w-3 h-3 rounded-full bg-muted" />
-              <span className="font-bold text-muted-foreground">NOT ENABLED BY DEFAULT</span>
+              <span className="font-bold text-muted-foreground">APPROVAL REQUIRED</span>
             </div>
             <p className="text-xs text-muted-foreground mt-2">
-              Live trading requires a GMX One-Click subaccount configured on the VPS — never your primary wallet key.
+              Live orders require operator approval (LIVE mode) and a configured GMX One-Click subaccount.
             </p>
           </Card>
         </div>
       </section>
 
-      {/* ── VPS Live Status Panel ── */}
+      {/* ── Executor Mode Selector ── */}
+      <section className="flex flex-col gap-4">
+        <h2 className="font-semibold flex items-center gap-2 border-b border-border pb-2 text-base">
+          <Cpu className="w-4 h-4 text-primary" /> Execution Target
+        </h2>
+
+        {/* Mode toggle */}
+        <div className="grid grid-cols-2 gap-3">
+          <button
+            onClick={() => { setExecutorMode('internal'); setShowAdvancedVps(false); }}
+            className={cn(
+              'flex flex-col items-start gap-1.5 p-4 rounded-lg border text-left transition-all',
+              executorMode === 'internal'
+                ? 'border-primary/50 bg-primary/5'
+                : 'border-border bg-card/30 opacity-60 hover:opacity-80',
+            )}
+          >
+            <div className="flex items-center gap-2">
+              <Cpu className={cn('w-4 h-4', executorMode === 'internal' ? 'text-primary' : 'text-muted-foreground')} />
+              <span className="text-sm font-bold">Internal Executor</span>
+              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/15 text-primary font-semibold">DEFAULT</span>
+            </div>
+            <p className="text-[11px] text-muted-foreground leading-relaxed">
+              Runs inside this Replit deployment. No external server needed. 24/7 on Reserved VM.
+            </p>
+          </button>
+
+          <button
+            onClick={() => { setExecutorMode('external'); setShowAdvancedVps(true); }}
+            className={cn(
+              'flex flex-col items-start gap-1.5 p-4 rounded-lg border text-left transition-all',
+              executorMode === 'external'
+                ? 'border-amber-500/50 bg-amber-500/5'
+                : 'border-border bg-card/30 opacity-60 hover:opacity-80',
+            )}
+          >
+            <div className="flex items-center gap-2">
+              <Globe className={cn('w-4 h-4', executorMode === 'external' ? 'text-amber-400' : 'text-muted-foreground')} />
+              <span className="text-sm font-bold">External VPS</span>
+              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-border text-muted-foreground font-semibold">ADVANCED</span>
+            </div>
+            <p className="text-[11px] text-muted-foreground leading-relaxed">
+              User-managed server holds the GMX subaccount key. Requires host/port configuration.
+            </p>
+          </button>
+        </div>
+
+        {/* Internal executor readiness badges */}
+        {executorMode === 'internal' && (
+          <div className="flex flex-wrap gap-2">
+            <div className={cn(
+              'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-[11px] font-medium',
+              connectionStatus === 'connected'
+                ? 'border-[var(--color-long)]/30 bg-[var(--color-long)]/5 text-[var(--color-long)]'
+                : connectionStatus === 'error'
+                  ? 'border-[var(--color-short)]/30 bg-[var(--color-short)]/5 text-[var(--color-short)]'
+                  : 'border-border bg-card/50 text-muted-foreground',
+            )}>
+              {connectionStatus === 'connected'
+                ? <CheckCircle2 className="w-3.5 h-3.5" />
+                : connectionStatus === 'error'
+                  ? <XCircle className="w-3.5 h-3.5" />
+                  : <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              }
+              Executor {connectionStatus === 'connected' ? 'Online' : connectionStatus === 'error' ? 'Unreachable' : 'Connecting'}
+            </div>
+
+            <div className={cn(
+              'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-[11px] font-medium',
+              internalSignerConfigured
+                ? 'border-[var(--color-long)]/30 bg-[var(--color-long)]/5 text-[var(--color-long)]'
+                : 'border-amber-500/30 bg-amber-500/5 text-amber-400',
+            )}>
+              {internalSignerConfigured
+                ? <CheckCircle2 className="w-3.5 h-3.5" />
+                : <AlertTriangle className="w-3.5 h-3.5" />
+              }
+              {internalSignerConfigured ? 'GMX Signer Configured' : 'Simulation Mode (no signer key)'}
+            </div>
+
+            <div className={cn(
+              'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-[11px] font-medium',
+              health.gmxConnected
+                ? 'border-[var(--color-long)]/30 bg-[var(--color-long)]/5 text-[var(--color-long)]'
+                : 'border-border bg-card/50 text-muted-foreground',
+            )}>
+              {health.gmxConnected
+                ? <CheckCircle2 className="w-3.5 h-3.5" />
+                : <XCircle className="w-3.5 h-3.5" />
+              }
+              GMX RPC {health.gmxConnected ? 'Healthy' : 'Disconnected'}
+            </div>
+
+            {internalDeploymentMode && (
+              <div className={cn(
+                'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-[11px] font-medium',
+                internalDeploymentMode === 'reserved_vm'
+                  ? 'border-primary/30 bg-primary/5 text-primary'
+                  : 'border-border bg-card/50 text-muted-foreground',
+              )}>
+                <Server className="w-3.5 h-3.5" />
+                {internalDeploymentMode === 'reserved_vm' ? 'Reserved VM (always-on)' : 'Development (may sleep)'}
+              </div>
+            )}
+          </div>
+        )}
+      </section>
+
+      {/* ── Execution Engine Status Panel ── */}
       <section className="flex flex-col gap-4">
         <h2 className="font-semibold flex items-center gap-2 border-b border-border pb-2 text-lg">
-          <Server className="w-5 h-5 text-primary" /> VPS Engine Status
+          <Server className="w-5 h-5 text-primary" /> Execution Engine Status
         </h2>
         <VpsStatusPanel showConfigLink={false} />
       </section>
 
-      {/* ── VPS Configuration ── */}
-      <section className="flex flex-col gap-4">
-        <h2 className="font-semibold flex items-center gap-2 border-b border-border pb-2 text-base text-muted-foreground">
-          VPS Connection Settings
-        </h2>
-
-        {/* Status bar */}
-        <div className={cn('flex items-center gap-3 px-4 py-3 rounded-lg border text-sm', {
-          'border-[var(--color-long)]/30 bg-[var(--color-long)]/5': connectionStatus === 'connected',
-          'border-[var(--color-warning)]/30 bg-[var(--color-warning)]/5': connectionStatus === 'connecting',
-          'border-destructive/30 bg-destructive/5': connectionStatus === 'error',
-          'border-border bg-card/50': connectionStatus === 'disconnected',
-        })}>
-          <StatusDot />
-          <span className="font-semibold uppercase tracking-wider text-xs">
-            {connectionStatus === 'connected' ? 'Connected' :
-             connectionStatus === 'connecting' ? 'Connecting…' :
-             connectionStatus === 'error' ? 'Connection Failed' : 'Disconnected'}
+      {/* ── External VPS Connection Settings (Advanced) ── */}
+      <section className="flex flex-col gap-2">
+        <button
+          onClick={() => setShowAdvancedVps(v => !v)}
+          className="flex items-center gap-2 w-full text-left py-2 border-b border-border group"
+        >
+          <Globe className="w-4 h-4 text-muted-foreground group-hover:text-foreground transition-colors" />
+          <span className="font-semibold text-base text-muted-foreground group-hover:text-foreground transition-colors">
+            External VPS Settings
+            <span className="ml-2 text-xs font-normal">(Advanced — optional)</span>
           </span>
-          {connectionStatus === 'connected' && health.heartbeatLatencyMs != null && (
-            <span className="text-muted-foreground text-xs ml-1">· {health.heartbeatLatencyMs}ms</span>
-          )}
-          {connectionError && <span className="text-destructive text-xs ml-2">{connectionError}</span>}
-          {connectionStatus === 'connected' && (
-            <Button size="sm" variant="ghost" className="ml-auto h-6 text-xs" onClick={disconnect}>
-              Disconnect
-            </Button>
-          )}
-        </div>
+          {showAdvancedVps
+            ? <ChevronUp className="w-4 h-4 ml-auto text-muted-foreground" />
+            : <ChevronDown className="w-4 h-4 ml-auto text-muted-foreground" />
+          }
+        </button>
 
-        <Card className="p-5 flex flex-col gap-4">
-          <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            <AlertOctagon className="w-3.5 h-3.5 text-[var(--color-warning)]" />
-            API keys and credentials are configured on the VPS — never entered here. This stores only connection metadata.
-          </div>
-
-          <div className="grid grid-cols-3 gap-3">
-            <div className="col-span-2 flex flex-col gap-1.5">
-              <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Host / IP Address</label>
-              <Input
-                value={vpsHost}
-                onChange={e => { setVpsHost(e.target.value); setVpsFormDirty(true); }}
-                placeholder="e.g. 192.168.1.100 or my-vps.example.com"
-                className="font-mono text-sm"
-              />
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Port</label>
-              <Input
-                value={vpsPort}
-                onChange={e => { setVpsPort(e.target.value); setVpsFormDirty(true); }}
-                placeholder="8080"
-                className="font-mono text-sm"
-              />
-            </div>
-          </div>
-
-          <div className="flex items-center gap-3">
-            <Switch checked={vpsSSL} onCheckedChange={v => { setVpsSSL(v); setVpsFormDirty(true); }} />
-            <span className="text-sm text-foreground">Use SSL / TLS</span>
-            <span className="text-xs text-muted-foreground">Recommended for production</span>
-          </div>
-
-          <div className="flex gap-3 pt-1">
-            {vpsFormDirty && (
-              <Button variant="outline" size="sm" onClick={() => {
-                saveConfig({ host: vpsHost, port: vpsPort, useSSL: vpsSSL });
-                setVpsFormDirty(false);
-              }}>
-                Save
-              </Button>
+        {showAdvancedVps && (
+          <div className="flex flex-col gap-4 pt-2 pl-1">
+            {executorMode === 'external' && (
+              /* Status bar — only shown when external mode active */
+              <div className={cn('flex items-center gap-3 px-4 py-3 rounded-lg border text-sm', {
+                'border-[var(--color-long)]/30 bg-[var(--color-long)]/5': connectionStatus === 'connected',
+                'border-[var(--color-warning)]/30 bg-[var(--color-warning)]/5': connectionStatus === 'connecting',
+                'border-destructive/30 bg-destructive/5': connectionStatus === 'error',
+                'border-border bg-card/50': connectionStatus === 'disconnected',
+              })}>
+                <StatusDot />
+                <span className="font-semibold uppercase tracking-wider text-xs">
+                  {connectionStatus === 'connected' ? 'Connected' :
+                   connectionStatus === 'connecting' ? 'Connecting…' :
+                   connectionStatus === 'error' ? 'Connection Failed' : 'Disconnected'}
+                </span>
+                {connectionStatus === 'connected' && health.heartbeatLatencyMs != null && (
+                  <span className="text-muted-foreground text-xs ml-1">· {health.heartbeatLatencyMs}ms</span>
+                )}
+                {connectionError && <span className="text-destructive text-xs ml-2">{connectionError}</span>}
+                {connectionStatus === 'connected' && (
+                  <Button size="sm" variant="ghost" className="ml-auto h-6 text-xs" onClick={disconnect}>
+                    Disconnect
+                  </Button>
+                )}
+              </div>
             )}
-            <Button
-              size="sm"
-              variant={connectionStatus === 'connected' ? 'outline' : 'default'}
-              onClick={handleVpsTest}
-              disabled={testing || !vpsHost.trim()}
-              className="flex items-center gap-2"
-            >
-              {testing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : connectionStatus === 'connected' ? <Wifi className="w-3.5 h-3.5" /> : <WifiOff className="w-3.5 h-3.5" />}
-              {testing ? 'Testing…' : connectionStatus === 'connected' ? 'Re-test' : 'Test Connection'}
-            </Button>
+
+            <Card className="p-5 flex flex-col gap-4">
+              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                <AlertOctagon className="w-3.5 h-3.5 text-[var(--color-warning)]" />
+                API keys and credentials are configured on the VPS — never entered here. This stores only connection metadata.
+              </div>
+
+              <div className="grid grid-cols-3 gap-3">
+                <div className="col-span-2 flex flex-col gap-1.5">
+                  <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Host / IP Address</label>
+                  <Input
+                    value={vpsHost}
+                    onChange={e => { setVpsHost(e.target.value); setVpsFormDirty(true); }}
+                    placeholder="e.g. 192.168.1.100 or my-vps.example.com"
+                    className="font-mono text-sm"
+                  />
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Port</label>
+                  <Input
+                    value={vpsPort}
+                    onChange={e => { setVpsPort(e.target.value); setVpsFormDirty(true); }}
+                    placeholder="8080"
+                    className="font-mono text-sm"
+                  />
+                </div>
+              </div>
+
+              <div className="flex items-center gap-3">
+                <Switch checked={vpsSSL} onCheckedChange={v => { setVpsSSL(v); setVpsFormDirty(true); }} />
+                <span className="text-sm text-foreground">Use SSL / TLS</span>
+                <span className="text-xs text-muted-foreground">Recommended for production</span>
+              </div>
+
+              <div className="flex gap-3 pt-1">
+                {vpsFormDirty && (
+                  <Button variant="outline" size="sm" onClick={() => {
+                    saveConfig({ host: vpsHost, port: vpsPort, useSSL: vpsSSL, executorMode });
+                    setVpsFormDirty(false);
+                  }}>
+                    Save
+                  </Button>
+                )}
+                <Button
+                  size="sm"
+                  variant={connectionStatus === 'connected' ? 'outline' : 'default'}
+                  onClick={handleVpsTest}
+                  disabled={testing || !vpsHost.trim()}
+                  className="flex items-center gap-2"
+                >
+                  {testing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : connectionStatus === 'connected' ? <Wifi className="w-3.5 h-3.5" /> : <WifiOff className="w-3.5 h-3.5" />}
+                  {testing ? 'Testing…' : connectionStatus === 'connected' ? 'Re-test' : 'Test Connection'}
+                </Button>
+              </div>
+            </Card>
           </div>
-        </Card>
+        )}
       </section>
 
       {/* ── Emergency Controls ── */}
@@ -248,12 +379,11 @@ export default function Settings() {
           </div>
         </Card>
 
-        {/* Unattended trading context note */}
         <div className="flex items-start gap-2 px-3 py-2 rounded-lg border border-amber-500/20 bg-amber-500/5 text-xs text-amber-300/80">
           <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5 text-amber-400" />
           <span>
-            Emergency Stop applies to this app's local engine only. If the VPS is armed for unattended trading,
-            use the Disarm button in the VPS Engine Status panel above to stop autonomous VPS activity.
+            Emergency Stop applies to this app's local engine only. If the Executor is armed for unattended trading,
+            use the Disarm button in the Execution Engine Status panel above to stop autonomous activity.
           </span>
         </div>
       </section>

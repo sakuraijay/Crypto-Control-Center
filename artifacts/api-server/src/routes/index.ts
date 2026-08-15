@@ -4,6 +4,7 @@ import gmxRouter from "./gmx";
 import dataRouter from "./data";
 import vpsRouter from "./vps";
 import aiRouter from "./ai";
+import executorRouter from "./executor";
 
 const router: IRouter = Router();
 
@@ -12,5 +13,6 @@ router.use(gmxRouter);
 router.use(dataRouter);
 router.use(vpsRouter);
 router.use(aiRouter);
+router.use(executorRouter);
 
 export default router;

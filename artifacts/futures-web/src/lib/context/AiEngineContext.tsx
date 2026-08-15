@@ -93,7 +93,7 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
   const { engineState, setEngineState } = useAppContext();
   const { limits } = useStrategyContext();
   const { watchlist } = useWatchlistContext();
-  const { connectionStatus, config: vpsConfig } = useVpsContext();
+  const { connectionStatus, config: vpsConfig, executorMode } = useVpsContext();
   const { toast } = useToast();
 
   const [currentDecision, setCurrentDecision] = useState<AiEngineDecision | null>(null);
@@ -328,21 +328,29 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
-  // ── Forward approved order to VPS (with query-param config + 1 retry) ───────
+  // ── Forward approved order to Executor (internal or external VPS) ────────────
   const forwardToVps = useCallback(async (
     decision: AiEngineDecision,
     snapshot?: { host: string; port: string; useSSL: boolean },
   ): Promise<{ ok: boolean; error?: string }> => {
-    // Use config captured at queue time (snapshot) so a host change mid-approval doesn't mis-route the order
-    const target = snapshot ?? { host: vpsConfig.host ?? '', port: vpsConfig.port ?? '8080', useSSL: vpsConfig.useSSL ?? false };
-    if (!target.host?.trim()) return { ok: false, error: 'VPS not configured — set host in Settings' };
+    const mode = executorMode ?? 'internal';
+    let url: string;
 
-    const params = new URLSearchParams({
-      host: target.host,
-      port: target.port || '8080',
-      ssl:  String(target.useSSL ?? false),
-    });
-    const url  = `/api-server/api/vps/execute?${params}`;
+    if (mode === 'internal') {
+      // Internal Replit Executor — no host/port needed
+      url = '/api-server/api/executor/execute';
+    } else {
+      // External VPS mode — use snapshotted or current config
+      // (snapshot captures config at queue time so a host change mid-approval doesn't mis-route)
+      const target = snapshot ?? { host: vpsConfig.host ?? '', port: vpsConfig.port ?? '8080', useSSL: vpsConfig.useSSL ?? false };
+      if (!target.host?.trim()) return { ok: false, error: 'External VPS not configured — set host in Settings → Advanced' };
+      const params = new URLSearchParams({
+        host: target.host,
+        port: target.port || '8080',
+        ssl:  String(target.useSSL ?? false),
+      });
+      url = `/api-server/api/vps/execute?${params}`;
+    }
     const body = JSON.stringify({
       decisionId:      decision.id,
       operatingState:  decision.operatingState,
@@ -368,7 +376,7 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
             await new Promise(r => setTimeout(r, 2_000));
             continue;
           }
-          return { ok: false, error: `VPS responded ${res.status}${detail ? ': ' + detail.slice(0, 120) : ''}` };
+          return { ok: false, error: `Executor responded ${res.status}${detail ? ': ' + detail.slice(0, 120) : ''}` };
         }
         return { ok: true };
       } catch (e) {
@@ -376,8 +384,8 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
         return { ok: false, error: e instanceof Error ? e.message : 'Network error' };
       }
     }
-    return { ok: false, error: 'VPS unreachable after retry' };
-  }, [vpsConfig]);
+    return { ok: false, error: 'Executor unreachable after retry' };
+  }, [vpsConfig, executorMode]);
 
   // ── Approve a live order ────────────────────────────────────────────────────
   const approveLiveOrder = useCallback(async (id: string) => {

@@ -24,6 +24,7 @@ import {
 
 export type VpsEngineState = 'OFF' | 'ARMED' | 'RECONCILING' | 'RUNNING' | 'RISK_LOCKED';
 export type VpsConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
+export type ExecutorMode = 'internal' | 'external';
 
 /**
  * High-level operating mode — what the system is actually doing right now.
@@ -45,6 +46,12 @@ export interface VpsConfig {
   useSSL: boolean;
   /** Optional human label for the active GMX subaccount (display only, no key data) */
   subaccountLabel?: string;
+  /**
+   * Execution target:
+   *   'internal' = Replit-hosted internal executor (default, no host config needed)
+   *   'external' = user-hosted external VPS (requires host/port/ssl)
+   */
+  executorMode: ExecutorMode;
 }
 
 export interface ReconciliationInfo {
@@ -99,6 +106,11 @@ interface VpsContextType {
   disconnect: () => void;
   armUnattended: () => Promise<{ ok: boolean; error?: string }>;
   disarmUnattended: () => Promise<{ ok: boolean; error?: string }>;
+  executorMode: ExecutorMode;
+  setExecutorMode: (mode: ExecutorMode) => void;
+  internalReady: boolean;
+  internalSignerConfigured: boolean;
+  internalDeploymentMode: 'reserved_vm' | 'development' | null;
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -107,7 +119,7 @@ const STORAGE_KEY = '@futures_vps_config';
 const POLL_INTERVAL_MS = 30_000;  // 30-second health-check interval
 const TIMEOUT_MS       = 8_000;
 
-const DEFAULT_CONFIG: VpsConfig = { host: '', port: '8080', useSSL: true };
+const DEFAULT_CONFIG: VpsConfig = { host: '', port: '8080', useSSL: true, executorMode: 'internal' };
 
 const EMPTY_HEALTH: SystemHealth = {
   lastHeartbeat: null, heartbeatLatencyMs: null, lastMarketUpdate: null,
@@ -136,6 +148,10 @@ export function VpsProvider({ children }: { children: React.ReactNode }) {
   const [unattendedArmed, setUnattendedArmed]   = useState(false);
   const [health, setHealth]               = useState<SystemHealth>(EMPTY_HEALTH);
 
+  const [internalReady, setInternalReady]                             = useState(false);
+  const [internalSignerConfigured, setInternalSignerConfigured]       = useState(false);
+  const [internalDeploymentMode, setInternalDeploymentMode]           = useState<'reserved_vm' | 'development' | null>(null);
+
   const configRef     = useRef<VpsConfig>(DEFAULT_CONFIG);
   const pollingRef    = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -155,9 +171,16 @@ export function VpsProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     AsyncStorage.getItem(STORAGE_KEY).then(raw => {
       if (raw) {
-        const parsed = JSON.parse(raw) as VpsConfig;
-        setConfig(parsed);
-        configRef.current = parsed;
+        const parsed = JSON.parse(raw) as Partial<VpsConfig>;
+        const loaded: VpsConfig = {
+          host:            parsed.host            ?? '',
+          port:            parsed.port            ?? '8080',
+          useSSL:          parsed.useSSL          ?? true,
+          subaccountLabel: parsed.subaccountLabel,
+          executorMode:    parsed.executorMode    ?? 'internal',
+        };
+        setConfig(loaded);
+        configRef.current = loaded;
       }
     }).catch(() => {});
   }, []);
@@ -221,6 +244,65 @@ export function VpsProvider({ children }: { children: React.ReactNode }) {
   // ── Poll status ─────────────────────────────────────────────────────────────
   const pollStatus = useCallback(async () => {
     const cfg = configRef.current;
+
+    // ── Internal executor mode ────────────────────────────────────────────────
+    if (cfg.executorMode === 'internal') {
+      try {
+        const res = await fetch(`${API_BASE}/executor/status`, {
+          signal: AbortSignal.timeout(TIMEOUT_MS),
+        });
+        if (!res.ok) throw new Error(`API ${res.status}`);
+        const data = await res.json() as {
+          ready: boolean;
+          signerConfigured: boolean;
+          gmxRpcHealthy: boolean;
+          deploymentMode: 'reserved_vm' | 'development';
+          walletAddress: string | null;
+          subaccountAddress: string | null;
+          uptimeMs: number;
+          startedAt: string;
+          lastRpcCheckAt: string | null;
+        };
+
+        setInternalReady(data.ready ?? false);
+        setInternalSignerConfigured(data.signerConfigured ?? false);
+        setInternalDeploymentMode(data.deploymentMode ?? 'development');
+        setConnectionStatus('connected');
+        setConnectionError('');
+        setVpsState(data.ready ? 'ARMED' : 'OFF');
+        setUnattendedArmed(data.ready ?? false);
+
+        setHealth({
+          lastHeartbeat:              data.lastRpcCheckAt,
+          heartbeatLatencyMs:         null,
+          lastMarketUpdate:            null,
+          lastUserStream:              null,
+          lastStrategyCycle:           null,
+          lastRestart:                 data.startedAt,
+          uptimeSeconds:               Math.round((data.uptimeMs ?? 0) / 1000),
+          reconciliation:              { status: 'idle', matchedPositions: 0, totalPositions: 0, lastAt: null },
+          gmxConnected:                data.gmxRpcHealthy ?? false,
+          walletAddress:               data.walletAddress ?? null,
+          subaccountAddress:           data.subaccountAddress ?? null,
+          subaccountExpiresAt:         null,
+          subaccountActionsRemaining:  null,
+          networkChainId:              42161,
+          strategyVersion:             null,
+          riskLock:                    null,
+          vpsReachable:                true,
+        });
+
+        await fireHealthAlert('connected', true, data.startedAt);
+      } catch {
+        setConnectionStatus('error');
+        setConnectionError('Cannot reach internal executor');
+        setInternalReady(false);
+        await fireHealthAlert('error', false, prevLastRestartRef.current);
+      }
+      return;
+    }
+
+    // ── External VPS mode (existing logic) ───────────────────────────────────
     if (!cfg.host.trim()) {
       setVpsState('OFF');
       setConnectionStatus('disconnected');
@@ -283,11 +365,10 @@ export function VpsProvider({ children }: { children: React.ReactNode }) {
       };
       setHealth(newHealth);
 
-      // Fire alerts for state transitions
       await fireHealthAlert(newStatus, newReachable, newLastRestart);
 
     } catch {
-      if (configRef.current.host.trim()) {
+      if (cfg.host.trim()) {
         const newStatus: VpsConnectionStatus = 'error';
         setConnectionStatus(newStatus);
         setConnectionError('Cannot reach VPS');
@@ -297,9 +378,21 @@ export function VpsProvider({ children }: { children: React.ReactNode }) {
     }
   }, [fireHealthAlert]);
 
-  // ── Restart polling when host changes ───────────────────────────────────────
+  // ── Restart polling when host or executorMode changes ───────────────────────
   useEffect(() => {
     if (pollingRef.current) clearInterval(pollingRef.current);
+
+    // Internal mode: always poll (executor is always running, no host needed)
+    if (config.executorMode === 'internal') {
+      prevStatusRef.current    = 'disconnected';
+      prevReachableRef.current = false;
+      errorStreakRef.current   = 0;
+      pollStatus();
+      pollingRef.current = setInterval(pollStatus, POLL_INTERVAL_MS);
+      return () => { if (pollingRef.current) clearInterval(pollingRef.current); };
+    }
+
+    // External mode: gate on host
     if (!config.host.trim()) {
       setVpsState('OFF');
       setConnectionStatus('disconnected');
@@ -309,24 +402,42 @@ export function VpsProvider({ children }: { children: React.ReactNode }) {
       errorStreakRef.current   = 0;
       return;
     }
-    // Reset transition tracking when host changes to avoid false alerts
+
     prevStatusRef.current    = 'disconnected';
     prevReachableRef.current = false;
     errorStreakRef.current   = 0;
     pollStatus();
     pollingRef.current = setInterval(pollStatus, POLL_INTERVAL_MS);
     return () => { if (pollingRef.current) clearInterval(pollingRef.current); };
-  }, [config.host, pollStatus]);
+  }, [config.host, config.executorMode, pollStatus]);
 
   // ── saveConfig ──────────────────────────────────────────────────────────────
   const saveConfig = useCallback(async (c: VpsConfig) => {
-    setConfig(c);
-    configRef.current = c;
-    await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(c)).catch(() => {});
+    const merged: VpsConfig = { ...configRef.current, ...c, executorMode: c.executorMode ?? configRef.current.executorMode ?? 'internal' };
+    setConfig(merged);
+    configRef.current = merged;
+    await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(merged)).catch(() => {});
     setConnectionStatus('disconnected');
     setConnectionError('');
     setVpsState('OFF');
     setHealth(EMPTY_HEALTH);
+  }, []);
+
+  // ── setExecutorMode ─────────────────────────────────────────────────────────
+  const setExecutorMode = useCallback(async (mode: ExecutorMode) => {
+    const newConfig: VpsConfig = { ...configRef.current, executorMode: mode };
+    setConfig(newConfig);
+    configRef.current = newConfig;
+    await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(newConfig)).catch(() => {});
+    // Reset connection state so the new mode's polling starts fresh
+    setConnectionStatus('disconnected');
+    setConnectionError('');
+    setVpsState('OFF');
+    setHealth(EMPTY_HEALTH);
+    setInternalReady(false);
+    prevStatusRef.current    = 'disconnected';
+    prevReachableRef.current = false;
+    errorStreakRef.current   = 0;
   }, []);
 
   const testConnection = useCallback(async () => {
@@ -351,6 +462,13 @@ export function VpsProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const armUnattended = useCallback(async (): Promise<{ ok: boolean; error?: string }> => {
+    // Internal mode: arm locally (executor always running)
+    if (configRef.current.executorMode === 'internal') {
+      setUnattendedArmed(true);
+      setVpsState('ARMED');
+      return { ok: true };
+    }
+
     const cfg = configRef.current;
     if (!cfg.host.trim()) return { ok: false, error: 'VPS host not configured' };
     try {
@@ -373,6 +491,13 @@ export function VpsProvider({ children }: { children: React.ReactNode }) {
   }, [pollStatus]);
 
   const disarmUnattended = useCallback(async (): Promise<{ ok: boolean; error?: string }> => {
+    // Internal mode: disarm locally
+    if (configRef.current.executorMode === 'internal') {
+      setUnattendedArmed(false);
+      setVpsState('OFF');
+      return { ok: true };
+    }
+
     const cfg = configRef.current;
     if (!cfg.host.trim()) return { ok: false, error: 'VPS not configured' };
     try {
@@ -400,6 +525,11 @@ export function VpsProvider({ children }: { children: React.ReactNode }) {
       unattendedArmed, health,
       saveConfig, testConnection, disconnect,
       armUnattended, disarmUnattended,
+      executorMode: config.executorMode ?? 'internal',
+      setExecutorMode,
+      internalReady,
+      internalSignerConfigured,
+      internalDeploymentMode,
     }}>
       {children}
     </VpsContext.Provider>

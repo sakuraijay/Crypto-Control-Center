@@ -1,6 +1,7 @@
 import app from "./app";
 import { logger } from "./lib/logger";
 import { runMigrations } from "@workspace/db";
+import { startRpcHealthMonitor } from "./workers/internalExecutor";
 
 const rawPort = process.env["PORT"];
 
@@ -15,6 +16,9 @@ const port = Number(rawPort);
 if (Number.isNaN(port) || port <= 0) {
   throw new Error(`Invalid PORT value: "${rawPort}"`);
 }
+
+// Start internal executor RPC health monitor (non-blocking)
+startRpcHealthMonitor();
 
 // Run database migrations before accepting requests.
 // Each migration file uses IF NOT EXISTS guards — safe to run on every start.

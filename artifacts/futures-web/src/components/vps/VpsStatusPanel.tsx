@@ -336,6 +336,7 @@ export function VpsStatusPanel({ showConfigLink = true, className }: VpsStatusPa
     config, vpsState, operatingMode, connectionStatus, connectionError,
     unattendedArmed, health, aiStats,
     testConnection, armUnattended, disarmUnattended,
+    executorMode, internalSignerConfigured, internalDeploymentMode,
   } = useVpsContext();
 
   const [testing, setTesting] = useState(false);
@@ -344,8 +345,9 @@ export function VpsStatusPanel({ showConfigLink = true, className }: VpsStatusPa
   const [actionError, setActionError] = useState('');
   const [actionLoading, setActionLoading] = useState(false);
 
-  const cls        = STATE_CLASSES[vpsState];
-  const configured = Boolean(config.host.trim());
+  const cls = STATE_CLASSES[vpsState];
+  // Internal executor is always "configured" (no host needed); external requires a host
+  const configured = executorMode === 'internal' ? true : Boolean(config.host.trim());
 
   const handleTest = async () => {
     setTesting(true);
@@ -393,10 +395,28 @@ export function VpsStatusPanel({ showConfigLink = true, className }: VpsStatusPa
       <div className="flex items-center justify-between px-4 py-3 bg-card/50 border-b border-border">
         <div className="flex items-center gap-2">
           <Server className="w-4 h-4 text-primary" />
-          <span className="font-semibold text-sm">VPS Trading Engine</span>
+          <span className="font-semibold text-sm">Execution Engine</span>
+          <span className={cn(
+            'text-[9px] px-1.5 py-0.5 rounded-full border font-bold tracking-wider',
+            executorMode === 'internal'
+              ? 'bg-primary/10 text-primary border-primary/30'
+              : 'bg-amber-500/10 text-amber-400 border-amber-500/30',
+          )}>
+            {executorMode === 'internal' ? 'INTERNAL' : 'EXTERNAL VPS'}
+          </span>
           {health.strategyVersion && (
             <span className="text-[10px] text-muted-foreground font-mono">
               {health.strategyVersion}
+            </span>
+          )}
+          {executorMode === 'internal' && internalDeploymentMode && (
+            <span className={cn(
+              'text-[9px] px-1.5 py-0.5 rounded-full border font-medium',
+              internalDeploymentMode === 'reserved_vm'
+                ? 'text-[var(--color-long)] border-[var(--color-long)]/30 bg-[var(--color-long)]/5'
+                : 'text-muted-foreground border-border',
+            )}>
+              {internalDeploymentMode === 'reserved_vm' ? '24/7' : 'dev'}
             </span>
           )}
         </div>
@@ -458,7 +478,9 @@ export function VpsStatusPanel({ showConfigLink = true, className }: VpsStatusPa
                 ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
                 : <WifiOff className="w-3.5 h-3.5 text-[var(--color-short)]" />
             }
-            <span className="font-mono truncate">{config.host}:{config.port}</span>
+            <span className="font-mono truncate">
+              {executorMode === 'internal' ? 'replit-executor (internal)' : `${config.host}:${config.port}`}
+            </span>
             {health.heartbeatLatencyMs != null && (
               <span className="text-[var(--color-long)]">· {health.heartbeatLatencyMs}ms</span>
             )}
@@ -477,10 +499,10 @@ export function VpsStatusPanel({ showConfigLink = true, className }: VpsStatusPa
         ) : (
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <WifiOff className="w-3.5 h-3.5" />
-            <span>VPS not configured.</span>
+            <span>{executorMode === 'internal' ? 'Executor offline.' : 'External VPS not configured.'}</span>
             {showConfigLink && (
               <Link href="/settings" className="text-primary hover:underline">
-                Configure in Settings →
+                {executorMode === 'internal' ? 'Check API Server →' : 'Configure in Settings →'}
               </Link>
             )}
           </div>
@@ -546,7 +568,7 @@ export function VpsStatusPanel({ showConfigLink = true, className }: VpsStatusPa
           <div className="flex items-center gap-3 px-3 py-2 rounded-lg border border-[var(--color-short)]/40 bg-[var(--color-short)]/5 text-xs">
             <AlertTriangle className="w-4 h-4 text-[var(--color-short)] shrink-0" />
             <div>
-              <div className="font-bold text-[var(--color-short)]">VPS Risk Lock Active</div>
+              <div className="font-bold text-[var(--color-short)]">Risk Lock Active</div>
               <div className="text-muted-foreground">
                 Reason: <span className="font-mono">{health.riskLock.reason}</span>
                 {' · '}{timeAgo(health.riskLock.since)}
@@ -563,7 +585,7 @@ export function VpsStatusPanel({ showConfigLink = true, className }: VpsStatusPa
               className="w-full font-bold tracking-wider"
               style={{ background: 'linear-gradient(90deg, #0ea5e9, #06b6d4)' }}
               onClick={() => setArmDialog(true)}
-              disabled={!configured || connectionStatus !== 'connected'}
+              disabled={connectionStatus !== 'connected'}
             >
               <Zap className="w-3.5 h-3.5 mr-1.5" />
               ARM UNATTENDED TRADING
@@ -583,8 +605,10 @@ export function VpsStatusPanel({ showConfigLink = true, className }: VpsStatusPa
             <AlertTriangle className="w-3 h-3 shrink-0 mt-0.5 text-amber-400" />
             <span>
               {unattendedArmed
-                ? "VPS is armed for autonomous trading. Positions will be managed 24/7 regardless of this app's state."
-                : "Live unattended trading requires an external VPS with a GMX One-Click subaccount. The VPS holds only the delegated subaccount key, never your primary wallet. Not enabled by default. Paper mode is always safe."}
+                ? `${executorMode === 'internal' ? 'Executor' : 'VPS'} is armed for autonomous trading. Positions will be managed 24/7 regardless of this app's state.`
+                : executorMode === 'internal'
+                  ? `Executor runs 24/7 inside this deployment. ${!internalSignerConfigured ? 'Simulation mode — configure GMX_SIGNER_KEY env var to enable real execution. ' : ''}Arm to begin autonomous operation.`
+                  : "Live unattended trading requires an external VPS with a GMX One-Click subaccount. The VPS holds only the delegated subaccount key, never your primary wallet. Not enabled by default. Paper mode is always safe."}
             </span>
           </div>
         </div>
@@ -604,9 +628,9 @@ export function VpsStatusPanel({ showConfigLink = true, className }: VpsStatusPa
                   <div>
                     <div className="font-bold mb-1">Read before arming</div>
                     <ul className="list-disc list-inside space-y-1 text-xs">
-                      <li>The VPS will operate autonomously <strong>24/7</strong>, including while you sleep.</li>
-                      <li>If the VPS is configured for <strong>live trading</strong>, real orders will be placed on GMX V2 (Arbitrum One).</li>
-                      <li>The VPS uses a delegated subaccount key (One-Click Trading) — never your primary wallet.</li>
+                      <li>The Executor will operate autonomously <strong>24/7</strong>, including while you sleep.</li>
+                      <li>If configured for <strong>live trading</strong>, real orders will be placed on GMX V2 (Arbitrum One).</li>
+                      <li>The Executor uses a delegated subaccount key (One-Click Trading) — never your primary wallet.</li>
                       <li>Risk controls (daily loss, drawdown, exposure limits) remain active at all times.</li>
                       <li><strong>Live trading is NOT enabled by default.</strong> Paper mode is always safe.</li>
                     </ul>
@@ -614,7 +638,7 @@ export function VpsStatusPanel({ showConfigLink = true, className }: VpsStatusPa
                 </div>
                 <div className="flex items-center gap-2 text-xs text-muted-foreground">
                   <ShieldCheck className="w-3.5 h-3.5 text-[var(--color-long)]" />
-                  VPS: <span className="font-mono">{config.host}:{config.port}</span>
+                  Executor: <span className="font-mono">{executorMode === 'internal' ? 'replit-internal' : `${config.host}:${config.port}`}</span>
                 </div>
                 {actionError && (
                   <div className="text-[var(--color-short)] text-xs">{actionError}</div>
@@ -646,7 +670,7 @@ export function VpsStatusPanel({ showConfigLink = true, className }: VpsStatusPa
               <ShieldOff className="w-5 h-5" /> Disarm Unattended Trading
             </DialogTitle>
             <DialogDescription className="text-sm pt-2">
-              The VPS will stop opening new autonomous positions. Existing positions will continue
+              The Executor will stop opening new autonomous positions. Existing positions will continue
               with their TP/SL orders active until manually closed or triggered.
               {actionError && <div className="text-[var(--color-short)] mt-2">{actionError}</div>}
             </DialogDescription>

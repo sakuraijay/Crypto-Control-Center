@@ -344,14 +344,23 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
     decision: AiEngineDecision,
     snapshot?: { host: string; port: string; useSSL: boolean },
   ): Promise<{ ok: boolean; error?: string }> => {
-    const target = snapshot ?? { host: config.host ?? '', port: config.port ?? '8080', useSSL: config.useSSL ?? false };
-    if (!target.host?.trim()) return { ok: false, error: 'VPS not configured — set host in Settings' };
-    const params = new URLSearchParams({
-      host: target.host,
-      port: target.port || '8080',
-      ssl: String(target.useSSL ?? false),
-    });
-    const url = `${API_BASE}/vps/execute?${params}`;
+    const mode = config.executorMode ?? 'internal';
+    let url: string;
+
+    if (mode === 'internal') {
+      // Internal Replit executor — no host/port needed
+      url = `${API_BASE}/executor/execute`;
+    } else {
+      // External VPS mode — use snapshotted or current config
+      const target = snapshot ?? { host: config.host ?? '', port: config.port ?? '8080', useSSL: config.useSSL ?? false };
+      if (!target.host?.trim()) return { ok: false, error: 'External VPS not configured — set host in Settings → Advanced' };
+      const params = new URLSearchParams({
+        host: target.host,
+        port: target.port || '8080',
+        ssl: String(target.useSSL ?? false),
+      });
+      url = `${API_BASE}/vps/execute?${params}`;
+    }
     const body = JSON.stringify({
       decisionId: decision.id,
       operatingState: decision.operatingState,
