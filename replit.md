@@ -174,3 +174,4 @@ ai.ts    — POST /api/ai/decisions (persist AI decision log)
 - Priority areas: dashboard usability, GMX V2 market/position/order flows, AI decision logs, risk controls, emergency controls, Internal Executor/Reserved VM execution health, Paper/Testnet/LIVE modes, GMX One-Click connection status.
 - Internal Replit Executor (`/api/executor/*`) is the default execution path. External VPS is optional/advanced.
 - Mobile-specific tasks (push notifications, mobile Settings UI) are cancelled — focus is the web terminal.
+- **모든 에이전트 메시지/상태 보고/설명은 한국어로 작성.** (Agent language: Korean only)
