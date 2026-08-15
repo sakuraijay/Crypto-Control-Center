@@ -12,6 +12,8 @@ import { VpsStatusPanel } from '@/components/vps/VpsStatusPanel';
 import { DailyTargetCard } from '@/components/dashboard/DailyTargetCard';
 import { AiStateCard } from '@/components/dashboard/AiStateCard';
 import { LiveApprovalCard } from '@/components/dashboard/LiveApprovalCard';
+import { SystemHealthBanner } from '@/components/dashboard/SystemHealthBanner';
+import { AiMarketRankingCard } from '@/components/dashboard/AiMarketRankingCard';
 import { cn } from '@/lib/utils';
 
 function KpiCard({ label, value, sub, color }: { label: string; value: string; sub?: string; color?: string }) {
@@ -56,11 +58,17 @@ export default function Dashboard() {
   return (
     <div className="flex flex-col gap-5 animate-in fade-in duration-500">
 
+      {/* ── System health / fail-closed warning ──────────────────────────────── */}
+      <SystemHealthBanner />
+
       {/* ── Live operator approval gate (shown in LIVE_TRADING mode) ────────── */}
       <LiveApprovalCard />
 
       {/* ── AI 5-State Engine Card (primary monitoring surface) ──────────────── */}
       <AiStateCard />
+
+      {/* ── AI Market Rankings ────────────────────────────────────────────────── */}
+      <AiMarketRankingCard />
 
       {/* ── VPS Engine Status ──────────────────────────────────────────────────── */}
       <VpsStatusPanel />

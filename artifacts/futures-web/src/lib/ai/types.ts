@@ -55,6 +55,25 @@ export interface SymbolAnalysis {
   opportunityScore: number; // 0–100 overall quality of the setup
 }
 
+/**
+ * Per-market ranking produced each engine cycle.
+ * Lets the operator and UI see exactly which GMX markets the AI is considering
+ * and in what priority order.
+ */
+export interface MarketRanking {
+  symbol: string;
+  displaySymbol: string;
+  rank: number;              // 1 = best opportunity
+  direction: 'LONG' | 'SHORT' | 'NEUTRAL';
+  opportunityScore: number;  // 0–100
+  bullishScore: number;
+  bearishScore: number;
+  confidence: number;        // max(bull, bear) rounded
+  atrPct: number;
+  price: number;
+  priceChange24h: number;
+}
+
 export interface HedgeParams {
   symbol: string;
   direction: 'LONG' | 'SHORT';
@@ -82,6 +101,8 @@ export interface AiEngineDecision {
   marketCondition: MarketCondition;
   riskLevel: RiskLevel;
   symbolAnalyses: SymbolAnalysis[];
+  /** Ranked list of all analysed markets — updated each cycle */
+  marketRankings: MarketRanking[];
 
   // ── Action parameters ──────────────────────────────
   executionType: ExecutionType;
@@ -107,6 +128,10 @@ export interface AiEngineDecision {
   // ── Execution (paper) ──────────────────────────────
   paperExecuted: boolean;
   paperOrderId?: string;
+
+  // ── System health ──────────────────────────────────
+  /** Set when the engine skipped execution due to VPS/connectivity issues */
+  pausedReason?: string;
 }
 
 export interface AiEngineStats {

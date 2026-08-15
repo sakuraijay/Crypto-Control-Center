@@ -8,6 +8,7 @@ import * as Haptics from 'expo-haptics';
 import { useColors } from '@/hooks/useColors';
 import { useTrading, NewOrderParams } from '@/contexts/TradingContext';
 import { useEngine, EngineState } from '@/contexts/EngineContext';
+import { useVps } from '@/contexts/VpsContext';
 
 interface Props {
   visible: boolean;
@@ -23,6 +24,7 @@ export function NewOrderModal({ visible, onClose, defaultSymbol = 'ETH' }: Props
   const colors = useColors();
   const { placeOrder, account } = useTrading();
   const { engineState, stopNewOrdersActive } = useEngine();
+  const { connectionStatus } = useVps();
 
   const [symbol, setSymbol]       = useState(defaultSymbol);
   const [side, setSide]           = useState<'LONG' | 'SHORT'>('LONG');
@@ -49,8 +51,12 @@ export function NewOrderModal({ visible, onClose, defaultSymbol = 'ETH' }: Props
     if (engineState === EngineState.EMERGENCY_STOP) return 'Emergency stop is active';
     if (stopNewOrdersActive) return 'New orders are disabled';
     if (engineState === EngineState.OFFLINE) return 'Engine is offline';
+    // Fail-closed: block new orders in LIVE mode when VPS is not reachable
+    if (engineState === EngineState.LIVE_TRADING && connectionStatus !== 'connected') {
+      return 'VPS disconnected — new orders blocked in LIVE mode';
+    }
     return null;
-  }, [engineState, stopNewOrdersActive]);
+  }, [engineState, stopNewOrdersActive, connectionStatus]);
 
   const handleSubmit = () => {
     setError('');

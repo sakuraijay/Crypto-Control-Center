@@ -1,5 +1,5 @@
 /**
- * AI Trading Engine — 5-State Model (mobile mirror of web types)
+ * AI Trading Engine — 5-State Model  (mobile mirror)
  *
  * SPOT   — bullish signal but leverage risk not justified; use GMX on-chain swap
  * LONG   — strong bullish signal with leverage (GMX Perpetual MarketIncrease)
@@ -55,6 +55,23 @@ export interface SymbolAnalysis {
   opportunityScore: number;
 }
 
+/**
+ * Per-market ranking produced each engine cycle.
+ */
+export interface MarketRanking {
+  symbol: string;
+  displaySymbol: string;
+  rank: number;
+  direction: 'LONG' | 'SHORT' | 'NEUTRAL';
+  opportunityScore: number;
+  bullishScore: number;
+  bearishScore: number;
+  confidence: number;
+  atrPct: number;
+  price: number;
+  priceChange24h: number;
+}
+
 export interface HedgeParams {
   symbol: string;
   direction: 'LONG' | 'SHORT';
@@ -79,6 +96,7 @@ export interface AiEngineDecision {
   marketCondition: MarketCondition;
   riskLevel: RiskLevel;
   symbolAnalyses: SymbolAnalysis[];
+  marketRankings: MarketRanking[];
 
   executionType: ExecutionType;
   sizeUsd?: number;
@@ -88,6 +106,7 @@ export interface AiEngineDecision {
   tpPrice?: number;
   slPrice?: number;
   trailingStopPct?: number;
+
   hedgeParams?: HedgeParams;
 
   stateRationale: string;
@@ -98,6 +117,8 @@ export interface AiEngineDecision {
 
   paperExecuted: boolean;
   paperOrderId?: string;
+
+  pausedReason?: string;
 }
 
 export interface AiEngineStats {
@@ -108,10 +129,7 @@ export interface AiEngineStats {
   lastCycleAt: string | null;
 }
 
-/** Price history buffer per symbol */
 export type PriceBuffer = Map<string, number[]>;
-
-// ── Live operator approval gate ────────────────────────────────────────────────
 
 export type ApprovalStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'EXPIRED';
 
@@ -128,5 +146,4 @@ export interface PendingLiveApproval {
   vpsError?: string;
 }
 
-/** 5 minutes to approve before auto-expire */
 export const APPROVAL_TIMEOUT_MS = 5 * 60 * 1000;

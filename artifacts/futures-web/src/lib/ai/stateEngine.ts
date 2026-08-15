@@ -19,6 +19,7 @@ import type {
   EntryStyle,
   HedgeParams,
   MarketCondition,
+  MarketRanking,
   RiskLevel,
   SymbolAnalysis,
 } from './types';
@@ -239,7 +240,8 @@ export function runAiEngine(input: EngineInput): Omit<AiEngineDecision, 'id' | '
       cycleNumber, prevState, operatingState: 'CASH' as AiOperatingState,
       stateChanged: prevState !== 'CASH', selectedSymbols: [], primarySymbol: null,
       confidence: 0, marketCondition: 'RANGING' as const, riskLevel: 'CRITICAL' as const,
-      symbolAnalyses: analyses, executionType: 'hold' as ExecutionType, entryStyle: 'none' as EntryStyle,
+      symbolAnalyses: analyses, marketRankings: [] as MarketRanking[],
+      executionType: 'hold' as ExecutionType, entryStyle: 'none' as EntryStyle,
       stateRationale, reasoning, riskApproved, riskVetoReason: reason,
     };
   };
@@ -402,6 +404,28 @@ export function runAiEngine(input: EngineInput): Omit<AiEngineDecision, 'id' | '
     !riskApproved, riskVetoReason,
   );
 
+  // ── Market rankings — one entry per analysed symbol, ordered by opportunity ──
+  const marketRankings: MarketRanking[] = sorted.map((a, i) => {
+    const isBull = a.bullishScore >= THRESHOLDS.LONG_BULLISH_MIN;
+    const isBear = a.bearishScore >= THRESHOLDS.SHORT_BEARISH_MIN;
+    const direction: 'LONG' | 'SHORT' | 'NEUTRAL' =
+      isBull && a.bullishScore > a.bearishScore ? 'LONG' :
+      isBear && a.bearishScore > a.bullishScore ? 'SHORT' : 'NEUTRAL';
+    return {
+      symbol:           a.symbol,
+      displaySymbol:    a.displaySymbol,
+      rank:             i + 1,
+      direction,
+      opportunityScore: Math.round(a.opportunityScore),
+      bullishScore:     Math.round(a.bullishScore),
+      bearishScore:     Math.round(a.bearishScore),
+      confidence:       Math.round(Math.max(a.bullishScore, a.bearishScore)),
+      atrPct:           a.indicators.atrPct,
+      price:            a.price,
+      priceChange24h:   a.indicators.priceChange24h,
+    };
+  });
+
   return {
     cycleNumber,
     prevState,
@@ -413,6 +437,7 @@ export function runAiEngine(input: EngineInput): Omit<AiEngineDecision, 'id' | '
     marketCondition: condition,
     riskLevel,
     symbolAnalyses: sorted,
+    marketRankings,
     executionType,
     sizeUsd: sizeUsd !== undefined ? Math.round(sizeUsd) : undefined,
     leverage,

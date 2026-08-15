@@ -131,7 +131,7 @@ function StateDistribution({ dist }: { dist: Record<AiOperatingState, number> })
 // ── Main component ────────────────────────────────────────────────────────────
 
 export function AiStateCard() {
-  const { currentDecision, stats, running, autoExecute, setAutoExecute, triggerCycle, nextCycleMs } = useAiEngine();
+  const { currentDecision, stats, running, autoExecute, setAutoExecute, triggerCycle, nextCycleMs, systemPaused, pauseReason } = useAiEngine();
   const { engineState, triggerEmergencyStop } = useAppContext();
   const [expanded, setExpanded] = useState(true);
   const [confirmAuto, setConfirmAuto] = useState(false);
@@ -215,6 +215,16 @@ export function AiStateCard() {
         <div className="mt-3 flex items-center gap-2 px-3 py-2 rounded-md bg-[var(--color-short)]/10 border border-[var(--color-short)]/30">
           <AlertTriangle className="w-4 h-4 text-[var(--color-short)] animate-pulse" />
           <span className="text-xs text-[var(--color-short)] font-bold">EMERGENCY STOP ACTIVE — AI engine suspended</span>
+        </div>
+      )}
+
+      {/* ── System paused overlay (VPS fail-closed in LIVE mode) ────────────── */}
+      {systemPaused && !isEmergency && (
+        <div className="mt-3 flex items-center gap-2 px-3 py-2 rounded-md bg-[var(--color-warning)]/10 border border-[var(--color-warning)]/30">
+          <AlertTriangle className="w-4 h-4 text-[var(--color-warning)] animate-pulse shrink-0" />
+          <span className="text-xs text-[var(--color-warning)] font-semibold">
+            AI PAUSED{pauseReason ? ` — ${pauseReason}` : ' — waiting for system health to restore'}
+          </span>
         </div>
       )}
 

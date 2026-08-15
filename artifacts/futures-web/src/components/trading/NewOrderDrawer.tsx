@@ -2,9 +2,10 @@ import { useState, useMemo } from 'react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { AlertCircle, TrendingUp, TrendingDown, Info } from 'lucide-react';
+import { AlertCircle, TrendingUp, TrendingDown, Info, WifiOff } from 'lucide-react';
 import { useTradingContext, useWatchlistContext, useStrategyContext, useAppContext } from '@/lib/context';
 import type { NewOrderParams } from '@/lib/context/AppContext';
+import { useVpsContext } from '@/lib/context/VpsContext';
 import { useToast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
 
@@ -34,6 +35,7 @@ export function NewOrderDrawer({ open, onClose, defaultSymbol }: Props) {
   const { watchlist } = useWatchlistContext();
   const { limits } = useStrategyContext();
   const { engineState, stopNewOrders } = useAppContext();
+  const { connectionStatus } = useVpsContext();
   const { toast } = useToast();
 
   const [symbol, setSymbol]           = useState(defaultSymbol ?? 'BTC');
@@ -58,10 +60,15 @@ export function NewOrderDrawer({ open, onClose, defaultSymbol }: Props) {
   // GMX collateral = sizeInUsd / leverage
   const collateralUsd = sizeUsdNum > 0 && levNum > 0 ? sizeUsdNum / levNum : 0;
 
+  const isLiveTrade = engineState === 'LIVE_TRADING';
+  const vpsDown = connectionStatus !== 'connected';
+
   const validationErrors = useMemo(() => {
     const errs: string[] = [];
     if (engineState === 'EMERGENCY_STOP') errs.push('Emergency stop is active');
     if (stopNewOrders) errs.push('New orders are disabled');
+    // Fail-closed: block manual orders in LIVE mode when VPS is unreachable
+    if (isLiveTrade && vpsDown) errs.push('VPS disconnected — orders blocked in LIVE mode');
     if (!sym.trim()) errs.push('Symbol is required');
     if (sizeUsdNum <= 0) errs.push('Position size must be > 0');
     if (levNum < 1 || levNum > limits.maxLeverage) errs.push(`Leverage must be 1–${limits.maxLeverage}x`);
@@ -74,7 +81,7 @@ export function NewOrderDrawer({ open, onClose, defaultSymbol }: Props) {
       errs.push(`Total exposure $${totalExposure.toFixed(0)} would exceed limit $${limits.maxTotalExposureUSDT.toLocaleString()}`);
     }
     return errs;
-  }, [engineState, stopNewOrders, sym, sizeUsdNum, levNum, orderType, limitPrice, collateralUsd, limits, account, positions]);
+  }, [engineState, stopNewOrders, isLiveTrade, vpsDown, sym, sizeUsdNum, levNum, orderType, limitPrice, collateralUsd, limits, account, positions]);
 
   const handleSubmit = async () => {
     if (validationErrors.length > 0) return;

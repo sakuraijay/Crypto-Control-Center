@@ -18,7 +18,7 @@ import React, {
 } from 'react';
 
 import type {
-  AiEngineDecision, AiEngineStats, AiOperatingState,
+  AiEngineDecision, AiEngineStats, AiOperatingState, MarketRanking,
   PriceBuffer, SymbolAnalysis, PendingLiveApproval, ApprovalStatus,
 } from '@/lib/ai/types';
 import { APPROVAL_TIMEOUT_MS } from '@/lib/ai/types';
@@ -30,6 +30,7 @@ import { useEngine, EngineState } from '@/contexts/EngineContext';
 import { useTrading } from '@/contexts/TradingContext';
 import { useStrategy } from '@/contexts/StrategyContext';
 import { useWatchlist } from '@/contexts/WatchlistContext';
+import { useVps } from '@/contexts/VpsContext';
 import {
   scheduleLiveApprovalAlert,
   scheduleRiskLockAlert,
@@ -78,6 +79,12 @@ export interface AiEngineContextType {
   clearHistory: () => void;
   nextCycleMs: number;
 
+  /** Ranked list of all analysed GMX markets from the latest cycle */
+  marketRankings: MarketRanking[];
+  /** True when the engine is paused (e.g. VPS disconnected in LIVE mode) */
+  systemPaused: boolean;
+  pauseReason: string | null;
+
   pendingApprovals: PendingLiveApproval[];
   approveLiveOrder: (id: string) => Promise<void>;
   rejectLiveOrder: (id: string, reason?: string) => void;
@@ -90,9 +97,10 @@ const AiEngineContext = createContext<AiEngineContextType | undefined>(undefined
 
 export function AiEngineProvider({ children }: { children: ReactNode }) {
   const { engineState, setEngineState } = useEngine();
-  const { account, positions, trades, placeOrder } = useTrading();
+  const { account, positions, trades, placeOrder, clearAllPositions } = useTrading();
   const { config: strategyConfig }  = useStrategy();
   const { symbols: watchlist }      = useWatchlist();
+  const { connectionStatus }        = useVps();
 
   const limits        = strategyConfig.riskLimits;
   const consecutiveLosses = useMemo(() => calcConsecutiveLosses(trades), [trades]);
@@ -110,6 +118,9 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
   const [running,         setRunning]         = useState(false);
   const [nextCycleMs,     setNextCycleMs]     = useState(CYCLE_MS);
   const [pendingApprovals, setPendingApprovals] = useState<PendingLiveApproval[]>([]);
+  const [marketRankings,   setMarketRankings]   = useState<MarketRanking[]>([]);
+  const [systemPaused,     setSystemPaused]     = useState(false);
+  const [pauseReason,      setPauseReason]      = useState<string | null>(null);
 
   const priceBuffer      = useRef<PriceBuffer>(new Map());
   const lastPriceUpdate  = useRef<number>(Date.now());
@@ -346,6 +357,7 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
       const isPaperTrade = !isLiveTrade &&
         engineState !== EngineState.EMERGENCY_STOP &&
         engineState !== EngineState.RISK_LOCKED;
+      const isVpsConnected = connectionStatus === 'connected';
       const isActionable =
         rawDecision.riskApproved &&
         rawDecision.operatingState !== 'CASH' &&
@@ -353,38 +365,55 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
         !!rawDecision.sizeUsd && rawDecision.sizeUsd > 0 &&
         !!rawDecision.primarySymbol;
 
+      // ── Update market rankings every cycle ────────────────────────────
+      setMarketRankings(rawDecision.marketRankings ?? []);
+
       let paperExecuted = false;
       let paperOrderId: string | undefined;
+      let pausedReason: string | undefined;
 
       if (isActionable) {
         if (isLiveTrade) {
-          // ── LIVE: queue for operator approval ───────────────────────────
-          const now      = new Date().toISOString();
-          const approvalId = genId();
-          const decId    = genId();
-          const fullDecision: AiEngineDecision = {
-            id: decId, createdAt: now, paperExecuted: false, ...rawDecision,
-          };
-          const approval: PendingLiveApproval = {
-            id:        approvalId,
-            decision:  fullDecision,
-            createdAt: now,
-            expiresAt: new Date(Date.now() + APPROVAL_TIMEOUT_MS).toISOString(),
-            status:    'PENDING',
-          };
-          setPendingApprovals(prev => [...prev, approval]);
+          // ── LIVE: fail-closed when VPS is not reachable ──────────────
+          if (!isVpsConnected) {
+            pausedReason = 'VPS disconnected — no live orders queued until connection restored';
+            setSystemPaused(true);
+            setPauseReason(pausedReason);
+            console.warn(`[AiEngine] LIVE mode fail-closed — ${pausedReason}`);
+          } else {
+            setSystemPaused(false);
+            setPauseReason(null);
+            // ── Queue for operator approval ─────────────────────────────
+            const now      = new Date().toISOString();
+            const approvalId = genId();
+            const decId    = genId();
+            const fullDecision: AiEngineDecision = {
+              id: decId, createdAt: now, paperExecuted: false, ...rawDecision,
+            };
+            const approval: PendingLiveApproval = {
+              id:        approvalId,
+              decision:  fullDecision,
+              createdAt: now,
+              expiresAt: new Date(Date.now() + APPROVAL_TIMEOUT_MS).toISOString(),
+              status:    'PENDING',
+            };
+            setPendingApprovals(prev => [...prev, approval]);
 
-          // Notify operator
-          const expiresInMin = Math.round(APPROVAL_TIMEOUT_MS / 60_000);
-          scheduleLiveApprovalAlert(
-            approvalId,
-            rawDecision.primarySymbol ?? 'MULTI',
-            rawDecision.operatingState,
-            expiresInMin,
-          );
+            // Notify operator
+            const expiresInMin = Math.round(APPROVAL_TIMEOUT_MS / 60_000);
+            scheduleLiveApprovalAlert(
+              approvalId,
+              rawDecision.primarySymbol ?? 'MULTI',
+              rawDecision.operatingState,
+              expiresInMin,
+            );
+          }
 
         } else if (isPaperTrade && autoExecute) {
-          // ── PAPER: auto-execute locally ─────────────────────────────────
+          // ── PAPER: auto-execute locally (VPS down doesn't block paper) ─
+          if (!isVpsConnected) {
+            console.info('[AiEngine] VPS disconnected — paper trade running locally only');
+          }
           const sym  = rawDecision.primarySymbol!;
           const side = rawDecision.operatingState === 'SHORT' ? 'SHORT' : 'LONG';
           const baseOrder = {
@@ -397,7 +426,7 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
           };
 
           let result;
-          if (['perp_long_open', 'perp_short_open', 'hedge_open'].includes(rawDecision.executionType)) {
+          if (['perp_long_open', 'perp_short_open', 'hedge_open', 'scale_in'].includes(rawDecision.executionType)) {
             result = placeOrder(baseOrder);
           } else if (rawDecision.executionType === 'spot_swap') {
             result = placeOrder({ ...baseOrder, leverage: 1 });
@@ -407,6 +436,14 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
             paperOrderId  = genId();
           }
         }
+      } else if (
+        rawDecision.operatingState === 'CASH' &&
+        isPaperTrade && autoExecute &&
+        positions.length > 0
+      ) {
+        // ── CASH decision with open positions → exit all to USDC (paper) ─
+        console.info('[AiEngine] CASH state — closing all open positions (paper)');
+        clearAllPositions();
       }
 
       const decision: AiEngineDecision = {
@@ -414,6 +451,7 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
         createdAt: new Date().toISOString(),
         paperExecuted,
         paperOrderId,
+        pausedReason,
         ...rawDecision,
       };
 
@@ -427,7 +465,8 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
     }
   }, [
     running, buildAnalyses, positions, account, limits, engineState,
-    consecutiveLosses, autoExecute, placeOrder, updateStats, persistDecision,
+    connectionStatus, consecutiveLosses, autoExecute, placeOrder,
+    clearAllPositions, updateStats, persistDecision,
   ]);
 
   // ── Schedule cycles ───────────────────────────────────────────────────────
@@ -475,6 +514,7 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
       currentDecision, decisionHistory, stats,
       running, autoExecute, setAutoExecute,
       triggerCycle, clearHistory, nextCycleMs,
+      marketRankings, systemPaused, pauseReason,
       pendingApprovals, approveLiveOrder, rejectLiveOrder, pendingCount,
     }}>
       {children}
