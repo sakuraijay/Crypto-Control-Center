@@ -1,14 +1,14 @@
 /**
  * AI Decision Log routes
  *
- * The VPS AI POSTs a record here every time it makes a trading decision.
+ * The Replit AI engine POSTs a record here every time it completes a 60-second cycle.
  * Clients (web/mobile) poll GET /api/ai/decisions to display the log.
  *
  * Risk controls have absolute veto authority — if riskResult='VETOED', the
  * decision is logged but no order was placed.
  *
- * POST /api/ai/decisions   — VPS ingests a decision
- * GET  /api/ai/decisions   — client reads the log (paginated)
+ * POST   /api/ai/decisions — AI engine persists a decision
+ * GET    /api/ai/decisions — client reads the log (paginated)
  * DELETE /api/ai/decisions — owner clears the log
  */
 
@@ -69,7 +69,7 @@ router.get("/ai/decisions", async (req, res) => {
   }
 });
 
-// ── POST /api/ai/decisions — VPS ingests a decision ──────────────
+// ── POST /api/ai/decisions — AI engine persists a decision ──────────────
 router.post("/ai/decisions", async (req, res) => {
   try {
     const b = req.body;

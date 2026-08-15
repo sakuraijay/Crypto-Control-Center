@@ -4,8 +4,8 @@
  * ──────────────────────────────────────────────────────────────────────────────
  * 보안 아키텍처 원칙 (변경 금지)
  * ──────────────────────────────────────────────────────────────────────────────
- * Replit 내부 실행기는 【모니터링·로깅·제어 클라이언트】역할만 담당합니다.
- * 실제 GMX V2 주문 서명 및 온체인 전송은 반드시 외부 24/7 VPS에서만 수행합니다.
+ * Replit 실행기는 【모니터링·AI 의사결정·오퍼레이터 승인 게이트·리스크 제어】를 담당합니다.
+ * 실제 GMX V2 주문 서명 및 온체인 전송은 GMX One-Click 서브계정 설정 후 수행됩니다 (task #32).
  *
  *   ❌ Replit 실행환경에 절대 저장 금지:
  *      - GMX 메인 지갑 개인키 / 시드 문구
@@ -14,16 +14,10 @@
  *
  *   ✅ Replit이 담당하는 역할:
  *      - 가격 데이터 수집 (GMX oracle)
- *      - AI 5-State 엔진 의사결정
- *      - 오퍼레이터 승인 게이트
- *      - 승인된 주문을 외부 VPS /execute로 전달
+ *      - AI 5-State 엔진 의사결정 (60 s 사이클)
+ *      - 오퍼레이터 승인 게이트 (LIVE 주문은 오퍼레이터 확인 필수)
  *      - 포지션·PnL·리스크 모니터링
- *      - 비상정지·일시정지 제어
- *
- *   ✅ 외부 VPS가 담당하는 역할:
- *      - GMX 서브계정 signer key 보관
- *      - ExchangeRouter 호출 / 실제 온체인 트랜잭션 서명·전송
- *      - 24/7 포지션 유지 (TP/SL 모니터링)
+ *      - 비상정지·일시정지·리스크 잠금 제어
  *
  * DEPLOYMENT MODES
  *   - reserved_vm   — Replit Reserved VM (항상 실행); 모니터링 지속
@@ -43,13 +37,19 @@ export interface ExecutorStatus {
   ready: boolean;
   /** True when GMX_RPC_URL env var is set */
   rpcConfigured: boolean;
-  /** True when Arbitrum One RPC responds within 5 s */
+  /** True when Arbitrum One RPC responds within 5 s (canonical field) */
+  gmxConnected: boolean;
+  /** Alias for gmxConnected — kept for backwards compatibility */
   gmxRpcHealthy: boolean;
+  /** Arbitrum One chain ID = 42161 */
+  networkChainId: 42161;
   /** Reserved VM = 항상 실행; development = 슬립 가능 */
   deploymentMode: DeploymentMode;
   /** 공개 지갑 주소 — 개인키 절대 미반환 */
   walletAddress: string | null;
   subaccountAddress: string | null;
+  /** Uptime in seconds (for UI display) */
+  uptimeSeconds: number;
   uptimeMs: number;
   startedAt: string;
   lastRpcCheckAt: string | null;
@@ -131,36 +131,39 @@ export function startRpcHealthMonitor(): void {
 export function getExecutorStatus(): ExecutorStatus {
   const rpcConfigured = Boolean(process.env.GMX_RPC_URL?.trim());
 
+  const uptimeMs = Date.now() - START_TIME;
   return {
     mode:              'internal',
     // 모니터링 준비 = RPC 연결 가능 여부 (서명 자격증명과 무관)
     ready:             rpcConfigured && gmxRpcHealthy,
     rpcConfigured,
-    gmxRpcHealthy,
+    gmxConnected:      gmxRpcHealthy,   // canonical field consumed by UI clients
+    gmxRpcHealthy,                       // alias kept for backwards compatibility
+    networkChainId:    42161 as const,   // Arbitrum One
     deploymentMode:    detectDeploymentMode(),
     walletAddress:     process.env.GMX_WALLET_ADDRESS ?? null,
     subaccountAddress: process.env.GMX_SUBACCOUNT_ADDRESS ?? null,
-    uptimeMs:          Date.now() - START_TIME,
+    uptimeSeconds:     Math.floor(uptimeMs / 1000),
+    uptimeMs,
     startedAt:         STARTED_AT,
     lastRpcCheckAt,
   };
 }
 
 /**
- * 내부 실행기 — 항상 시뮬레이션 반환
+ * 실행 처리기 — 현재 페이퍼 시뮬레이션 반환
  *
  * 【중요 보안 원칙】
- * Replit 내부 실행기는 실제 GMX 주문을 서명하거나 온체인 전송하지 않습니다.
- * 이 함수는 페이퍼 트레이딩 시뮬레이션 및 의사결정 로그 기록에만 사용됩니다.
- * LIVE 모드의 실제 실행은 클라이언트(AiEngineContext)가 외부 VPS /execute로
- * 직접 전달합니다. 이 경로는 LIVE 주문에 대해 호출되지 않습니다.
+ * Replit 실행환경에는 GMX 개인키가 없으므로 실제 온체인 트랜잭션을 서명하지 않습니다.
+ * 실제 GMX 주문 실행은 GMX One-Click 서브계정 구성 완료 후 task #32에서 구현 예정입니다.
+ * 이 함수는 페이퍼 트레이딩 시뮬레이션 및 의사결정 로그 기록에 사용됩니다.
  */
 export async function executeOrder(params: ExecuteOrderParams): Promise<ExecuteOrderResult> {
   const ts = new Date().toISOString();
 
-  // 항상 시뮬레이션 — Replit은 서명 권한 없음
+  // 페이퍼 시뮬레이션 — GMX 키 미보유, 실제 온체인 전송 불가
   console.info(
-    `[InternalMonitor] 시뮬레이션 — 실제 실행은 외부 VPS 담당. ` +
+    `[Executor] 페이퍼 시뮬레이션 — ` +
     `decisionId=${params.decisionId} type=${params.executionType} symbol=${params.symbol ?? 'MULTI'}`,
   );
 
@@ -169,6 +172,6 @@ export async function executeOrder(params: ExecuteOrderParams): Promise<ExecuteO
     executedAt:  ts,
     txHash:      null,
     simulated:   true,
-    note:        'Replit 내부 모니터는 시뮬레이션 전용입니다. 실제 GMX 실행은 외부 VPS에서만 수행됩니다.',
+    note:        'GMX One-Click 서브계정 설정 후 실제 실행 활성화 예정 (task #32).',
   };
 }

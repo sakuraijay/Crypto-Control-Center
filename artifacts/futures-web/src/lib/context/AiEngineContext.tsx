@@ -335,8 +335,8 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
   }, []);
 
   // ── Approve a live order ────────────────────────────────────────────────────
-  // Marks the approval as APPROVED and logs it. Actual GMX execution is handled
-  // by the GMX SDK integration (task #32) — no external VPS required.
+  // Marks the approval as APPROVED and logs it. Actual GMX on-chain execution
+  // will be wired up via GMX SDK integration (task #32).
   const approveLiveOrder = useCallback(async (id: string) => {
     const approval = pendingApprovals.find(a => a.id === id);
     if (!approval || approval.status !== 'PENDING') return;

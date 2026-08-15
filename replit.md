@@ -1,6 +1,6 @@
 # Crypto Control Center
 
-A personal, single-operator crypto trading control center built on GMX V2 (Arbitrum One). The AI autonomously selects the operating state (SPOT / LONG / SHORT / HEDGE / CASH), symbol, sizing, leverage, TP/SL, and hedging every 60 seconds. The operator's role is monitoring, pause/resume, Emergency Stop, and force-close only.
+A personal, single-operator crypto trading control center built on GMX V2 (Arbitrum One). The AI autonomously selects the operating state (SPOT / LONG / SHORT / HEDGE / CASH), symbol, sizing, leverage, TP/SL, and hedging every 60 seconds. The operator's role is monitoring, LIVE order approval gate, Emergency Stop, and force-close only.
 
 Login is **disabled in dev** (bypassed automatically). Never re-enable via code — use an env var.
 
@@ -12,7 +12,7 @@ Login is **disabled in dev** (bypassed automatically). Never re-enable via code 
 
 | Service | Dir | Purpose |
 |---|---|---|
-| API Server | `artifacts/api-server/` | Express 5 proxy — GMX oracle prices (3 s poll), candles, markets, VPS state, AI decision persistence |
+| API Server | `artifacts/api-server/` | Express 5 — GMX oracle prices (3 s poll), candles, markets, executor status, AI decision persistence |
 | Web app | `artifacts/futures-web/` | Vite + React 19 dark dashboard — primary operator surface |
 | Mobile app | `artifacts/futures-terminal/` | Expo SDK 54 React Native — companion monitoring app |
 
@@ -22,9 +22,9 @@ The trading engine lives in `artifacts/futures-web/src/lib/ai/`:
 - `types.ts` — `AiOperatingState`, `AiEngineDecision`, `SymbolAnalysis`, `IndicatorValues`, `HedgeParams`, `AiEngineStats`
 - `indicators.ts` — EMA, RSI, ATR%, momentum, composite bull/bear scoring
 - `stateEngine.ts` — `runAiEngine()` pure function: selects state + symbol + all trade params + risk gates
-- `../context/AiEngineContext.tsx` — React context: 60 s cycle, price buffer, paper auto-execution, decision persistence
+- `../context/AiEngineContext.tsx` — React context: 60 s cycle, price buffer, paper auto-execution, LIVE approval queue, decision persistence
 
-**Operator controls only:** Emergency Stop · Pause/Resume · Force-close all positions. AI decides everything else.
+**Operator controls only:** Emergency Stop · Pause/Resume · LIVE order approve/reject · Force-close all positions. AI decides everything else.
 
 ### Data flow
 
@@ -37,9 +37,9 @@ Web/Mobile WatchlistContext (price buffer)
   ↓ every 60 s
 AiEngineContext → runAiEngine() → AiEngineDecision
   ↓ paper mode
-TradingContext.placeOrder()   (simulated locally)
-  ↓ live mode (future)
-VPS → GMX One-Click subaccount → Arbitrum One
+TradingContext.placeOrder()         (simulated locally)
+  ↓ live mode (task #32)
+GMX One-Click subaccount → Arbitrum One
 ```
 
 ### GMX V2 specifics
@@ -52,9 +52,9 @@ VPS → GMX One-Click subaccount → Arbitrum One
 - **Collateral:** USDC
 - **Network:** Arbitrum One, chainId 42161
 
-### VPS safety model
+### Security model
 
-The VPS holds only a GMX One-Click **subaccount** key — never the primary wallet key. The web/mobile apps never hold any trading credentials. ARM → RUNNING flow requires the operator to explicitly authorise unattended trading.
+GMX private keys and seed phrases are **never stored in Replit**. The web/mobile apps hold no trading credentials. For LIVE execution, a GMX One-Click delegated subaccount key is held only by the GMX protocol — Replit sends signed approval decisions, not on-chain transactions (task #32 implements on-chain execution).
 
 ---
 
@@ -78,14 +78,14 @@ Or use the Replit workflow buttons — they inject PORT and EXPO_* env vars auto
 ### Web (`artifacts/futures-web/src/`)
 ```
 pages/
-  dashboard.tsx    — AiStateCard (primary view), VPS panel, KPI bar
+  dashboard.tsx    — AiStateCard (primary view), executor status widget, KPI bar
   positions.tsx    — Open positions (sizeInUsd / collateralUsd)
   watchlist.tsx    — GMX perpetuals price monitor
   strategy.tsx     — Risk limits (read-only KPIs for AI)
-  ai-log.tsx       — 5-state decision history with full indicator detail
+  ai-log.tsx       — 5-state decision history with full indicator detail + LIVE approval history
   backtest.tsx     — GMX candle backtester (BTC/ETH/SOL/ARB/LINK…)
   history.tsx      — Trade history + CSV export
-  settings.tsx     — VPS config (host/port/SSL, GMX wallet/subaccount)
+  settings.tsx     — System status, GMX executor health, emergency controls
 
 lib/
   ai/types.ts          — All AI type definitions
@@ -95,35 +95,34 @@ lib/
   gmx/markets.ts       — MARKET_BY_SYMBOL Map, displaySymbol()
   gmx/priceStream.ts   — GmxPriceStream class (polls API server)
   context/
-    AiEngineContext.tsx   — 60 s decision cycle, paper execution
+    AiEngineContext.tsx   — 60 s decision cycle, paper execution, LIVE approval queue, operatingMode
     AppContext.tsx         — EngineState, Emergency Stop
     TradingContext.tsx     — Paper positions, placeOrder(), closeAllPositions()
     WatchlistContext.tsx   — Price feed (change24h field)
-    VpsContext.tsx         — VPS ARM/DISARM, operating mode
     StrategyContext.tsx    — Risk limits
 
 components/
-  dashboard/AiStateCard.tsx     — State badge, confidence, reasoning, auto-execute toggle
-  shell/Sidebar.tsx              — Nav + CRYPTO CTL logo
-  vps/VpsStatusPanel.tsx         — VPS connection + ARM button
-  trading/RiskAlertMonitor.tsx   — Real-time risk breach alerts
+  dashboard/AiStateCard.tsx          — State badge, confidence, reasoning, auto-execute toggle
+  dashboard/ExecutorStatusWidget.tsx — Replit executor health (RPC status, deployment mode, AI cycle)
+  shell/Sidebar.tsx                  — Nav + CRYPTO CTL logo
+  trading/RiskAlertMonitor.tsx       — Real-time risk breach alerts
 ```
 
 ### Mobile (`artifacts/futures-terminal/`)
 ```
 app/(tabs)/
-  index.tsx      — Dashboard (account, positions overview)
+  index.tsx      — Dashboard (account, positions overview, live approval gate)
   positions.tsx  — Position cards
   watchlist.tsx  — Price monitor
   strategy.tsx   — Risk limits
   backtest.tsx   — GMX candle backtester
   history.tsx    — Trade history
-  settings.tsx   — VPS config + Crypto Control Center version
+  settings.tsx   — GMX executor status, emergency controls, notifications
 
 contexts/
+  AiEngineContext.tsx   — AI engine + operatingMode + LIVE approval queue
   TradingContext.tsx    — closeAllPositions() (not clearAllPositions)
   WatchlistContext.tsx  — GMX price feed
-  VpsContext.tsx        — VPS state
 
 services/
   gmxPriceStream.ts    — Mobile GMX oracle stream
@@ -135,9 +134,9 @@ utils/
 
 ### API Server (`artifacts/api-server/src/routes/`)
 ```
-gmx.ts   — /api/gmx/prices · /api/gmx/markets · /api/gmx/candles
-vps.ts   — /api/vps/status · /api/vps/arm · /api/vps/disarm
-ai.ts    — POST /api/ai/decisions (persist AI decision log)
+gmx.ts      — /api/gmx/prices · /api/gmx/markets · /api/gmx/candles
+executor.ts — /api/executor/status · /api/executor/execute
+ai.ts       — POST/GET /api/ai/decisions (persist AI decision log)
 ```
 
 ---
@@ -154,12 +153,13 @@ ai.ts    — POST /api/ai/decisions (persist AI decision log)
 - **EngineState values** — `'PAPER_TRADING' | 'LIVE_READY' | 'LIVE_TRADING' | 'RISK_LOCKED' | 'EMERGENCY_STOP'` — no `'RUNNING'`
 - **calendar.tsx + spinner.tsx** — pre-existing React 19 ref-type TS errors; ignore
 - **NEVER create app.config.ts/js** — use app.json only (required for Expo Launch)
+- **Executor status field** — `gmxConnected` is the canonical field; `gmxRpcHealthy` is an alias for backwards compatibility; `networkChainId` is always 42161
 
 ## User preferences
 
 - Private single-operator app. No multi-user, no cloud sync.
 - Login/auth is disabled in dev. Always-dark theme. Never flip to light mode.
-- AI controls all trading decisions. Operator = monitor + emergency stop only.
+- AI controls all trading decisions. Operator = monitor + LIVE approval gate + emergency stop only.
 - GMX V2 on Arbitrum One is the **only** exchange. No Binance. No USDT pairs.
 - Collateral is USDC. Sizing is always USD-denominated (`sizeInUsd`).
 - Daily target is a monitoring KPI only — never enforced by logic.
@@ -172,6 +172,6 @@ ai.ts    — POST /api/ai/decisions (persist AI decision log)
 - Responsive CSS is kept as a basic fallback only — do **not** actively optimize for mobile.
 - The `artifacts/futures-terminal/` (Expo) codebase is preserved but frozen — no new UI/nav/push-notification work.
 - Priority areas: dashboard usability, GMX V2 market/position/order flows, AI decision logs, risk controls, emergency controls, Internal Executor/Reserved VM execution health, Paper/Testnet/LIVE modes, GMX One-Click connection status.
-- Internal Replit Executor (`/api/executor/*`) is the default execution path. External VPS is optional/advanced.
+- Internal Replit Executor (`/api/executor/*`) is the default execution path. GMX One-Click on-chain execution is task #32.
 - Mobile-specific tasks (push notifications, mobile Settings UI) are cancelled — focus is the web terminal.
 - **모든 에이전트 메시지/상태 보고/설명은 한국어로 작성.** (Agent language: Korean only)

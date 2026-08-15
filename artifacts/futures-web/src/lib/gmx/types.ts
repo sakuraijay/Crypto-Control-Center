@@ -41,7 +41,7 @@ export type GmxOrderType =
   | 'StopLossDecrease'  // stop loss trigger
   | 'TakeProfit';       // take profit trigger
 
-/** On-chain wallet connection status (read from VPS, no browser wallet needed) */
+/** On-chain wallet connection status (display-only; no browser wallet needed) */
 export interface WalletStatus {
   address: string | null;
   connected: boolean;
