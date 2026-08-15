@@ -142,6 +142,10 @@ export interface AiEngineDecision {
   // ── System health ──────────────────────────────────
   /** Set when the engine skipped execution due to connectivity issues */
   pausedReason?: string;
+
+  // ── LIVE TEST MODE ─────────────────────────────────
+  /** True when this decision was produced while LIVE TEST MODE was active */
+  testMode?: boolean;
 }
 
 export interface AiEngineStats {

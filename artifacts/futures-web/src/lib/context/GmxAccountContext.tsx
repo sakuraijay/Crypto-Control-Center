@@ -347,7 +347,7 @@ export function GmxAccountProvider({ children }: { children: ReactNode }) {
         body: JSON.stringify({
           walletConnected:    true,
           addressFingerprint: `${address.slice(0, 6)}\u2026${address.slice(-4)}`,
-          subgraphOk:         source !== 'unavailable',
+          subgraphOk:         source === 'subgraph' || source === 'rpc',
           positionCount:      positions.length,
           lastRefreshAt:      now.toISOString(),
         }),

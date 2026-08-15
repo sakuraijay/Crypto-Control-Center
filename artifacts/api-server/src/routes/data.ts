@@ -167,7 +167,11 @@ router.get("/data/strategy", async (_req, res) => {
 /** PUT /api/data/strategy — save (upsert) strategy config */
 router.put("/data/strategy", async (req, res) => {
   try {
-    const { indicators, limits } = req.body;
+    const { indicators } = req.body;
+    // Clamp LIVE TEST MODE caps to conservative server-enforced bounds.
+    // These limits are authoritative regardless of what the UI sends.
+    const limits = clampLiveTestLimits(req.body.limits);
+
     // Always upsert into row id=1
     const existing = await db.select({ id: strategyConfigTable.id }).from(strategyConfigTable).limit(1);
     if (existing.length > 0) {
@@ -183,5 +187,56 @@ router.put("/data/strategy", async (req, res) => {
     res.status(500).json({ error: "Failed to save strategy config" });
   }
 });
+
+/**
+ * safeNum — parse any value to a finite number.
+ * Returns the parsed value if finite, undefined otherwise.
+ * Handles string inputs (e.g. "100"), booleans, null, undefined.
+ */
+function safeNum(val: unknown): number | undefined {
+  const n = typeof val === 'string' ? parseFloat(val) : Number(val);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+/**
+ * clampLiveTestLimits — server-side enforcement of LIVE TEST MODE hardcap bounds.
+ * Called on every strategy write so the DB always reflects safe values regardless
+ * of what the browser UI submits (including string-typed or out-of-range values).
+ * Returns the merged+clamped limits object.
+ */
+function clampLiveTestLimits(limits: unknown): unknown {
+  if (!limits || typeof limits !== 'object') return limits;
+  const lim = limits as Record<string, unknown>;
+  const clamped: Record<string, unknown> = { ...lim };
+
+  // liveTestMode: must be boolean (reject non-boolean including "true"/"false" strings)
+  if ('liveTestMode' in clamped) {
+    clamped.liveTestMode = clamped.liveTestMode === true;
+  }
+
+  // testBudgetUsd: finite numeric, $10 ≤ x ≤ $500. Non-numeric → default $100.
+  if ('testBudgetUsd' in clamped) {
+    const v = safeNum(clamped.testBudgetUsd);
+    clamped.testBudgetUsd = v !== undefined ? Math.min(500, Math.max(10, v)) : 100;
+  }
+
+  // testMaxLeverage: finite numeric, 1× ≤ x ≤ 2× (server absolute max: 2×).
+  // Non-numeric or out-of-range → default 2× (conservative max).
+  if ('testMaxLeverage' in clamped) {
+    const v = safeNum(clamped.testMaxLeverage);
+    clamped.testMaxLeverage = v !== undefined ? Math.min(2, Math.max(1, v)) : 2;
+  }
+
+  // testMaxLossUsd: finite numeric, $1 ≤ x ≤ min(50% of budget, $250).
+  // Non-numeric → default min($50, 50% of budget).
+  if ('testMaxLossUsd' in clamped) {
+    const v = safeNum(clamped.testMaxLossUsd);
+    const budget = typeof clamped.testBudgetUsd === 'number' ? clamped.testBudgetUsd : 100;
+    const upperBound = Math.min(250, budget * 0.5);
+    clamped.testMaxLossUsd = v !== undefined ? Math.min(upperBound, Math.max(1, v)) : Math.min(50, upperBound);
+  }
+
+  return clamped;
+}
 
 export default router;

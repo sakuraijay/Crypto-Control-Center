@@ -1,7 +1,10 @@
 import { useLocation } from 'wouter';
+import { useAiEngine } from '@/lib/context/AiEngineContext';
+import { FlaskConical } from 'lucide-react';
 
 export function TopBar() {
   const [location] = useLocation();
+  const { liveTestMode } = useAiEngine();
 
   const getPageTitle = () => {
     switch (location) {
@@ -21,9 +24,16 @@ export function TopBar() {
         {getPageTitle()}
       </h1>
       <div className="flex items-center gap-4">
-        <div className="px-3 py-1 rounded-full bg-accent/10 border border-accent/20 text-accent text-xs font-bold tracking-widest uppercase">
-          PAPER TRADING
-        </div>
+        {liveTestMode ? (
+          <div className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-400 text-xs font-bold tracking-widest uppercase">
+            <FlaskConical className="w-3 h-3" />
+            LIVE TEST
+          </div>
+        ) : (
+          <div className="px-3 py-1 rounded-full bg-accent/10 border border-accent/20 text-accent text-xs font-bold tracking-widest uppercase">
+            PAPER TRADING
+          </div>
+        )}
       </div>
     </div>
   );

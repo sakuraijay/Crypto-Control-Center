@@ -127,9 +127,14 @@ function DecisionRow({ d }: { d: AiEngineDecision }) {
         <td className="px-3 py-2.5 text-[10px] text-muted-foreground font-mono">#{d.cycleNumber}</td>
         {/* State */}
         <td className="px-3 py-2.5">
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1.5 flex-wrap">
             <StatePill state={d.operatingState} />
             {d.stateChanged && <span className="text-[9px] text-primary">↑ changed</span>}
+            {d.testMode && (
+              <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[9px] font-bold border border-amber-500/30 bg-amber-500/10 text-amber-400">
+                🧪 TEST
+              </span>
+            )}
           </div>
         </td>
         {/* Symbol */}

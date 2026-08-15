@@ -21,6 +21,7 @@ import { and, desc, eq, lt } from "drizzle-orm";
 import { computeIndicators, computeScores } from "./indicators";
 import { runAiEngine } from "./stateEngine";
 import { getCachedPrices, getCachedChange24h, ensureGmxPoller } from "../routes/gmx";
+import { fetchServerLiveTestData } from "../routes/gmx";
 import type { AiOperatingState, RiskLimits, SymbolAnalysis, ServerAiDecision } from "./serverTypes";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -81,6 +82,13 @@ export interface WorkerStatus {
   lastLimitsUsed: import('./serverTypes').RiskLimits | null;
   /** 현재 계좌 Equity High-Water Mark (USD). null = HWM 미수립 */
   equityHwm: number | null;
+  // ── LIVE TEST MODE ──────────────────────────────────────────────────────────
+  /** True when liveTestMode is enabled in strategy limits */
+  liveTestMode: boolean;
+  /** Reason the last LIVE TEST hardcap blocked a trade, or null */
+  liveTestVetoReason: string | null;
+  /** Accumulated test losses tracked since activation (USD) */
+  liveTestAccumLossUsd: number;
 }
 
 // ── WorkerManager ─────────────────────────────────────────────────────────────
@@ -110,6 +118,15 @@ class WorkerManager {
 
   /** 마지막 사이클에서 사용된 Strategy Limits — 상태 엔드포인트 노출용 */
   private lastLimitsUsed: RiskLimits | null = null;
+
+  // ── LIVE TEST MODE class fields ─────────────────────────────────────────────
+  /** Accumulated LIVE TEST losses persisted in worker_state DB */
+  private liveTestAccumLossUsd: number = 0;
+  /** Reason the most recent LIVE TEST hardcap blocked a trade (null = no block) */
+  private lastLiveTestVetoReason: string | null = null;
+  /** Whether liveTestMode was active in the last cycle */
+  private lastLiveTestMode: boolean = false;
+  // ────────────────────────────────────────────────────────────────────────────
 
   /** 심볼별 가격 히스토리 버퍼 */
   private priceBuffer = new Map<string, number[]>();
@@ -164,16 +181,24 @@ class WorkerManager {
     console.info('[AIWorker] 정지');
   }
 
+
   getStatus(): WorkerStatus {
     return {
-      workerRunning:   this.isRunning,
-      lastCycleAt:     this.lastCycleAt?.toISOString() ?? null,
-      lastCycleResult: this.lastCycleResult,
-      cycleCount:      this.cycleCount,
-      lastLimitsUsed:  this.lastLimitsUsed,
-      equityHwm:       this.equityHighWaterMark,
+      workerRunning:        this.isRunning,
+      lastCycleAt:          this.lastCycleAt?.toISOString() ?? null,
+      lastCycleResult:      this.lastCycleResult,
+      cycleCount:           this.cycleCount,
+      lastLimitsUsed:       this.lastLimitsUsed,
+      equityHwm:            this.equityHighWaterMark,
+      liveTestMode:         this.lastLiveTestMode,
+      liveTestVetoReason:   this.lastLiveTestVetoReason,
+      liveTestAccumLossUsd: this.liveTestAccumLossUsd,
     };
   }
+
+  // NOTE: LIVE TEST accumulated-loss persistence (loadLiveTestStateFromDb / saveLiveTestAccumLoss)
+  // is intentionally deferred to task #80. Loss tracking requires PnL data from real trade
+  // execution, which is not available while LIVE_EXECUTION_LOCKED=true.
 
   // ── Equity HWM persistence ───────────────────────────────────────────────────
 
@@ -332,6 +357,7 @@ class WorkerManager {
         riskNote:         decision.riskVetoReason ?? null,
         executionOutcome: "SIMULATED",
         fullJson:         JSON.stringify(decision),
+        testMode:         decision.testMode ?? false,
       });
     } catch (err) {
       console.error("[AIWorker] persistDecision 실패:", err);
@@ -372,6 +398,7 @@ class WorkerManager {
         decisionJson: JSON.stringify(decision),
         status:       "PENDING",
         expiresAt,
+        testMode:     decision.testMode ?? false,
       });
 
       this.pendingApprovalKeys.add(key);
@@ -667,6 +694,15 @@ class WorkerManager {
           ? Math.max(0, (this.equityHighWaterMark - currentEquity) / this.equityHighWaterMark * 100)
           : undefined;
 
+      const isLiveMode = process.env.WORKER_ENGINE_MODE === 'LIVE';
+      // LIVE TEST verification: query GMX subgraph/RPC server-side using GMX_WALLET_ADDRESS.
+      // This is the authoritative source — browser-posted diagnostics are NOT used for
+      // safety-critical decisions (they are unauthenticated and can be spoofed).
+      const liveTestData = isLiveMode
+        ? await fetchServerLiveTestData()
+        : { positionCount: 0, subgraphOk: true };  // PAPER mode — safety checks don't apply
+      const walletSubgraphOk = liveTestData.subgraphOk;
+
       const engineResult = runAiEngine({
         cycleNumber:      cycleNum,
         prevState:        this.prevState,
@@ -689,7 +725,27 @@ class WorkerManager {
         rolling24hRealizedPnlUsd: paperState.realizedPnLRolling24h,
         tradingCapital:           limits.tradingCapital,
         accountDrawdownPct,
+        // ── LIVE TEST MODE ────────────────────────────────────────────────
+        isLiveMode,
+        liveTestAccumLossUsd: this.liveTestAccumLossUsd,  // always 0 until task #80
+        walletSubgraphOk,  // false when stale, disconnected, or wrong-network
+        // Server-authoritative on-chain position count (subgraph → RPC → 999 fail-closed).
+        // Never uses browser-posted data; see fetchServerLiveTestData() in gmx.ts.
+        livePositionCount: liveTestData.positionCount,
       });
+
+      // LIVE TEST MODE: 상태 업데이트 + 차단 이유 기록
+      const testModeActive = Boolean(limits.liveTestMode && isLiveMode);
+      this.lastLiveTestMode = testModeActive;
+      if (testModeActive) {
+        const vetoPrefix = '[LIVE TEST]';
+        const isTestVeto = engineResult.riskVetoReason?.startsWith(vetoPrefix);
+        this.lastLiveTestVetoReason = isTestVeto ? (engineResult.riskVetoReason ?? null) : null;
+        // NOTE: liveTestAccumLossUsd accumulation requires real trade PnL — deferred to task #80.
+        // Until then the value stays 0 and is not persisted.
+      } else {
+        this.lastLiveTestVetoReason = null;
+      }
 
       // 상태 업데이트
       this.prevState = engineResult.operatingState;
@@ -701,6 +757,7 @@ class WorkerManager {
         paperExecuted: false,
         paperOrderId:  null,
         source:        "server_worker",
+        testMode:      testModeActive,
         ...engineResult,
       };
 

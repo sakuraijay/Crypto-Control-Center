@@ -83,6 +83,15 @@ export interface RiskLimits {
    * When exceeded the AI engine immediately returns CASH regardless of signal.
    */
   rolling24hLossLimitUSDT: number;
+  // ── LIVE TEST MODE ────────────────────────────────────────────────────────
+  /** LIVE TEST 모드 활성화 여부 (기본: false) */
+  liveTestMode: boolean;
+  /** 테스트 예산 (USD). 기본 $100. */
+  testBudgetUsd: number;
+  /** 최대 누적 테스트 손실 (USD). 초과 시 즉시 비상정지. 기본 $50 */
+  testMaxLossUsd: number;
+  /** 테스트 최대 레버리지 (기본 2x; 절대 일반 maxLeverage 미만) */
+  testMaxLeverage: number;
 }
 
 const DEFAULT_INDICATORS: IndicatorConfig[] = [
@@ -117,6 +126,11 @@ const DEFAULT_LIMITS: RiskLimits = {
   maxRiskPerSymbolPct:           2,   // 2 % of tradingCapital per symbol
   profitLockThresholdPct:        1,   // Lv.1 activates at +1 % daily PnL
   rolling24hLossLimitUSDT:       0,   // 0 = disabled by default
+  // LIVE TEST MODE defaults (off / conservative)
+  liveTestMode:    false,
+  testBudgetUsd:   100,
+  testMaxLossUsd:   50,
+  testMaxLeverage:   2,
 };
 
 /** Server sync state for the debounced PUT /api/data/strategy call. */
@@ -132,6 +146,8 @@ interface StrategyContextType {
   syncError: string | null;
   updateIndicator: (id: string, updates: Partial<IndicatorConfig>) => void;
   updateLimit: (key: keyof RiskLimits, value: number) => void;
+  /** Toggle LIVE TEST MODE on/off (saves all liveTest fields together) */
+  updateLiveTestConfig: (config: Partial<Pick<RiskLimits, 'liveTestMode' | 'testBudgetUsd' | 'testMaxLossUsd' | 'testMaxLeverage'>>) => void;
   updateSubaccountConfig: (updates: Partial<SubaccountConfig>) => void;
   resetToDefaults: () => void;
 }
@@ -259,6 +275,18 @@ export function StrategyProvider({ children }: { children: ReactNode }) {
   }, []);
 
   /**
+   * updateLiveTestConfig — LIVE TEST MODE 설정 일괄 업데이트.
+   * 불리언 포함 필드를 일괄 적용하기 위해 별도 메서드로 분리.
+   */
+  const updateLiveTestConfig = useCallback(
+    (config: Partial<Pick<RiskLimits, 'liveTestMode' | 'testBudgetUsd' | 'testMaxLossUsd' | 'testMaxLeverage'>>) => {
+      setLimits(prev => ({ ...prev, ...config }));
+      initializedFromServer.current = true;
+    },
+    [],
+  );
+
+  /**
    * updateSubaccountConfig — 서브계정 설정 업데이트 (localStorage 영속화).
    *
    * 보안 제약:
@@ -287,7 +315,7 @@ export function StrategyProvider({ children }: { children: ReactNode }) {
     <StrategyContext.Provider value={{
       indicators, limits, subaccountConfig,
       syncStatus, syncError,
-      updateIndicator, updateLimit, updateSubaccountConfig, resetToDefaults,
+      updateIndicator, updateLimit, updateLiveTestConfig, updateSubaccountConfig, resetToDefaults,
     }}>
       {children}
     </StrategyContext.Provider>

@@ -55,6 +55,10 @@ interface ExecutorHealth {
   lastCycleResult?: WorkerCycleResult | null;
   equityHwm?: number | null;
   lastLimitsUsed?: RiskLimitsSnapshot | null;
+  // LIVE TEST MODE
+  liveTestMode?: boolean;
+  liveTestVetoReason?: string | null;
+  liveTestAccumLossUsd?: number;
 }
 
 const AUTO_REFRESH_MS = 30_000;
@@ -176,7 +180,7 @@ export default function Settings() {
   const { notificationPermission, requestNotificationPermission, sendTestNotification, weeklyRealizedPnl } = useAiEngine();
   const now = useNow();
 
-  const { subaccountConfig, updateSubaccountConfig, limits, syncStatus } = useStrategyContext();
+  const { subaccountConfig, updateSubaccountConfig, limits, syncStatus, updateLiveTestConfig } = useStrategyContext();
 
   const [closeAllPhase, setCloseAllPhase] = useState<0 | 1 | 2>(0);
   const [testNotifState, setTestNotifState] = useState<'idle' | 'sending' | 'sent' | 'denied' | 'unsupported'>('idle');
@@ -184,6 +188,10 @@ export default function Settings() {
   const [subDraftMaxActions, setSubDraftMaxActions] = useState(subaccountConfig.maxActions);
   const [subDraftExpiresIn, setSubDraftExpiresIn]   = useState(subaccountConfig.expiresInDays);
   const [subSaved, setSubSaved] = useState(false);
+  // LIVE TEST MODE draft state
+  const [ltBudgetDraft, setLtBudgetDraft]   = useState(() => limits.testBudgetUsd   ?? 100);
+  const [ltMaxLossDraft, setLtMaxLossDraft] = useState(() => limits.testMaxLossUsd  ?? 50);
+  const [ltMaxLevDraft, setLtMaxLevDraft]   = useState(() => limits.testMaxLeverage ?? 2);
 
   const isEmergency = engineState === 'EMERGENCY_STOP';
   const isOffline   = consecutiveFailures >= OFFLINE_THRESHOLD;
@@ -1021,6 +1029,208 @@ export default function Settings() {
         </div>
       </section>
 
+      {/* ── LIVE TEST MODE ── */}
+      <section className="flex flex-col gap-4">
+        <div className="flex items-center gap-2 border-b border-border pb-2">
+          <h2 className="font-semibold flex items-center gap-2 text-lg flex-1">
+            <FlaskConical className="w-5 h-5 text-amber-400" /> LIVE TEST MODE
+          </h2>
+          {limits.liveTestMode ? (
+            <span className="text-[10px] font-bold px-2 py-1 rounded-full border border-amber-500/40 bg-amber-500/10 text-amber-400">
+              활성 — 소액 검증 중
+            </span>
+          ) : (
+            <span className="text-[10px] font-bold px-2 py-1 rounded-full border border-border bg-secondary text-muted-foreground">
+              비활성 (기본)
+            </span>
+          )}
+        </div>
+
+        {/* Description */}
+        <p className="text-xs text-muted-foreground -mt-2 leading-relaxed">
+          실제 주문 실행 전에 AI 엔진-승인 흐름 전체를 검증하는 중간 레이어입니다.
+          기존 Risk Engine 제한보다 항상 더 엄격한 TEST 전용 하드캡이 적용되며,
+          하드캡 위반 시 즉시 차단됩니다.
+          <strong className="text-foreground"> 실제 실행은 LIVE_EXECUTION_LOCKED=true로 여전히 잠겨있습니다.</strong>
+        </p>
+
+        <Card className="p-5 flex flex-col gap-5 border-amber-500/20 bg-amber-500/5">
+
+          {/* 활성화 토글 */}
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <div className="text-sm font-semibold text-foreground">LIVE TEST MODE 활성화</div>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                활성 시 AI 사이클이 LIVE 결정을 생성할 때 아래 하드캡을 먼저 검사합니다.
+              </p>
+            </div>
+            <Switch
+              checked={limits.liveTestMode ?? false}
+              onCheckedChange={v => {
+                updateLiveTestConfig({
+                  liveTestMode: v,
+                  testBudgetUsd:   ltBudgetDraft,
+                  testMaxLossUsd:  ltMaxLossDraft,
+                  testMaxLeverage: ltMaxLevDraft,
+                });
+              }}
+            />
+          </div>
+
+          {/* 파라미터 */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+
+            {/* testBudgetUsd */}
+            <div>
+              <div className="text-xs font-medium text-foreground mb-1.5">
+                테스트 예산 <span className="text-muted-foreground font-normal">(USD)</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min={10}
+                  max={wallet.usdcBalance ? Math.max(10, parseFloat(wallet.usdcBalance) - 1) : 10000}
+                  step={10}
+                  value={ltBudgetDraft}
+                  onChange={e => {
+                    const v = Math.max(10, Number(e.target.value));
+                    setLtBudgetDraft(v);
+                    // auto-adjust maxLoss if needed
+                    if (ltMaxLossDraft > v * 0.5) setLtMaxLossDraft(Math.floor(v * 0.5));
+                  }}
+                  onBlur={() => updateLiveTestConfig({ testBudgetUsd: ltBudgetDraft, testMaxLossUsd: ltMaxLossDraft })}
+                  className="w-28 h-8 px-2.5 rounded border border-border bg-card text-foreground text-xs font-mono focus:outline-none focus:ring-1 focus:ring-amber-500/40"
+                />
+                <span className="text-xs text-muted-foreground">
+                  {wallet.usdcBalance ? `/ USDC 잔고 $${wallet.usdcBalance}` : '지갑 미연결'}
+                </span>
+              </div>
+            </div>
+
+            {/* testMaxLossUsd */}
+            <div>
+              <div className="text-xs font-medium text-foreground mb-1.5">
+                최대 누적 손실 한도 <span className="text-muted-foreground font-normal">(USD)</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min={1}
+                  max={Math.floor(ltBudgetDraft * 0.5)}
+                  step={5}
+                  value={ltMaxLossDraft}
+                  onChange={e => setLtMaxLossDraft(Math.min(Math.floor(ltBudgetDraft * 0.5), Math.max(1, Number(e.target.value))))}
+                  onBlur={() => updateLiveTestConfig({ testMaxLossUsd: ltMaxLossDraft })}
+                  className="w-28 h-8 px-2.5 rounded border border-border bg-card text-foreground text-xs font-mono focus:outline-none focus:ring-1 focus:ring-amber-500/40"
+                />
+                <span className="text-xs text-muted-foreground">
+                  (예산의 {ltBudgetDraft > 0 ? Math.round((ltMaxLossDraft / ltBudgetDraft) * 100) : 0}%)
+                </span>
+              </div>
+            </div>
+
+            {/* testMaxLeverage */}
+            <div>
+              <div className="text-xs font-medium text-foreground mb-1.5">
+                최대 레버리지
+              </div>
+              <div className="flex gap-2">
+                {([1, 2] as const).map(v => (
+                  <button
+                    key={v}
+                    onClick={() => {
+                      setLtMaxLevDraft(v);
+                      updateLiveTestConfig({ testMaxLeverage: v });
+                    }}
+                    className={cn(
+                      'px-3 py-1.5 text-xs font-mono rounded border transition-colors',
+                      ltMaxLevDraft === v
+                        ? 'border-amber-500/60 bg-amber-500/10 text-amber-400 font-bold'
+                        : 'border-border text-muted-foreground hover:border-amber-500/30 bg-card/50',
+                    )}
+                  >
+                    {v}x
+                  </button>
+                ))}
+                <span className="text-[10px] text-muted-foreground self-center">(최대 2×)</span>
+              </div>
+            </div>
+
+            {/* testMaxPositions — always 1, read-only */}
+            <div>
+              <div className="text-xs font-medium text-foreground mb-1.5">
+                최대 포지션 수
+              </div>
+              <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 px-3 py-1.5 rounded border border-border/60 bg-secondary/50">
+                  <Lock className="w-3 h-3 text-muted-foreground" />
+                  <span className="text-xs font-mono text-muted-foreground">1개 (고정)</span>
+                </div>
+                <span className="text-[10px] text-muted-foreground">LIVE TEST 전용 하드캡</span>
+              </div>
+            </div>
+
+          </div>
+
+          {/* 현황 — 활성일 때만 표시 */}
+          {limits.liveTestMode && (
+            <div className="border-t border-amber-500/20 pt-4">
+              <div className="text-xs font-semibold text-foreground mb-3 flex items-center gap-2">
+                <Activity className="w-3.5 h-3.5 text-amber-400" />
+                LIVE TEST 현황
+              </div>
+              <div className="flex flex-col gap-2">
+
+                {/* 차단 이유 */}
+                {health?.liveTestVetoReason ? (
+                  <div className="flex items-start gap-2 px-3 py-2 rounded-lg border border-[var(--color-short)]/30 bg-[var(--color-short)]/5 text-xs">
+                    <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5 text-[var(--color-short)]" />
+                    <div>
+                      <div className="font-semibold text-[var(--color-short)] mb-0.5">마지막 차단 이유</div>
+                      <div className="text-muted-foreground">{health.liveTestVetoReason}</div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="px-3 py-2 rounded-lg border border-border bg-card/60 text-xs text-muted-foreground">
+                    차단 이력 없음 — 하드캡이 정상 범위 내에서 작동 중입니다.
+                  </div>
+                )}
+
+                {/* 손실 추적 안내 */}
+                <div className="px-3 py-2 rounded-lg border border-amber-500/20 bg-amber-500/5 text-xs text-amber-400/80">
+                  ⓘ 누적 손실 집계는 실제 거래 PnL 연동 후 활성화됩니다 (예정).
+                    현재 LIVE_EXECUTION_LOCKED=true 기간 동안은 차단 로직만 동작합니다.
+                </div>
+
+              </div>
+            </div>
+          )}
+
+          {/* 하드캡 목록 */}
+          <div className="border-t border-amber-500/20 pt-4">
+            <div className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider mb-2">하드캡 조건 (모두 충족 필요)</div>
+            <div className="flex flex-col gap-1">
+              {[
+                `사용 예산 < $${ltBudgetDraft} (테스트 예산 초과 시 차단)`,
+                `누적 손실 < $${ltMaxLossDraft} (초과 시 즉시 비상정지)`,
+                `동시 포지션 ≤ 1개 (초과 시 신규 진입 차단)`,
+                `레버리지 ≤ ${ltMaxLevDraft}× (초과 시 자동 축소)`,
+                `서브그래프 연결 필요 (미연결 시 fail-closed)`,
+                `기존 PendingLiveApproval 오퍼레이터 승인 게이트 유지`,
+              ].map((rule, i) => (
+                <div key={i} className="flex items-start gap-1.5 text-[10px] text-muted-foreground">
+                  <span className="text-amber-400 shrink-0 mt-0.5">•</span>
+                  <span>{rule}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+        </Card>
+
+
+      </section>
+
       {/* ── System Status ── */}
       <section className="flex flex-col gap-4">
         <h2 className="font-semibold flex items-center gap-2 border-b border-border pb-2 text-lg">
@@ -1237,7 +1447,7 @@ export default function Settings() {
                 const mismatches: MismatchRow[] = [];
                 const checkNum = (key: keyof typeof limits, label: string, fmt: (v: number) => string, tol = 1) => {
                   const w = lim[key] ?? 0;
-                  const u = (limits as Record<string, number>)[key] ?? 0;
+                  const u = Number((limits as unknown as Record<string, unknown>)[key] ?? 0);
                   if (Math.abs(w - u) > tol) mismatches.push({ label, worker: fmt(w), ui: fmt(u) });
                 };
                 checkNum('tradingCapital',   '트레이딩 자본',     v => `$${v.toLocaleString('en-US',{maximumFractionDigits:0})}`, 1);

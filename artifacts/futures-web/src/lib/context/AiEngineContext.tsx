@@ -137,6 +137,11 @@ interface AiEngineContextType {
    * Used for display and weeklyLossLimitUSDT enforcement.
    */
   weeklyRealizedPnl: number;
+  /**
+   * True when LIVE TEST MODE is active (from strategy limits).
+   * Controls TopBar badge and Dashboard mode indicator.
+   */
+  liveTestMode: boolean;
 }
 
 const AiEngineContext = createContext<AiEngineContextType | undefined>(undefined);
@@ -1062,6 +1067,7 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
       cooldownEndsAt,
       tradesThisHour,
       weeklyRealizedPnl,
+      liveTestMode: limits.liveTestMode ?? false,
     }}>
       {children}
     </AiEngineContext.Provider>

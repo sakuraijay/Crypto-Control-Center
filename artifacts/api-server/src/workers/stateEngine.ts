@@ -244,6 +244,28 @@ export interface EngineInput {
    * undefined = HWM not yet established (first cycle).
    */
   accountDrawdownPct?: number;
+  /**
+   * True when the caller is operating in LIVE mode (WORKER_ENGINE_MODE=LIVE).
+   * Required for the LIVE TEST MODE hardcap veto to activate.
+   */
+  isLiveMode?: boolean;
+  /**
+   * Accumulated LIVE TEST losses tracked since activation (USD).
+   * Persisted in worker_state and supplied by aiWorker each cycle.
+   */
+  liveTestAccumLossUsd?: number;
+  /**
+   * Latest wallet diagnostic subgraphOk flag — for LIVE TEST fail-closed check.
+   * true = subgraph reachable; false/undefined = fail-closed (block trade).
+   */
+  walletSubgraphOk?: boolean;
+  /**
+   * Number of real on-chain GMX positions from the wallet diagnostic snapshot.
+   * Authoritative for the LIVE TEST one-position cap — takes precedence over the
+   * paper DB positions array (which only tracks Replit-originated paper trades).
+   * Set to a fail-closed sentinel (999) when the snapshot is stale or unavailable.
+   */
+  livePositionCount?: number;
 }
 
 export function runAiEngine(
@@ -255,6 +277,10 @@ export function runAiEngine(
     dailyRealizedPnlUsd, tradingCapital,
     weeklyRealizedPnlUsd = 0, rolling24hRealizedPnlUsd = 0,
     accountDrawdownPct,
+    isLiveMode = false,
+    liveTestAccumLossUsd = 0,
+    walletSubgraphOk = true,
+    livePositionCount,
   } = input;
 
   const profitLockStage = computeProfitLockStage(
@@ -415,6 +441,23 @@ export function runAiEngine(
     entryStyle = 'none';
   }
 
+  // ── LIVE TEST MODE leverage pre-cap ──────────────────────────────────────────
+  // Applied BEFORE profit-lock and risk gate so all subsequent collateral/margin
+  // checks see the already-capped leverage value and sizeUsd remains consistent.
+  // A second structural check still runs after the risk gate for other hardcaps.
+  if (limits.liveTestMode && isLiveMode && state !== 'CASH' && leverage !== undefined) {
+    const maxLev = limits.testMaxLeverage ?? 2;
+    if (leverage > maxLev) {
+      const origLev = leverage;
+      leverage = maxLev;
+      // Re-scale sizeUsd proportionally: sizeUsd = baseCollateral × leverage,
+      // so newSizeUsd = sizeUsd × (cappedLev / origLev)
+      if (sizeUsd !== undefined && origLev > 0) {
+        sizeUsd = Math.floor(sizeUsd * (maxLev / origLev));
+      }
+    }
+  }
+
   // ── Profit-lock application ───────────────────────────────────────────────
   if (profitLockStage > 0 && state !== 'CASH') {
     const exposureMultiplier =
@@ -478,6 +521,38 @@ export function runAiEngine(
           state = 'CASH'; executionType = 'hold';
         }
       }
+    }
+  }
+
+  // ── LIVE TEST MODE hardcap veto ─────────────────────────────────────────────
+  // Highest priority override — runs after the regular risk gate.
+  // Only activates when limits.liveTestMode=true AND caller is in LIVE mode.
+  // Any hardcap breach forces CASH + records block reason (overrides risk gate).
+  if (limits.liveTestMode && isLiveMode && state !== 'CASH') {
+    // NOTE: Accumulated-loss emergency stop is intentionally deferred to task #80
+    // (requires PnL tracking from actual trade execution, not available while
+    //  LIVE_EXECUTION_LOCKED=true). Only structural/connectivity hardcaps run here.
+    const maxLev = limits.testMaxLeverage ?? 2;   // hard cap: always ≤ 2×
+    const budget = limits.testBudgetUsd   ?? 100; // hard cap: single position ≤ budget
+
+    let ltVeto: string | undefined;
+    if ((sizeUsd ?? 0) > budget) {
+      ltVeto = `[LIVE TEST] 포지션 규모 $${(sizeUsd ?? 0).toFixed(0)} > 테스트 예산 $${budget.toFixed(0)} — 차단`;
+    } else if (Math.max(positions.length, livePositionCount ?? 0) >= 1) {
+      // Use whichever is higher: paper DB positions OR real on-chain count from subgraph.
+      // livePositionCount=999 (sentinel) when snapshot is stale → always blocks (fail-closed).
+      const totalCount = Math.max(positions.length, livePositionCount ?? 0);
+      ltVeto = `[LIVE TEST] 최대 포지션(1개) 초과 — paper:${positions.length}개 / on-chain:${livePositionCount ?? '미확인'}개 (합계:${totalCount})`;
+    } else if (!walletSubgraphOk) {
+      ltVeto = `[LIVE TEST] 서브그래프 연결 불가 또는 스냅샷 만료 — fail-closed`;
+    }
+    // NOTE: Leverage is already pre-capped before the risk gate (see leverage pre-cap block above).
+    // No additional leverage cap needed here; sizeUsd is already consistent with capped leverage.
+
+    if (ltVeto) {
+      state = 'CASH'; executionType = 'hold';
+      riskApproved = false;
+      riskVetoReason = ltVeto;
     }
   }
 

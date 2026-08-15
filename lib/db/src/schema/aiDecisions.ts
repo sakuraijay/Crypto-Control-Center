@@ -1,4 +1,4 @@
-import { pgTable, serial, text, real, integer, timestamp } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, real, integer, timestamp, boolean } from "drizzle-orm/pg-core";
 // fullJson stores the complete AiEngineDecision JSON for full-fidelity replay after page refresh.
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
@@ -38,6 +38,8 @@ export const aiDecisionsTable = pgTable("ai_decisions", {
   durationMs:       integer("duration_ms"),
   /** Full AiEngineDecision serialised as JSON — null for older rows / VPS-originated decisions */
   fullJson:         text("full_json"),
+  /** True when this decision was produced while LIVE TEST MODE was active */
+  testMode:         boolean("test_mode").notNull().default(false),
   createdAt:        timestamp("created_at").defaultNow().notNull(),
 });
 

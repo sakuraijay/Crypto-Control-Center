@@ -8,7 +8,7 @@
  *   - decision_json은 AiEngineDecision 전체를 직렬화한 것 (지갑 정보 없음)
  *   - 실제 주문 실행 여부와 무관하게 오퍼레이터 결정을 감사 기록으로 보존
  */
-import { pgTable, text, timestamp, integer } from "drizzle-orm/pg-core";
+import { pgTable, text, timestamp, integer, boolean } from "drizzle-orm/pg-core";
 
 export const liveApprovalsTable = pgTable("live_approvals", {
   /** UUID — 클라이언트에서 생성하여 낙관적 업데이트와 동기화 */
@@ -30,6 +30,8 @@ export const liveApprovalsTable = pgTable("live_approvals", {
   lastError:       text("last_error"),
   /** 마지막 재시도 시각 */
   lastRetriedAt:   timestamp("last_retried_at", { withTimezone: true }),
+  /** True when this approval was queued while LIVE TEST MODE was active */
+  testMode:        boolean("test_mode").notNull().default(false),
 });
 
 export type DbLiveApproval = typeof liveApprovalsTable.$inferSelect;

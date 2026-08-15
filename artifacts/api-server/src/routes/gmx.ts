@@ -370,6 +370,75 @@ const positionsCache = new Map<string, CacheEntry<PositionsResult>>();
 const POSITIONS_CACHE_TTL         = 30_000; // successful fetch
 const POSITIONS_UNAVAILABLE_TTL   =  5_000; // failure — retry sooner
 
+// ── LIVE TEST server-side verification cache ──────────────────────────────────
+// Short TTL to keep data fresh for every AI cycle without hammering the subgraph.
+const LIVE_TEST_VERIFY_TTL_OK  = 30_000; // success: cache 30s
+const LIVE_TEST_VERIFY_TTL_ERR =  3_000; // failure: retry sooner (fail-closed window)
+
+interface LiveTestServerData {
+  /** Number of active on-chain GMX positions. 999 = fail-closed sentinel. */
+  positionCount: number;
+  /** true = authoritative server-side subgraph/RPC query succeeded. false = fail-closed. */
+  subgraphOk: boolean;
+  fetchedAt: number;
+  expiresAt: number;
+}
+
+let liveTestServerCache: LiveTestServerData | null = null;
+
+/**
+ * fetchServerLiveTestData — authoritative server-side LIVE TEST position and
+ * connectivity verification using GMX_WALLET_ADDRESS env var.
+ *
+ * Queries Satsuma subgraph → Arbitrum RPC → fail-closed. Results are cached
+ * for LIVE_TEST_VERIFY_TTL_OK ms on success to avoid hammering the subgraph
+ * on every AI cycle (typically 60s). Browser-posted diagnostics are NOT used.
+ *
+ * Returns { positionCount: 999, subgraphOk: false } on any failure so the
+ * LIVE TEST hardcap always fails closed when the data source is unavailable.
+ */
+export async function fetchServerLiveTestData(): Promise<{ positionCount: number; subgraphOk: boolean }> {
+  // Serve from cache if still fresh
+  if (liveTestServerCache && Date.now() < liveTestServerCache.expiresAt) {
+    return { positionCount: liveTestServerCache.positionCount, subgraphOk: liveTestServerCache.subgraphOk };
+  }
+
+  const walletAddress = process.env.GMX_WALLET_ADDRESS?.toLowerCase() ?? '';
+  if (!walletAddress || !isValidAddress(walletAddress)) {
+    // GMX_WALLET_ADDRESS not configured — fail-closed (cannot verify)
+    liveTestServerCache = {
+      positionCount: 999, subgraphOk: false,
+      fetchedAt: Date.now(), expiresAt: Date.now() + LIVE_TEST_VERIFY_TTL_ERR,
+    };
+    return { positionCount: 999, subgraphOk: false };
+  }
+
+  // Try subgraph (primary), then RPC (fallback), then fail-closed
+  let positions: SubgraphPosition[] | null = await fetchFromSatsuma(walletAddress);
+  let ok = positions !== null;
+
+  if (!ok) {
+    positions = await fetchFromRpc(walletAddress);
+    ok = positions !== null;
+  }
+
+  if (ok && positions !== null) {
+    const positionCount = positions.length;
+    liveTestServerCache = {
+      positionCount, subgraphOk: true,
+      fetchedAt: Date.now(), expiresAt: Date.now() + LIVE_TEST_VERIFY_TTL_OK,
+    };
+    return { positionCount, subgraphOk: true };
+  }
+
+  // Both upstreams failed → fail-closed (sentinel 999 blocks LIVE TEST immediately)
+  liveTestServerCache = {
+    positionCount: 999, subgraphOk: false,
+    fetchedAt: Date.now(), expiresAt: Date.now() + LIVE_TEST_VERIFY_TTL_ERR,
+  };
+  return { positionCount: 999, subgraphOk: false };
+}
+
 /** Server-side flag: false once we confirm Satsuma schema lacks liquidationPrice. */
 let sgSupportsLiqPrice = true;
 

@@ -141,4 +141,13 @@ router.get('/wallet/diagnostic', (_req: Request, res: Response) => {
   });
 });
 
+/**
+ * getWalletDiagnosticSnapshot — server-internal accessor so aiWorker
+ * can read the latest browser-pushed snapshot without an HTTP round-trip.
+ * Returns the current in-memory snapshot; never exposes it externally.
+ */
+export function getWalletDiagnosticSnapshot(): WalletDiagnosticSnapshot {
+  return { ...snapshot };
+}
+
 export default router;

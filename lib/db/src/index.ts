@@ -80,6 +80,15 @@ const MIGRATIONS: { name: string; sql: string }[] = [
       );
     `,
   },
+  {
+    name: "0008_live_test_mode",
+    sql: `
+      ALTER TABLE ai_decisions
+        ADD COLUMN IF NOT EXISTS test_mode boolean NOT NULL DEFAULT false;
+      ALTER TABLE live_approvals
+        ADD COLUMN IF NOT EXISTS test_mode boolean NOT NULL DEFAULT false;
+    `,
+  },
   // Add future migrations here in chronological order.
 ];
 

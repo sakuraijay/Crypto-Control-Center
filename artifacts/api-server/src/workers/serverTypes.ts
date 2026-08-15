@@ -102,6 +102,17 @@ export interface RiskLimits {
   rolling24hLossLimitUSDT?: number;
   cooldownMinutes?: number;
   maxTradesPerHour?: number;
+  // ── LIVE TEST MODE ────────────────────────────────────────────────────────
+  /** Activate LIVE TEST MODE safety layer. false = off (default). */
+  liveTestMode?: boolean;
+  /** Test budget in USD. LIVE TEST mode will block new entries if accumulated losses reach testMaxLossUsd. Default $100. */
+  testBudgetUsd?: number;
+  /** Maximum accumulated test loss (USD) before emergency stop. Default $50. */
+  testMaxLossUsd?: number;
+  /** Maximum leverage in LIVE TEST mode (hard cap, default 2×). */
+  testMaxLeverage?: number;
+  /** Max simultaneous positions in LIVE TEST mode. Always 1 — not configurable. */
+  readonly testMaxPositions?: 1;
 }
 
 /** Full AI decision record produced by one engine cycle. */
@@ -136,4 +147,6 @@ export interface ServerAiDecision {
   paperOrderId: null;
   /** Source tag to distinguish worker decisions from browser decisions in UI */
   source: 'server_worker';
+  /** True when this decision was produced while LIVE TEST MODE was active */
+  testMode?: boolean;
 }

@@ -92,6 +92,13 @@ export interface ExecutorStatus {
   lastLimitsUsed: import('./serverTypes').RiskLimits | null;
   /** Equity high-water mark (USD) since server start. null = HWM not yet established */
   equityHwm: number | null;
+  // ── LIVE TEST MODE ──────────────────────────────────────────────────────────
+  /** True when liveTestMode is enabled in strategy limits */
+  liveTestMode: boolean;
+  /** Reason the last LIVE TEST hardcap blocked a trade, or null */
+  liveTestVetoReason: string | null;
+  /** Accumulated test losses tracked since activation (USD) */
+  liveTestAccumLossUsd: number;
 }
 
 export interface ExecuteOrderParams {
@@ -188,12 +195,16 @@ export function getExecutorStatus(): ExecutorStatus {
     startedAt:         STARTED_AT,
     lastRpcCheckAt,
     // AI Worker
-    workerRunning:    workerStatus.workerRunning,
-    lastCycleAt:      workerStatus.lastCycleAt,
-    lastCycleResult:  workerStatus.lastCycleResult,
-    cycleCount:       workerStatus.cycleCount,
-    lastLimitsUsed:   workerStatus.lastLimitsUsed,
-    equityHwm:        workerStatus.equityHwm,
+    workerRunning:        workerStatus.workerRunning,
+    lastCycleAt:          workerStatus.lastCycleAt,
+    lastCycleResult:      workerStatus.lastCycleResult,
+    cycleCount:           workerStatus.cycleCount,
+    lastLimitsUsed:       workerStatus.lastLimitsUsed,
+    equityHwm:            workerStatus.equityHwm,
+    // LIVE TEST MODE
+    liveTestMode:         workerStatus.liveTestMode,
+    liveTestVetoReason:   workerStatus.liveTestVetoReason,
+    liveTestAccumLossUsd: workerStatus.liveTestAccumLossUsd,
   };
 }
 
