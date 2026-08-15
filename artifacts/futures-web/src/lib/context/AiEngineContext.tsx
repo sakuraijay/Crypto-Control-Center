@@ -93,7 +93,9 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
   const { engineState, setEngineState } = useAppContext();
   const { limits } = useStrategyContext();
   const { watchlist } = useWatchlistContext();
-  const { connectionStatus, config: vpsConfig, executorMode } = useVpsContext();
+  // executorMode는 더 이상 forwardToVps에서 사용하지 않음
+  // (LIVE 실행은 항상 외부 VPS → executorMode는 모니터링 UI 전용)
+  const { connectionStatus, config: vpsConfig } = useVpsContext();
   const { toast } = useToast();
 
   const [currentDecision, setCurrentDecision] = useState<AiEngineDecision | null>(null);
@@ -328,29 +330,38 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
-  // ── Forward approved order to Executor (internal or external VPS) ────────────
+  // ── 승인 주문을 외부 VPS로 전달 ────────────────────────────────────────────────
+  // ┌─ 보안 아키텍처 원칙 ────────────────────────────────────────────────────────┐
+  // │ LIVE 주문의 실제 GMX 서명·온체인 전송은 반드시 외부 VPS에서만 수행합니다.    │
+  // │ Replit (내부 실행기)은 모니터링·로깅·페이퍼 시뮬레이션 전용입니다.           │
+  // │ executorMode 설정값과 관계없이 LIVE 승인은 항상 외부 VPS /execute로 라우팅. │
+  // └────────────────────────────────────────────────────────────────────────────┘
   const forwardToVps = useCallback(async (
     decision: AiEngineDecision,
     snapshot?: { host: string; port: string; useSSL: boolean },
   ): Promise<{ ok: boolean; error?: string }> => {
-    const mode = executorMode ?? 'internal';
-    let url: string;
+    // 스냅샷 우선: 승인 대기열 진입 시점의 VPS 설정 사용
+    // (승인 중 호스트 변경으로 인한 잘못된 라우팅 방지)
+    const target = snapshot ?? {
+      host:   vpsConfig.host ?? '',
+      port:   vpsConfig.port ?? '8080',
+      useSSL: vpsConfig.useSSL ?? false,
+    };
 
-    if (mode === 'internal') {
-      // Internal Replit Executor — no host/port needed
-      url = '/api-server/api/executor/execute';
-    } else {
-      // External VPS mode — use snapshotted or current config
-      // (snapshot captures config at queue time so a host change mid-approval doesn't mis-route)
-      const target = snapshot ?? { host: vpsConfig.host ?? '', port: vpsConfig.port ?? '8080', useSSL: vpsConfig.useSSL ?? false };
-      if (!target.host?.trim()) return { ok: false, error: 'External VPS not configured — set host in Settings → Advanced' };
-      const params = new URLSearchParams({
-        host: target.host,
-        port: target.port || '8080',
-        ssl:  String(target.useSSL ?? false),
-      });
-      url = `/api-server/api/vps/execute?${params}`;
+    if (!target.host?.trim()) {
+      return {
+        ok: false,
+        error: 'LIVE 실행 불가 — 외부 VPS가 설정되지 않았습니다. Settings → External VPS 섹션에서 호스트를 구성하세요.',
+      };
     }
+
+    const params = new URLSearchParams({
+      host: target.host,
+      port: target.port || '8080',
+      ssl:  String(target.useSSL ?? false),
+    });
+    const url = `/api-server/api/vps/execute?${params}`;
+
     const body = JSON.stringify({
       decisionId:      decision.id,
       operatingState:  decision.operatingState,
@@ -371,21 +382,24 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
         const res = await fetch(url, { method: 'POST', headers, body });
         if (!res.ok) {
           const detail = await res.text().catch(() => '');
-          // Retry once on 5xx
+          // 5xx: 1회 재시도
           if (res.status >= 500 && attempt === 0) {
             await new Promise(r => setTimeout(r, 2_000));
             continue;
           }
-          return { ok: false, error: `Executor responded ${res.status}${detail ? ': ' + detail.slice(0, 120) : ''}` };
+          return {
+            ok: false,
+            error: `VPS 응답 오류 ${res.status}${detail ? ': ' + detail.slice(0, 120) : ''}`,
+          };
         }
         return { ok: true };
       } catch (e) {
         if (attempt === 0) { await new Promise(r => setTimeout(r, 2_000)); continue; }
-        return { ok: false, error: e instanceof Error ? e.message : 'Network error' };
+        return { ok: false, error: e instanceof Error ? e.message : '네트워크 오류 — VPS에 연결할 수 없습니다' };
       }
     }
-    return { ok: false, error: 'Executor unreachable after retry' };
-  }, [vpsConfig, executorMode]);
+    return { ok: false, error: '재시도 후에도 VPS에 연결할 수 없습니다' };
+  }, [vpsConfig]);
 
   // ── Approve a live order ────────────────────────────────────────────────────
   const approveLiveOrder = useCallback(async (id: string) => {

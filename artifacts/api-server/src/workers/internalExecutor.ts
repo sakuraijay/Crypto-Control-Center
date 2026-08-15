@@ -1,40 +1,53 @@
 /**
- * Internal Executor — Replit-hosted GMX V2 / Arbitrum One execution worker.
+ * Internal Monitor — Replit 내부 실행 상태 모니터
  *
- * This module runs inside the API server process on a Replit Reserved VM,
- * providing 24/7 execution without an external VPS.
+ * ──────────────────────────────────────────────────────────────────────────────
+ * 보안 아키텍처 원칙 (변경 금지)
+ * ──────────────────────────────────────────────────────────────────────────────
+ * Replit 내부 실행기는 【모니터링·로깅·제어 클라이언트】역할만 담당합니다.
+ * 실제 GMX V2 주문 서명 및 온체인 전송은 반드시 외부 24/7 VPS에서만 수행합니다.
  *
- * SECURITY CONTRACT
- *   - All GMX credentials (signer key, RPC URL) are read from server env vars only.
- *   - No key material is ever returned to any client response.
- *   - The /executor/status endpoint returns only boolean readiness signals.
+ *   ❌ Replit 실행환경에 절대 저장 금지:
+ *      - GMX 메인 지갑 개인키 / 시드 문구
+ *      - GMX One-Click/위임 서브계정 signer private key
+ *      - 어떠한 형태의 서명 자격증명
+ *
+ *   ✅ Replit이 담당하는 역할:
+ *      - 가격 데이터 수집 (GMX oracle)
+ *      - AI 5-State 엔진 의사결정
+ *      - 오퍼레이터 승인 게이트
+ *      - 승인된 주문을 외부 VPS /execute로 전달
+ *      - 포지션·PnL·리스크 모니터링
+ *      - 비상정지·일시정지 제어
+ *
+ *   ✅ 외부 VPS가 담당하는 역할:
+ *      - GMX 서브계정 signer key 보관
+ *      - ExchangeRouter 호출 / 실제 온체인 트랜잭션 서명·전송
+ *      - 24/7 포지션 유지 (TP/SL 모니터링)
  *
  * DEPLOYMENT MODES
- *   - reserved_vm   — Replit Reserved VM (always-on); full autonomous operation.
- *   - development   — Replit development container (sleeps when idle); use for testing only.
+ *   - reserved_vm   — Replit Reserved VM (항상 실행); 모니터링 지속
+ *   - development   — Replit 개발 컨테이너 (유휴 시 슬립); 테스트 전용
  *
- * CREDENTIALS (set as Replit Secrets on the api-server artifact)
- *   GMX_SIGNER_KEY        — GMX One-Click delegated subaccount private key (hex, no 0x prefix).
- *                           This is the subaccount key only — never the primary wallet key.
- *   GMX_RPC_URL           — Arbitrum One RPC endpoint (e.g. https://arb1.arbitrum.io/rpc)
- *   GMX_WALLET_ADDRESS    — Primary wallet address (public, informational only)
- *   GMX_SUBACCOUNT_ADDRESS — Delegated One-Click subaccount address (public, informational only)
+ * 환경 변수 (Replit Secrets — 공개 주소만, 키 절대 금지)
+ *   GMX_RPC_URL            — Arbitrum One RPC 엔드포인트 (Alchemy/Infura)
+ *   GMX_WALLET_ADDRESS     — 메인 지갑 주소 (공개, 정보 제공 전용)
+ *   GMX_SUBACCOUNT_ADDRESS — 위임 One-Click 서브계정 주소 (공개, 정보 제공 전용)
  */
 
 export type DeploymentMode = 'reserved_vm' | 'development';
 
 export interface ExecutorStatus {
   mode: 'internal';
+  /** 모니터링 준비 여부 (RPC 연결 + 응답 확인) */
   ready: boolean;
-  /** True when GMX_SIGNER_KEY env var is set (value never returned) */
-  signerConfigured: boolean;
   /** True when GMX_RPC_URL env var is set */
   rpcConfigured: boolean;
-  /** True when Arbitrum One RPC responds within 5 s (checked on startup + every 60 s) */
+  /** True when Arbitrum One RPC responds within 5 s */
   gmxRpcHealthy: boolean;
-  /** Reserved VM = always-on; development = may sleep */
+  /** Reserved VM = 항상 실행; development = 슬립 가능 */
   deploymentMode: DeploymentMode;
-  /** Public wallet info — never private keys */
+  /** 공개 지갑 주소 — 개인키 절대 미반환 */
   walletAddress: string | null;
   subaccountAddress: string | null;
   uptimeMs: number;
@@ -44,9 +57,9 @@ export interface ExecutorStatus {
 
 export interface ExecuteOrderParams {
   decisionId: string;
-  operatingState: string;     // 'LONG' | 'SHORT' | 'CASH' | 'SPOT' | 'HEDGE'
+  operatingState: string;
   symbol: string | null;
-  executionType: string;      // 'perp_long_open' | 'perp_short_open' | etc.
+  executionType: string;
   sizeUsd?: number | null;
   leverage?: number | null;
   tpPrice?: number | null;
@@ -61,27 +74,26 @@ export interface ExecuteOrderResult {
   txHash?: string | null;
   error?: string;
   code?: string;
-  /** Simulated when signer not configured */
-  simulated?: boolean;
+  simulated: true;
+  note: string;
 }
 
-// ── Startup timestamp ─────────────────────────────────────────────────────────
+// ── 시작 시각 ──────────────────────────────────────────────────────────────────
 const START_TIME = Date.now();
 const STARTED_AT = new Date().toISOString();
 
-// ── RPC health cache ──────────────────────────────────────────────────────────
+// ── RPC 헬스 캐시 ─────────────────────────────────────────────────────────────
 let gmxRpcHealthy = false;
 let lastRpcCheckAt: string | null = null;
 const RPC_CHECK_INTERVAL_MS = 60_000;
 
-/** Detect Replit deployment mode from environment */
+/** Replit 배포 모드 감지 */
 function detectDeploymentMode(): DeploymentMode {
-  // REPLIT_DEPLOYMENT is set in Reserved VM / Autoscale deployments
   if (process.env.REPLIT_DEPLOYMENT) return 'reserved_vm';
   return 'development';
 }
 
-/** Check Arbitrum One RPC health without revealing the RPC URL to clients */
+/** Arbitrum One RPC 헬스 체크 — RPC URL 값은 클라이언트에 미노출 */
 async function checkRpcHealth(): Promise<boolean> {
   const rpcUrl = process.env.GMX_RPC_URL;
   if (!rpcUrl?.trim()) return false;
@@ -105,76 +117,58 @@ async function checkRpcHealth(): Promise<boolean> {
   }
 }
 
-/** Start periodic RPC health check */
+/** 주기적 RPC 헬스 체크 시작 */
 export function startRpcHealthMonitor(): void {
   const check = async () => {
     gmxRpcHealthy = await checkRpcHealth();
     lastRpcCheckAt = new Date().toISOString();
   };
-  void check(); // immediate first check
+  void check(); // 즉시 첫 번째 체크
   setInterval(check, RPC_CHECK_INTERVAL_MS);
 }
 
-/** Return current executor status — no secrets included */
+/** 현재 모니터 상태 반환 — 비밀값 절대 미포함 */
 export function getExecutorStatus(): ExecutorStatus {
-  const signerConfigured = Boolean(process.env.GMX_SIGNER_KEY?.trim());
-  const rpcConfigured    = Boolean(process.env.GMX_RPC_URL?.trim());
+  const rpcConfigured = Boolean(process.env.GMX_RPC_URL?.trim());
 
   return {
-    mode:               'internal',
-    ready:              signerConfigured && rpcConfigured && gmxRpcHealthy,
-    signerConfigured,
+    mode:              'internal',
+    // 모니터링 준비 = RPC 연결 가능 여부 (서명 자격증명과 무관)
+    ready:             rpcConfigured && gmxRpcHealthy,
     rpcConfigured,
     gmxRpcHealthy,
-    deploymentMode:     detectDeploymentMode(),
-    walletAddress:      process.env.GMX_WALLET_ADDRESS ?? null,
-    subaccountAddress:  process.env.GMX_SUBACCOUNT_ADDRESS ?? null,
-    uptimeMs:           Date.now() - START_TIME,
-    startedAt:          STARTED_AT,
+    deploymentMode:    detectDeploymentMode(),
+    walletAddress:     process.env.GMX_WALLET_ADDRESS ?? null,
+    subaccountAddress: process.env.GMX_SUBACCOUNT_ADDRESS ?? null,
+    uptimeMs:          Date.now() - START_TIME,
+    startedAt:         STARTED_AT,
     lastRpcCheckAt,
   };
 }
 
 /**
- * Execute a GMX V2 order via the internal signer.
+ * 내부 실행기 — 항상 시뮬레이션 반환
  *
- * In development (signer not configured), returns a simulated success so the
- * full approval-gate and logging flow can be exercised without real credentials.
- *
- * In production (GMX_SIGNER_KEY set), this is where the GMX SDK call will go
- * once the One-Click subaccount key is provided.
+ * 【중요 보안 원칙】
+ * Replit 내부 실행기는 실제 GMX 주문을 서명하거나 온체인 전송하지 않습니다.
+ * 이 함수는 페이퍼 트레이딩 시뮬레이션 및 의사결정 로그 기록에만 사용됩니다.
+ * LIVE 모드의 실제 실행은 클라이언트(AiEngineContext)가 외부 VPS /execute로
+ * 직접 전달합니다. 이 경로는 LIVE 주문에 대해 호출되지 않습니다.
  */
 export async function executeOrder(params: ExecuteOrderParams): Promise<ExecuteOrderResult> {
   const ts = new Date().toISOString();
-  const signerConfigured = Boolean(process.env.GMX_SIGNER_KEY?.trim());
 
-  // ── Development / unconfigured: simulate ────────────────────────────────────
-  if (!signerConfigured) {
-    console.info(
-      `[InternalExecutor] SIMULATED — signer not configured. decision=${params.decisionId} type=${params.executionType} symbol=${params.symbol ?? 'MULTI'}`,
-    );
-    return {
-      ok:          true,
-      executedAt:  ts,
-      txHash:      null,
-      simulated:   true,
-    };
-  }
-
-  // ── Production: GMX SDK execution (stub — implement when key is provided) ───
-  // TODO: Replace this stub with actual GMX V2 SDK order submission.
-  //       The signer key is available as process.env.GMX_SIGNER_KEY
-  //       The RPC URL is available as process.env.GMX_RPC_URL
-  //       Neither value should ever be returned to clients.
+  // 항상 시뮬레이션 — Replit은 서명 권한 없음
   console.info(
-    `[InternalExecutor] LIVE — would execute decision=${params.decisionId} type=${params.executionType} symbol=${params.symbol ?? 'MULTI'} sizeUsd=${params.sizeUsd ?? 'n/a'}`,
+    `[InternalMonitor] 시뮬레이션 — 실제 실행은 외부 VPS 담당. ` +
+    `decisionId=${params.decisionId} type=${params.executionType} symbol=${params.symbol ?? 'MULTI'}`,
   );
 
-  // Return simulated until GMX SDK is integrated
   return {
-    ok:         true,
-    executedAt: ts,
-    txHash:     null,
-    simulated:  true,
+    ok:          true,
+    executedAt:  ts,
+    txHash:      null,
+    simulated:   true,
+    note:        'Replit 내부 모니터는 시뮬레이션 전용입니다. 실제 GMX 실행은 외부 VPS에서만 수행됩니다.',
   };
 }

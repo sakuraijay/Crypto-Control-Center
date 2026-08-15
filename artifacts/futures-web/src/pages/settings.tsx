@@ -71,14 +71,27 @@ export default function Settings() {
         </div>
       )}
 
-      {/* ── Architecture note ── */}
-      <div className="flex items-start gap-3 px-4 py-3 rounded-lg border border-border bg-card/50 text-xs text-muted-foreground">
-        <Info className="w-4 h-4 shrink-0 mt-0.5 text-primary" />
-        <div className="leading-relaxed">
-          <strong className="text-foreground">Replit Executor is the primary 24/7 execution authority.</strong>
-          {' '}It runs inside this deployment and continues strategy evaluation, position management,
-          TP/SL handling, and (when armed) autonomous entries — even while you are offline or asleep.
-          An optional External VPS can be configured as an advanced alternative. Paper mode is always safe.
+      {/* ── 아키텍처 원칙 안내 ── */}
+      <div className="flex flex-col gap-2 px-4 py-3 rounded-lg border border-primary/20 bg-primary/5 text-xs">
+        <div className="flex items-start gap-2">
+          <Info className="w-4 h-4 shrink-0 mt-0.5 text-primary" />
+          <div className="leading-relaxed text-foreground/90">
+            <strong className="text-foreground">Replit = 모니터링·승인·제어 클라이언트</strong>
+            {' '}— 가격 수집, AI 의사결정, 오퍼레이터 승인 게이트, 리스크 모니터링을 담당합니다.
+            실제 GMX 주문 서명 및 온체인 전송은 외부 24/7 VPS에서만 수행합니다.
+          </div>
+        </div>
+        <div className="flex items-start gap-2 pl-6 text-muted-foreground">
+          <span className="text-[var(--color-short)] font-bold shrink-0">❌</span>
+          <span>Replit Secrets에 GMX 개인키·시드문구·서브계정 signer key를 절대 저장하지 마세요.</span>
+        </div>
+        <div className="flex items-start gap-2 pl-6 text-muted-foreground">
+          <span className="text-[var(--color-long)] font-bold shrink-0">✅</span>
+          <span>GMX_WALLET_ADDRESS, GMX_SUBACCOUNT_ADDRESS (공개 주소만) — 상태 표시 전용으로 저장 가능.</span>
+        </div>
+        <div className="flex items-start gap-2 pl-6 text-muted-foreground">
+          <span className="text-[var(--color-long)] font-bold shrink-0">✅</span>
+          <span>GMX_RPC_URL — RPC 헬스 모니터링 전용. 외부 VPS Settings에서 호스트를 설정하면 LIVE 주문이 VPS로 전달됩니다.</span>
         </div>
       </div>
 
@@ -132,11 +145,12 @@ export default function Settings() {
           >
             <div className="flex items-center gap-2">
               <Cpu className={cn('w-4 h-4', executorMode === 'internal' ? 'text-primary' : 'text-muted-foreground')} />
-              <span className="text-sm font-bold">Internal Executor</span>
-              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/15 text-primary font-semibold">DEFAULT</span>
+              <span className="text-sm font-bold">Replit 모니터</span>
+              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-primary/15 text-primary font-semibold">기본값</span>
             </div>
             <p className="text-[11px] text-muted-foreground leading-relaxed">
-              Runs inside this Replit deployment. No external server needed. 24/7 on Reserved VM.
+              Replit이 AI 의사결정·승인 게이트·리스크 모니터를 담당합니다.
+              실제 GMX 실행은 외부 VPS에서 수행됩니다.
             </p>
           </button>
 
@@ -180,17 +194,10 @@ export default function Settings() {
               Executor {connectionStatus === 'connected' ? 'Online' : connectionStatus === 'error' ? 'Unreachable' : 'Connecting'}
             </div>
 
-            <div className={cn(
-              'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-[11px] font-medium',
-              internalSignerConfigured
-                ? 'border-[var(--color-long)]/30 bg-[var(--color-long)]/5 text-[var(--color-long)]'
-                : 'border-amber-500/30 bg-amber-500/5 text-amber-400',
-            )}>
-              {internalSignerConfigured
-                ? <CheckCircle2 className="w-3.5 h-3.5" />
-                : <AlertTriangle className="w-3.5 h-3.5" />
-              }
-              {internalSignerConfigured ? 'GMX Signer Configured' : 'Simulation Mode (no signer key)'}
+            {/* 모니터 역할 명시 — Signer 배지 없음 (Replit은 키 미보관) */}
+            <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-primary/30 bg-primary/5 text-primary text-[11px] font-medium">
+              <Cpu className="w-3.5 h-3.5" />
+              모니터링 전용 — 실행은 외부 VPS 담당
             </div>
 
             <div className={cn(
@@ -203,7 +210,7 @@ export default function Settings() {
                 ? <CheckCircle2 className="w-3.5 h-3.5" />
                 : <XCircle className="w-3.5 h-3.5" />
               }
-              GMX RPC {health.gmxConnected ? 'Healthy' : 'Disconnected'}
+              GMX RPC {health.gmxConnected ? '연결됨' : '연결 없음'}
             </div>
 
             {internalDeploymentMode && (

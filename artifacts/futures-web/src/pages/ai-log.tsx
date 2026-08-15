@@ -213,6 +213,7 @@ export default function AiLogPage() {
   const {
     currentDecision, decisionHistory, stats, running, autoExecute,
     setAutoExecute, triggerCycle, clearHistory, loadMoreHistory,
+    pendingApprovals,
   } = useAiEngine();
   const { engineState, triggerEmergencyStop } = useAppContext();
 
@@ -512,14 +513,98 @@ export default function AiLogPage() {
         )}
       </Card>
 
-      {/* ── Architecture note ──────────────────────────────────────────────────── */}
+      {/* ── LIVE 승인 이력 ────────────────────────────────────────────────────────── */}
+      {pendingApprovals.length > 0 && (
+        <Card className="overflow-hidden">
+          <div className="p-4 border-b border-border bg-card/50 flex items-center justify-between">
+            <h3 className="font-semibold text-sm flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-primary" /> LIVE 승인 이력
+            </h3>
+            <span className="text-[10px] text-muted-foreground">
+              {pendingApprovals.filter(a => a.status === 'APPROVED').length}건 승인 ·{' '}
+              {pendingApprovals.filter(a => a.status === 'REJECTED').length}건 거절 ·{' '}
+              {pendingApprovals.filter(a => a.status === 'PENDING').length}건 대기
+            </span>
+          </div>
+          <div className="overflow-auto">
+            <table className="w-full text-xs">
+              <thead className="bg-secondary/50 border-b border-border">
+                <tr>
+                  {['시간', '결정 #', '심볼', '실행 유형', '상태', 'VPS 전달', '오류'].map(h => (
+                    <th key={h} className="text-left font-medium text-muted-foreground py-2 px-3 text-[10px] uppercase tracking-wider whitespace-nowrap">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border/40">
+                {[...pendingApprovals].reverse().map(a => {
+                  const statusCfg = {
+                    PENDING:  { cls: 'bg-amber-500/15 text-amber-400 border-amber-500/30',   label: '⏳ 대기' },
+                    APPROVED: { cls: 'bg-[var(--color-long)]/15 text-[var(--color-long)] border-[var(--color-long)]/30', label: '✅ 승인' },
+                    REJECTED: { cls: 'bg-[var(--color-short)]/15 text-[var(--color-short)] border-[var(--color-short)]/30', label: '❌ 거절' },
+                    EXPIRED:  { cls: 'bg-secondary text-muted-foreground border-border',     label: '⏰ 만료' },
+                  }[a.status] ?? { cls: 'bg-secondary text-muted-foreground border-border', label: a.status };
+
+                  return (
+                    <tr key={a.id} className="hover:bg-secondary/20 transition-colors">
+                      <td className="px-3 py-2 font-mono text-muted-foreground whitespace-nowrap">
+                        {format(new Date(a.createdAt), 'HH:mm:ss')}
+                        <div className="text-[9px] opacity-50">{format(new Date(a.createdAt), 'MM/dd')}</div>
+                      </td>
+                      <td className="px-3 py-2 font-mono text-muted-foreground">
+                        #{a.decision.cycleNumber}
+                      </td>
+                      <td className="px-3 py-2 font-bold">
+                        {a.decision.primarySymbol ? `${a.decision.primarySymbol}/USD` : '—'}
+                      </td>
+                      <td className="px-3 py-2 font-mono text-[10px] text-muted-foreground">
+                        {a.decision.executionType?.replace(/_/g, ' ') ?? '—'}
+                      </td>
+                      <td className="px-3 py-2">
+                        <span className={cn('inline-flex items-center px-1.5 py-0.5 rounded border text-[10px] font-bold', statusCfg.cls)}>
+                          {statusCfg.label}
+                        </span>
+                        {a.status === 'REJECTED' && a.rejectionReason && (
+                          <div className="text-[9px] text-muted-foreground mt-0.5 max-w-[120px] truncate">{a.rejectionReason}</div>
+                        )}
+                      </td>
+                      <td className="px-3 py-2">
+                        {a.vpsForwarded === true && (
+                          <span className="inline-flex items-center gap-1 text-[10px] text-[var(--color-long)] font-semibold">
+                            <CheckCircle2 className="w-3 h-3" /> 전달됨
+                          </span>
+                        )}
+                        {a.vpsForwarded === false && (
+                          <span className="inline-flex items-center gap-1 text-[10px] text-[var(--color-short)] font-semibold">
+                            <XCircle className="w-3 h-3" /> 실패
+                          </span>
+                        )}
+                        {a.vpsForwarded == null && (
+                          <span className="text-[10px] text-muted-foreground">—</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2 text-[10px] text-[var(--color-short)] max-w-[180px]">
+                        {a.vpsError ? (
+                          <span className="truncate block" title={a.vpsError}>{a.vpsError.slice(0, 60)}</span>
+                        ) : '—'}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
+
+      {/* ── 아키텍처 원칙 안내 ────────────────────────────────────────────────────── */}
       <div className="flex items-start gap-2 text-[10px] text-muted-foreground px-1 pb-2">
         <ShieldAlert className="w-3 h-3 shrink-0 mt-0.5 text-amber-400" />
         <span>
-          Deterministic risk controls have <strong>absolute veto authority</strong> above the AI.
-          Vetoed decisions are logged but never executed. In paper mode, auto-execute simulates
-          orders locally. Live trading requires a GMX One-Click subaccount configured on the VPS — never your primary wallet key here.
-          Operator role: <strong>monitor and emergency stop only</strong>.
+          결정론적 리스크 컨트롤이 AI보다 <strong>절대 우선권</strong>을 가집니다.
+          거부(Veto)된 결정은 로그에 기록되지만 절대 실행되지 않습니다.
+          페이퍼 모드에서 자동 실행은 로컬 시뮬레이션입니다.
+          LIVE 거래는 외부 VPS에서 GMX One-Click 서브계정으로만 실행됩니다.
+          오퍼레이터 역할: <strong>모니터링 및 비상정지 전용</strong>.
         </span>
       </div>
     </div>
