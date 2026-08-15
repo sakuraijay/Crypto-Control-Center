@@ -24,7 +24,34 @@ import { useWallet } from './WalletContext';
 const SUBGRAPH_URL =
   'https://subgraph.satsuma-prod.com/3b2ced13c8d9/gmx/synthetics-arbitrum-stats/api';
 
-const POSITIONS_QUERY = `
+/**
+ * Full query — includes liquidationPrice.
+ * GMX V2 Synthetics subgraph (Satsuma) may or may not expose this field depending on
+ * deployment version. We try this first and fall back to POSITIONS_QUERY_BASIC on a
+ * schema error to avoid breaking position display entirely.
+ */
+const POSITIONS_QUERY_FULL = `
+  query AccountPositions($account: String!) {
+    positions(
+      first: 20
+      where: { account: $account, sizeInUsd_gt: "0" }
+    ) {
+      id
+      account
+      market
+      collateralToken
+      sizeInUsd
+      collateralAmount
+      realisedPnlUsd
+      isLong
+      increasedAtTime
+      liquidationPrice
+    }
+  }
+`;
+
+/** Fallback query — omits liquidationPrice when the subgraph schema does not support it. */
+const POSITIONS_QUERY_BASIC = `
   query AccountPositions($account: String!) {
     positions(
       first: 20
@@ -43,8 +70,23 @@ const POSITIONS_QUERY = `
   }
 `;
 
+/**
+ * Module-level flag: start optimistic (try liquidationPrice).
+ * Set to false once we confirm the subgraph schema does not expose that field —
+ * avoids sending a known-failing query on every subsequent poll.
+ */
+let sgSupportsLiqPrice = true;
+
 // ── GMX precision: sizeInUsd / realisedPnlUsd use 30 decimals ────────────────
 const GMX_PRECISION = 1e30;
+
+/**
+ * Native USDC on Arbitrum One (6 decimals).
+ * Leverage is only computed when collateralToken matches this address — other
+ * GMX collateral tokens (WETH 18 dec, WBTC 8 dec) require token-price conversion
+ * that is not performed here, so we show N/A for leverage to avoid misleading values.
+ */
+const ARBITRUM_USDC = '0xaf88d065e77c8cc2239327c5edb3a432268e5831'; // lowercase
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -63,6 +105,17 @@ export interface GmxOnchainPosition {
   market:        string;
   /** Unix timestamp of last increase (seconds) */
   openedAt:      number | null;
+  /**
+   * Effective leverage = sizeUsd / collateralUsd.
+   * null when either value is zero/negative (trust-safe only).
+   */
+  leverage:      number | null;
+  /**
+   * Liquidation price in USD from the GMX subgraph.
+   * null when the subgraph does not expose the field or returns 0/null.
+   * Never estimated — only real subgraph values are stored here.
+   */
+  liquidationPrice: number | null;
 }
 
 export type GmxAccountLoadStatus = 'idle' | 'loading' | 'ok' | 'error' | 'unavailable';
@@ -160,6 +213,11 @@ export function GmxAccountProvider({ children }: { children: ReactNode }) {
     setState(prev => ({ ...prev, status: 'loading' }));
 
     try {
+      // ── Choose query based on cached schema-support flag ─────────────────
+      const activeQuery = sgSupportsLiqPrice
+        ? POSITIONS_QUERY_FULL
+        : POSITIONS_QUERY_BASIC;
+
       // Load market → symbol registry in parallel with subgraph query
       const [symbolMap, sgRes] = await Promise.all([
         getMarketSymbols(),
@@ -167,7 +225,7 @@ export function GmxAccountProvider({ children }: { children: ReactNode }) {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            query: POSITIONS_QUERY,
+            query: activeQuery,
             variables: { account: address.toLowerCase() },
           }),
           signal: AbortSignal.timeout(12_000),
@@ -183,12 +241,44 @@ export function GmxAccountProvider({ children }: { children: ReactNode }) {
             collateralToken: string; sizeInUsd: string;
             collateralAmount: string; realisedPnlUsd: string;
             isLong: boolean; increasedAtTime?: string | null;
+            liquidationPrice?: string | null;
           }>;
         };
         errors?: Array<{ message: string }>;
       };
 
-      if (json.errors?.length) throw new Error(json.errors[0].message);
+      // ── Detect "liquidationPrice not in schema" error and retry ──────────
+      // When the subgraph schema doesn't expose liquidationPrice, GraphQL returns
+      // an errors array with "Cannot query field" and no data. We flip the flag
+      // and immediately retry with the basic query so positions still display.
+      if (
+        json.errors?.length &&
+        sgSupportsLiqPrice &&
+        json.errors.some(e =>
+          e.message.toLowerCase().includes('liquidationprice') ||
+          e.message.toLowerCase().includes('cannot query field')
+        )
+      ) {
+        console.info('[GmxAccount] subgraph does not support liquidationPrice — falling back to basic query');
+        sgSupportsLiqPrice = false;
+
+        const fallbackRes = await fetch(SUBGRAPH_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            query: POSITIONS_QUERY_BASIC,
+            variables: { account: address.toLowerCase() },
+          }),
+          signal: AbortSignal.timeout(12_000),
+        });
+        if (!fallbackRes.ok) throw new Error(`Subgraph HTTP ${fallbackRes.status}`);
+        const fallbackJson = await fallbackRes.json() as typeof json;
+        if (fallbackJson.errors?.length) throw new Error(fallbackJson.errors[0].message);
+        // Overwrite json so the rest of the processing is identical
+        Object.assign(json, fallbackJson);
+      } else if (json.errors?.length) {
+        throw new Error(json.errors[0].message);
+      }
 
       const rawPositions = json.data?.positions ?? [];
 
@@ -196,15 +286,37 @@ export function GmxAccountProvider({ children }: { children: ReactNode }) {
         const sym = symbolMap[p.market?.toLowerCase()] ?? 'Unknown';
         // USDC collateral: 6 decimals
         const collateralUsd = parseBigIntUsd(p.collateralAmount, 1e6);
+        const sizeUsd       = parseBigIntUsd(p.sizeInUsd, GMX_PRECISION);
+
+        // Leverage: only computed when collateral token is verified USDC (6 decimals, USD-pegged).
+        // WETH (18 dec) and WBTC (8 dec) positions require token→USD price conversion
+        // that is not available here — show N/A rather than a wildly wrong value.
+        const isUsdcCollateral =
+          p.collateralToken?.toLowerCase() === ARBITRUM_USDC;
+        const leverage =
+          isUsdcCollateral && sizeUsd > 0 && collateralUsd > 0
+            ? sizeUsd / collateralUsd
+            : null;
+
+        // Liquidation price: from subgraph only — never estimated
+        // GMX V2 stores liquidationPrice with 30-decimal precision (same as sizeInUsd)
+        const rawLiqPrice = p.liquidationPrice;
+        const liquidationPrice =
+          rawLiqPrice && rawLiqPrice !== '0'
+            ? parseBigIntUsd(rawLiqPrice, GMX_PRECISION)
+            : null;
+
         return {
-          id:             p.id,
-          symbol:         sym,
-          direction:      p.isLong ? 'LONG' : 'SHORT',
-          sizeUsd:        parseBigIntUsd(p.sizeInUsd, GMX_PRECISION),
+          id:               p.id,
+          symbol:           sym,
+          direction:        p.isLong ? 'LONG' : 'SHORT',
+          sizeUsd,
           collateralUsd,
-          realisedPnlUsd: parseBigIntUsd(p.realisedPnlUsd, GMX_PRECISION),
-          market:         p.market,
-          openedAt:       p.increasedAtTime ? Number(p.increasedAtTime) : null,
+          realisedPnlUsd:   parseBigIntUsd(p.realisedPnlUsd, GMX_PRECISION),
+          market:           p.market,
+          openedAt:         p.increasedAtTime ? Number(p.increasedAtTime) : null,
+          leverage,
+          liquidationPrice,
         };
       });
 

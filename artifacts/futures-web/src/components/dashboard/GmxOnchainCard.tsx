@@ -89,8 +89,8 @@ function PositionRow({ pos }: { pos: GmxOnchainPosition }) {
         </div>
       </div>
 
-      {/* Right: size + collateral + realised PnL */}
-      <div className="flex items-center gap-5 shrink-0 text-right">
+      {/* Right: size + collateral + leverage + liq price + realised PnL */}
+      <div className="flex items-center gap-4 shrink-0 text-right">
         <div>
           <div className="font-mono font-semibold text-foreground">
             ${pos.sizeUsd.toLocaleString('en-US', { maximumFractionDigits: 0 })}
@@ -102,6 +102,32 @@ function PositionRow({ pos }: { pos: GmxOnchainPosition }) {
             ${pos.collateralUsd.toLocaleString('en-US', { maximumFractionDigits: 2 })}
           </div>
           <div className="text-[10px] text-muted-foreground">COLLATERAL</div>
+        </div>
+        {/* Leverage — calculated from size/collateral, shown only when trust-safe */}
+        <div>
+          <div className={cn(
+            'font-mono font-semibold',
+            pos.leverage != null ? 'text-foreground' : 'text-muted-foreground/50',
+          )}>
+            {pos.leverage != null
+              ? `${pos.leverage.toFixed(1)}x`
+              : 'N/A'}
+          </div>
+          <div className="text-[10px] text-muted-foreground">LEV</div>
+        </div>
+        {/* Liquidation price — subgraph value only, never estimated */}
+        <div>
+          <div className={cn(
+            'font-mono',
+            pos.liquidationPrice != null
+              ? 'text-[var(--color-short)] font-semibold'
+              : 'text-muted-foreground/50',
+          )}>
+            {pos.liquidationPrice != null
+              ? `$${pos.liquidationPrice.toLocaleString('en-US', { maximumFractionDigits: 2 })}`
+              : 'N/A'}
+          </div>
+          <div className="text-[10px] text-muted-foreground">LIQ.PRICE</div>
         </div>
         <div>
           <div className={cn('font-mono font-semibold', pnlColor)}>
