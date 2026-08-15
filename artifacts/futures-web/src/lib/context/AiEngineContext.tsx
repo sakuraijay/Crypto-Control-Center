@@ -110,6 +110,12 @@ interface AiEngineContextType {
    * Call this from a button click — never automatically.
    */
   requestNotificationPermission: () => Promise<void>;
+  /**
+   * Fire a test browser notification, requesting permission first if needed.
+   * Updates shared `notificationPermission` state so the rest of the UI stays in sync.
+   * Returns 'sent' | 'denied' | 'unsupported'.
+   */
+  sendTestNotification: () => Promise<'sent' | 'denied' | 'unsupported'>;
 
   /**
    * Current profit-lock stage (0 = off, 1–3 = increasingly tight).
@@ -338,6 +344,26 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
     if (Notification.permission !== 'default') return;
     const perm = await Notification.requestPermission();
     setNotificationPermission(perm);
+  }, []);
+
+  // Test notification — requests permission if needed, then fires a desktop alert.
+  // Always syncs notificationPermission so badges/buttons update immediately.
+  const sendTestNotification = useCallback(async (): Promise<'sent' | 'denied' | 'unsupported'> => {
+    if (typeof Notification === 'undefined') return 'unsupported';
+    let perm = Notification.permission;
+    if (perm === 'default') {
+      perm = await Notification.requestPermission();
+      setNotificationPermission(perm);  // sync shared state regardless of outcome
+    }
+    if (perm !== 'granted') {
+      setNotificationPermission(perm);  // ensure denied state is reflected
+      return 'denied';
+    }
+    new Notification('Crypto Control Center', {
+      body: '알림이 정상 동작합니다. ✅',
+      icon: '/favicon.ico',
+    });
+    return 'sent';
   }, []);
 
   // ── Toast + browser notification when a new LIVE approval enters the queue ──
@@ -1031,7 +1057,7 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
       benchmarkDailyMin:    BENCHMARK_DAILY_MIN,
       benchmarkDailyMax:    BENCHMARK_DAILY_MAX,
       pendingApprovals, approveLiveOrder, rejectLiveOrder, retryLiveApproval, pendingCount, loadMoreHistory,
-      notificationPermission, requestNotificationPermission,
+      notificationPermission, requestNotificationPermission, sendTestNotification,
       profitLockStage: (currentDecision?.profitLockStage ?? 0) as 0 | 1 | 2 | 3,
       cooldownEndsAt,
       tradesThisHour,

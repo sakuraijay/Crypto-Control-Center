@@ -1,14 +1,21 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useAppContext, useAuthContext, useTradingContext, useWallet } from '@/lib/context';
 import { useAiEngine } from '@/lib/context/AiEngineContext';
 import { Card } from '@/components/ui/card';
 import { Switch } from '@/components/ui/switch';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
-import { ShieldAlert, Server, Lock, AlertTriangle, AlertOctagon, Info, CheckCircle2, XCircle, Cpu, Loader2, Wallet, Key, FlaskConical, ChevronRight, AlertCircle, RefreshCw, Bell, BellOff, ExternalLink } from 'lucide-react';
+import {
+  ShieldAlert, Server, Lock, AlertTriangle, AlertOctagon, Info,
+  CheckCircle2, XCircle, Cpu, Loader2, Wallet, Key, FlaskConical,
+  ChevronRight, AlertCircle, RefreshCw, Bell, BellOff, ExternalLink,
+  WifiOff, Send,
+} from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { format } from 'date-fns';
+// sendTestNotification is handled by AiEngineContext to keep permission state in sync.
 
-// ── Executor status hook (fetches /api/executor/status directly) ───────────────
+// ── Executor status hook (fetches /api/executor/status with 30s auto-refresh) ──
 
 interface ExecutorHealth {
   gmxConnected: boolean;
@@ -18,37 +25,91 @@ interface ExecutorHealth {
   uptimeSeconds?: number;
 }
 
-function useExecutorHealth() {
-  const [health, setHealth] = useState<ExecutorHealth | null>(null);
-  const [loading, setLoading] = useState(true);
+const AUTO_REFRESH_MS = 30_000;
+const OFFLINE_THRESHOLD = 2; // consecutive failures before offline banner
 
-  const refresh = async () => {
+function useExecutorHealth() {
+  const [health, setHealth]                     = useState<ExecutorHealth | null>(null);
+  const [loading, setLoading]                   = useState(true);
+  const [lastSuccessAt, setLastSuccessAt]       = useState<Date | null>(null);
+  const [consecutiveFailures, setConsecFails]   = useState(0);
+  const timerRef                                = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const refresh = useCallback(async () => {
     setLoading(true);
     try {
       const res = await fetch('/api/executor/status');
-      if (res.ok) setHealth(await res.json());
-    } catch { /* non-fatal */ }
+      if (res.ok) {
+        const data = await res.json() as ExecutorHealth;
+        setHealth(data);
+        setLastSuccessAt(new Date());
+        setConsecFails(0);
+      } else {
+        setConsecFails(c => c + 1);
+      }
+    } catch {
+      setConsecFails(c => c + 1);
+    }
     setLoading(false);
-  };
+  }, []);
 
-  useEffect(() => { refresh(); }, []);
+  useEffect(() => {
+    void refresh();
+    timerRef.current = setInterval(() => { void refresh(); }, AUTO_REFRESH_MS);
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
+  }, [refresh]);
 
-  return { health, loading, refresh };
+  return { health, loading, refresh, lastSuccessAt, consecutiveFailures };
 }
 
-// ── Main settings page ─────────────────────────────────────────────────────────
+// ── useNow — 1-second ticker for elapsed-time display ─────────────────────────
+
+function useNow() {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1_000);
+    return () => clearInterval(t);
+  }, []);
+  return now;
+}
+
+// ── Elapsed seconds pretty-printer ───────────────────────────────────────────
+
+function formatElapsed(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  if (s < 60)  return `${s}초 전`;
+  const m = Math.floor(s / 60);
+  if (m < 60)  return `${m}분 전`;
+  return `${Math.floor(m / 60)}시간 전`;
+}
+
+// ── Main settings page ────────────────────────────────────────────────────────
 
 export default function Settings() {
   const { engineState, stopNewOrders, toggleStopNewOrders, triggerEmergencyStop, resetFromEmergency } = useAppContext();
   const { logout } = useAuthContext();
   const { clearAllPositions, positions } = useTradingContext();
-  const { health, loading: healthLoading, refresh: refreshHealth } = useExecutorHealth();
+  const { health, loading: healthLoading, refresh: refreshHealth, lastSuccessAt, consecutiveFailures } = useExecutorHealth();
   const wallet = useWallet();
-  const { notificationPermission, requestNotificationPermission } = useAiEngine();
+  const { notificationPermission, requestNotificationPermission, sendTestNotification } = useAiEngine();
+  const now = useNow();
 
   const [closeAllPhase, setCloseAllPhase] = useState<0 | 1 | 2>(0);
+  const [testNotifState, setTestNotifState] = useState<'idle' | 'sending' | 'sent' | 'denied' | 'unsupported'>('idle');
 
   const isEmergency = engineState === 'EMERGENCY_STOP';
+  const isOffline   = consecutiveFailures >= OFFLINE_THRESHOLD;
+  const isStale     = consecutiveFailures >= 1 && consecutiveFailures < OFFLINE_THRESHOLD;
+
+  const handleTestNotif = async () => {
+    setTestNotifState('sending');
+    const result = await sendTestNotification();
+    setTestNotifState(result);
+    // Reset badge after 4 s
+    setTimeout(() => setTestNotifState('idle'), 4_000);
+  };
 
   return (
     <div className="animate-in fade-in duration-500 flex flex-col gap-8 max-w-4xl">
@@ -123,15 +184,15 @@ export default function Settings() {
 
           {/* Step 2 — 브라우저 지갑 */}
           {(() => {
-            const isConnected = wallet.status === 'connected' && wallet.isArbitrum;
-            const isWrongNet  = wallet.status === 'wrong_network';
+            const isConnected  = wallet.status === 'connected' && wallet.isArbitrum;
+            const isWrongNet   = wallet.status === 'wrong_network';
             const isConnecting = wallet.status === 'connecting';
-            const borderColor = isConnected
+            const borderColor  = isConnected
               ? 'border-[var(--color-long)]/30 bg-[var(--color-long)]/5'
               : isWrongNet
                 ? 'border-amber-500/30 bg-amber-500/5'
                 : 'border-border bg-card/30';
-            const circleColor = isConnected
+            const circleColor  = isConnected
               ? 'border-[var(--color-long)] text-[var(--color-long)]'
               : 'border-border text-muted-foreground';
 
@@ -155,7 +216,6 @@ export default function Settings() {
                   </div>
 
                   {isConnected ? (
-                    /* ── 연결됨 — 주소 + 잔고 표시 ── */
                     <div className="flex flex-col gap-2">
                       <div className="flex items-center gap-3 text-xs">
                         <span className="text-muted-foreground">주소</span>
@@ -179,7 +239,6 @@ export default function Settings() {
                       </div>
                     </div>
                   ) : (
-                    /* ── 미연결 / 오류 ── */
                     <div>
                       <p className="text-xs text-muted-foreground mb-2">
                         MetaMask 등 브라우저 지갑으로 내 GMX 계정 주소를 연결합니다.
@@ -311,13 +370,56 @@ export default function Settings() {
         <h2 className="font-semibold flex items-center gap-2 border-b border-border pb-2 text-lg">
           <Cpu className="w-5 h-5 text-primary" /> System Status
         </h2>
-        <Card className="p-4 flex flex-col gap-3">
-          <div className="flex items-center justify-between">
-            <span className="text-sm font-semibold">Execution Engine</span>
-            <Button size="sm" variant="ghost" onClick={refreshHealth} disabled={healthLoading} className="h-7 text-xs">
-              {healthLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : '↻ Refresh'}
+
+        {/* ── Offline banner (2+ consecutive failures) ── */}
+        {isOffline && (
+          <div className="flex items-center gap-3 p-3 rounded-lg border border-amber-500/50 bg-amber-500/8">
+            <WifiOff className="w-4 h-4 text-amber-400 shrink-0 animate-pulse" />
+            <div className="flex-1 text-xs">
+              <span className="font-bold text-amber-400">Executor 오프라인</span>
+              <span className="text-amber-300/80 ml-2">
+                {consecutiveFailures}회 연속 응답 없음
+                {lastSuccessAt ? ` — 마지막 성공: ${formatElapsed(now - lastSuccessAt.getTime())}` : ''}
+              </span>
+            </div>
+            <Button size="sm" variant="ghost" onClick={refreshHealth} disabled={healthLoading}
+              className="h-7 text-xs text-amber-400 hover:text-amber-300 shrink-0">
+              {healthLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
             </Button>
           </div>
+        )}
+
+        <Card className={cn(
+          'p-4 flex flex-col gap-3 border transition-colors',
+          isOffline ? 'border-amber-500/40 bg-amber-500/5'
+          : isStale  ? 'border-amber-500/20'
+          :            'border-border',
+        )}>
+          {/* Header row — auto-refresh label + manual refresh button */}
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-semibold">Execution Engine</span>
+              {/* Last-success timestamp (always visible once we have one) */}
+              {lastSuccessAt ? (
+                <span className={cn(
+                  'text-[10px] font-mono',
+                  isOffline || isStale ? 'text-amber-400' : 'text-muted-foreground',
+                )}>
+                  {format(lastSuccessAt, 'HH:mm:ss')} ({formatElapsed(now - lastSuccessAt.getTime())})
+                </span>
+              ) : null}
+              {/* Auto-refresh chip */}
+              <span className="text-[9px] px-1.5 py-0.5 rounded border border-border text-muted-foreground/60">
+                30초 자동갱신
+              </span>
+            </div>
+            <Button size="sm" variant="ghost" onClick={refreshHealth} disabled={healthLoading} className="h-7 text-xs">
+              {healthLoading
+                ? <Loader2 className="w-3 h-3 animate-spin" />
+                : <><RefreshCw className="w-3 h-3 mr-1" />지금 갱신</>}
+            </Button>
+          </div>
+
           {health ? (
             <div className="flex flex-wrap gap-2">
               <div className={cn(
@@ -374,7 +476,22 @@ export default function Settings() {
               <Loader2 className="w-3.5 h-3.5 animate-spin" /> 상태 로딩 중…
             </div>
           ) : (
-            <div className="text-xs text-muted-foreground">Executor status unavailable</div>
+            <div className={cn(
+              'flex items-center gap-2 text-xs',
+              isOffline ? 'text-amber-400' : 'text-muted-foreground',
+            )}>
+              {isOffline
+                ? <><WifiOff className="w-3.5 h-3.5" /> Executor 응답 없음 — 네트워크 또는 서버 상태를 확인하세요</>
+                : 'Executor status unavailable'}
+            </div>
+          )}
+
+          {/* Consecutive-failure warning row */}
+          {isStale && !isOffline && (
+            <div className="flex items-center gap-2 text-[11px] text-amber-400/80 border-t border-amber-500/20 pt-2 mt-1">
+              <AlertCircle className="w-3 h-3 shrink-0" />
+              마지막 갱신 실패 — 자동으로 재시도 중입니다
+            </div>
           )}
         </Card>
       </section>
@@ -468,6 +585,41 @@ export default function Settings() {
               대시보드 배너가 대체 알림 역할을 합니다.
               Chrome 또는 Edge 사용을 권장합니다.
             </p>
+          )}
+
+          {/* ── Test notification button — always visible except 'unsupported' ── */}
+          {notificationPermission !== 'unsupported' && (
+            <div className="flex items-center gap-3 pt-2 border-t border-border/60">
+              <Button
+                size="sm"
+                variant="outline"
+                className={cn(
+                  'h-8 text-xs gap-1.5 transition-colors',
+                  testNotifState === 'sent'    && 'border-[var(--color-long)]/50 text-[var(--color-long)]',
+                  testNotifState === 'denied'  && 'border-[var(--color-short)]/50 text-[var(--color-short)]',
+                  testNotifState === 'sending' && 'opacity-60',
+                )}
+                onClick={handleTestNotif}
+                disabled={testNotifState === 'sending' || notificationPermission === 'denied'}
+              >
+                {testNotifState === 'sending' ? (
+                  <><Loader2 className="w-3.5 h-3.5 animate-spin" /> 전송 중…</>
+                ) : testNotifState === 'sent' ? (
+                  <><CheckCircle2 className="w-3.5 h-3.5" /> 알림 전송됨</>
+                ) : testNotifState === 'denied' ? (
+                  <><XCircle className="w-3.5 h-3.5" /> 권한 없음</>
+                ) : (
+                  <><Send className="w-3.5 h-3.5" /> 테스트 알림 전송</>
+                )}
+              </Button>
+              <span className="text-[10px] text-muted-foreground">
+                {notificationPermission === 'denied'
+                  ? '브라우저 설정에서 권한을 허용한 뒤 사용 가능합니다'
+                  : notificationPermission === 'default'
+                    ? '클릭 시 권한 요청 후 즉시 테스트 알림을 발송합니다'
+                    : '즉시 데스크탑 알림을 발송해 동작 여부를 확인합니다'}
+              </span>
+            </div>
           )}
         </Card>
       </section>
