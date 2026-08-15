@@ -85,40 +85,77 @@ const SUPPORTED_SYMBOLS = ["ETH", "BTC", "SOL", "ARB", "LINK", "AVAX", "DOGE"];
 /** symbol → 24h change % */
 let change24hCache: CacheEntry<Record<string, number>> | null = null;
 
+// ── In-memory price snapshot ring (24h change fallback) ─────────────────────
+// Stores price snapshots every 5 min per symbol so we can compute 24h change
+// even when stats.gmx.io is unreachable.
+const SNAPSHOT_INTERVAL_MS = 5 * 60_000;
+const MAX_SNAPSHOTS        = 300; // 25 h of 5-min snapshots
+const priceSnapshotRing    = new Map<string, Array<{ price: number; ts: number }>>();
+
+function takeSnapshot() {
+  if (!priceCache) return;
+  const now = Date.now();
+  for (const tick of priceCache.data) {
+    if (!SUPPORTED_SYMBOLS.includes(tick.tokenSymbol)) continue;
+    const ring = priceSnapshotRing.get(tick.tokenSymbol) ?? [];
+    ring.push({ price: tick.priceUsd, ts: now });
+    if (ring.length > MAX_SNAPSHOTS) ring.shift();
+    priceSnapshotRing.set(tick.tokenSymbol, ring);
+  }
+}
+
+/** Compute 24h change for one symbol from the snapshot ring. Returns 0 when insufficient data. */
+function change24hFromRing(sym: string): number {
+  const ring = priceSnapshotRing.get(sym);
+  if (!ring || ring.length < 2) return 0;
+  const currentPrice = priceCache?.data.find(p => p.tokenSymbol === sym)?.priceUsd ?? 0;
+  if (!currentPrice) return 0;
+  const target = Date.now() - 24 * 60 * 60_000;
+  // find snapshot closest to 24h ago
+  const snap = ring.reduce((best, s) =>
+    Math.abs(s.ts - target) < Math.abs(best.ts - target) ? s : best,
+  );
+  return snap.price > 0 ? ((currentPrice - snap.price) / snap.price) * 100 : 0;
+}
+
 /**
  * Fetch 24h price change for all supported symbols using the GMX stats API
  * (1-day candles: compare yesterday's close → today's current price).
- * Falls back to 0 per symbol on failure.
+ * Falls back to in-memory snapshot ring per symbol when stats.gmx.io is down.
+ * Stale cache values are preserved on total failure.
  */
 async function refreshChange24h(): Promise<void> {
-  try {
-    const results: Record<string, number> = {};
-    const now = Math.floor(Date.now() / 1000);
+  const results: Record<string, number> = {};
+  const failed  = new Set<string>();
 
-    await Promise.allSettled(
-      SUPPORTED_SYMBOLS.map(async (sym) => {
-        try {
-          // countBack=2 gives [yesterday, today] daily candles
-          const url = `${STATS_API}/api/candleSticks?tokenSymbol=${sym}&period=1d&preferredChainId=42161&countBack=2`;
-          const r = await fetch(url, { signal: AbortSignal.timeout(8_000) });
-          if (!r.ok) { results[sym] = 0; return; }
-          const data = await r.json() as { prices?: number[][] } | number[][];
-          const prices = Array.isArray(data) ? data : ((data as { prices?: number[][] }).prices ?? null);
-          if (!prices || prices.length < 2) { results[sym] = 0; return; }
-          // Each candle: [timestamp, open, high, low, close, volume]
-          const prevClose = prices[prices.length - 2]?.[4];
-          const currClose = prices[prices.length - 1]?.[4];
-          if (!prevClose || !currClose || prevClose === 0) { results[sym] = 0; return; }
-          results[sym] = ((currClose - prevClose) / prevClose) * 100;
-        } catch {
-          results[sym] = 0;
-        }
-      }),
-    );
-    change24hCache = { data: results, expiresAt: Date.now() + 5 * 60_000 };
-  } catch {
-    // Keep stale cache
+  await Promise.allSettled(
+    SUPPORTED_SYMBOLS.map(async (sym) => {
+      try {
+        // countBack=2 gives [yesterday, today] daily candles
+        const url = `${STATS_API}/api/candleSticks?tokenSymbol=${sym}&period=1d&preferredChainId=42161&countBack=2`;
+        const r = await fetch(url, { signal: AbortSignal.timeout(8_000) });
+        if (!r.ok) { failed.add(sym); return; }
+        const data = await r.json() as { prices?: number[][] } | number[][];
+        const prices = Array.isArray(data) ? data : ((data as { prices?: number[][] }).prices ?? null);
+        if (!prices || prices.length < 2) { failed.add(sym); return; }
+        const prevClose = prices[prices.length - 2]?.[4];
+        const currClose = prices[prices.length - 1]?.[4];
+        if (!prevClose || !currClose || prevClose === 0) { failed.add(sym); return; }
+        results[sym] = ((currClose - prevClose) / prevClose) * 100;
+      } catch {
+        failed.add(sym);
+      }
+    }),
+  );
+
+  // Snapshot-ring fallback for each symbol that failed upstream
+  for (const sym of failed) {
+    const ringChange = change24hFromRing(sym);
+    // Fall back to stale cache if ring also has no data
+    results[sym] = ringChange !== 0 ? ringChange : (change24hCache?.data[sym] ?? 0);
   }
+
+  change24hCache = { data: results, expiresAt: Date.now() + 5 * 60_000 };
 }
 
 // ── Price cache + background poller ─────────────────────────────────────────
@@ -158,8 +195,9 @@ function ensurePoller() {
   // Initial fetches
   void refreshPrices();
   void refreshChange24h();
-  // Price: every 3s; 24h change: every 5 min
+  // Price: every 3s; snapshot every 5 min; 24h change: every 5 min
   setInterval(() => void refreshPrices(), POLL_MS);
+  setInterval(() => takeSnapshot(), SNAPSHOT_INTERVAL_MS);
   setInterval(() => void refreshChange24h(), 5 * 60_000);
 }
 

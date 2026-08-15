@@ -19,6 +19,7 @@ import {
   createContext, useCallback, useContext, useEffect, useRef, useState, ReactNode,
 } from 'react';
 import { v4 as uuid } from 'uuid';
+import { useToast } from '@/hooks/use-toast';
 import type {
   AiEngineDecision, AiEngineStats, AiOperatingState, MarketRanking,
   PriceBuffer, SymbolAnalysis, PendingLiveApproval, ApprovalStatus,
@@ -79,6 +80,8 @@ interface AiEngineContextType {
   rejectLiveOrder: (id: string, reason?: string) => void;
   /** Count of currently pending (not yet approved/rejected/expired) */
   pendingCount: number;
+  /** Load the next page (200 rows) of older decisions from the server. Returns false when exhausted. */
+  loadMoreHistory: () => Promise<boolean>;
 }
 
 const AiEngineContext = createContext<AiEngineContextType | undefined>(undefined);
@@ -91,6 +94,7 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
   const { limits } = useStrategyContext();
   const { watchlist } = useWatchlistContext();
   const { connectionStatus, config: vpsConfig } = useVpsContext();
+  const { toast } = useToast();
 
   const [currentDecision, setCurrentDecision] = useState<AiEngineDecision | null>(null);
   const [decisionHistory, setDecisionHistory] = useState<AiEngineDecision[]>([]);
@@ -120,7 +124,9 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
   const prevState = useRef<AiOperatingState>('CASH');
   const cycleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const countdownTimer = useRef<ReturnType<typeof setInterval> | null>(null);
-  const nextCycleAt = useRef<number>(Date.now() + CYCLE_MS);
+  const nextCycleAt      = useRef<number>(Date.now() + CYCLE_MS);
+  const seenApprovalIds  = useRef<Set<string>>(new Set());
+  const dbPage           = useRef(1); // page 0 loaded on mount
 
   // ── Feed price buffer from watchlist ───────────────────────────────────────
   useEffect(() => {
@@ -176,6 +182,28 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
     })();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // ── Toast alert when a new LIVE approval enters the queue ─────────────────
+  useEffect(() => {
+    const newPending = pendingApprovals.filter(
+      a => a.status === 'PENDING' && !seenApprovalIds.current.has(a.id)
+    );
+    for (const approval of newPending) {
+      seenApprovalIds.current.add(approval.id);
+      const d = approval.decision;
+      const sym   = d.primarySymbol ?? 'MULTI';
+      const state = d.operatingState;
+      const size  = d.sizeUsd ? ` · $${d.sizeUsd.toLocaleString()}` : '';
+      const expiresMs  = new Date(approval.expiresAt).getTime() - Date.now();
+      const expiresMins = Math.max(1, Math.round(expiresMs / 60_000));
+      toast({
+        title:       '⚡ LIVE Trade Approval Required',
+        description: `${state} ${sym}/USD${size} — expires in ${expiresMins}m · Approve on Dashboard`,
+        variant:     'destructive',
+        duration:    15_000,
+      });
+    }
+  }, [pendingApprovals, toast]);
 
   // ── Daily / weekly loss limit → RISK_LOCKED ───────────────────────────────
   useEffect(() => {
@@ -520,6 +548,44 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
     cycleTimer.current = setTimeout(triggerCycle, CYCLE_MS);
   }, [runCycle]);
 
+  // ── Load older decisions from server (paginated) ──────────────────────────
+  const loadMoreHistory = useCallback(async (): Promise<boolean> => {
+    try {
+      const offset = dbPage.current * 200;
+      const res = await fetch(`/api-server/api/ai/decisions?limit=200&offset=${offset}`);
+      if (!res.ok) return false;
+      const { decisions } = await res.json() as {
+        decisions: Array<{
+          id: number; ts: string; symbol: string; direction: string;
+          confidence: number; rationale: string; riskResult: string;
+          riskNote?: string | null; executionOutcome: string;
+        }>;
+      };
+      if (!decisions?.length) return false;
+      const opStateMap: Record<string, AiOperatingState> = {
+        LONG: 'LONG', SHORT: 'SHORT', NO_TRADE: 'CASH',
+      };
+      const converted = decisions.map((row): AiEngineDecision => ({
+        id: String(row.id), cycleNumber: 0, createdAt: row.ts,
+        operatingState: opStateMap[row.direction] ?? 'CASH',
+        prevState: 'CASH', stateChanged: false,
+        selectedSymbols: row.symbol ? [row.symbol] : [],
+        primarySymbol: row.symbol || null,
+        confidence: Math.round((row.confidence ?? 0) * 100),
+        marketCondition: 'RANGING', riskLevel: 'MEDIUM',
+        symbolAnalyses: [], marketRankings: [],
+        executionType: 'hold', entryStyle: 'none',
+        stateRationale: row.rationale ?? '', reasoning: [],
+        riskApproved: row.riskResult === 'APPROVED',
+        riskVetoReason: row.riskNote ?? undefined,
+        paperExecuted: row.executionOutcome === 'SIMULATED',
+      }));
+      setDecisionHistory(prev => [...prev, ...converted]);
+      dbPage.current += 1;
+      return true;
+    } catch { return false; }
+  }, []);
+
   const clearHistory = useCallback(() => {
     setDecisionHistory([]);
     setCurrentDecision(null);
@@ -537,7 +603,7 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
       benchmarkAccountSize: BENCHMARK_ACCOUNT,
       benchmarkDailyMin:    BENCHMARK_DAILY_MIN,
       benchmarkDailyMax:    BENCHMARK_DAILY_MAX,
-      pendingApprovals, approveLiveOrder, rejectLiveOrder, pendingCount,
+      pendingApprovals, approveLiveOrder, rejectLiveOrder, pendingCount, loadMoreHistory,
     }}>
       {children}
     </AiEngineContext.Provider>

@@ -6,7 +6,7 @@
  * Operators: monitoring only. Emergency Stop always overrides.
  */
 
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useAiEngine } from '@/lib/context/AiEngineContext';
 import { useAppContext } from '@/lib/context';
 import { Card } from '@/components/ui/card';
@@ -16,6 +16,7 @@ import {
   Brain, ShieldAlert, RefreshCw, Trash2,
   TrendingUp, TrendingDown, CheckCircle2, XCircle,
   AlertTriangle, ChevronRight, Zap, ZapOff, BarChart2,
+  ChevronDown, ServerCrash,
 } from 'lucide-react';
 import { format, formatDistanceToNowStrict } from 'date-fns';
 import type { AiEngineDecision, AiOperatingState, RiskLevel } from '@/lib/ai/types';
@@ -204,15 +205,23 @@ function DecisionRow({ d }: { d: AiEngineDecision }) {
 type StateFilter = AiOperatingState | 'ALL';
 type RiskFilter = RiskLevel | 'ALL';
 
+const PAGE_SIZE = 50;
+
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function AiLogPage() {
-  const { currentDecision, decisionHistory, stats, running, autoExecute, setAutoExecute, triggerCycle, clearHistory } = useAiEngine();
+  const {
+    currentDecision, decisionHistory, stats, running, autoExecute,
+    setAutoExecute, triggerCycle, clearHistory, loadMoreHistory,
+  } = useAiEngine();
   const { engineState, triggerEmergencyStop } = useAppContext();
 
-  const [stateFilter, setStateFilter] = useState<StateFilter>('ALL');
-  const [riskFilter, setRiskFilter]   = useState<RiskFilter>('ALL');
-  const [showVetoed, setShowVetoed]   = useState(true);
+  const [stateFilter,    setStateFilter]    = useState<StateFilter>('ALL');
+  const [riskFilter,     setRiskFilter]     = useState<RiskFilter>('ALL');
+  const [showVetoed,     setShowVetoed]     = useState(true);
+  const [visibleCount,   setVisibleCount]   = useState(PAGE_SIZE);
+  const [hasMoreServer,  setHasMoreServer]  = useState(true);
+  const [isFetchingMore, setIsFetchingMore] = useState(false);
 
   const isEmergency = engineState === 'EMERGENCY_STOP';
 
@@ -222,6 +231,25 @@ export default function AiLogPage() {
     if (!showVetoed && !d.riskApproved)                              return false;
     return true;
   });
+
+  const visible = filtered.slice(0, visibleCount);
+  const hasMoreInMemory = filtered.length > visibleCount;
+
+  // Reset visible page when filters change
+  useEffect(() => { setVisibleCount(PAGE_SIZE); }, [stateFilter, riskFilter, showVetoed]);
+
+  const handleLoadMoreInMemory = () => setVisibleCount(c => c + PAGE_SIZE);
+
+  const handleFetchOlder = useCallback(async () => {
+    setIsFetchingMore(true);
+    try {
+      const gotMore = await loadMoreHistory();
+      if (!gotMore) setHasMoreServer(false);
+      else setVisibleCount(c => c + PAGE_SIZE);
+    } finally {
+      setIsFetchingMore(false);
+    }
+  }, [loadMoreHistory]);
 
   const states: AiOperatingState[] = ['SPOT', 'LONG', 'SHORT', 'HEDGE', 'CASH'];
   const risks: RiskLevel[]         = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
@@ -405,7 +433,8 @@ export default function AiLogPage() {
 
         <span className="ml-auto text-[10px] text-muted-foreground flex items-center gap-1">
           <BarChart2 className="w-3 h-3" />
-          {filtered.length} of {decisionHistory.length} decisions
+          Showing {visible.length} of {filtered.length}
+          {decisionHistory.length !== filtered.length && ` (${decisionHistory.length} total)`}
         </span>
       </Card>
 
@@ -436,11 +465,51 @@ export default function AiLogPage() {
                 </tr>
               </thead>
               <tbody>
-                {filtered.map(d => <DecisionRow key={d.id} d={d} />)}
+                {visible.map(d => <DecisionRow key={d.id} d={d} />)}
               </tbody>
             </table>
           )}
         </div>
+
+        {/* ── Pagination footer ──────────────────────────────────────────────── */}
+        {filtered.length > 0 && (hasMoreInMemory || hasMoreServer) && (
+          <div className="border-t border-border/40 px-4 py-3 flex items-center justify-between bg-secondary/20">
+            <span className="text-[10px] text-muted-foreground">
+              {visible.length} / {filtered.length} shown
+              {hasMoreServer && filtered.length === visibleCount && ' · More available on server'}
+            </span>
+            <div className="flex items-center gap-2">
+              {hasMoreInMemory && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={handleLoadMoreInMemory}
+                  className="gap-1.5 text-[11px] h-7"
+                >
+                  <ChevronDown className="w-3 h-3" />
+                  Show {Math.min(PAGE_SIZE, filtered.length - visibleCount)} more
+                </Button>
+              )}
+              {!hasMoreInMemory && hasMoreServer && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={handleFetchOlder}
+                  disabled={isFetchingMore}
+                  className="gap-1.5 text-[11px] h-7"
+                >
+                  {isFetchingMore
+                    ? <><RefreshCw className="w-3 h-3 animate-spin" /> Loading…</>
+                    : <><ServerCrash className="w-3 h-3" /> Fetch older from server</>
+                  }
+                </Button>
+              )}
+              {!hasMoreServer && !hasMoreInMemory && (
+                <span className="text-[10px] text-muted-foreground italic">All decisions loaded</span>
+              )}
+            </div>
+          </div>
+        )}
       </Card>
 
       {/* ── Architecture note ──────────────────────────────────────────────────── */}
