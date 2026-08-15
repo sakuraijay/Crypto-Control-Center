@@ -202,7 +202,15 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── Toast alert when a new LIVE approval enters the queue ─────────────────
+  // ── Browser Notification permission request (on first LIVE approval queue) ──
+  const notifPermissionRef = useRef<NotificationPermission>('default');
+  useEffect(() => {
+    if (typeof Notification !== 'undefined') {
+      notifPermissionRef.current = Notification.permission;
+    }
+  }, []);
+
+  // ── Toast + browser notification when a new LIVE approval enters the queue ──
   useEffect(() => {
     const newPending = pendingApprovals.filter(
       a => a.status === 'PENDING' && !seenApprovalIds.current.has(a.id)
@@ -215,12 +223,35 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
       const size  = d.sizeUsd ? ` · $${d.sizeUsd.toLocaleString()}` : '';
       const expiresMs  = new Date(approval.expiresAt).getTime() - Date.now();
       const expiresMins = Math.max(1, Math.round(expiresMs / 60_000));
+
+      // In-app toast
       toast({
         title:       '⚡ LIVE Trade Approval Required',
         description: `${state} ${sym}/USD${size} — expires in ${expiresMins}m · Approve on Dashboard`,
         variant:     'destructive',
         duration:    15_000,
       });
+
+      // Browser push notification (request permission lazily on first event)
+      if (typeof Notification !== 'undefined') {
+        const fireNotif = () => {
+          try {
+            new Notification('⚡ LIVE 승인 필요 — Crypto Control Center', {
+              body: `${state} ${sym}/USD${size} — ${expiresMins}분 내 승인`,
+              tag:  `live-approval-${approval.id}`,
+              icon: '/favicon.ico',
+            });
+          } catch { /* non-fatal */ }
+        };
+        if (Notification.permission === 'granted') {
+          fireNotif();
+        } else if (Notification.permission === 'default') {
+          Notification.requestPermission().then(perm => {
+            notifPermissionRef.current = perm;
+            if (perm === 'granted') fireNotif();
+          });
+        }
+      }
     }
   }, [pendingApprovals, toast]);
 

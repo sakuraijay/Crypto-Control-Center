@@ -14,7 +14,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { Link } from 'wouter';
 import {
   Server, CheckCircle2, XCircle, Loader2,
-  ExternalLink, Cpu, Eye, Clock,
+  ExternalLink, Cpu, Eye, Clock, Wallet, Key, FlaskConical,
 } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -136,22 +136,41 @@ export function ExecutorStatusWidget() {
             <Loader2 className="w-3 h-3 animate-spin" /> 상태 로딩 중…
           </div>
         ) : (
-          <div className="grid grid-cols-2 gap-2">
-            <div className={cn(
-              'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-[10px] font-medium',
-              health?.gmxConnected
-                ? 'border-[var(--color-long)]/30 bg-[var(--color-long)]/5 text-[var(--color-long)]'
-                : 'border-border bg-card/50 text-muted-foreground',
-            )}>
-              {health?.gmxConnected ? <CheckCircle2 className="w-3 h-3" /> : <XCircle className="w-3 h-3" />}
-              GMX RPC
+          <div className="flex flex-col gap-1.5">
+            {/* Row 1: RPC + monitoring */}
+            <div className="grid grid-cols-2 gap-2">
+              <div className={cn(
+                'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-[10px] font-medium',
+                health?.gmxConnected
+                  ? 'border-[var(--color-long)]/30 bg-[var(--color-long)]/5 text-[var(--color-long)]'
+                  : 'border-border bg-card/50 text-muted-foreground',
+              )}>
+                {health?.gmxConnected ? <CheckCircle2 className="w-3 h-3" /> : <XCircle className="w-3 h-3" />}
+                Arbitrum RPC
+              </div>
+              <div className={cn(
+                'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-[10px] font-medium',
+                'border-primary/30 bg-primary/5 text-primary',
+              )}>
+                <Eye className="w-3 h-3" />
+                시장 데이터 전용
+              </div>
             </div>
-            <div className={cn(
-              'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-[10px] font-medium',
-              'border-primary/30 bg-primary/5 text-primary',
-            )}>
-              <Eye className="w-3 h-3" />
-              모니터링 전용
+            {/* Row 2: Wallet + Subaccount */}
+            <div className="grid grid-cols-2 gap-2">
+              <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-border bg-card/50 text-muted-foreground text-[10px] font-medium">
+                <Wallet className="w-3 h-3" />
+                지갑 미연결
+              </div>
+              <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-border bg-card/50 text-muted-foreground text-[10px] font-medium">
+                <Key className="w-3 h-3" />
+                서브계정 미인증
+              </div>
+            </div>
+            {/* Row 3: Execution mode */}
+            <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-blue-500/30 bg-blue-500/5 text-blue-400 text-[10px] font-medium">
+              <FlaskConical className="w-3 h-3" />
+              주문 실행: PAPER ONLY (모의거래)
             </div>
           </div>
         )}

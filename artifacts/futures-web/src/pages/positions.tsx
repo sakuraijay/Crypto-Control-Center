@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
 import { format } from 'date-fns';
-import { AlertTriangle, X, Plus, Check, Pencil } from 'lucide-react';
+import { AlertTriangle, X, Plus, Check, Pencil, FlaskConical } from 'lucide-react';
 import { NewOrderDrawer } from '@/components/trading/NewOrderDrawer';
 import { cn } from '@/lib/utils';
 
@@ -52,11 +52,24 @@ export default function Positions() {
 
   return (
     <div className="animate-in fade-in duration-500 flex flex-col gap-4 h-full">
+      {/* PAPER TRADING notice */}
+      <div className="flex items-center gap-2 px-3 py-2 rounded-lg border border-blue-500/25 bg-blue-500/5 text-[11px] text-blue-300/80">
+        <FlaskConical className="w-3.5 h-3.5 shrink-0 text-blue-400" />
+        <span>
+          <strong className="text-blue-400 font-bold">PAPER TRADING</strong>
+          {' '}— 이 페이지의 모든 포지션·잔고·PnL은 <strong>모의 데이터</strong>입니다. 실제 GMX 계정 데이터와 무관합니다.
+          실제 계정 조회는 브라우저 지갑 연결 후 활성화됩니다.
+        </span>
+      </div>
+
       {/* Header row */}
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="font-bold text-lg">{positions.length} Open Position{positions.length !== 1 ? 's' : ''}</h2>
-          <p className="text-xs text-muted-foreground mt-0.5">Paper trading — all orders simulated</p>
+          <h2 className="font-bold text-lg flex items-center gap-2">
+            {positions.length} Open Position{positions.length !== 1 ? 's' : ''}
+            <span className="text-[10px] px-1.5 py-0.5 rounded border border-blue-500/30 bg-blue-500/10 text-blue-400 font-bold">MOCK</span>
+          </h2>
+          <p className="text-xs text-muted-foreground mt-0.5">모의거래 — 실제 주문 없음</p>
         </div>
         <Button size="sm" onClick={() => setOrderOpen(true)}>
           <Plus className="w-4 h-4 mr-2" /> New Order

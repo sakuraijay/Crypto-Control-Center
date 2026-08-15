@@ -107,17 +107,19 @@ export default function Dashboard() {
         <KpiCard
           label="Total Balance"
           value={`$${account.balance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+          sub="MOCK · 실제 잔고 아님"
         />
         <KpiCard
           label="Unrealized PnL"
           value={`${account.unrealizedPnl >= 0 ? '+' : ''}$${account.unrealizedPnl.toFixed(2)}`}
           color={account.unrealizedPnl >= 0 ? 'text-[var(--color-long)]' : 'text-[var(--color-short)]'}
+          sub="MOCK · 모의 PnL"
         />
         <KpiCard
           label="Margin Ratio"
           value={`${(account.marginRatio * 100).toFixed(1)}%`}
           color={account.marginRatio > 0.7 ? 'text-[var(--color-short)]' : account.marginRatio > 0.5 ? 'text-[var(--color-warning)]' : undefined}
-          sub={`$${account.availableBalance.toFixed(0)} available`}
+          sub={`$${account.availableBalance.toFixed(0)} avail · MOCK`}
         />
         {/* Quick Controls — emergency actions always visible */}
         <Card className="p-4 flex flex-col justify-between border-border bg-card/50">
@@ -219,6 +221,7 @@ export default function Dashboard() {
             <div className="p-4 border-b border-border flex items-center justify-between bg-card/50">
               <h3 className="font-semibold text-sm flex items-center gap-2">
                 <Layers className="w-4 h-4 text-primary" /> Active Positions ({positions.length})
+                <span className="text-[9px] px-1.5 py-0.5 rounded-full border bg-blue-500/10 text-blue-400 border-blue-500/30 font-bold">PAPER</span>
               </h3>
               <div className="flex items-center gap-3">
                 <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => setOrderOpen(true)}>

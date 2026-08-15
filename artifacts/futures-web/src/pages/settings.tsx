@@ -4,7 +4,7 @@ import { Card } from '@/components/ui/card';
 import { Switch } from '@/components/ui/switch';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
-import { ShieldAlert, Server, Lock, AlertTriangle, AlertOctagon, Info, CheckCircle2, XCircle, Cpu, Loader2 } from 'lucide-react';
+import { ShieldAlert, Server, Lock, AlertTriangle, AlertOctagon, Info, CheckCircle2, XCircle, Cpu, Loader2, Wallet, Key, FlaskConical, ChevronRight } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 // ── Executor status hook (fetches /api/executor/status directly) ───────────────
@@ -85,6 +85,112 @@ export default function Settings() {
         </div>
       </div>
 
+      {/* ── GMX 계정 연결 준비 단계 ── */}
+      <section className="flex flex-col gap-4">
+        <h2 className="font-semibold flex items-center gap-2 border-b border-border pb-2 text-lg">
+          <Wallet className="w-5 h-5 text-primary" /> GMX 계정 연결 준비
+        </h2>
+        <p className="text-xs text-muted-foreground -mt-2">
+          실제 GMX 계정 조회 및 자동매매를 위해서는 아래 4단계를 순서대로 완료해야 합니다.
+          현재는 <strong className="text-foreground">1단계만 완료</strong>된 상태입니다.
+          메인 지갑 개인키·시드문구는 절대 서버에 입력하지 마세요.
+        </p>
+
+        <div className="flex flex-col gap-3">
+
+          {/* Step 1 — RPC (완료) */}
+          <div className="flex items-start gap-4 p-4 rounded-lg border border-[var(--color-long)]/30 bg-[var(--color-long)]/5">
+            <div className="flex items-center justify-center w-7 h-7 rounded-full border-2 border-[var(--color-long)] text-[var(--color-long)] font-bold text-xs shrink-0 mt-0.5">
+              ✓
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 mb-1">
+                <span className="font-semibold text-sm text-[var(--color-long)]">1단계 — Arbitrum RPC 연결 (완료)</span>
+                <span className="text-[9px] px-1.5 py-0.5 rounded-full border bg-[var(--color-long)]/10 text-[var(--color-long)] border-[var(--color-long)]/30 font-bold">ACTIVE</span>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                GMX 공개 시장 데이터, 실시간 가격, 24h 변동률을 수신 중입니다.
+                <strong className="text-foreground"> 계정 인증 없이 사용 가능한 공개 데이터입니다.</strong>
+              </p>
+            </div>
+          </div>
+
+          {/* Step 2 — 브라우저 지갑 (미완료) */}
+          <div className="flex items-start gap-4 p-4 rounded-lg border border-border bg-card/30">
+            <div className="flex items-center justify-center w-7 h-7 rounded-full border-2 border-border text-muted-foreground font-bold text-xs shrink-0 mt-0.5">
+              2
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 mb-1">
+                <span className="font-semibold text-sm">브라우저 지갑 연결</span>
+                <span className="text-[9px] px-1.5 py-0.5 rounded-full border bg-secondary text-muted-foreground border-border font-bold">NOT CONNECTED</span>
+              </div>
+              <p className="text-xs text-muted-foreground mb-2">
+                MetaMask 등 브라우저 지갑으로 내 GMX 계정 주소를 연결합니다.
+                <strong className="text-foreground"> 이 단계는 read-only 조회용으로, 서명 권한을 부여하지 않습니다.</strong>
+                개인키·시드문구는 브라우저 지갑 내부에 보관되며 서버로 전송되지 않습니다.
+              </p>
+              <Button size="sm" variant="outline" disabled className="h-7 text-xs opacity-50 cursor-not-allowed">
+                <Wallet className="w-3 h-3 mr-1.5" />
+                지갑 연결 (미구현 — 2단계 준비 중)
+              </Button>
+            </div>
+          </div>
+
+          {/* Step 3 — Read-only 계정 조회 */}
+          <div className="flex items-start gap-4 p-4 rounded-lg border border-border bg-card/30 opacity-60">
+            <div className="flex items-center justify-center w-7 h-7 rounded-full border-2 border-border text-muted-foreground font-bold text-xs shrink-0 mt-0.5">
+              3
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 mb-1">
+                <span className="font-semibold text-sm">Read-only 계정 조회</span>
+                <span className="text-[9px] px-1.5 py-0.5 rounded-full border bg-secondary text-muted-foreground border-border font-bold">2단계 완료 후</span>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                실제 GMX 포지션·잔고·거래 내역을 조회합니다.
+                서명 없이 온체인 데이터만 읽습니다 — 주문을 낼 수 없습니다.
+              </p>
+            </div>
+          </div>
+
+          {/* Step 4 — Delegated Subaccount */}
+          <div className="flex items-start gap-4 p-4 rounded-lg border border-border bg-card/30 opacity-60">
+            <div className="flex items-center justify-center w-7 h-7 rounded-full border-2 border-border text-muted-foreground font-bold text-xs shrink-0 mt-0.5">
+              4
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 mb-1">
+                <span className="font-semibold text-sm">GMX Delegated Subaccount 승인</span>
+                <span className="text-[9px] px-1.5 py-0.5 rounded-full border bg-secondary text-muted-foreground border-border font-bold">NOT AUTHORIZED</span>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                메인 지갑에서 제한된 One-Click 거래 권한을 별도 서브계정에 위임합니다.
+                <strong className="text-foreground"> 메인 지갑 자금에 대한 전체 권한이 아닌, GMX 계약이 허용하는 제한된 실행 권한입니다.</strong>
+                서브계정 주소만 서버에 저장 가능하며, 서명키·개인키는 절대 서버에 저장하지 않습니다.
+                이 단계 완료 후 LIVE 모드 승인 시 실제 주문 전송이 가능합니다.
+              </p>
+              <div className="flex items-center gap-1.5 mt-2 text-[10px] text-amber-400/80">
+                <ChevronRight className="w-3 h-3" />
+                3단계 완료 + 별도 보안 검토 후 활성화 예정
+              </div>
+            </div>
+          </div>
+
+        </div>
+
+        {/* Security note */}
+        <div className="flex items-start gap-2 px-3 py-2.5 rounded-lg border border-amber-500/20 bg-amber-500/5 text-xs text-amber-300/80">
+          <Key className="w-3.5 h-3.5 shrink-0 mt-0.5 text-amber-400" />
+          <span>
+            <strong className="text-amber-400">보안 원칙:</strong>{' '}
+            메인 지갑 개인키·니모닉·시드문구를 이 서버(Replit)에 절대 입력하지 마세요.
+            Replit은 AI 의사결정·오퍼레이터 승인 게이트·리스크 모니터링 전용으로만 사용합니다.
+            실제 서명은 항상 브라우저 지갑(사용자 기기)에서만 이루어집니다.
+          </span>
+        </div>
+      </section>
+
       {/* ── Engine Mode ── */}
       <section className="flex flex-col gap-4">
         <h2 className="font-semibold flex items-center gap-2 border-b border-border pb-2 text-lg">
@@ -137,7 +243,7 @@ export default function Settings() {
                   : 'border-border bg-card/50 text-muted-foreground',
               )}>
                 {health.gmxConnected ? <CheckCircle2 className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
-                GMX RPC {health.gmxConnected ? '연결됨' : '연결 없음'}
+                Arbitrum RPC {health.gmxConnected ? '연결됨 (시장 데이터)' : '연결 없음'}
               </div>
               {health.deploymentMode && (
                 <div className={cn(
@@ -155,6 +261,15 @@ export default function Settings() {
                   Chain {health.networkChainId}
                 </div>
               )}
+              <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-border bg-card/50 text-muted-foreground text-[11px] font-medium">
+                <Wallet className="w-3.5 h-3.5" /> 지갑 미연결
+              </div>
+              <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-border bg-card/50 text-muted-foreground text-[11px] font-medium">
+                <Key className="w-3.5 h-3.5" /> 서브계정 미인증
+              </div>
+              <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-blue-500/30 bg-blue-500/5 text-blue-400 text-[11px] font-medium">
+                <FlaskConical className="w-3.5 h-3.5" /> 실행: PAPER ONLY
+              </div>
             </div>
           ) : healthLoading ? (
             <div className="flex items-center gap-2 text-xs text-muted-foreground">

@@ -514,18 +514,27 @@ export default function AiLogPage() {
       </Card>
 
       {/* ── LIVE 승인 이력 ────────────────────────────────────────────────────────── */}
-      {pendingApprovals.length > 0 && (
-        <Card className="overflow-hidden">
-          <div className="p-4 border-b border-border bg-card/50 flex items-center justify-between">
-            <h3 className="font-semibold text-sm flex items-center gap-2">
-              <CheckCircle2 className="w-4 h-4 text-primary" /> LIVE 승인 이력
-            </h3>
-            <span className="text-[10px] text-muted-foreground">
-              {pendingApprovals.filter(a => a.status === 'APPROVED').length}건 승인 ·{' '}
-              {pendingApprovals.filter(a => a.status === 'REJECTED').length}건 거절 ·{' '}
-              {pendingApprovals.filter(a => a.status === 'PENDING').length}건 대기
+      <Card className="overflow-hidden">
+        <div className="p-4 border-b border-border bg-card/50 flex items-center justify-between">
+          <h3 className="font-semibold text-sm flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-primary" /> LIVE 승인 이력
+            <span className="text-[9px] px-1.5 py-0.5 rounded-full border bg-blue-500/10 text-blue-400 border-blue-500/30 font-bold">
+              PAPER — 실제 주문 없음
             </span>
+          </h3>
+          <span className="text-[10px] text-muted-foreground">
+            {pendingApprovals.filter(a => a.status === 'APPROVED').length}건 승인 ·{' '}
+            {pendingApprovals.filter(a => a.status === 'REJECTED').length}건 거절 ·{' '}
+            {pendingApprovals.filter(a => a.status === 'PENDING').length}건 대기
+          </span>
+        </div>
+        {pendingApprovals.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-10 text-muted-foreground gap-2">
+            <CheckCircle2 className="w-8 h-8 opacity-20" />
+            <div className="text-xs">아직 LIVE 승인 요청이 없습니다</div>
+            <div className="text-[10px] opacity-60">LIVE 모드가 활성화되면 AI가 승인을 요청합니다</div>
           </div>
+        ) : (
           <div className="overflow-auto">
             <table className="w-full text-xs">
               <thead className="bg-secondary/50 border-b border-border">
@@ -573,8 +582,8 @@ export default function AiLogPage() {
               </tbody>
             </table>
           </div>
-        </Card>
-      )}
+        )}
+      </Card>
 
       {/* ── 아키텍처 원칙 안내 ────────────────────────────────────────────────────── */}
       <div className="flex items-start gap-2 text-[10px] text-muted-foreground px-1 pb-2">
