@@ -6,6 +6,17 @@ Login is **disabled in dev** (bypassed automatically). Never re-enable via code 
 
 ---
 
+## ✅ READ-ONLY ACCOUNT VALIDATION READY
+
+**Status as of 2026-08-15 — All regression checks PASS. GitHub origin/main synced to `454f7a0`.**
+
+The system is cleared for read-only real-wallet connection and account verification.
+No signing, no on-chain transactions, no private key storage. `LIVE_EXECUTION_LOCKED = true as const`.
+
+See "Read-Only 연결 검증" checklist at the bottom of the Settings page in the app.
+
+---
+
 ## Architecture
 
 ### Three services, one product
