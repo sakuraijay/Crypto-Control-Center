@@ -53,6 +53,12 @@ interface WalletContextType extends WalletState {
   disconnect: () => void;
   /** 잔고 새로고침 */
   refreshBalances: () => Promise<void>;
+  /**
+   * Re-reads eth_chainId immediately and updates wallet state.
+   * Call this after a chain switch request to bypass the chainChanged
+   * event-listener delay that causes the 'wrong_network' badge to stick.
+   */
+  refreshChainStatus: () => Promise<void>;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -138,6 +144,26 @@ export function WalletProvider({ children }: { children: ReactNode }) {
 
   const refreshBalances = useCallback(async () => {
     if (addressRef.current) await fetchBalances(addressRef.current);
+  }, [fetchBalances]);
+
+  const refreshChainStatus = useCallback(async () => {
+    const provider = (window as any).ethereum;
+    if (!provider) return;
+    try {
+      const chainHex: string = await provider.request({ method: 'eth_chainId' });
+      const chainId = hexToNumber(chainHex);
+      const isArbitrum = chainId === ARBITRUM_CHAIN_ID;
+      setState(prev => ({
+        ...prev,
+        chainId,
+        isArbitrum,
+        status: prev.address
+          ? (isArbitrum ? 'connected' : 'wrong_network')
+          : prev.status,
+        error: isArbitrum ? null : `네트워크 불일치: Arbitrum One(42161)으로 전환해주세요. 현재: ${chainId}`,
+      }));
+      if (isArbitrum && addressRef.current) await fetchBalances(addressRef.current);
+    } catch { /* non-fatal */ }
   }, [fetchBalances]);
 
   // ── Connect ───────────────────────────────────────────────────────────────
@@ -249,7 +275,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   }, [disconnect, fetchBalances]);
 
   return (
-    <WalletContext.Provider value={{ ...state, connect, disconnect, refreshBalances }}>
+    <WalletContext.Provider value={{ ...state, connect, disconnect, refreshBalances, refreshChainStatus }}>
       {children}
     </WalletContext.Provider>
   );

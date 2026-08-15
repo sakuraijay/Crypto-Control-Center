@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useAppContext, useAuthContext, useTradingContext, useWallet } from '@/lib/context';
 import { useAiEngine } from '@/lib/context/AiEngineContext';
 import { useStrategyContext } from '@/lib/context/StrategyContext';
@@ -10,7 +10,7 @@ import {
   ShieldAlert, Server, Lock, AlertTriangle, AlertOctagon, Info,
   CheckCircle2, XCircle, Cpu, Loader2, Wallet, Key, FlaskConical,
   ChevronRight, AlertCircle, RefreshCw, Bell, BellOff, ExternalLink,
-  WifiOff, Send,
+  WifiOff, Send, Activity,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { format } from 'date-fns';
@@ -91,13 +91,13 @@ function formatElapsed(ms: number): string {
 export default function Settings() {
   const { engineState, stopNewOrders, toggleStopNewOrders, triggerEmergencyStop, resetFromEmergency } = useAppContext();
   const { logout } = useAuthContext();
-  const { clearAllPositions, positions } = useTradingContext();
+  const { clearAllPositions, positions, closedTrades, consecutiveLosses } = useTradingContext();
   const { health, loading: healthLoading, refresh: refreshHealth, lastSuccessAt, consecutiveFailures } = useExecutorHealth();
   const wallet = useWallet();
-  const { notificationPermission, requestNotificationPermission, sendTestNotification } = useAiEngine();
+  const { notificationPermission, requestNotificationPermission, sendTestNotification, weeklyRealizedPnl } = useAiEngine();
   const now = useNow();
 
-  const { subaccountConfig, updateSubaccountConfig } = useStrategyContext();
+  const { subaccountConfig, updateSubaccountConfig, limits } = useStrategyContext();
 
   const [closeAllPhase, setCloseAllPhase] = useState<0 | 1 | 2>(0);
   const [testNotifState, setTestNotifState] = useState<'idle' | 'sending' | 'sent' | 'denied' | 'unsupported'>('idle');
@@ -109,6 +109,27 @@ export default function Settings() {
   const isEmergency = engineState === 'EMERGENCY_STOP';
   const isOffline   = consecutiveFailures >= OFFLINE_THRESHOLD;
   const isStale     = consecutiveFailures >= 1 && consecutiveFailures < OFFLINE_THRESHOLD;
+
+  // ── PAPER 리스크 지표 (브라우저 상태 기준) ─────────────────────────────────
+  const dailyPnl = useMemo(() => {
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    return closedTrades
+      .filter(t => new Date(t.timestamp) >= todayStart)
+      .reduce((s, t) => s + (t.pnl ?? 0), 0);
+  }, [closedTrades]);
+
+  const rolling24hPnl = useMemo(() => {
+    const since = Date.now() - 24 * 60 * 60 * 1000;
+    return closedTrades
+      .filter(t => new Date(t.timestamp).getTime() >= since)
+      .reduce((s, t) => s + (t.pnl ?? 0), 0);
+  }, [closedTrades]);
+
+  const totalExposure = useMemo(
+    () => positions.reduce((s, p) => s + (p.sizeInUsd ?? 0), 0),
+    [positions],
+  );
 
   /** Attempt wallet_switchEthereumChain → Arbitrum One (0xa4b1 = 42161) */
   const handleSwitchToArbitrum = async () => {
@@ -138,6 +159,8 @@ export default function Settings() {
       }
     } finally {
       setSwitchingNet(false);
+      // 체인 상태 즉시 재확인 — chainChanged 이벤트 지연으로 wrong_network 배지가 고착되는 문제 방지
+      await wallet.refreshChainStatus();
     }
   };
 
@@ -946,6 +969,142 @@ export default function Settings() {
               </span>
             </div>
           )}
+        </Card>
+      </section>
+
+      {/* ── 리스크 사용량 현황 ── */}
+      <section className="flex flex-col gap-4">
+        <h2 className="font-semibold flex items-center gap-2 border-b border-border pb-2 text-lg">
+          <Activity className="w-5 h-5 text-primary" /> 리스크 사용량 현황
+          <span className="ml-auto text-[10px] font-normal text-muted-foreground px-2 py-0.5 rounded-full border border-border bg-secondary/50">
+            PAPER 전용
+          </span>
+        </h2>
+        <Card className="p-4 border-border">
+          <div className="grid grid-cols-2 gap-4">
+            {/* Daily loss */}
+            {(() => {
+              const val = dailyPnl;
+              const lim = limits.dailyLossLimitUSDT;
+              const pct = lim > 0 ? Math.abs(Math.min(0, val)) / lim : 0;
+              const barColor = pct >= 1 ? 'bg-red-500' : pct >= 0.75 ? 'bg-amber-500' : 'bg-primary';
+              const valColor = val < 0 ? (pct >= 1 ? 'text-red-400' : pct >= 0.75 ? 'text-amber-400' : 'text-muted-foreground') : 'text-[var(--color-long)]';
+              return (
+                <div className="flex flex-col gap-1.5">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="text-muted-foreground">일일 손실</span>
+                    <span className={cn('font-mono font-semibold', valColor)}>
+                      {val >= 0 ? '+' : ''}{val.toFixed(0)} USDT
+                    </span>
+                  </div>
+                  <div className="relative h-1.5 bg-secondary rounded-full overflow-hidden">
+                    <div className={cn('h-full rounded-full transition-all', barColor)} style={{ width: `${Math.min(100, pct * 100).toFixed(1)}%` }} />
+                  </div>
+                  <div className="text-[9px] text-muted-foreground">한도: ${lim.toLocaleString()} · {(pct * 100).toFixed(0)}% 사용</div>
+                </div>
+              );
+            })()}
+
+            {/* Weekly loss */}
+            {(() => {
+              const val = weeklyRealizedPnl;
+              const lim = limits.weeklyLossLimitUSDT;
+              const pct = lim > 0 ? Math.abs(Math.min(0, val)) / lim : 0;
+              const barColor = pct >= 1 ? 'bg-red-500' : pct >= 0.75 ? 'bg-amber-500' : 'bg-primary';
+              const valColor = val < 0 ? (pct >= 1 ? 'text-red-400' : pct >= 0.75 ? 'text-amber-400' : 'text-muted-foreground') : 'text-[var(--color-long)]';
+              return (
+                <div className="flex flex-col gap-1.5">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="text-muted-foreground">주간 손실</span>
+                    <span className={cn('font-mono font-semibold', valColor)}>
+                      {val >= 0 ? '+' : ''}{val.toFixed(0)} USDT
+                    </span>
+                  </div>
+                  <div className="relative h-1.5 bg-secondary rounded-full overflow-hidden">
+                    <div className={cn('h-full rounded-full transition-all', barColor)} style={{ width: `${Math.min(100, pct * 100).toFixed(1)}%` }} />
+                  </div>
+                  <div className="text-[9px] text-muted-foreground">한도: ${lim.toLocaleString()} · {(pct * 100).toFixed(0)}% 사용</div>
+                </div>
+              );
+            })()}
+
+            {/* Rolling 24h */}
+            {(() => {
+              const val = rolling24hPnl;
+              const lim = limits.rolling24hLossLimitUSDT;
+              if (!lim) {
+                return (
+                  <div className="flex flex-col gap-1.5">
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="text-muted-foreground">Rolling 24h 손실</span>
+                      <span className="font-mono font-semibold text-muted-foreground/60">{val >= 0 ? '+' : ''}{val.toFixed(0)} USDT</span>
+                    </div>
+                    <div className="relative h-1.5 bg-secondary rounded-full overflow-hidden">
+                      <div className="h-full w-0 rounded-full bg-muted-foreground/30" />
+                    </div>
+                    <div className="text-[9px] text-muted-foreground/60">비활성화 (Strategy에서 설정)</div>
+                  </div>
+                );
+              }
+              const pct = Math.abs(Math.min(0, val)) / lim;
+              const barColor = pct >= 1 ? 'bg-red-500' : pct >= 0.75 ? 'bg-amber-500' : 'bg-primary';
+              const valColor = val < 0 ? (pct >= 1 ? 'text-red-400' : pct >= 0.75 ? 'text-amber-400' : 'text-muted-foreground') : 'text-[var(--color-long)]';
+              return (
+                <div className="flex flex-col gap-1.5">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="text-muted-foreground">Rolling 24h 손실</span>
+                    <span className={cn('font-mono font-semibold', valColor)}>{val >= 0 ? '+' : ''}{val.toFixed(0)} USDT</span>
+                  </div>
+                  <div className="relative h-1.5 bg-secondary rounded-full overflow-hidden">
+                    <div className={cn('h-full rounded-full transition-all', barColor)} style={{ width: `${Math.min(100, pct * 100).toFixed(1)}%` }} />
+                  </div>
+                  <div className="text-[9px] text-muted-foreground">한도: ${lim.toLocaleString()} · {(pct * 100).toFixed(0)}% 사용</div>
+                </div>
+              );
+            })()}
+
+            {/* Total exposure */}
+            {(() => {
+              const val = totalExposure;
+              const lim = limits.maxTotalExposureUSDT;
+              const pct = lim > 0 ? val / lim : 0;
+              const barColor = pct >= 1 ? 'bg-red-500' : pct >= 0.8 ? 'bg-amber-500' : 'bg-primary';
+              const valColor = pct >= 1 ? 'text-red-400' : pct >= 0.8 ? 'text-amber-400' : 'text-muted-foreground';
+              return (
+                <div className="flex flex-col gap-1.5">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="text-muted-foreground">총 포지션 노출</span>
+                    <span className={cn('font-mono font-semibold', valColor)}>${val.toFixed(0)}</span>
+                  </div>
+                  <div className="relative h-1.5 bg-secondary rounded-full overflow-hidden">
+                    <div className={cn('h-full rounded-full transition-all', barColor)} style={{ width: `${Math.min(100, pct * 100).toFixed(1)}%` }} />
+                  </div>
+                  <div className="text-[9px] text-muted-foreground">한도: ${lim.toLocaleString()} · {(pct * 100).toFixed(0)}% 사용</div>
+                </div>
+              );
+            })()}
+
+            {/* Consecutive losses */}
+            {(() => {
+              const val = consecutiveLosses;
+              const lim = limits.consecutiveLossLimit;
+              const pct = lim > 0 ? val / lim : 0;
+              const barColor = pct >= 1 ? 'bg-red-500' : pct >= 0.6 ? 'bg-amber-500' : 'bg-primary';
+              const valColor = pct >= 1 ? 'text-red-400' : pct >= 0.6 ? 'text-amber-400' : 'text-muted-foreground';
+              return (
+                <div className="flex flex-col gap-1.5">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="text-muted-foreground">연속 손실</span>
+                    <span className={cn('font-mono font-semibold', valColor)}>{val}회</span>
+                  </div>
+                  <div className="relative h-1.5 bg-secondary rounded-full overflow-hidden">
+                    <div className={cn('h-full rounded-full transition-all', barColor)} style={{ width: `${Math.min(100, pct * 100).toFixed(1)}%` }} />
+                  </div>
+                  <div className="text-[9px] text-muted-foreground">한도: {lim}회 · {(pct * 100).toFixed(0)}% 사용</div>
+                </div>
+              );
+            })()}
+          </div>
         </Card>
       </section>
 

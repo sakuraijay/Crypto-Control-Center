@@ -96,6 +96,12 @@ export interface RiskLimits {
   profitLockThresholdPct?: number;
   maxSimultaneousPositions?: number;
   maxRiskPerSymbolPct?: number;
+  /** Weekly loss limit since Monday 00:00 UTC. Mirrors StrategyContext.weeklyLossLimitUSDT. */
+  weeklyLossLimitUSDT?: number;
+  /** Rolling 24-hour loss limit (USDT). When exceeded the engine immediately returns CASH. 0 = disabled. */
+  rolling24hLossLimitUSDT?: number;
+  cooldownMinutes?: number;
+  maxTradesPerHour?: number;
 }
 
 /** Full AI decision record produced by one engine cycle. */

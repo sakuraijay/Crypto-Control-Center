@@ -16,8 +16,8 @@
  *  - LIVE 모드 (WORKER_ENGINE_MODE=LIVE) 시에만 live_approvals INSERT
  */
 
-import { db, aiDecisionsTable, liveApprovalsTable } from "@workspace/db";
-import { and, eq, lt } from "drizzle-orm";
+import { db, aiDecisionsTable, liveApprovalsTable, strategyConfigTable, tradesTable } from "@workspace/db";
+import { and, desc, eq, lt } from "drizzle-orm";
 import { computeIndicators, computeScores } from "./indicators";
 import { runAiEngine } from "./stateEngine";
 import { getCachedPrices, getCachedChange24h, ensureGmxPoller } from "../routes/gmx";
@@ -53,6 +53,10 @@ const DEFAULT_LIMITS: RiskLimits = {
   profitLockThresholdPct:     1,
   maxSimultaneousPositions:   3,
   maxRiskPerSymbolPct:       10,
+  weeklyLossLimitUSDT:     1500,
+  rolling24hLossLimitUSDT:    0,  // 0 = disabled by default
+  cooldownMinutes:           30,
+  maxTradesPerHour:           6,
 };
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -318,6 +322,125 @@ class WorkerManager {
     }
   }
 
+  // ── Strategy limits from DB ─────────────────────────────────────────────
+  /**
+   * DB에서 사용자 Strategy 설정을 읽어 RiskLimits 반환.
+   * 설정이 없거나 실패하면 보수적인 DEFAULT_LIMITS 반환.
+   */
+  private async loadStrategyLimits(): Promise<RiskLimits> {
+    try {
+      const rows = await db.select().from(strategyConfigTable).limit(1);
+      const row = rows[0];
+      if (!row?.limits) return DEFAULT_LIMITS;
+      const raw = (
+        typeof row.limits === 'string'
+          ? JSON.parse(row.limits as string)
+          : row.limits
+      ) as Partial<RiskLimits>;
+      return { ...DEFAULT_LIMITS, ...raw };
+    } catch (err) {
+      console.warn('[AIWorker] loadStrategyLimits 실패 — DEFAULT_LIMITS 사용:', (err as Error).message);
+      return DEFAULT_LIMITS;
+    }
+  }
+
+  // ── Paper trading state from DB ─────────────────────────────────────────
+  /**
+   * PAPER 거래 DB에서 실제 운용 상태를 계산합니다.
+   *
+   * - realizedPnLToday:       당일(UTC 자정~현재) CLOSE 거래 PnL 합계
+   * - realizedPnLRolling24h:  최근 24h 롤링 윈도우 PnL 합계
+   * - realizedPnLWeekly:      이번 주 월요일 00:00 UTC~ PnL 합계
+   * - consecutiveLosses:      최신 CLOSE 거래부터 연속 음수 PnL 카운트
+   * - positions:              action=OPEN + closeTime=0 레코드에서 추출
+   *
+   * ⚠️ LIVE 실제 계정 데이터와 절대 혼합하지 않습니다.
+   */
+  private async loadPaperState(): Promise<{
+    realizedPnLToday: number;
+    realizedPnLRolling24h: number;
+    realizedPnLWeekly: number;
+    consecutiveLosses: number;
+    positions: import('./serverTypes').Position[];
+  }> {
+    try {
+      const now = Date.now();
+
+      // 당일 시작: UTC 자정
+      const todayStart = new Date();
+      todayStart.setUTCHours(0, 0, 0, 0);
+
+      // Rolling 24h 시작
+      const rolling24hStart = new Date(now - 24 * 60 * 60 * 1000);
+
+      // 이번 주 월요일 00:00 UTC
+      const weekStart = new Date();
+      weekStart.setUTCHours(0, 0, 0, 0);
+      const dow = weekStart.getUTCDay(); // 0=일, 1=월~6=토
+      weekStart.setUTCDate(weekStart.getUTCDate() - (dow === 0 ? 6 : dow - 1));
+
+      // DB에서 전체 거래 조회 (최신순)
+      const allTrades = await db
+        .select()
+        .from(tradesTable)
+        .orderBy(desc(tradesTable.timestamp));
+
+      // CLOSE 거래에서 실현 PnL 계산
+      const closeTrades = allTrades.filter(
+        t => t.action === 'CLOSE' || t.action === 'CLOSE_ALL',
+      );
+
+      let realizedPnLToday      = 0;
+      let realizedPnLRolling24h = 0;
+      let realizedPnLWeekly     = 0;
+
+      for (const t of closeTrades) {
+        const ts  = new Date(t.timestamp as string | Date).getTime();
+        const pnl = parseFloat(t.pnl ?? '0') || 0;
+        if (ts >= todayStart.getTime())      realizedPnLToday      += pnl;
+        if (ts >= rolling24hStart.getTime()) realizedPnLRolling24h += pnl;
+        if (ts >= weekStart.getTime())       realizedPnLWeekly     += pnl;
+      }
+
+      // 연속 손실 카운트: 최신 CLOSE부터 연속 음수 PnL
+      let consecutiveLosses = 0;
+      for (const t of closeTrades) {
+        const pnl = parseFloat(t.pnl ?? '0') || 0;
+        if (pnl < 0) consecutiveLosses++;
+        else break;
+      }
+
+      // 미청산 포지션 추출: action=OPEN + closeTime=0
+      const openTrades = allTrades.filter(
+        t => t.action === 'OPEN' && (!t.closeTime || t.closeTime === 0),
+      );
+      const positions: import('./serverTypes').Position[] = openTrades.map(t => {
+        const sizeInUsd = parseFloat(t.sizeInUsd ?? t.size ?? '0') || 0;
+        const price     = parseFloat(t.price ?? '0') || 0;
+        return {
+          symbol:        t.symbol,
+          side:          (t.side === 'SHORT' ? 'SHORT' : 'LONG') as 'LONG' | 'SHORT',
+          sizeInUsd,
+          collateralUsd: sizeInUsd,  // collateral ≈ sizeInUsd (레버리지 미기록)
+          unrealizedPnl: 0,           // DB에 미기록
+          entryPrice:    price,
+          leverage:      1,            // DB에 미기록
+        };
+      });
+
+      return {
+        realizedPnLToday, realizedPnLRolling24h, realizedPnLWeekly,
+        consecutiveLosses, positions,
+      };
+    } catch (err) {
+      console.warn('[AIWorker] loadPaperState 실패 — synthetic zeros 사용:', (err as Error).message);
+      return {
+        realizedPnLToday: 0, realizedPnLRolling24h: 0, realizedPnLWeekly: 0,
+        consecutiveLosses: 0, positions: [],
+      };
+    }
+  }
+
   /** 60초 AI 사이클 — setTimeout 루프 (완료 후 다음 예약). */
   private async runCycle(): Promise<void> {
     if (!this.active) return;
@@ -359,23 +482,32 @@ class WorkerManager {
         return;
       }
 
+      // ── 사용자 설정 + PAPER 운용 상태를 DB에서 로드 ────────────────────────────
+      // ⚠️ LIVE 실제 계정 데이터와 절대 혼합하지 않음 (지갑 미연결 = PAPER 데이터 전용)
+      const [limits, paperState] = await Promise.all([
+        this.loadStrategyLimits(),
+        this.loadPaperState(),
+      ]);
+
       const engineResult = runAiEngine({
         cycleNumber:      cycleNum,
         prevState:        this.prevState,
         analyses,
-        positions:        [],   // 서버는 온체인 포지션 없음
+        positions:        paperState.positions,
         account: {
-          balance:           DEFAULT_LIMITS.tradingCapital,
-          availableBalance:  DEFAULT_LIMITS.tradingCapital * (1 - DEFAULT_LIMITS.reserveCashPct / 100),
-          unrealizedPnl:     0,
-          realizedPnlToday:  0,
+          balance:          limits.tradingCapital,
+          availableBalance: limits.tradingCapital * (1 - (limits.reserveCashPct ?? 20) / 100),
+          unrealizedPnl:    0,
+          realizedPnlToday: paperState.realizedPnLToday,
         },
-        limits:           DEFAULT_LIMITS,
-        engineState:      "RUNNING",
-        consecutiveLosses: 0,
+        limits,
+        engineState:              "RUNNING",
+        consecutiveLosses:        paperState.consecutiveLosses,
         dataFreshMs,
-        dailyRealizedPnlUsd: 0,
-        tradingCapital:   DEFAULT_LIMITS.tradingCapital,
+        dailyRealizedPnlUsd:      paperState.realizedPnLToday,
+        weeklyRealizedPnlUsd:     paperState.realizedPnLWeekly,
+        rolling24hRealizedPnlUsd: paperState.realizedPnLRolling24h,
+        tradingCapital:           limits.tradingCapital,
       });
 
       // 상태 업데이트

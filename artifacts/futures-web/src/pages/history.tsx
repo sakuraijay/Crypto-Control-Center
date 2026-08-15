@@ -7,7 +7,7 @@ import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Badge } from '@/components/ui/badge';
 import { format } from 'date-fns';
-import { Download, X, RefreshCw, CheckCircle2, XCircle, Clock, RotateCcw } from 'lucide-react';
+import { Download, X, RefreshCw, CheckCircle2, XCircle, Clock, RotateCcw, Ban } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 // ── CSV export ──────────────────────────────────────────────────────────────
@@ -144,6 +144,7 @@ function AiHistoryTab() {
   const [filterDir, setFilterDir] = useState('ALL');
   const [filterDryRun, setFilterDryRun] = useState('ALL');
   const [filterSymbol, setFilterSymbol] = useState('ALL');
+  const [actionStates, setActionStates] = useState<Record<string, 'retrying' | 'rejecting'>>({});
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -217,6 +218,29 @@ function AiHistoryTab() {
   }, []);
 
   useEffect(() => { void load(); }, [load]);
+
+  // ── Dry-run retry / reject ─────────────────────────────────────────────────
+  const handleRetry = useCallback(async (id: string) => {
+    setActionStates(prev => ({ ...prev, [id]: 'retrying' }));
+    try {
+      await fetch(`/api/ai/approvals/${id}/retry`, { method: 'POST' });
+    } catch { /* non-fatal */ }
+    setActionStates(prev => { const n = { ...prev }; delete n[id]; return n; });
+    void load();
+  }, [load]);
+
+  const handleReject = useCallback(async (id: string) => {
+    setActionStates(prev => ({ ...prev, [id]: 'rejecting' }));
+    try {
+      await fetch(`/api/ai/approvals/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'REJECTED', rejectionReason: '운영자 거부 (드라이런 실패)' }),
+      });
+    } catch { /* non-fatal */ }
+    setActionStates(prev => { const n = { ...prev }; delete n[id]; return n; });
+    void load();
+  }, [load]);
 
   const uniqueSymbols = useMemo(
     () => ['ALL', ...Array.from(new Set(entries.map(e => e.symbol))).sort()],
@@ -344,19 +368,20 @@ function AiHistoryTab() {
                   <th className="text-left font-medium text-muted-foreground py-3 px-4 whitespace-nowrap text-xs">승인 상태</th>
                   <th className="text-left font-medium text-muted-foreground py-3 px-4 whitespace-nowrap text-xs">드라이런</th>
                   <th className="text-left font-medium text-muted-foreground py-3 px-4 text-xs">오류 / 근거</th>
+                   <th className="text-left font-medium text-muted-foreground py-3 px-4 whitespace-nowrap text-xs">액션</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
                 {loading && entries.length === 0 ? (
                   <tr>
-                    <td colSpan={8} className="py-12 text-center text-muted-foreground">
+                    <td colSpan={9} className="py-12 text-center text-muted-foreground">
                       <RefreshCw className="w-4 h-4 animate-spin mx-auto mb-2" />
                       불러오는 중…
                     </td>
                   </tr>
                 ) : filtered.length === 0 ? (
                   <tr>
-                    <td colSpan={8} className="py-12 text-center text-muted-foreground">
+                    <td colSpan={9} className="py-12 text-center text-muted-foreground">
                       {entries.length === 0 ? 'AI 이력이 없습니다' : '필터 조건에 맞는 항목이 없습니다'}
                     </td>
                   </tr>
@@ -410,6 +435,38 @@ function AiHistoryTab() {
                           </span>
                         )}
                       </td>
+                       <td className="py-2.5 px-4 whitespace-nowrap">
+                         {e.kind === 'approval' && e.approvalStatus === 'APPROVED' && e.dryRunResult === 'failed' ? (
+                           <div className="flex gap-1">
+                             <Button
+                               size="sm"
+                               variant="outline"
+                               className="h-6 px-1.5 text-[10px] gap-1 border-amber-500/40 text-amber-400 hover:bg-amber-500/10"
+                               disabled={!!actionStates[e.id]}
+                               onClick={() => void handleRetry(e.id)}
+                             >
+                               {actionStates[e.id] === 'retrying'
+                                 ? <RefreshCw className="w-2.5 h-2.5 animate-spin" />
+                                 : <RotateCcw className="w-2.5 h-2.5" />}
+                               재시도
+                             </Button>
+                             <Button
+                               size="sm"
+                               variant="outline"
+                               className="h-6 px-1.5 text-[10px] gap-1 border-red-500/40 text-red-400 hover:bg-red-500/10"
+                               disabled={!!actionStates[e.id]}
+                               onClick={() => void handleReject(e.id)}
+                             >
+                               {actionStates[e.id] === 'rejecting'
+                                 ? <RefreshCw className="w-2.5 h-2.5 animate-spin" />
+                                 : <Ban className="w-2.5 h-2.5" />}
+                               거부
+                             </Button>
+                           </div>
+                         ) : (
+                           <span className="text-muted-foreground text-[10px]">—</span>
+                         )}
+                       </td>
                     </tr>
                   ))
                 )}

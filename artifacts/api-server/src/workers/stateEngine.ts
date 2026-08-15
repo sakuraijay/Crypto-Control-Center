@@ -56,6 +56,8 @@ function deriveRiskLevel(
   consecutiveLosses: number,
   limits: RiskLimits,
   account: { unrealizedPnl: number; realizedPnlToday: number; balance: number },
+  weeklyPnl = 0,
+  rolling24hPnl = 0,
 ): RiskLevel {
   const avgAtr = analyses.length > 0
     ? analyses.reduce((s, a) => s + a.indicators.atrPct, 0) / analyses.length
@@ -66,12 +68,22 @@ function deriveRiskLevel(
     ? Math.abs(Math.min(0, totalDailyLoss)) / limits.dailyLossLimitUSDT
     : 0;
 
+  const weeklyLossLimitPct = (limits.weeklyLossLimitUSDT ?? 0) > 0
+    ? Math.abs(Math.min(0, weeklyPnl)) / limits.weeklyLossLimitUSDT!
+    : 0;
+
+  const rolling24hLossLimitPct = (limits.rolling24hLossLimitUSDT ?? 0) > 0
+    ? Math.abs(Math.min(0, rolling24hPnl)) / limits.rolling24hLossLimitUSDT!
+    : 0;
+
   const maxDrawdown = positions.length > 0
     ? Math.max(...positions.map(p => p.unrealizedPnl < 0 ? Math.abs(p.unrealizedPnl) / p.collateralUsd * 100 : 0))
     : 0;
 
   if (
     lossLimitPct > 0.9 ||
+    weeklyLossLimitPct >= 1.0 ||
+    rolling24hLossLimitPct >= 1.0 ||
     consecutiveLosses >= limits.consecutiveLossLimit ||
     avgAtr > THRESHOLDS.HIGH_VOL_ATR_PCT ||
     maxDrawdown > limits.maxDrawdownPercent * 0.9
@@ -79,6 +91,8 @@ function deriveRiskLevel(
 
   if (
     lossLimitPct > 0.5 ||
+    weeklyLossLimitPct > 0.75 ||
+    rolling24hLossLimitPct > 0.75 ||
     consecutiveLosses >= Math.floor(limits.consecutiveLossLimit * 0.7) ||
     avgAtr > THRESHOLDS.VOLATILE_ATR_PCT ||
     maxDrawdown > limits.maxDrawdownPercent * 0.5
@@ -86,6 +100,8 @@ function deriveRiskLevel(
 
   if (
     lossLimitPct > 0.25 ||
+    weeklyLossLimitPct > 0.5 ||
+    rolling24hLossLimitPct > 0.5 ||
     consecutiveLosses >= 2 ||
     avgAtr > 2.5
   ) return 'MEDIUM';
@@ -218,6 +234,10 @@ export interface EngineInput {
   dataFreshMs: number;
   dailyRealizedPnlUsd: number;
   tradingCapital: number;
+  /** Realized PnL since Monday 00:00 UTC (negative = net weekly loss). */
+  weeklyRealizedPnlUsd?: number;
+  /** Realized PnL in the rolling 24-hour window (negative = net loss). */
+  rolling24hRealizedPnlUsd?: number;
 }
 
 export function runAiEngine(
@@ -227,6 +247,7 @@ export function runAiEngine(
     cycleNumber, prevState, analyses, positions, account,
     limits, engineState, consecutiveLosses, dataFreshMs,
     dailyRealizedPnlUsd, tradingCapital,
+    weeklyRealizedPnlUsd = 0, rolling24hRealizedPnlUsd = 0,
   } = input;
 
   const profitLockStage = computeProfitLockStage(
@@ -252,8 +273,22 @@ export function runAiEngine(
   if (dataFreshMs > 60_000) return CASH_DECISION(`Price data stale (${Math.round(dataFreshMs / 1000)}s old)`);
   if (analyses.length === 0) return CASH_DECISION('No market data available');
 
+  // ── Rolling 24h loss limit ────────────────────────────────────────────────
+  if ((limits.rolling24hLossLimitUSDT ?? 0) > 0 && rolling24hRealizedPnlUsd < -(limits.rolling24hLossLimitUSDT!)) {
+    return CASH_DECISION(
+      `Rolling 24h 손실 한도 초과: -$${Math.abs(rolling24hRealizedPnlUsd).toFixed(0)} / $${limits.rolling24hLossLimitUSDT}`,
+    );
+  }
+
+  // ── Weekly loss limit ─────────────────────────────────────────────────────
+  if ((limits.weeklyLossLimitUSDT ?? 0) > 0 && weeklyRealizedPnlUsd < -(limits.weeklyLossLimitUSDT!)) {
+    return CASH_DECISION(
+      `주간 손실 한도 초과: -$${Math.abs(weeklyRealizedPnlUsd).toFixed(0)} / $${limits.weeklyLossLimitUSDT}`,
+    );
+  }
+
   const condition = deriveMarketCondition(analyses);
-  const riskLevel = deriveRiskLevel(analyses, positions, consecutiveLosses, limits, account);
+  const riskLevel = deriveRiskLevel(analyses, positions, consecutiveLosses, limits, account, weeklyRealizedPnlUsd, rolling24hRealizedPnlUsd);
 
   if (riskLevel === 'CRITICAL') return CASH_DECISION('Risk level CRITICAL — no new positions');
 

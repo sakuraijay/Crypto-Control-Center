@@ -78,6 +78,11 @@ export interface RiskLimits {
    * Each additional threshold × N advances to Lv.N (max Lv.3).
    */
   profitLockThresholdPct: number;
+  /**
+   * Rolling 24-hour loss limit (USDT). 0 = disabled.
+   * When exceeded the AI engine immediately returns CASH regardless of signal.
+   */
+  rolling24hLossLimitUSDT: number;
 }
 
 const DEFAULT_INDICATORS: IndicatorConfig[] = [
@@ -111,6 +116,7 @@ const DEFAULT_LIMITS: RiskLimits = {
   maxTradesPerHour:              6,
   maxRiskPerSymbolPct:           2,   // 2 % of tradingCapital per symbol
   profitLockThresholdPct:        1,   // Lv.1 activates at +1 % daily PnL
+  rolling24hLossLimitUSDT:       0,   // 0 = disabled by default
 };
 
 interface StrategyContextType {
