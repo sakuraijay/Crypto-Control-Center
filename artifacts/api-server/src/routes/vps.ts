@@ -17,7 +17,29 @@
 import { Router } from "express";
 
 const router = Router();
-const TIMEOUT = 5_000;
+const TIMEOUT = 8_000;
+const RETRY_DELAY_MS = 2_000;
+
+/** POST to a VPS endpoint with one automatic retry on network / 5xx failure. */
+async function fetchVps(url: string, init: RequestInit): Promise<Response> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetch(url, { ...init, signal: AbortSignal.timeout(TIMEOUT) });
+      if (res.status >= 500 && attempt === 0) {
+        await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
+        continue;
+      }
+      return res;
+    } catch (e: unknown) {
+      if (attempt === 0) {
+        await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw new Error("Unreachable");
+}
 
 function offStatus(extra: Record<string, unknown> = {}) {
   return {
@@ -183,22 +205,33 @@ router.post("/vps/execute", async (req, res) => {
 
   try {
     const base = buildBase(host, port ?? "8080", ssl);
-    const response = await fetch(`${base}/api/execute`, {
+    const response = await fetchVps(`${base}/api/execute`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(TIMEOUT),
     });
 
     if (!response.ok) {
       const text = await response.text().catch(() => "");
-      return res.status(502).json({ ok: false, error: `VPS returned HTTP ${response.status}`, detail: text });
+      return res.status(502).json({
+        ok: false,
+        code: "VPS_HTTP_ERROR",
+        error: `VPS returned HTTP ${response.status}`,
+        detail: text.slice(0, 500),
+      });
     }
 
     const data = (await response.json()) as Record<string, unknown>;
-    return res.json({ ok: true, ...data });
+    return res.json({ ok: true, executedAt: new Date().toISOString(), ...data });
   } catch (e: unknown) {
-    return res.status(502).json({ ok: false, error: "VPS unreachable", detail: (e as Error).message });
+    const msg = (e as Error).message ?? "Network error";
+    const isTimeout = msg.includes("timeout") || msg.includes("abort") || msg.toLowerCase().includes("timed out");
+    return res.status(502).json({
+      ok: false,
+      code: isTimeout ? "VPS_TIMEOUT" : "VPS_UNREACHABLE",
+      error: isTimeout ? "VPS timed out after retry" : "VPS unreachable after retry",
+      detail: msg.slice(0, 200),
+    });
   }
 });
 

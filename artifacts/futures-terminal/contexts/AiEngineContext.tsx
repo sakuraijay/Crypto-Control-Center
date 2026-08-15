@@ -34,6 +34,10 @@ import { useVps } from '@/contexts/VpsContext';
 import {
   scheduleLiveApprovalAlert,
   scheduleRiskLockAlert,
+  scheduleApprovalGrantedAlert,
+  scheduleApprovalRejectedAlert,
+  scheduleApprovalExpiredAlert,
+  scheduleEmergencyStopAlert,
 } from '@/services/notifications';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -100,7 +104,7 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
   const { account, positions, trades, placeOrder, clearAllPositions } = useTrading();
   const { config: strategyConfig }  = useStrategy();
   const { symbols: watchlist }      = useWatchlist();
-  const { connectionStatus }        = useVps();
+  const { connectionStatus, config } = useVps();
 
   const limits        = strategyConfig.riskLimits;
   const consecutiveLosses = useMemo(() => calcConsecutiveLosses(trades), [trades]);
@@ -130,7 +134,8 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
   const countdownTimer   = useRef<ReturnType<typeof setInterval> | null>(null);
   const nextCycleAt      = useRef<number>(Date.now() + CYCLE_MS);
   // Track which risk event notifications we've sent to avoid spamming
-  const notifiedRiskLock = useRef(false);
+  const notifiedRiskLock     = useRef(false);
+  const prevEngineStateRef   = useRef<string | null>(null);
 
   // ── Feed price buffer from watchlist ──────────────────────────────────────
   useEffect(() => {
@@ -184,20 +189,76 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const t = setInterval(() => {
       const now = Date.now();
-      setPendingApprovals(prev =>
-        prev.map(a => {
+      setPendingApprovals(prev => {
+        const next = prev.map(a => {
           if (a.status === 'PENDING' && new Date(a.expiresAt).getTime() <= now) {
+            void scheduleApprovalExpiredAlert(
+              a.decision.primarySymbol ?? 'MULTI',
+              a.decision.operatingState,
+            );
             return { ...a, status: 'EXPIRED' as ApprovalStatus };
           }
           return a;
-        }).filter(a =>
+        });
+        return next.filter(a =>
           a.status === 'PENDING' ||
           new Date(a.createdAt).getTime() > now - APPROVAL_HISTORY_KEEP_MS,
-        )
-      );
+        );
+      });
     }, 15_000);
     return () => clearInterval(t);
   }, []);
+
+  // ── Emergency stop notification ───────────────────────────────────────────
+  useEffect(() => {
+    if (engineState === EngineState.EMERGENCY_STOP && prevEngineStateRef.current !== EngineState.EMERGENCY_STOP) {
+      void scheduleEmergencyStopAlert();
+    }
+    prevEngineStateRef.current = String(engineState);
+  }, [engineState]);
+
+  // ── Seed decision history from persisted API records ──────────────────────
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/ai/decisions?limit=200`);
+        if (!res.ok) return;
+        const { decisions } = await res.json() as { decisions: Array<{
+          id: number; ts: string; symbol: string; direction: string;
+          confidence: number; rationale: string; riskResult: string;
+          riskNote?: string; executionOutcome: string;
+        }> };
+        if (!decisions?.length) return;
+
+        const opStateMap: Record<string, AiOperatingState> = {
+          LONG: 'LONG', SHORT: 'SHORT', NO_TRADE: 'CASH',
+        };
+        const seeded = decisions.map((row): AiEngineDecision => ({
+          id: String(row.id),
+          cycleNumber: 0,
+          createdAt: row.ts,
+          operatingState: opStateMap[row.direction] ?? 'CASH',
+          prevState: 'CASH',
+          stateChanged: false,
+          selectedSymbols: row.symbol ? [row.symbol] : [],
+          primarySymbol: row.symbol || null,
+          confidence: Math.round((row.confidence ?? 0) * 100),
+          marketCondition: 'RANGING',
+          riskLevel: 'MEDIUM',
+          symbolAnalyses: [],
+          marketRankings: [],
+          executionType: 'hold',
+          entryStyle: 'none',
+          stateRationale: row.rationale ?? '',
+          reasoning: [],
+          riskApproved: row.riskResult === 'APPROVED',
+          riskVetoReason: row.riskNote ?? undefined,
+          paperExecuted: row.executionOutcome === 'SIMULATED',
+        }));
+        setDecisionHistory(seeded);
+      } catch { /* non-fatal */ }
+    })();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Build SymbolAnalysis ──────────────────────────────────────────────────
   const buildAnalyses = useCallback((): SymbolAnalysis[] => {
@@ -270,30 +331,47 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
   const forwardToVps = useCallback(async (
     decision: AiEngineDecision,
   ): Promise<{ ok: boolean; error?: string }> => {
-    try {
-      const res = await fetch(`${API_BASE}/vps/execute`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          decisionId:    decision.id,
-          operatingState: decision.operatingState,
-          symbol:        decision.primarySymbol,
-          executionType: decision.executionType,
-          sizeUsd:       decision.sizeUsd,
-          leverage:      decision.leverage,
-          tpPrice:       decision.tpPrice,
-          slPrice:       decision.slPrice,
-          trailingStopPct: decision.trailingStopPct,
-          hedgeParams:   decision.hedgeParams,
-          cycleNumber:   decision.cycleNumber,
-        }),
-      });
-      if (!res.ok) return { ok: false, error: `VPS responded ${res.status}` };
-      return { ok: true };
-    } catch (e) {
-      return { ok: false, error: e instanceof Error ? e.message : 'Network error' };
+    if (!config.host?.trim()) return { ok: false, error: 'VPS not configured' };
+    const params = new URLSearchParams({
+      host: config.host,
+      port: config.port || '8080',
+      ssl: String(config.useSSL ?? false),
+    });
+    const url = `${API_BASE}/vps/execute?${params}`;
+    const body = JSON.stringify({
+      decisionId: decision.id,
+      operatingState: decision.operatingState,
+      symbol: decision.primarySymbol,
+      executionType: decision.executionType,
+      sizeUsd: decision.sizeUsd,
+      leverage: decision.leverage,
+      tpPrice: decision.tpPrice,
+      slPrice: decision.slPrice,
+      trailingStopPct: decision.trailingStopPct,
+      hedgeParams: decision.hedgeParams,
+      cycleNumber: decision.cycleNumber,
+    });
+    const headers = { 'Content-Type': 'application/json' };
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const res = await fetch(url, { method: 'POST', headers, body });
+        if (!res.ok) {
+          const detail = await res.text().catch(() => '');
+          if (res.status >= 500 && attempt === 0) {
+            await new Promise(r => setTimeout(r, 2000));
+            continue;
+          }
+          return { ok: false, error: `VPS responded ${res.status}${detail ? ': ' + detail.slice(0, 120) : ''}` };
+        }
+        return { ok: true };
+      } catch (e) {
+        if (attempt === 0) { await new Promise(r => setTimeout(r, 2000)); continue; }
+        return { ok: false, error: e instanceof Error ? e.message : 'Network error' };
+      }
     }
-  }, []);
+    return { ok: false, error: 'VPS unreachable after retry' };
+  }, [config]);
 
   // ── Approve a live order ──────────────────────────────────────────────────
   const approveLiveOrder = useCallback(async (id: string) => {
@@ -310,10 +388,16 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
     setPendingApprovals(prev => prev.map(a =>
       a.id === id ? { ...a, vpsForwarded: result.ok, vpsError: result.error } : a,
     ));
+    void scheduleApprovalGrantedAlert(
+      approval.decision.primarySymbol ?? 'MULTI',
+      approval.decision.operatingState,
+      result.ok,
+    );
   }, [pendingApprovals, forwardToVps]);
 
   // ── Reject a live order ───────────────────────────────────────────────────
   const rejectLiveOrder = useCallback((id: string, reason?: string) => {
+    const approval = pendingApprovals.find(a => a.id === id);
     setPendingApprovals(prev => prev.map(a =>
       a.id === id && a.status === 'PENDING'
         ? {
@@ -324,7 +408,13 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
           }
         : a,
     ));
-  }, []);
+    if (approval?.status === 'PENDING') {
+      void scheduleApprovalRejectedAlert(
+        approval.decision.primarySymbol ?? 'MULTI',
+        approval.decision.operatingState,
+      );
+    }
+  }, [pendingApprovals]);
 
   // ── Run one engine cycle ──────────────────────────────────────────────────
   const runCycle = useCallback(async () => {

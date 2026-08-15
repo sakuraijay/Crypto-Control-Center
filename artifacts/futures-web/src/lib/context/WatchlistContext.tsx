@@ -18,7 +18,7 @@ interface WatchlistContextType {
 
 const WatchlistContext = createContext<WatchlistContextType | undefined>(undefined);
 
-const LS_SYMBOLS   = 'futures_watchlist_symbols_v2';   // v2 = GMX symbols (no USDT suffix)
+const LS_SYMBOLS   = 'futures_watchlist_symbols_v2';
 const LS_WATCHLIST = 'futures_watchlist_v2';
 
 function loadInitialWatchlist(): WatchlistSymbol[] {
@@ -26,11 +26,9 @@ function loadInitialWatchlist(): WatchlistSymbol[] {
     const raw = localStorage.getItem(LS_WATCHLIST);
     if (raw) {
       const parsed = JSON.parse(raw) as WatchlistSymbol[];
-      // Validate: reject if any symbol contains "USDT" (stale Binance data)
       if (parsed.every(w => !w.symbol.includes('USDT'))) return parsed;
     }
   } catch {}
-  // Return mock with displaySymbol field added
   return (MOCK_WATCHLIST as WatchlistSymbol[]).map(w => ({
     ...w,
     displaySymbol: w.displaySymbol ?? displaySymbol(w.symbol),
@@ -45,7 +43,6 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
   const [watchlist, setWatchlist] = useState<WatchlistSymbol[]>(loadInitialWatchlist);
   const [streamStatus, setStreamStatus] = useState<StreamStatus>('connecting');
 
-  // Separate symbol list — avoids reconnect on every price tick
   const [symbolsList, setSymbolsList] = useState<string[]>(() =>
     loadInitialWatchlist().map(w => w.symbol)
   );
@@ -73,11 +70,7 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
         prev.map(w => {
           const tick = priceMap.get(w.symbol);
           if (!tick) return w;
-          return {
-            ...w,
-            price: tick.priceUsd,
-            // GMX doesn't provide 24h change via this feed — keep existing
-          };
+          return { ...w, price: tick.priceUsd };
         })
       );
     };
@@ -90,7 +83,6 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
     }
   }, [symbolsList]);
 
-  // Cleanup on unmount
   useEffect(() => {
     return () => { streamRef.current?.disconnect(); streamRef.current = null; };
   }, []);
@@ -109,6 +101,29 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
     });
   }, [symbolsList]);
 
+  // ── Fetch 24h price change from API (on mount + every 5 min) ───
+  useEffect(() => {
+    const fetch24h = async () => {
+      try {
+        const res = await fetch('/api-server/api/gmx/change24h');
+        if (!res.ok) return;
+        const data = await res.json() as { symbol: string; change24hPct: number }[];
+        if (!Array.isArray(data) || data.length === 0) return;
+        const changeMap = new Map(data.map(d => [d.symbol, d.change24hPct]));
+        setWatchlist(prev =>
+          prev.map(w => {
+            const change = changeMap.get(w.symbol);
+            return change !== undefined ? { ...w, change24h: change } : w;
+          })
+        );
+      } catch { /* non-fatal */ }
+    };
+
+    void fetch24h();
+    const id = setInterval(fetch24h, 5 * 60_000);
+    return () => clearInterval(id);
+  }, []);
+
   // ── Strategy score simulation (independent of price feed) ──────
   useEffect(() => {
     const id = setInterval(() => {
@@ -126,9 +141,7 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
 
   // ── Add symbol ─────────────────────────────────────────────────
   const addSymbol = useCallback((sym: string) => {
-    // Normalise: strip USDT suffix if present, uppercase
     const s = sym.toUpperCase().replace(/USDT$/, '').replace(/\/USD$/, '');
-
     setWatchlist(prev => {
       if (prev.find(p => p.symbol === s)) return prev;
       return [...prev, {
@@ -154,7 +167,6 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
   );
 }
 
-// Expose DEFAULT_WATCHLIST_SYMBOLS so other components can reference it
 export { DEFAULT_WATCHLIST_SYMBOLS };
 
 export function useWatchlistContext() {

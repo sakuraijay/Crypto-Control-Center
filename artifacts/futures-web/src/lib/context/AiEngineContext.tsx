@@ -90,7 +90,7 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
   const { engineState, setEngineState } = useAppContext();
   const { limits } = useStrategyContext();
   const { watchlist } = useWatchlistContext();
-  const { connectionStatus } = useVpsContext();
+  const { connectionStatus, config: vpsConfig } = useVpsContext();
 
   const [currentDecision, setCurrentDecision] = useState<AiEngineDecision | null>(null);
   const [decisionHistory, setDecisionHistory] = useState<AiEngineDecision[]>([]);
@@ -138,6 +138,44 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
       }
     }
   }, [watchlist]);
+
+  // ── Seed history from persisted DB records on mount ───────────────────────
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch('/api-server/api/ai/decisions?limit=200');
+        if (!res.ok) return;
+        const { decisions } = await res.json() as {
+          decisions: Array<{
+            id: number; ts: string; symbol: string; direction: string;
+            confidence: number; rationale: string; riskResult: string;
+            riskNote?: string | null; executionOutcome: string;
+          }>;
+        };
+        if (!decisions?.length) return;
+        const opStateMap: Record<string, AiOperatingState> = {
+          LONG: 'LONG', SHORT: 'SHORT', NO_TRADE: 'CASH',
+        };
+        const seeded = decisions.map((row): AiEngineDecision => ({
+          id: String(row.id), cycleNumber: 0, createdAt: row.ts,
+          operatingState: opStateMap[row.direction] ?? 'CASH',
+          prevState: 'CASH', stateChanged: false,
+          selectedSymbols: row.symbol ? [row.symbol] : [],
+          primarySymbol: row.symbol || null,
+          confidence: Math.round((row.confidence ?? 0) * 100),
+          marketCondition: 'RANGING', riskLevel: 'MEDIUM',
+          symbolAnalyses: [], marketRankings: [],
+          executionType: 'hold', entryStyle: 'none',
+          stateRationale: row.rationale ?? '', reasoning: [],
+          riskApproved: row.riskResult === 'APPROVED',
+          riskVetoReason: row.riskNote ?? undefined,
+          paperExecuted: row.executionOutcome === 'SIMULATED',
+        }));
+        setDecisionHistory(seeded);
+      } catch { /* non-fatal */ }
+    })();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ── Daily / weekly loss limit → RISK_LOCKED ───────────────────────────────
   useEffect(() => {
@@ -249,32 +287,51 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
-  // ── Forward approved order to VPS ──────────────────────────────────────────
+  // ── Forward approved order to VPS (with query-param config + 1 retry) ───────
   const forwardToVps = useCallback(async (decision: AiEngineDecision): Promise<{ ok: boolean; error?: string }> => {
-    try {
-      const res = await fetch('/api-server/api/vps/execute', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          decisionId: decision.id,
-          operatingState: decision.operatingState,
-          symbol: decision.primarySymbol,
-          executionType: decision.executionType,
-          sizeUsd: decision.sizeUsd,
-          leverage: decision.leverage,
-          tpPrice: decision.tpPrice,
-          slPrice: decision.slPrice,
-          trailingStopPct: decision.trailingStopPct,
-          hedgeParams: decision.hedgeParams,
-          cycleNumber: decision.cycleNumber,
-        }),
-      });
-      if (!res.ok) return { ok: false, error: `VPS responded ${res.status}` };
-      return { ok: true };
-    } catch (e) {
-      return { ok: false, error: e instanceof Error ? e.message : 'Network error' };
+    if (!vpsConfig.host?.trim()) return { ok: false, error: 'VPS not configured — set host in Settings' };
+
+    const params = new URLSearchParams({
+      host: vpsConfig.host,
+      port: vpsConfig.port || '8080',
+      ssl:  String(vpsConfig.useSSL ?? false),
+    });
+    const url  = `/api-server/api/vps/execute?${params}`;
+    const body = JSON.stringify({
+      decisionId:      decision.id,
+      operatingState:  decision.operatingState,
+      symbol:          decision.primarySymbol,
+      executionType:   decision.executionType,
+      sizeUsd:         decision.sizeUsd,
+      leverage:        decision.leverage,
+      tpPrice:         decision.tpPrice,
+      slPrice:         decision.slPrice,
+      trailingStopPct: decision.trailingStopPct,
+      hedgeParams:     decision.hedgeParams,
+      cycleNumber:     decision.cycleNumber,
+    });
+    const headers = { 'Content-Type': 'application/json' } as const;
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const res = await fetch(url, { method: 'POST', headers, body });
+        if (!res.ok) {
+          const detail = await res.text().catch(() => '');
+          // Retry once on 5xx
+          if (res.status >= 500 && attempt === 0) {
+            await new Promise(r => setTimeout(r, 2_000));
+            continue;
+          }
+          return { ok: false, error: `VPS responded ${res.status}${detail ? ': ' + detail.slice(0, 120) : ''}` };
+        }
+        return { ok: true };
+      } catch (e) {
+        if (attempt === 0) { await new Promise(r => setTimeout(r, 2_000)); continue; }
+        return { ok: false, error: e instanceof Error ? e.message : 'Network error' };
+      }
     }
-  }, []);
+    return { ok: false, error: 'VPS unreachable after retry' };
+  }, [vpsConfig]);
 
   // ── Approve a live order ────────────────────────────────────────────────────
   const approveLiveOrder = useCallback(async (id: string) => {

@@ -4,17 +4,19 @@
  * No API key required — all data is publicly available.
  *
  * Endpoints:
- *   GET /api/gmx/prices   — oracle prices, refreshed every 3 s
- *   GET /api/gmx/markets  — listed perpetual markets, cached 60 s
- *   GET /api/gmx/tokens   — token registry with decimals, cached 5 min
- *   GET /api/gmx/candles  — OHLCV candles for backtesting
+ *   GET /api/gmx/prices     — oracle prices with 24h change, refreshed every 3 s
+ *   GET /api/gmx/change24h  — 24h price change % per symbol, cached 5 min
+ *   GET /api/gmx/markets    — listed perpetual markets, cached 60 s
+ *   GET /api/gmx/tokens     — token registry with decimals, cached 5 min
+ *   GET /api/gmx/candles    — OHLCV candles for backtesting
  */
 
 import { Router } from "express";
 
 const router = Router();
-const GMX_API = "https://arbitrum-api.gmxinfra.io";
-const POLL_MS = 3_000;
+const GMX_API  = "https://arbitrum-api.gmxinfra.io";
+const STATS_API = "https://stats.gmx.io";
+const POLL_MS  = 3_000;
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -32,19 +34,20 @@ export interface PriceTick {
   priceUsd: number;
   minPriceUsd: number;
   maxPriceUsd: number;
+  /** 24-hour price change percent (positive = up). 0 when unavailable. */
+  change24hPct: number;
   updatedAt: number;
 }
 
-interface GmxToken { symbol: string; address: string; decimals: number; synthetic?: boolean; }
+interface GmxToken  { symbol: string; address: string; decimals: number; synthetic?: boolean; }
 interface GmxMarket { name: string; marketToken: string; indexToken: string; longToken: string; shortToken: string; isListed: boolean; }
 interface CacheEntry<T> { data: T; expiresAt: number; }
 
 // ── Decimal registry ─────────────────────────────────────────────────────────
-// Prices from gmxinfra are scaled: priceUSD = rawPrice / 10^(30 - decimals)
 
 const DECIMALS_FALLBACK: Record<string, number> = {
   ETH: 18, WETH: 18, ARB: 18, LINK: 18, AVAX: 18, EIGEN: 18, UNI: 18,
-  BTC: 8, "WBTC.b": 8,  tBTC: 18,
+  BTC: 8, "WBTC.b": 8, tBTC: 18,
   SOL: 9, DOGE: 8, LTC: 8, BONK: 5, MEW: 5, FLOKI: 9, TAO: 9,
   USDC: 6, USDT: 6, "USDT.e": 6, USDe: 18, DAI: 18, GHO: 18,
 };
@@ -69,11 +72,52 @@ async function loadDecimals(): Promise<Record<string, number>> {
 
 function convertPrice(raw: string, decimals: number): number {
   try {
-    const exponent = 30 - decimals;
-    // Use floating-point for large numbers (precision sufficient for display)
-    return Number(raw) / Math.pow(10, exponent);
+    return Number(raw) / Math.pow(10, 30 - decimals);
   } catch {
     return 0;
+  }
+}
+
+// ── 24h change cache ──────────────────────────────────────────────────────────
+// Supported GMX V2 perpetual symbols on Arbitrum One
+const SUPPORTED_SYMBOLS = ["ETH", "BTC", "SOL", "ARB", "LINK", "AVAX", "DOGE"];
+
+/** symbol → 24h change % */
+let change24hCache: CacheEntry<Record<string, number>> | null = null;
+
+/**
+ * Fetch 24h price change for all supported symbols using the GMX stats API
+ * (1-day candles: compare yesterday's close → today's current price).
+ * Falls back to 0 per symbol on failure.
+ */
+async function refreshChange24h(): Promise<void> {
+  try {
+    const results: Record<string, number> = {};
+    const now = Math.floor(Date.now() / 1000);
+
+    await Promise.allSettled(
+      SUPPORTED_SYMBOLS.map(async (sym) => {
+        try {
+          // countBack=2 gives [yesterday, today] daily candles
+          const url = `${STATS_API}/api/candleSticks?tokenSymbol=${sym}&period=1d&preferredChainId=42161&countBack=2`;
+          const r = await fetch(url, { signal: AbortSignal.timeout(8_000) });
+          if (!r.ok) { results[sym] = 0; return; }
+          const data = await r.json() as { prices?: number[][] } | number[][];
+          const prices = Array.isArray(data) ? data : ((data as { prices?: number[][] }).prices ?? null);
+          if (!prices || prices.length < 2) { results[sym] = 0; return; }
+          // Each candle: [timestamp, open, high, low, close, volume]
+          const prevClose = prices[prices.length - 2]?.[4];
+          const currClose = prices[prices.length - 1]?.[4];
+          if (!prevClose || !currClose || prevClose === 0) { results[sym] = 0; return; }
+          results[sym] = ((currClose - prevClose) / prevClose) * 100;
+        } catch {
+          results[sym] = 0;
+        }
+      }),
+    );
+    change24hCache = { data: results, expiresAt: Date.now() + 5 * 60_000 };
+  } catch {
+    // Keep stale cache
   }
 }
 
@@ -91,15 +135,17 @@ async function refreshPrices() {
         .then(r => r.ok ? r.json() as Promise<RawTicker[]> : Promise.reject(new Error("upstream"))),
       loadDecimals(),
     ]);
+    const ch = change24hCache?.data ?? {};
     const prices: PriceTick[] = tickers.map(t => {
       const d = dec[t.tokenSymbol] ?? 18;
       return {
-        tokenAddress: t.tokenAddress,
-        tokenSymbol: t.tokenSymbol,
-        priceUsd: convertPrice(t.minPrice, d),
-        minPriceUsd: convertPrice(t.minPrice, d),
-        maxPriceUsd: convertPrice(t.maxPrice, d),
-        updatedAt: t.updatedAt,
+        tokenAddress:  t.tokenAddress,
+        tokenSymbol:   t.tokenSymbol,
+        priceUsd:      convertPrice(t.minPrice, d),
+        minPriceUsd:   convertPrice(t.minPrice, d),
+        maxPriceUsd:   convertPrice(t.maxPrice, d),
+        change24hPct:  ch[t.tokenSymbol] ?? 0,
+        updatedAt:     t.updatedAt,
       };
     });
     priceCache = { data: prices, expiresAt: Date.now() + 10_000 };
@@ -109,16 +155,19 @@ async function refreshPrices() {
 function ensurePoller() {
   if (pollerStarted) return;
   pollerStarted = true;
+  // Initial fetches
   void refreshPrices();
+  void refreshChange24h();
+  // Price: every 3s; 24h change: every 5 min
   setInterval(() => void refreshPrices(), POLL_MS);
+  setInterval(() => void refreshChange24h(), 5 * 60_000);
 }
 
 // ── Routes ───────────────────────────────────────────────────────────────────
 
 /**
  * GET /api/gmx/prices
- * All GMX oracle prices with USD conversion. Refreshed every 3 s server-side.
- * Clients poll this; no browser CORS issues.
+ * All GMX oracle prices with USD conversion and 24h change. Refreshed every 3 s server-side.
  */
 router.get("/gmx/prices", async (_req, res) => {
   ensurePoller();
@@ -126,6 +175,22 @@ router.get("/gmx/prices", async (_req, res) => {
   if (!priceCache) return res.status(502).json({ error: "GMX price feed unavailable" });
   res.setHeader("Cache-Control", "no-cache");
   return res.json(priceCache.data);
+});
+
+/**
+ * GET /api/gmx/change24h
+ * 24-hour price change % for all supported GMX V2 symbols. Cached 5 min.
+ * Returns: [{ symbol: string, change24hPct: number }]
+ */
+router.get("/gmx/change24h", async (_req, res) => {
+  ensurePoller();
+  if (!change24hCache || Date.now() > change24hCache.expiresAt) {
+    await refreshChange24h();
+  }
+  const data = change24hCache?.data ?? {};
+  const result = Object.entries(data).map(([symbol, change24hPct]) => ({ symbol, change24hPct }));
+  res.setHeader("Cache-Control", "public, max-age=300");
+  return res.json(result);
 });
 
 /**
@@ -138,7 +203,7 @@ router.get("/gmx/markets", async (_req, res) => {
       const r = await fetch(`${GMX_API}/markets`, { signal: AbortSignal.timeout(10_000) });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const data = await r.json() as { markets?: GmxMarket[] } | GmxMarket[];
-      const markets: GmxMarket[] = Array.isArray(data) ? data : (data.markets ?? []);
+      const markets = Array.isArray(data) ? data : ((data as { markets?: GmxMarket[] }).markets ?? []);
       marketCache = { data: markets.filter(m => m.isListed), expiresAt: Date.now() + 60_000 };
     } catch {
       if (!marketCache) return res.status(502).json({ error: "GMX markets unavailable" });
@@ -150,7 +215,7 @@ router.get("/gmx/markets", async (_req, res) => {
 
 /**
  * GET /api/gmx/tokens
- * GMX token registry with addresses and decimals. Cached 5 min.
+ * Token registry with decimals. Cached 5 min.
  */
 router.get("/gmx/tokens", async (_req, res) => {
   if (!tokenCache || Date.now() > tokenCache.expiresAt) {
@@ -176,11 +241,11 @@ router.get("/gmx/candles", async (req, res) => {
   const count = Math.min(Number(countBack) || 500, 1500);
 
   try {
-    const url = `https://stats.gmx.io/api/candleSticks?tokenSymbol=${symbol}&period=${period}&preferredChainId=42161&countBack=${count}`;
+    const url = `${STATS_API}/api/candleSticks?tokenSymbol=${symbol}&period=${period}&preferredChainId=42161&countBack=${count}`;
     const upstream = await fetch(url, { signal: AbortSignal.timeout(15_000) });
     if (upstream.ok) {
       const data = await upstream.json() as { prices?: number[][] } | number[][];
-      const prices = Array.isArray(data) ? data : (data.prices ?? null);
+      const prices = Array.isArray(data) ? data : ((data as { prices?: number[][] }).prices ?? null);
       if (prices && prices.length > 0) {
         res.setHeader("Cache-Control", "public, max-age=300");
         return res.json({ prices, source: "gmx-stats" });

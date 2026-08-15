@@ -184,6 +184,62 @@ export async function scheduleRestartAlert(message: string): Promise<string | nu
   );
 }
 
+// ── Approval events ───────────────────────────────────────────────────────────
+
+/** Fire when operator approves a live trade and it's forwarded to VPS */
+export async function scheduleApprovalGrantedAlert(
+  symbol: string,
+  direction: string,
+  vpsForwarded: boolean,
+): Promise<string | null> {
+  const title = vpsForwarded
+    ? `✅ Trade Executed — ${symbol}/USD`
+    : `✅ Approved — ${symbol}/USD (VPS unreachable)`;
+  const body = vpsForwarded
+    ? `${direction} order forwarded to VPS for GMX execution.`
+    : `Order approved but VPS did not confirm. Check VPS connection.`;
+  return scheduleNow(title, body, { type: 'approval_granted', symbol, direction }, `approval-granted-${symbol}-${Date.now()}`, 'live-approvals');
+}
+
+/** Fire when operator rejects a live trade proposal */
+export async function scheduleApprovalRejectedAlert(
+  symbol: string,
+  direction: string,
+): Promise<string | null> {
+  return scheduleNow(
+    `❌ Proposal Rejected — ${symbol}/USD`,
+    `${direction} proposal was rejected by operator.`,
+    { type: 'approval_rejected', symbol, direction },
+    `approval-rejected-${symbol}-${Date.now()}`,
+    'live-approvals',
+  );
+}
+
+/** Fire when a live proposal auto-expires */
+export async function scheduleApprovalExpiredAlert(
+  symbol: string,
+  direction: string,
+): Promise<string | null> {
+  return scheduleNow(
+    `⏰ Proposal Expired — ${symbol}/USD`,
+    `${direction} proposal expired without operator action.`,
+    { type: 'approval_expired', symbol, direction },
+    `approval-expired-${symbol}-${Date.now()}`,
+    'live-approvals',
+  );
+}
+
+/** Fire when engine transitions to EMERGENCY_STOP */
+export async function scheduleEmergencyStopAlert(reason?: string): Promise<string | null> {
+  return scheduleNow(
+    '🚨 EMERGENCY STOP ACTIVATED',
+    reason ?? 'All trading halted. Manual review required.',
+    { type: 'emergency_stop', reason },
+    'emergency-stop-alert',
+    'risk-alerts',
+  );
+}
+
 // ── Cancel ────────────────────────────────────────────────────────────────────
 
 export async function cancelAlert(identifier: string) {

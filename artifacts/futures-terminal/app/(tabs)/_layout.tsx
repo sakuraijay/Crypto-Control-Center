@@ -31,6 +31,10 @@ function NativeTabLayout() {
         <Icon sf={{ default: 'cpu', selected: 'cpu' }} />
         <Label>AI Log</Label>
       </NativeTabs.Trigger>
+      <NativeTabs.Trigger name="ai-history">
+        <Icon sf={{ default: 'clock.arrow.circlepath', selected: 'clock.arrow.circlepath' }} />
+        <Label>AI History</Label>
+      </NativeTabs.Trigger>
       <NativeTabs.Trigger name="backtest">
         <Icon sf={{ default: 'chart.xyaxis.line', selected: 'chart.xyaxis.line' }} />
         <Label>Backtest</Label>
@@ -117,6 +121,14 @@ function ClassicTabLayout() {
           title: 'AI Log',
           tabBarIcon: ({ color }) =>
             isIOS ? <SymbolView name="cpu" tintColor={color} size={22} /> : <Feather name="cpu" size={20} color={color} />,
+        }}
+      />
+      <Tabs.Screen
+        name="ai-history"
+        options={{
+          title: 'AI History',
+          tabBarIcon: ({ color }) =>
+            isIOS ? <SymbolView name="clock.arrow.circlepath" tintColor={color} size={22} /> : <Feather name="clock" size={20} color={color} />,
         }}
       />
       <Tabs.Screen
