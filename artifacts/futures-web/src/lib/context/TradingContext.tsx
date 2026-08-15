@@ -346,6 +346,9 @@ export function TradingProvider({ children }: { children: ReactNode }) {
     }));
 
     // Record OPEN trade (matches mobile behaviour; persisted via the sync effect)
+    // leverage + collateralUsd are included so the server-side AI Worker can do
+    // accurate mark-to-market and maxDrawdown calculations without falling back
+    // to a 1x default.
     const openTrade: Trade = {
       id:               `open-${Date.now()}`,
       symbol:           sym,
@@ -360,6 +363,8 @@ export function TradingProvider({ children }: { children: ReactNode }) {
       strategy:         params.orderType,
       timestamp:        new Date(),
       closeTime:        0,
+      leverage:         params.leverage,
+      collateralUsd,
     };
     setClosedTrades(ts => [openTrade, ...ts]);
 

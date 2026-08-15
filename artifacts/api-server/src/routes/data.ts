@@ -43,6 +43,9 @@ router.post("/data/trades/batch", async (req, res) => {
       sizeInUsd?: number | string;
       collateralToken?: string;
       gmxMarketAddress?: string;
+      // Risk fields — persisted so the AI Worker can do accurate risk calculations
+      leverage?: number | string;
+      collateralUsd?: number | string;
       // Legacy fallback
       size?: number | string;
       price: number | string; pnl?: number | string; strategy?: string;
@@ -68,6 +71,9 @@ router.post("/data/trades/batch", async (req, res) => {
         sizeInUsd:        r.sizeInUsd != null ? String(r.sizeInUsd) : null,
         collateralToken:  r.collateralToken ?? "USDC",
         gmxMarketAddress: r.gmxMarketAddress ?? null,
+        // ── Risk fields ────────────────────────────────────────────
+        leverage:         r.leverage != null ? String(r.leverage) : null,
+        collateralUsd:    r.collateralUsd != null ? String(r.collateralUsd) : null,
       })))
       .onConflictDoNothing();
 
@@ -90,6 +96,9 @@ router.post("/data/trades", async (req, res) => {
     const sizeInUsdVal   = r.sizeInUsd != null ? String(r.sizeInUsd) : null;
     const collateral     = r.collateralToken ?? "USDC";
     const marketAddress  = r.gmxMarketAddress ?? null;
+    // Risk fields — null-safe; only OPEN trades carry these
+    const leverageVal    = r.leverage != null ? String(r.leverage) : null;
+    const collateralUsdV = r.collateralUsd != null ? String(r.collateralUsd) : null;
 
     await db
       .insert(tradesTable)
@@ -109,6 +118,9 @@ router.post("/data/trades", async (req, res) => {
         sizeInUsd:        sizeInUsdVal,
         collateralToken:  collateral,
         gmxMarketAddress: marketAddress,
+        // ── Risk fields ────────────────────────────────────────────
+        leverage:         leverageVal,
+        collateralUsd:    collateralUsdV,
       })
       .onConflictDoUpdate({
         target: tradesTable.id,
@@ -118,6 +130,10 @@ router.post("/data/trades", async (req, res) => {
           sizeInUsd:        sizeInUsdVal,
           collateralToken:  collateral,
           gmxMarketAddress: marketAddress,
+          // leverage/collateralUsd are set at OPEN and should not change on CLOSE;
+          // but we keep them in the update set so a re-POSTed OPEN can correct them.
+          leverage:         leverageVal,
+          collateralUsd:    collateralUsdV,
         },
       });
     res.json({ ok: true });

@@ -70,6 +70,16 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         ADD COLUMN IF NOT EXISTS collateral_usd numeric(18,4);
     `,
   },
+  {
+    name: "0007_worker_state",
+    sql: `
+      CREATE TABLE IF NOT EXISTS worker_state (
+        key        text PRIMARY KEY,
+        value      text NOT NULL,
+        updated_at timestamptz NOT NULL DEFAULT now()
+      );
+    `,
+  },
   // Add future migrations here in chronological order.
 ];
 

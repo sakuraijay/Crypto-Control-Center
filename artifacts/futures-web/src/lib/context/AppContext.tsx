@@ -83,6 +83,11 @@ export interface Trade {
   strategy: string;
   timestamp: Date;
   closeTime?: number;
+  /** Leverage at open — persisted to DB so the AI Worker risk engine can do
+   *  accurate mark-to-market and maxDrawdown calculations. */
+  leverage?: number;
+  /** Collateral in USD at open — persisted to DB alongside leverage. */
+  collateralUsd?: number;
 }
 
 // ── Strategy Log ──────────────────────────────────────────────────────────────

@@ -16,7 +16,7 @@
  *  - LIVE 모드 (WORKER_ENGINE_MODE=LIVE) 시에만 live_approvals INSERT
  */
 
-import { db, aiDecisionsTable, liveApprovalsTable, strategyConfigTable, tradesTable } from "@workspace/db";
+import { db, aiDecisionsTable, liveApprovalsTable, strategyConfigTable, tradesTable, workerStateTable } from "@workspace/db";
 import { and, desc, eq, lt } from "drizzle-orm";
 import { computeIndicators, computeScores } from "./indicators";
 import { runAiEngine } from "./stateEngine";
@@ -144,6 +144,9 @@ class WorkerManager {
     // DB에서 기존 PENDING 승인 로드 (재시작 복구)
     await this.loadPendingApprovals();
 
+    // DB에서 equity HWM 복구 (재시작 후에도 maxDrawdown 강제 연속성 유지)
+    await this.loadHwmFromDb();
+
     // 가격 버퍼 폴링 시작 (10s 간격)
     this.updatePriceBuffers(); // 즉시 첫 실행
     this.pricePollTimer = setInterval(() => this.updatePriceBuffers(), 10_000);
@@ -170,6 +173,48 @@ class WorkerManager {
       lastLimitsUsed:  this.lastLimitsUsed,
       equityHwm:       this.equityHighWaterMark,
     };
+  }
+
+  // ── Equity HWM persistence ───────────────────────────────────────────────────
+
+  /**
+   * 서버 재시작 시 DB에서 equity HWM을 복구합니다.
+   * 복구 성공 시 첫 사이클부터 maxDrawdown 강제가 즉시 적용됩니다.
+   */
+  private async loadHwmFromDb(): Promise<void> {
+    try {
+      const rows = await db
+        .select()
+        .from(workerStateTable)
+        .where(eq(workerStateTable.key, 'equityHwm'));
+      if (rows[0]?.value) {
+        const saved = parseFloat(rows[0].value);
+        if (!isNaN(saved) && saved > 0) {
+          this.equityHighWaterMark = saved;
+          console.info(`[AIWorker] Equity HWM 복구: $${saved.toFixed(2)}`);
+        }
+      }
+    } catch (err) {
+      console.warn('[AIWorker] HWM 로드 실패 (무시):', (err as Error).message);
+    }
+  }
+
+  /**
+   * 현재 equity HWM을 DB에 저장합니다 (fire-and-forget).
+   * 사이클 지연을 최소화하기 위해 await 없이 호출합니다.
+   */
+  private async saveHwmToDb(hwm: number): Promise<void> {
+    try {
+      await db
+        .insert(workerStateTable)
+        .values({ key: 'equityHwm', value: String(hwm) })
+        .onConflictDoUpdate({
+          target: workerStateTable.key,
+          set: { value: String(hwm), updatedAt: new Date() },
+        });
+    } catch (err) {
+      console.warn('[AIWorker] HWM 저장 실패 (무시):', (err as Error).message);
+    }
   }
 
   // ── Private helpers ─────────────────────────────────────────────────────────
@@ -376,6 +421,8 @@ class WorkerManager {
     realizedPnLToday: number;
     realizedPnLRolling24h: number;
     realizedPnLWeekly: number;
+    /** 전체 기간 누적 실현 PnL — HWM 계산 기준 */
+    totalRealizedPnlAllTime: number;
     consecutiveLosses: number;
     positions: import('./serverTypes').Position[];
     /** OPEN 거래 수 (최근 1시간 내) — maxTradesPerHour 강제용 */
@@ -387,6 +434,7 @@ class WorkerManager {
   }> {
     const ZEROS = {
       realizedPnLToday: 0, realizedPnLRolling24h: 0, realizedPnLWeekly: 0,
+      totalRealizedPnlAllTime: 0,
       consecutiveLosses: 0, positions: [],
       tradesInLastHour: 0, lastOpenTradeTimestampMs: null, totalUnrealizedPnl: 0,
     };
@@ -419,13 +467,15 @@ class WorkerManager {
         t => t.action === 'CLOSE' || t.action === 'CLOSE_ALL',
       );
 
-      let realizedPnLToday      = 0;
-      let realizedPnLRolling24h = 0;
-      let realizedPnLWeekly     = 0;
+      let realizedPnLToday         = 0;
+      let realizedPnLRolling24h    = 0;
+      let realizedPnLWeekly        = 0;
+      let totalRealizedPnlAllTime  = 0;
 
       for (const t of closeTrades) {
         const ts  = new Date(t.timestamp as string | Date).getTime();
         const pnl = parseFloat(t.pnl ?? '0') || 0;
+        totalRealizedPnlAllTime  += pnl;                                    // 전체 누적
         if (ts >= todayStart.getTime())      realizedPnLToday      += pnl;
         if (ts >= rolling24hStart.getTime()) realizedPnLRolling24h += pnl;
         if (ts >= weekStart.getTime())       realizedPnLWeekly     += pnl;
@@ -504,6 +554,7 @@ class WorkerManager {
 
       return {
         realizedPnLToday, realizedPnLRolling24h, realizedPnLWeekly,
+        totalRealizedPnlAllTime,
         consecutiveLosses, positions,
         tradesInLastHour, lastOpenTradeTimestampMs, totalUnrealizedPnl,
       };
@@ -596,14 +647,18 @@ class WorkerManager {
       }
 
       // ── Equity HWM 및 계좌 드로다운 계산 ───────────────────────────────
+      // currentEquity = 초기 자본 + 전체 누적 실현 PnL + mark-to-market 미실현 PnL
+      // totalRealizedPnlAllTime을 사용해 오늘만이 아닌 전체 계좌 가치를 반영합니다.
       const currentEquity =
         limits.tradingCapital
-        + paperState.realizedPnLToday       // 오늘 실현 PnL (근사치 — 정확한 누적값은 HWM 기반)
-        + paperState.totalUnrealizedPnl;    // mark-to-market 미실현 PnL
+        + paperState.totalRealizedPnlAllTime  // 전체 기간 누적 실현 PnL
+        + paperState.totalUnrealizedPnl;      // mark-to-market 미실현 PnL
 
-      // HWM 갱신: 첫 사이클은 현재 equity로 초기화
+      // HWM 갱신: 첫 사이클은 현재 equity로 초기화.
+      // DB에 저장해 서버 재시작 후에도 maxDrawdown 강제가 연속성을 갖도록 함.
       if (this.equityHighWaterMark === null || currentEquity > this.equityHighWaterMark) {
         this.equityHighWaterMark = currentEquity;
+        void this.saveHwmToDb(currentEquity); // fire-and-forget: 사이클 지연 최소화
       }
 
       // HWM 대비 드로다운 % (HWM > 0이고 현재 equity < HWM일 때만 의미 있음)
@@ -619,7 +674,9 @@ class WorkerManager {
         positions:        paperState.positions,
         account: {
           balance:          limits.tradingCapital,
-          availableBalance: limits.tradingCapital * (1 - (limits.reserveCashPct ?? 20) / 100),
+          // reserveCash 차감은 stateEngine 내부에서 한 번만 수행됩니다.
+          // 여기서 미리 차감하면 stateEngine이 다시 차감해 이중 공제가 됩니다.
+          availableBalance: limits.tradingCapital,
           unrealizedPnl:    paperState.totalUnrealizedPnl,
           realizedPnlToday: paperState.realizedPnLToday,
         },

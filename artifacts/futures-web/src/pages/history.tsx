@@ -95,8 +95,10 @@ function StatusBadge({ status }: { status?: string }) {
 }
 
 function DryRunBadge({ result, retryCount }: { result?: string | null; retryCount?: number }) {
-  // 'pending' = 아직 결과 없음 (실행 대기 중 또는 미실행)
-  const isPending = !result || result === 'pending' || result === 'PENDING';
+  // undefined/null = CASH/NO_TRADE 결정 → 실행 자체가 없음 — 배지 미표시
+  if (result == null) return null;
+  // 'pending' = 실행 예정이나 결과 미확인 (드라이런 대기 중)
+  const isPending = result === 'pending' || result === 'PENDING';
   const isOk      = result === 'succeeded';
   const isFailed  = result === 'failed';
 
@@ -177,21 +179,28 @@ function AiHistoryTab() {
         ? ((await appRes.json() as { approvals: AiApprovalRow[] }).approvals ?? [])
         : [];
 
-      const decisionEntries: AiHistoryEntry[] = decisionRows.map(r => ({
-        kind:       'decision',
-        id:         String(r.id),
-        ts:         r.ts,
-        symbol:     r.symbol || 'MULTI',
-        direction:  r.direction === 'NO_TRADE' ? 'CASH' : (r.direction || 'CASH'),
-        confidence: Math.round((r.confidence ?? 0) * 100),
-        // SIMULATED = 드라이런 성공; null/PENDING/undefined = 아직 실행 안 됨(대기)
-        dryRunResult: r.executionOutcome === 'SIMULATED'
-          ? 'succeeded'
-          : (r.executionOutcome === 'FAILED' || r.executionOutcome === 'failed')
-            ? 'failed'
-            : 'pending',
-        rationale:  r.rationale ?? '',
-      }));
+      const decisionEntries: AiHistoryEntry[] = decisionRows.map(r => {
+        // CASH/NO_TRADE 결정은 실행 자체가 없으므로 dryRunResult를 undefined로
+        // 처리 → DryRunBadge가 아무것도 표시하지 않음.
+        const isCash = r.direction === 'CASH' || r.direction === 'NO_TRADE' || !r.direction;
+        const dryRunResult = isCash
+          ? undefined
+          : r.executionOutcome === 'SIMULATED'
+            ? 'succeeded'
+            : (r.executionOutcome === 'FAILED' || r.executionOutcome === 'failed')
+              ? 'failed'
+              : 'pending';
+        return {
+          kind:       'decision',
+          id:         String(r.id),
+          ts:         r.ts,
+          symbol:     r.symbol || 'MULTI',
+          direction:  r.direction === 'NO_TRADE' ? 'CASH' : (r.direction || 'CASH'),
+          confidence: Math.round((r.confidence ?? 0) * 100),
+          dryRunResult,
+          rationale:  r.rationale ?? '',
+        };
+      });
 
       const approvalEntries: AiHistoryEntry[] = approvalRows.map(r => {
         let symbol = 'MULTI';

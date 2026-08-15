@@ -18,12 +18,42 @@ import { format } from 'date-fns';
 
 // ── Executor status hook (fetches /api/executor/status with 30s auto-refresh) ──
 
+interface WorkerCycleResult {
+  cycleNumber: number;
+  at: string;
+  operatingState: string;
+  primarySymbol: string | null;
+  confidence: number;
+  analysesCount: number;
+  approvalCreated: boolean;
+  error?: string;
+}
+
+interface RiskLimitsSnapshot {
+  tradingCapital?: number;
+  maxDrawdownPercent?: number;
+  weeklyLossLimitUSDT?: number;
+  rolling24hLossLimitUSDT?: number;
+  maxTradesPerHour?: number;
+  cooldownMinutes?: number;
+  maxLeverage?: number;
+  dailyLossLimitUSDT?: number;
+  [key: string]: number | undefined;
+}
+
 interface ExecutorHealth {
   gmxConnected: boolean;
   rpcUrl?: string;
   networkChainId?: number;
   deploymentMode?: 'reserved_vm' | 'development';
   uptimeSeconds?: number;
+  // AI Worker cycle fields
+  workerRunning?: boolean;
+  cycleCount?: number;
+  lastCycleAt?: string | null;
+  lastCycleResult?: WorkerCycleResult | null;
+  equityHwm?: number | null;
+  lastLimitsUsed?: RiskLimitsSnapshot | null;
 }
 
 const AUTO_REFRESH_MS = 30_000;

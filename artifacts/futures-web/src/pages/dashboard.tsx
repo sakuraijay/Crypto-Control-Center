@@ -67,7 +67,7 @@ export default function Dashboard() {
   const { account, positions, logs, todayStats, equityHistory } = useTradingContext();
   const { watchlist } = useWatchlistContext();
   const { stopNewOrders, toggleStopNewOrders, triggerEmergencyStop } = useAppContext();
-  const { indicators } = useStrategyContext();
+  const { indicators, limits } = useStrategyContext();
 
   const [orderOpen, setOrderOpen] = useState(false);
 
@@ -268,6 +268,11 @@ export default function Dashboard() {
                           </span>
                           <span className="font-bold text-xs">{pos.displaySymbol ?? pos.symbol}</span>
                           <span className="text-[10px] text-muted-foreground">{pos.leverage}x</span>
+                          {pos.leverage > limits.maxLeverage && (
+                            <span title={`레버리지 ${pos.leverage}x — 설정 한도(${limits.maxLeverage}x) 초과`}>
+                              <ShieldAlert className="w-3 h-3 text-amber-400" />
+                            </span>
+                          )}
                         </div>
                       </td>
                       <td className="py-2.5 px-4 text-right font-mono text-xs">
