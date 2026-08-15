@@ -235,6 +235,27 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
+  // ── 30s auto-refresh when connected on Arbitrum ──────────────────────────
+  // Skips when the tab is hidden to avoid unnecessary RPC load.
+  const balanceTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  useEffect(() => {
+    if (balanceTimerRef.current) {
+      clearInterval(balanceTimerRef.current);
+      balanceTimerRef.current = null;
+    }
+    if (state.status !== 'connected' || !state.isArbitrum) return;
+    balanceTimerRef.current = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+      if (addressRef.current) void fetchBalances(addressRef.current);
+    }, 30_000);
+    return () => {
+      if (balanceTimerRef.current) {
+        clearInterval(balanceTimerRef.current);
+        balanceTimerRef.current = null;
+      }
+    };
+  }, [state.status, state.isArbitrum, fetchBalances]);
+
   // ── Listen for account / chain changes ───────────────────────────────────
   useEffect(() => {
     const provider = (window as any).ethereum;

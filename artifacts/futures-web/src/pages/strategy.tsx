@@ -3,7 +3,7 @@ import { useWallet } from '@/lib/context/WalletContext';
 import { Card } from '@/components/ui/card';
 import { Switch } from '@/components/ui/switch';
 import { Button } from '@/components/ui/button';
-import { Activity, ShieldAlert, RotateCcw, Target, TrendingUp, Cpu, Info, Lock } from 'lucide-react';
+import { Activity, ShieldAlert, RotateCcw, Target, TrendingUp, Cpu, Info, Lock, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useCallback, useEffect } from 'react';
 
@@ -28,7 +28,7 @@ function Stepper({ value, onChange, min = 0, max = 1000, step = 1 }: {
 }
 
 export default function Strategy() {
-  const { indicators, limits, updateIndicator, updateLimit, resetToDefaults } = useStrategyContext();
+  const { indicators, limits, updateIndicator, updateLimit, resetToDefaults, syncStatus, syncError } = useStrategyContext();
   const { address, usdcBalance } = useWallet();
 
   const combined = indicators.find(i => i.id === 'combined');
@@ -74,11 +74,29 @@ export default function Strategy() {
 
   return (
     <div className="animate-in fade-in duration-500 flex flex-col gap-6">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-3">
         <p className="text-muted-foreground text-sm">Configure signal thresholds, indicator logic, and risk guards.</p>
-        <Button variant="outline" size="sm" onClick={resetToDefaults} className="h-8 text-xs">
-          <RotateCcw className="w-3 h-3 mr-2" /> Reset Defaults
-        </Button>
+        <div className="flex items-center gap-2 shrink-0">
+          {/* Server sync status badge */}
+          {syncStatus === 'saving' && (
+            <span className="text-[10px] flex items-center gap-1 text-muted-foreground">
+              <Loader2 className="w-3 h-3 animate-spin" /> 서버 저장 중…
+            </span>
+          )}
+          {syncStatus === 'saved' && (
+            <span className="text-[10px] flex items-center gap-1 text-emerald-500/80">
+              <CheckCircle2 className="w-3 h-3" /> 서버에 저장됨
+            </span>
+          )}
+          {syncStatus === 'error' && (
+            <span className="text-[10px] flex items-center gap-1 text-amber-400" title={syncError ?? undefined}>
+              <AlertCircle className="w-3 h-3" /> 저장 실패{syncError ? ` — ${syncError}` : ''}
+            </span>
+          )}
+          <Button variant="outline" size="sm" onClick={resetToDefaults} className="h-8 text-xs">
+            <RotateCcw className="w-3 h-3 mr-2" /> Reset Defaults
+          </Button>
+        </div>
       </div>
 
       {/* ── AI Objective Function ── */}

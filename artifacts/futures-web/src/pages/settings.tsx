@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo, Fragment } from 'react';
 import { useAppContext, useAuthContext, useTradingContext, useWallet } from '@/lib/context';
 import { useAiEngine } from '@/lib/context/AiEngineContext';
 import { useStrategyContext } from '@/lib/context/StrategyContext';
@@ -584,10 +584,26 @@ export default function Settings() {
                         </div>
                       )}
 
-                      <p className="text-[10px] text-muted-foreground/50 flex items-center gap-1 border-t border-border/40 pt-2">
-                        <Database className="w-2.5 h-2.5" />
-                        조회 전용 — 서명·주문·자금 이동 없음. PAPER 시뮬레이션 데이터와 절대 혼합되지 않습니다.
-                      </p>
+                      {/* 하단: 보안 고지 + 수동 재조회 버튼 */}
+                      <div className="flex items-center justify-between gap-3 border-t border-border/40 pt-2">
+                        <p className="text-[10px] text-muted-foreground/50 flex items-center gap-1 min-w-0">
+                          <Database className="w-2.5 h-2.5 shrink-0" />
+                          조회 전용 — 서명·주문·자금 이동 없음. PAPER 데이터와 혼합 없음.
+                        </p>
+                        <Button
+                          size="sm"
+                          variant={gmxErr ? 'outline' : 'ghost'}
+                          className={cn(
+                            'h-6 text-[10px] gap-1 shrink-0',
+                            gmxErr && 'border-amber-500/40 text-amber-400 hover:bg-amber-500/10',
+                          )}
+                          onClick={() => gmx.refresh()}
+                          disabled={gmxLoading}
+                        >
+                          <RefreshCw className={cn('w-2.5 h-2.5', gmxLoading && 'animate-spin')} />
+                          재조회
+                        </Button>
+                      </div>
                     </div>
                   ) : (
                     <p className="text-xs text-muted-foreground">
@@ -1168,6 +1184,22 @@ export default function Settings() {
               {/* 핵심 Risk Limits (마지막 사이클 기준) */}
               {(health as { lastLimitsUsed?: object | null }).lastLimitsUsed && (() => {
                 const lim = (health as { lastLimitsUsed: Record<string, number> }).lastLimitsUsed;
+
+                // ── 불일치 감지: Worker가 마지막으로 적용한 값 vs 현재 UI 설정 ──────
+                type MismatchRow = { label: string; worker: string; ui: string };
+                const mismatches: MismatchRow[] = [];
+                const checkNum = (key: keyof typeof limits, label: string, fmt: (v: number) => string, tol = 1) => {
+                  const w = lim[key] ?? 0;
+                  const u = (limits as Record<string, number>)[key] ?? 0;
+                  if (Math.abs(w - u) > tol) mismatches.push({ label, worker: fmt(w), ui: fmt(u) });
+                };
+                checkNum('tradingCapital',   '트레이딩 자본',     v => `$${v.toLocaleString('en-US',{maximumFractionDigits:0})}`, 1);
+                checkNum('maxDrawdownPercent','최대 드로다운',      v => `${v}%`, 0.01);
+                checkNum('dailyLossLimitUSDT','일일 손실 한도',    v => `$${v}`, 1);
+                checkNum('maxLeverage',       '최대 레버리지',     v => `${v}x`, 0.01);
+                checkNum('maxTradesPerHour',  '시간당 최대 거래', v => `${v}건`, 0);
+                checkNum('cooldownMinutes',   '쿨다운',           v => `${v}분`, 0);
+
                 return (
                   <div className="border-t border-border/60 pt-3 flex flex-col gap-2">
                     <p className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">
@@ -1190,6 +1222,28 @@ export default function Settings() {
                         </div>
                       ))}
                     </div>
+
+                    {/* 불일치 경고 */}
+                    {mismatches.length > 0 && (
+                      <div className="mt-1 p-2.5 rounded-lg border border-amber-500/30 bg-amber-500/5 flex flex-col gap-1.5">
+                        <div className="flex items-center gap-1.5 text-[11px] font-semibold text-amber-400">
+                          <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                          UI 설정과 Worker 마지막 적용값이 다릅니다 — 다음 사이클에서 자동 적용됩니다.
+                        </div>
+                        <div className="grid grid-cols-[auto_1fr_1fr] gap-x-3 gap-y-0.5 text-[10px] pl-5">
+                          <span className="text-muted-foreground font-semibold">항목</span>
+                          <span className="text-muted-foreground font-semibold">Worker 적용값</span>
+                          <span className="text-amber-300/80 font-semibold">현재 UI 설정</span>
+                          {mismatches.map(m => (
+                            <Fragment key={m.label}>
+                              <span className="text-muted-foreground">{m.label}</span>
+                              <span className="font-mono text-muted-foreground">{m.worker}</span>
+                              <span className="font-mono text-amber-400 font-semibold">{m.ui}</span>
+                            </Fragment>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 );
               })()}

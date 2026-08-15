@@ -119,10 +119,17 @@ const DEFAULT_LIMITS: RiskLimits = {
   rolling24hLossLimitUSDT:       0,   // 0 = disabled by default
 };
 
+/** Server sync state for the debounced PUT /api/data/strategy call. */
+export type StrategySyncStatus = 'idle' | 'saving' | 'saved' | 'error';
+
 interface StrategyContextType {
   indicators: IndicatorConfig[];
   limits: RiskLimits;
   subaccountConfig: SubaccountConfig;
+  /** 서버 동기화 상태: idle=대기, saving=저장 중, saved=저장 완료, error=저장 실패 */
+  syncStatus: StrategySyncStatus;
+  /** 동기화 실패 시 오류 메시지 */
+  syncError: string | null;
   updateIndicator: (id: string, updates: Partial<IndicatorConfig>) => void;
   updateLimit: (key: keyof RiskLimits, value: number) => void;
   updateSubaccountConfig: (updates: Partial<SubaccountConfig>) => void;
@@ -163,8 +170,14 @@ export function StrategyProvider({ children }: { children: ReactNode }) {
     }
   });
 
+  const [syncStatus, setSyncStatus] = useState<StrategySyncStatus>('idle');
+  const [syncError, setSyncError]   = useState<string | null>(null);
   const serverSyncTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const initializedFromServer = useRef(false);
+
+  // Always-current snapshot used by the debounced callback (avoids stale closures)
+  const latestDataRef = useRef({ indicators, limits });
+  latestDataRef.current = { indicators, limits };
 
   // ── Load from server on mount (server overrides localStorage if found) ───
   useEffect(() => {
@@ -193,33 +206,46 @@ export function StrategyProvider({ children }: { children: ReactNode }) {
       .catch(() => { /* server unavailable — use localStorage */ });
   }, []);
 
+  // ── Shared debounced PUT helper ───────────────────────────────────────────
+  const scheduleSave = useCallback(() => {
+    setSyncStatus('saving');
+    setSyncError(null);
+    if (serverSyncTimer.current) clearTimeout(serverSyncTimer.current);
+    serverSyncTimer.current = setTimeout(() => {
+      const { indicators: ind, limits: lim } = latestDataRef.current;
+      fetch('/api/data/strategy', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ indicators: ind, limits: lim }),
+        signal: AbortSignal.timeout(5_000),
+      })
+        .then(r => {
+          if (r.ok) {
+            setSyncStatus('saved');
+            setTimeout(() => setSyncStatus('idle'), 3_000);
+          } else {
+            setSyncStatus('error');
+            setSyncError(`서버 오류 HTTP ${r.status}`);
+          }
+        })
+        .catch(e => {
+          setSyncStatus('error');
+          setSyncError((e as Error).message ?? '서버 연결 실패');
+        });
+    }, SERVER_SYNC_DELAY_MS);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   // ── Persist to localStorage immediately, server with debounce ────────────
   useEffect(() => {
     localStorage.setItem('futures_indicators', JSON.stringify(indicators));
     if (!initializedFromServer.current) return; // don't push until we've pulled
-    if (serverSyncTimer.current) clearTimeout(serverSyncTimer.current);
-    serverSyncTimer.current = setTimeout(() => {
-      fetch('/api/data/strategy', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ indicators, limits }),
-        signal: AbortSignal.timeout(5_000),
-      }).catch(() => {});
-    }, SERVER_SYNC_DELAY_MS);
+    scheduleSave();
   }, [indicators]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     localStorage.setItem('futures_limits', JSON.stringify(limits));
     if (!initializedFromServer.current) return;
-    if (serverSyncTimer.current) clearTimeout(serverSyncTimer.current);
-    serverSyncTimer.current = setTimeout(() => {
-      fetch('/api/data/strategy', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ indicators, limits }),
-        signal: AbortSignal.timeout(5_000),
-      }).catch(() => {});
-    }, SERVER_SYNC_DELAY_MS);
+    scheduleSave();
   }, [limits]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const updateIndicator = useCallback((id: string, updates: Partial<IndicatorConfig>) => {
@@ -260,6 +286,7 @@ export function StrategyProvider({ children }: { children: ReactNode }) {
   return (
     <StrategyContext.Provider value={{
       indicators, limits, subaccountConfig,
+      syncStatus, syncError,
       updateIndicator, updateLimit, updateSubaccountConfig, resetToDefaults,
     }}>
       {children}
