@@ -214,6 +214,38 @@ function buildReasoning(
   };
 }
 
+// ── Profit-lock stage calculator ─────────────────────────────────────────────
+
+/**
+ * Returns the profit-lock stage (0–3) based on today's realized PnL vs capital.
+ *
+ * Profit-lock is a PROTECTIVE mechanism for good days:
+ * it steps DOWN new-position exposure and tightens trailing stops as the day's
+ * gain grows, so the engine keeps riding open trends without adding dangerous
+ * new risk. It does NOT stop the engine or close existing positions.
+ *
+ * IMPORTANT: No extra trades are ever placed because a daily-target was NOT met.
+ * This function is only ever called to REDUCE risk, never to increase it.
+ *
+ * Stage thresholds (based on realizedPnl / tradingCapital):
+ *   0 — < 1× threshold : normal operation
+ *   1 — ≥ 1× threshold : exposure ×0.75, trailing +20 %
+ *   2 — ≥ 2× threshold : exposure ×0.50, trailing +40 %, stricter entry score
+ *   3 — ≥ 3× threshold : exposure ×0.25, trailing +60 %, scale_in blocked
+ */
+function computeProfitLockStage(
+  dailyRealizedPnlUsd: number,
+  tradingCapital: number,
+  thresholdPct: number,        // e.g. 1.0 → 1 % of tradingCapital
+): 0 | 1 | 2 | 3 {
+  if (tradingCapital <= 0 || thresholdPct <= 0 || dailyRealizedPnlUsd <= 0) return 0;
+  const thresholdUsd = tradingCapital * (thresholdPct / 100);
+  if (dailyRealizedPnlUsd >= thresholdUsd * 3) return 3;
+  if (dailyRealizedPnlUsd >= thresholdUsd * 2) return 2;
+  if (dailyRealizedPnlUsd >= thresholdUsd)     return 1;
+  return 0;
+}
+
 // ── Main engine function ──────────────────────────────────────────────────────
 
 export interface EngineInput {
@@ -226,13 +258,31 @@ export interface EngineInput {
   engineState: string;          // 'RUNNING' | 'STOPPED' | 'EMERGENCY_STOP'
   consecutiveLosses: number;
   dataFreshMs: number;          // ms since last price update
+  /** Today's realized PnL (USD). Used only for profit-lock — never to mandate extra trades. */
+  dailyRealizedPnlUsd: number;
+  /** Effective trading capital for profit-lock threshold math (same as limits.tradingCapital). */
+  tradingCapital: number;
 }
 
 export function runAiEngine(input: EngineInput): Omit<AiEngineDecision, 'id' | 'createdAt' | 'paperExecuted' | 'paperOrderId'> {
   const {
     cycleNumber, prevState, analyses, positions, account,
     limits, engineState, consecutiveLosses, dataFreshMs,
+    dailyRealizedPnlUsd, tradingCapital,
   } = input;
+
+  // ── Profit-lock stage (computed FIRST so all exit paths include it) ──────────
+  // Must precede CASH_DECISION so every early return (emergency, stale data,
+  // critical risk) carries the current stage. AiEngineContext uses this to keep
+  // its prevProfitLockStageRef monotonic across interrupted cycles.
+  //
+  // ⛔ INVARIANT: profit-lock ONLY reduces risk. It NEVER adds trades or raises
+  //    leverage to compensate for a day that has not yet met a daily target.
+  const profitLockStage = computeProfitLockStage(
+    dailyRealizedPnlUsd,
+    tradingCapital > 0 ? tradingCapital : (limits.tradingCapital ?? 10_000),
+    limits.profitLockThresholdPct ?? 1,
+  );
 
   const CASH_DECISION = (reason: string, riskApproved = false) => {
     const { stateRationale, reasoning } = buildReasoning('CASH', null, 'RANGING', 'CRITICAL', true, reason);
@@ -243,6 +293,8 @@ export function runAiEngine(input: EngineInput): Omit<AiEngineDecision, 'id' | '
       symbolAnalyses: analyses, marketRankings: [] as MarketRanking[],
       executionType: 'hold' as ExecutionType, entryStyle: 'none' as EntryStyle,
       stateRationale, reasoning, riskApproved, riskVetoReason: reason,
+      // Always include stage so AiEngineContext transition tracking stays correct
+      profitLockStage,
     };
   };
 
@@ -273,6 +325,17 @@ export function runAiEngine(input: EngineInput): Omit<AiEngineDecision, 'id' | '
 
   const { bullishScore, bearishScore, directionalBias } = best;
   const avgAtr = analyses.reduce((s, a) => s + a.indicators.atrPct, 0) / analyses.length;
+
+  // profitLockStage already computed above (before CASH_DECISION).
+
+  // Lv.2+: raise entry-score bar to make the engine more selective on strong days.
+  // HEDGE is intentionally exempt — protecting at-risk positions is always allowed.
+  const longBullishMin  = profitLockStage >= 2
+    ? THRESHOLDS.LONG_BULLISH_MIN  + 10 : THRESHOLDS.LONG_BULLISH_MIN;
+  const shortBearishMin = profitLockStage >= 2
+    ? THRESHOLDS.SHORT_BEARISH_MIN + 10 : THRESHOLDS.SHORT_BEARISH_MIN;
+  const spotBullishMin  = profitLockStage >= 2
+    ? THRESHOLDS.SPOT_BULLISH_MIN  + 10 : THRESHOLDS.SPOT_BULLISH_MIN;
 
   // ── State selection ─────────────────────────────────────────────────────────
 
@@ -322,7 +385,7 @@ export function runAiEngine(input: EngineInput): Omit<AiEngineDecision, 'id' | '
   }
 
   // Priority 3: LONG
-  else if (bullishScore >= THRESHOLDS.LONG_BULLISH_MIN && avgAtr >= THRESHOLDS.SPOT_ATR_MAX) {
+  else if (bullishScore >= longBullishMin && avgAtr >= THRESHOLDS.SPOT_ATR_MAX) {
     state = 'LONG';
     confidence = Math.min(95, bullishScore + (directionalBias > 40 ? 10 : 0));
     leverage = LEVERAGE_BY_CONFIDENCE(confidence, avgAtr);
@@ -337,7 +400,7 @@ export function runAiEngine(input: EngineInput): Omit<AiEngineDecision, 'id' | '
   }
 
   // Priority 4: SHORT
-  else if (bearishScore >= THRESHOLDS.SHORT_BEARISH_MIN && avgAtr >= THRESHOLDS.SPOT_ATR_MAX) {
+  else if (bearishScore >= shortBearishMin && avgAtr >= THRESHOLDS.SPOT_ATR_MAX) {
     state = 'SHORT';
     confidence = Math.min(95, bearishScore + (directionalBias < -40 ? 10 : 0));
     leverage = LEVERAGE_BY_CONFIDENCE(confidence, avgAtr);
@@ -352,7 +415,7 @@ export function runAiEngine(input: EngineInput): Omit<AiEngineDecision, 'id' | '
   }
 
   // Priority 5: SPOT — bullish but low volatility / low-leverage environment
-  else if (bullishScore >= THRESHOLDS.SPOT_BULLISH_MIN && avgAtr < THRESHOLDS.SPOT_ATR_MAX) {
+  else if (bullishScore >= spotBullishMin && avgAtr < THRESHOLDS.SPOT_ATR_MAX) {
     state = 'SPOT';
     confidence = Math.min(90, bullishScore);
     sizeUsd = calcSizeUsd('SPOT', confidence, limits, account.availableBalance) * 3; // no leverage → larger notional
@@ -366,6 +429,42 @@ export function runAiEngine(input: EngineInput): Omit<AiEngineDecision, 'id' | '
     confidence = 75;
     executionType = 'hold';
     entryStyle = 'none';
+  }
+
+  // ── Profit-lock application ─────────────────────────────────────────────────
+  // profitLockStage was computed above (before state selection).
+  // Here we apply the protective size/trailing reductions.
+  //
+  // ⛔ INVARIANT: every branch below ONLY reduces values from their computed
+  //    baseline. No branch may yield a sizeUsd or trailingStopPct that exceeds
+  //    the un-locked value (including for HEDGEs where original size may be small).
+  if (profitLockStage > 0 && state !== 'CASH') {
+    const exposureMultiplier =
+      profitLockStage === 1 ? 0.75 :
+      profitLockStage === 2 ? 0.50 : 0.25;
+
+    // trailingStopPct is the % GAP from the high-water mark to the stop price.
+    //   LONG stop  = highWater × (1 − pct/100)   → smaller pct = tighter (closer to price)
+    //   SHORT stop = lowWater  × (1 + pct/100)   → smaller pct = tighter
+    // Multiply by < 1 to TIGHTEN. Never set below 0.3 % to avoid noise-triggered exits.
+    const trailingTightenFactor =
+      profitLockStage === 1 ? 0.80 :
+      profitLockStage === 2 ? 0.65 : 0.50;
+
+    // Reduce new position size. Never use a floor that could exceed the original
+    // (e.g. a small hedge was $30 — Math.max(50, ...) would incorrectly increase it).
+    if (sizeUsd !== undefined) {
+      sizeUsd = Math.round(sizeUsd * exposureMultiplier);
+      // sizeUsd may be 0 after rounding; risk gate downstream treats 0 as hold.
+    }
+    // Tighten trailing stop — reduce only, floor at 0.3 % for noise protection.
+    if (trailingStopPct !== undefined) {
+      trailingStopPct = Math.max(0.3, trailingStopPct * trailingTightenFactor);
+    }
+    // Stage 3: block scale_in — existing positions continue, no new additions
+    if (profitLockStage >= 3 && executionType === 'scale_in') {
+      executionType = 'hold';
+    }
   }
 
   // ── Risk gate (secondary) ───────────────────────────────────────────────────
@@ -450,5 +549,6 @@ export function runAiEngine(input: EngineInput): Omit<AiEngineDecision, 'id' | '
     reasoning,
     riskApproved,
     riskVetoReason,
+    profitLockStage,
   };
 }

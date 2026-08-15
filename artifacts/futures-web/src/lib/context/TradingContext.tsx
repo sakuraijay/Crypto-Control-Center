@@ -23,7 +23,15 @@ interface TradingContextType {
   placeOrder: (params: NewOrderParams) => PlaceOrderResult;
   closePosition: (id: string) => void;
   clearAllPositions: () => void;
-  updatePositionRisk: (id: string, tp: number | null, sl: number | null, trailing?: number | null) => void;
+  /**
+   * Update TP/SL/trailing stop for a paper position.
+   * @param highWater Optional: preserve this high-water mark (profit-lock tightening).
+   *   When provided, `_trailingHighWater` is set to this value instead of resetting to
+   *   `markPrice`, so the ratchet continues from the correct base after tightening.
+   *   The caller is responsible for computing and passing a `sl` that is already tighter
+   *   than the existing stop.
+   */
+  updatePositionRisk: (id: string, tp: number | null, sl: number | null, trailing?: number | null, highWater?: number | null) => void;
   /** How many consecutive losing trades since last winner — updated live */
   consecutiveLosses: number;
 }
@@ -430,16 +438,24 @@ export function TradingProvider({ children }: { children: ReactNode }) {
   }, []);
 
   // ── updatePositionRisk ─────────────────────────────────────────
-  const updatePositionRisk = useCallback((id: string, tp: number | null, sl: number | null, trailing?: number | null) => {
+  const updatePositionRisk = useCallback((
+    id: string, tp: number | null, sl: number | null,
+    trailing?: number | null,
+    highWater?: number | null,   // explicit high-water to preserve (profit-lock use)
+  ) => {
     setPositions(prev => prev.map(p => {
       if (p.id !== id) return p;
-      const trailPct = trailing ?? p.trailingStopPct;
+      const trailPct = trailing !== undefined ? (trailing ?? undefined) : p.trailingStopPct;
+      // When caller passes an explicit highWater (e.g. profit-lock tightening),
+      // preserve it so the trailing ratchet continues from the correct base.
+      // Otherwise fall back to the original behaviour of resetting to markPrice.
+      const newHighWater = highWater != null ? highWater : (trailPct ? p.markPrice : undefined);
       return {
         ...p,
         tpPrice: tp ?? undefined,
         slPrice: sl ?? undefined,
         trailingStopPct: trailPct ?? undefined,
-        _trailingHighWater: trailPct ? p.markPrice : undefined,
+        _trailingHighWater: newHighWater,
       };
     }));
     const parts = [`TP=${tp ?? 'none'}`, `SL=${sl ?? 'none'}`];

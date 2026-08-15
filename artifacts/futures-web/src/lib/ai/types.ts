@@ -129,6 +129,16 @@ export interface AiEngineDecision {
   paperExecuted: boolean;
   paperOrderId?: string;
 
+  // ── Profit-lock ────────────────────────────────────
+  /**
+   * Profit-lock stage (0 = off, 1–3 = increasingly tight).
+   * Activated when daily realized PnL ≥ tradingCapital × profitLockThresholdPct × N.
+   * Existing positions are NOT closed — engine rides good trends with less new risk.
+   * 0 = normal | 1 = exposure ×0.75, trailing +20% | 2 = ×0.50, +40%, higher bar |
+   * 3 = ×0.25, +60%, scale_in blocked
+   */
+  profitLockStage?: 0 | 1 | 2 | 3;
+
   // ── System health ──────────────────────────────────
   /** Set when the engine skipped execution due to connectivity issues */
   pausedReason?: string;

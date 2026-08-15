@@ -105,6 +105,13 @@ interface AiEngineContextType {
    * Call this from a button click — never automatically.
    */
   requestNotificationPermission: () => Promise<void>;
+
+  /**
+   * Current profit-lock stage (0 = off, 1–3 = increasingly tight).
+   * Derived from the latest cycle's `profitLockStage` field.
+   * Lv.1 activates when daily realized PnL ≥ tradingCapital × profitLockThresholdPct.
+   */
+  profitLockStage: 0 | 1 | 2 | 3;
 }
 
 const AiEngineContext = createContext<AiEngineContextType | undefined>(undefined);
@@ -112,7 +119,7 @@ const AiEngineContext = createContext<AiEngineContextType | undefined>(undefined
 // ── Provider ──────────────────────────────────────────────────────────────────
 
 export function AiEngineProvider({ children }: { children: ReactNode }) {
-  const { account, positions, placeOrder, clearAllPositions, consecutiveLosses } = useTradingContext();
+  const { account, positions, placeOrder, clearAllPositions, updatePositionRisk, consecutiveLosses, todayStats } = useTradingContext();
   const { engineState, setEngineState } = useAppContext();
   const { limits } = useStrategyContext();
   const { watchlist } = useWatchlistContext();
@@ -149,6 +156,12 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
   const nextCycleAt = useRef<number>(Date.now() + CYCLE_MS);
   const seenApprovalIds = useRef<Set<string>>(new Set());
   const dbPage = useRef(1); // page 0 loaded on mount
+  /** Track last-known profit-lock stage so we can detect upward transitions. */
+  const prevProfitLockStageRef = useRef<0 | 1 | 2 | 3>(0);
+  /** Peak realized PnL today — monotonically increases so stage can only rise within a day. */
+  const maxDailyPnlRef = useRef(0);
+  /** Calendar-day key used to reset monotonic PnL and stage at midnight. */
+  const cycleResetDayRef = useRef('');
 
   // ── Feed price buffer from watchlist ───────────────────────────────────────
   useEffect(() => {
@@ -597,6 +610,23 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
         engineState: String(engineState),
         consecutiveLosses: consecutiveLosses,
         dataFreshMs,
+        // Profit-lock inputs.
+        // Use the PEAK realized PnL seen today (monotonically increasing within a day)
+        // so that profitLockStage can only rise, never fall, even if an unrealised
+        // gain is later taken away by a pullback that doesn't yet close the trade.
+        // todayStats.realized is the authoritative source (all close paths feed it).
+        // ── Daily rollover: reset peak when calendar day changes ──
+        dailyRealizedPnlUsd: (() => {
+          const todayKey = new Date().toDateString();
+          if (todayKey !== cycleResetDayRef.current) {
+            maxDailyPnlRef.current = 0;
+            prevProfitLockStageRef.current = 0;
+            cycleResetDayRef.current = todayKey;
+          }
+          maxDailyPnlRef.current = Math.max(maxDailyPnlRef.current, todayStats.realized);
+          return maxDailyPnlRef.current;
+        })(),
+        tradingCapital: limits.tradingCapital,
       });
 
       const isLiveTrade  = engineState === 'LIVE_TRADING';
@@ -609,6 +639,56 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
         !!rawDecision.primarySymbol;
 
       setMarketRankings(rawDecision.marketRankings ?? []);
+
+      // ── Profit-lock stage transition → tighten existing open-position trailing stops ─
+      // When the stage rises (better-than-threshold profit day), tighten trailing stops
+      // on ALL open LONG/SHORT positions so already-captured gains are better protected.
+      //
+      // ⛔ Ratchet invariant: we only REDUCE trailing distance; if a position's current
+      //    trailing pct is already tighter than the computed target, we leave it alone.
+      //    We never loosen a trailing stop, even when the stage drops later in the session.
+      const newStage = (rawDecision.profitLockStage ?? 0) as 0 | 1 | 2 | 3;
+      if (newStage > prevProfitLockStageRef.current) {
+        const tightenFactor =
+          newStage === 1 ? 0.80 :
+          newStage === 2 ? 0.65 : 0.50;
+        for (const pos of positions) {
+          if (
+            !pos.trailingStopPct || pos.trailingStopPct <= 0 ||
+            (pos.side !== 'LONG' && pos.side !== 'SHORT')
+          ) continue;
+
+          const newTrailing = Math.max(0.3, pos.trailingStopPct * tightenFactor);
+          if (newTrailing >= pos.trailingStopPct) continue; // already tighter or equal
+
+          // Compute immediate stop from the EXISTING high-water mark (not markPrice).
+          // This prevents the stop from moving backward after updatePositionRisk resets
+          // the ratchet base; the preserved highWater keeps the ratchet running from
+          // the correct level even through price pullbacks.
+          const existingHW = pos._trailingHighWater ?? pos.entryPrice;
+          const newSlFromHW = pos.side === 'LONG'
+            ? existingHW * (1 - newTrailing / 100)
+            : existingHW * (1 + newTrailing / 100);
+
+          // Direction-aware ratchet invariant:
+          //   LONG  → new stop must be HIGHER than current (closer to price)
+          //   SHORT → new stop must be LOWER  than current (closer to price)
+          const isTighter = pos.side === 'LONG'
+            ? newSlFromHW > (pos.slPrice ?? 0)
+            : newSlFromHW < (pos.slPrice ?? Infinity);
+
+          if (isTighter) {
+            // Pass existingHW so updatePositionRisk preserves the ratchet base
+            updatePositionRisk(pos.id, pos.tpPrice ?? null, newSlFromHW, newTrailing, existingHW);
+          }
+        }
+      }
+      // Monotonic within a session: stage only increases during a trading day.
+      // staleData / emergency exits now carry profitLockStage too, so newStage
+      // is always the authoritative computed value — safe to take Math.max.
+      prevProfitLockStageRef.current = Math.max(
+        prevProfitLockStageRef.current, newStage,
+      ) as 0 | 1 | 2 | 3;
 
       let paperExecuted = false;
       let paperOrderId: string | undefined;
@@ -649,6 +729,9 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
             leverage: rawDecision.leverage ?? 5,
             tpPrice: rawDecision.tpPrice,
             slPrice: rawDecision.slPrice,
+            // Pass profit-lock-adjusted trailing stop so paper execution honours
+            // the tightened trailing distance from stateEngine.
+            trailingStopPct: rawDecision.trailingStopPct,
           };
 
           let result;
@@ -689,8 +772,8 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
     }
   }, [
     running, buildAnalyses, positions, account, limits, engineState,
-    autoExecute, placeOrder, clearAllPositions,
-    updateStats, persistDecision, consecutiveLosses,
+    autoExecute, placeOrder, clearAllPositions, updatePositionRisk,
+    updateStats, persistDecision, consecutiveLosses, todayStats,
   ]);
 
   // ── Schedule cycles ─────────────────────────────────────────────────────────
@@ -785,6 +868,7 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
       benchmarkDailyMax:    BENCHMARK_DAILY_MAX,
       pendingApprovals, approveLiveOrder, rejectLiveOrder, pendingCount, loadMoreHistory,
       notificationPermission, requestNotificationPermission,
+      profitLockStage: (currentDecision?.profitLockStage ?? 0) as 0 | 1 | 2 | 3,
     }}>
       {children}
     </AiEngineContext.Provider>

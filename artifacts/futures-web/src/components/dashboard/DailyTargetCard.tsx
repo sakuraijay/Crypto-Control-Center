@@ -12,8 +12,9 @@
 import { useTradingContext } from '@/lib/context';
 import { useStrategyContext } from '@/lib/context/StrategyContext';
 import { useAppContext } from '@/lib/context/AppContext';
+import { useAiEngine } from '@/lib/context/AiEngineContext';
 import { cn } from '@/lib/utils';
-import { AlertTriangle, CheckCircle2, ShieldAlert, TrendingDown, TrendingUp, Info } from 'lucide-react';
+import { CheckCircle2, ShieldAlert, TrendingDown, TrendingUp, Info, Lock } from 'lucide-react';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -43,7 +44,7 @@ const STATE_META: Record<DailyState, {
   label: string;
   cls: string;
 }> = {
-  REACHED:  { icon: CheckCircle2,   label: 'TARGET REACHED',        cls: 'bg-yellow-500/15 text-yellow-400 border-yellow-500/30' },
+  REACHED:  { icon: CheckCircle2,   label: 'KPI 달성',              cls: 'bg-yellow-500/15 text-yellow-400 border-yellow-500/30' },
   ON_TRACK: { icon: TrendingUp,     label: 'ON TRACK',              cls: 'bg-[var(--color-long)]/15 text-[var(--color-long)] border-[var(--color-long)]/30' },
   DRAWDOWN: { icon: TrendingDown,   label: 'DAILY DRAWDOWN',        cls: 'bg-[var(--color-short)]/15 text-[var(--color-short)] border-[var(--color-short)]/30' },
   HALTED:   { icon: ShieldAlert,    label: 'TRADING HALTED',        cls: 'bg-[var(--color-short)]/15 text-[var(--color-short)] border-[var(--color-short)]/30 animate-pulse' },
@@ -66,13 +67,14 @@ export function DailyTargetCard({ className }: { className?: string }) {
   const { todayStats, account } = useTradingContext();
   const { limits } = useStrategyContext();
   const { engineState } = useAppContext();
+  const { profitLockStage } = useAiEngine();
 
   const realized    = todayStats?.realized    ?? 0;
   const unrealized  = account?.unrealizedPnl  ?? 0;
   const totalPnL    = realized + unrealized;
 
   const dailyTarget    = limits.dailyTargetUSDT  ?? 500;
-  const startingCap    = limits.startingCapital   ?? 10_000;
+  const tradingCap     = limits.tradingCapital    ?? 10_000;
   const dailyLossLimit = limits.dailyLossLimitUSDT ?? 500;
 
   const isHalted   = engineState === 'RISK_LOCKED' || engineState === 'EMERGENCY_STOP';
@@ -80,17 +82,23 @@ export function DailyTargetCard({ className }: { className?: string }) {
   const stateMeta  = STATE_META[dailyState];
   const StateIcon  = stateMeta.icon;
 
+  // Profit-lock: override REACHED label to show lock stage
+  const statusLabel = dailyState === 'REACHED' && profitLockStage > 0
+    ? `KPI 달성 · LOCK Lv.${profitLockStage}`
+    : stateMeta.label;
+
   // Progress bar math
   const totalPct    = Math.max(-100, Math.min(100, (totalPnL / dailyTarget) * 100));
   const realizedPct = Math.max(-100, Math.min(100, (realized  / dailyTarget) * 100));
   const isPositive  = totalPnL >= 0;
 
-  // Drawdown as % of starting capital
+  // Drawdown as % of trading capital
   const drawdownUsdt   = Math.min(0, realized + unrealized);
-  const drawdownPct    = startingCap > 0 ? Math.abs(drawdownUsdt / startingCap) * 100 : 0;
+  const drawdownPct    = tradingCap > 0 ? Math.abs(drawdownUsdt / tradingCap) * 100 : 0;
 
   const remaining = Math.max(0, dailyTarget - realized);
   const achievedPct = Math.max(0, Math.min(100, (realized / dailyTarget) * 100));
+  const realizedPnlPct = tradingCap > 0 ? (realized / tradingCap) * 100 : 0;
 
   const progressColor = dailyState === 'REACHED'  ? '#f59e0b'
     : dailyState === 'DRAWDOWN' || dailyState === 'HALTED' ? 'var(--color-short)'
@@ -113,18 +121,32 @@ export function DailyTargetCard({ className }: { className?: string }) {
     )}>
 
       {/* ── Header ── */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-start justify-between gap-2">
         <div className="flex flex-col gap-0.5">
           <span className="text-xs font-bold tracking-widest text-muted-foreground uppercase">
-            Daily Performance KPI
+            Daily PnL
           </span>
-          <span className="text-[10px] text-muted-foreground">
-            ${startingCap.toLocaleString()} starting capital · ${dailyTarget.toLocaleString()} daily target
+          <span className="text-[10px] text-muted-foreground leading-relaxed">
+            KPI 모니터링 전용 · AI 진입 결정을 강제하지 않습니다
           </span>
         </div>
-        <div className={cn('flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-[10px] font-bold tracking-wider', stateMeta.cls)}>
-          <StateIcon className="w-3 h-3" />
-          {stateMeta.label}
+        <div className="flex items-center gap-1.5 shrink-0">
+          {/* Profit-lock badge — shown when engine has reduced new-entry exposure */}
+          {profitLockStage > 0 && (
+            <div className={cn(
+              'flex items-center gap-1 px-2 py-0.5 rounded-full border text-[9px] font-bold tracking-wider',
+              profitLockStage === 1 ? 'bg-yellow-500/10 text-yellow-400 border-yellow-500/25' :
+              profitLockStage === 2 ? 'bg-orange-500/10 text-orange-400 border-orange-500/25' :
+                                      'bg-red-500/10 text-red-400 border-red-500/25',
+            )}>
+              <Lock className="w-2.5 h-2.5" />
+              PROFIT-LOCK Lv.{profitLockStage}
+            </div>
+          )}
+          <div className={cn('flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-[10px] font-bold tracking-wider', stateMeta.cls)}>
+            <StateIcon className="w-3 h-3" />
+            {statusLabel}
+          </div>
         </div>
       </div>
 
@@ -135,7 +157,7 @@ export function DailyTargetCard({ className }: { className?: string }) {
             {fmt(totalPnL)} total PnL
           </span>
           <span className="text-muted-foreground font-mono">
-            {achievedPct.toFixed(1)}% of ${dailyTarget.toLocaleString()} target
+            {achievedPct.toFixed(1)}% of KPI · {realizedPnlPct >= 0 ? '+' : ''}{realizedPnlPct.toFixed(2)}% capital
           </span>
         </div>
 
