@@ -89,6 +89,11 @@ interface AiEngineContextType {
   approveLiveOrder: (id: string) => Promise<void>;
   /** Reject a queued live order → discard */
   rejectLiveOrder: (id: string, reason?: string) => void;
+  /**
+   * Retry a failed dry-run on an already-APPROVED approval.
+   * Calls POST /api/ai/approvals/:id/retry and updates local state.
+   */
+  retryLiveApproval: (id: string) => Promise<void>;
   /** Count of currently pending (not yet approved/rejected/expired) */
   pendingCount: number;
   /** Load the next page (200 rows) of older decisions from the server. */
@@ -303,6 +308,7 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
             rejectedAt:      row.rejectedAt ?? undefined,
             rejectionReason: row.rejectionReason ?? undefined,
             executionFeedback,
+            retryCount:      (row as { retryCount?: number }).retryCount ?? 0,
           };
         });
 
@@ -607,13 +613,14 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
           : a
       ));
 
-      // Step 5 — persist outcome to DB (non-fatal)
+      // Step 5 — persist outcome + lastError to DB (non-fatal)
       fetch(`/api/ai/approvals/${id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           status: 'APPROVED',
           executionOutcome: result.ok ? 'succeeded' : 'failed',
+          lastError: result.ok ? null : (result.error ?? '드라이런 시뮬레이션 실패'),
         }),
       }).catch(() => { /* non-fatal */ });
 
@@ -624,19 +631,62 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
           ? { ...a, executionFeedback: 'failed' as const, executionError: msg }
           : a
       ));
-      // Persist failure outcome to DB (non-fatal) — catch path must also sync
+      // Persist failure outcome + lastError to DB (non-fatal) — catch path must also sync
       fetch(`/api/ai/approvals/${id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'APPROVED', executionOutcome: 'failed' }),
+        body: JSON.stringify({ status: 'APPROVED', executionOutcome: 'failed', lastError: msg }),
       }).catch(() => { /* non-fatal */ });
     }
   }, [pendingApprovals]);
 
+  // ── Retry a failed dry-run ──────────────────────────────────────────────────
+  // The operator calls this after a dry-run failure to re-validate the order.
+  // Hits POST /api/ai/approvals/:id/retry on the server which re-runs executeOrder
+  // and increments retryCount + stores the error if it fails again.
+  const retryLiveApproval = useCallback(async (id: string) => {
+    const approval = pendingApprovals.find(a => a.id === id);
+    if (!approval || approval.status !== 'APPROVED') return;
+
+    // Optimistic: mark as retrying + feedback 'pending'
+    setPendingApprovals(prev => prev.map(a =>
+      a.id === id
+        ? { ...a, executionFeedback: 'pending' as const, retrying: true }
+        : a
+    ));
+
+    try {
+      const res = await fetch(`/api/ai/approvals/${id}/retry`, { method: 'POST' });
+      const data = await res.json() as { ok: boolean; lastError?: string | null };
+      const feedback: 'ok' | 'failed' = data.ok ? 'ok' : 'failed';
+      const errMsg = data.ok ? undefined : (data.lastError ?? '재시도 실패');
+
+      setPendingApprovals(prev => prev.map(a =>
+        a.id === id
+          ? {
+              ...a,
+              executionFeedback: feedback,
+              executionError: errMsg,
+              retryCount: (a.retryCount ?? 0) + 1,
+              retrying: false,
+            }
+          : a
+      ));
+    } catch (e) {
+      const msg = (e as Error).message ?? '재시도 요청 실패';
+      setPendingApprovals(prev => prev.map(a =>
+        a.id === id
+          ? { ...a, executionFeedback: 'failed' as const, executionError: msg, retrying: false }
+          : a
+      ));
+    }
+  }, [pendingApprovals]);
+
   // ── Reject a live order ─────────────────────────────────────────────────────
+  // Handles both PENDING (normal reject) and APPROVED with failed dry-run (operator discards after failure).
   const rejectLiveOrder = useCallback((id: string, reason?: string) => {
     setPendingApprovals(prev => prev.map(a =>
-      a.id === id && a.status === 'PENDING'
+      a.id === id && (a.status === 'PENDING' || a.status === 'APPROVED')
         ? { ...a, status: 'REJECTED' as ApprovalStatus, rejectedAt: new Date().toISOString(), rejectionReason: reason }
         : a
     ));
@@ -980,7 +1030,7 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
       benchmarkAccountSize: BENCHMARK_ACCOUNT,
       benchmarkDailyMin:    BENCHMARK_DAILY_MIN,
       benchmarkDailyMax:    BENCHMARK_DAILY_MAX,
-      pendingApprovals, approveLiveOrder, rejectLiveOrder, pendingCount, loadMoreHistory,
+      pendingApprovals, approveLiveOrder, rejectLiveOrder, retryLiveApproval, pendingCount, loadMoreHistory,
       notificationPermission, requestNotificationPermission,
       profitLockStage: (currentDecision?.profitLockStage ?? 0) as 0 | 1 | 2 | 3,
       cooldownEndsAt,

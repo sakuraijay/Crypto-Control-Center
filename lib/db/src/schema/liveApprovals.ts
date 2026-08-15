@@ -8,7 +8,7 @@
  *   - decision_json은 AiEngineDecision 전체를 직렬화한 것 (지갑 정보 없음)
  *   - 실제 주문 실행 여부와 무관하게 오퍼레이터 결정을 감사 기록으로 보존
  */
-import { pgTable, text, timestamp } from "drizzle-orm/pg-core";
+import { pgTable, text, timestamp, integer } from "drizzle-orm/pg-core";
 
 export const liveApprovalsTable = pgTable("live_approvals", {
   /** UUID — 클라이언트에서 생성하여 낙관적 업데이트와 동기화 */
@@ -24,6 +24,12 @@ export const liveApprovalsTable = pgTable("live_approvals", {
   rejectionReason:  text("rejection_reason"),
   /** 드라이런 실행 결과 — 'succeeded' | 'failed' | null */
   executionOutcome: text("execution_outcome"),
+  /** 재시도 횟수 — 드라이런 실패 후 운영자가 재시도한 횟수 */
+  retryCount:      integer("retry_count").notNull().default(0),
+  /** 마지막 드라이런 에러 메시지 */
+  lastError:       text("last_error"),
+  /** 마지막 재시도 시각 */
+  lastRetriedAt:   timestamp("last_retried_at", { withTimezone: true }),
 });
 
 export type DbLiveApproval = typeof liveApprovalsTable.$inferSelect;

@@ -23,7 +23,7 @@ const VALID_EXECUTION_TYPES = new Set([
   "hedge_open", "scale_in", "scale_out", "hold", "cash_exit",
 ]);
 
-function validateDryRunParams(params: ExecuteOrderParams): string | null {
+export function validateDryRunParams(params: ExecuteOrderParams): string | null {
   if (!params.symbol || !params.symbol.trim()) {
     return "심볼이 비어 있습니다";
   }

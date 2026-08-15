@@ -179,6 +179,10 @@ export interface PendingLiveApproval {
   executionFeedback?: 'pending' | 'ok' | 'failed';
   /** Error message when executionFeedback === 'failed' */
   executionError?: string;
+  /** Number of times the operator has retried the dry-run after failure */
+  retryCount?: number;
+  /** Whether a retry is currently in-flight */
+  retrying?: boolean;
 }
 
 /** How long the operator has to approve before a queued decision expires (ms) */

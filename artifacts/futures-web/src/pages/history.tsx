@@ -1,12 +1,14 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect, useCallback } from 'react';
 import { useTradingContext } from '@/lib/context';
 import { Card } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Badge } from '@/components/ui/badge';
 import { format } from 'date-fns';
-import { Download, X } from 'lucide-react';
+import { Download, X, RefreshCw, CheckCircle2, XCircle, Clock, RotateCcw } from 'lucide-react';
+import { cn } from '@/lib/utils';
 
 // ── CSV export ──────────────────────────────────────────────────────────────
 function downloadCSV(trades: ReturnType<typeof useTradingContext>['closedTrades']) {
@@ -34,11 +36,399 @@ function downloadCSV(trades: ReturnType<typeof useTradingContext>['closedTrades'
   URL.revokeObjectURL(url);
 }
 
+// ── AI history types ──────────────────────────────────────────────────────────
+
+interface AiDecisionRow {
+  id: number;
+  ts: string;
+  symbol: string;
+  direction: string;
+  confidence: number;
+  rationale: string;
+  riskResult: string;
+  riskNote?: string | null;
+  executionOutcome: string;
+}
+
+interface AiApprovalRow {
+  id: string;
+  status: string;
+  createdAt: string;
+  approvedAt?: string | null;
+  rejectedAt?: string | null;
+  rejectionReason?: string | null;
+  executionOutcome?: string | null;
+  retryCount?: number;
+  lastError?: string | null;
+  decisionJson: string;
+}
+
+interface AiHistoryEntry {
+  kind: 'decision' | 'approval';
+  id: string;
+  ts: string;
+  symbol: string;
+  direction: string;       // LONG | SHORT | CASH | HEDGE | SPOT
+  confidence: number;      // 0–100
+  approvalStatus?: string; // PENDING | APPROVED | REJECTED | EXPIRED
+  dryRunResult?: string;   // succeeded | failed | null
+  retryCount?: number;
+  lastError?: string | null;
+  rationale: string;
+}
+
+// ── Status badge ──────────────────────────────────────────────────────────────
+
+function StatusBadge({ status }: { status?: string }) {
+  if (!status) return null;
+  const cfg: Record<string, string> = {
+    PENDING:  'bg-yellow-500/20 text-yellow-400 border-yellow-500/30',
+    APPROVED: 'bg-[var(--color-long)]/20 text-[var(--color-long)] border-[var(--color-long)]/30',
+    REJECTED: 'bg-[var(--color-short)]/20 text-[var(--color-short)] border-[var(--color-short)]/30',
+    EXPIRED:  'bg-muted/30 text-muted-foreground border-border',
+  };
+  return (
+    <span className={cn('text-[9px] font-bold px-1.5 py-0.5 rounded border', cfg[status] ?? 'bg-muted/30 text-muted-foreground')}>
+      {status}
+    </span>
+  );
+}
+
+function DryRunBadge({ result, retryCount }: { result?: string | null; retryCount?: number }) {
+  if (!result) return <span className="text-muted-foreground text-xs">—</span>;
+  const ok = result === 'succeeded';
+  return (
+    <div className="flex items-center gap-1">
+      <span className={cn(
+        'text-[9px] font-bold px-1.5 py-0.5 rounded border flex items-center gap-1',
+        ok
+          ? 'bg-[var(--color-long)]/20 text-[var(--color-long)] border-[var(--color-long)]/30'
+          : 'bg-amber-500/20 text-amber-400 border-amber-500/30',
+      )}>
+        {ok ? <CheckCircle2 className="w-2.5 h-2.5" /> : <XCircle className="w-2.5 h-2.5" />}
+        {ok ? '성공' : '실패'}
+      </span>
+      {(retryCount ?? 0) > 0 && (
+        <span className="text-[9px] text-muted-foreground flex items-center gap-0.5">
+          <RotateCcw className="w-2.5 h-2.5" />×{retryCount}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function DirectionBadge({ dir }: { dir: string }) {
+  const cfg: Record<string, string> = {
+    LONG:  'bg-[var(--color-long)]/20 text-[var(--color-long)]',
+    SHORT: 'bg-[var(--color-short)]/20 text-[var(--color-short)]',
+    CASH:  'bg-muted/30 text-muted-foreground',
+    SPOT:  'bg-sky-500/20 text-sky-400',
+    HEDGE: 'bg-violet-500/20 text-violet-400',
+  };
+  return (
+    <span className={cn('text-[10px] font-bold px-1.5 py-0.5 rounded', cfg[dir] ?? 'bg-muted/30 text-muted-foreground')}>
+      {dir}
+    </span>
+  );
+}
+
+// ── AI History tab ────────────────────────────────────────────────────────────
+
+function AiHistoryTab() {
+  const [entries, setEntries] = useState<AiHistoryEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  // Filters
+  const [filterStatus, setFilterStatus] = useState('ALL');
+  const [filterDir, setFilterDir] = useState('ALL');
+  const [filterDryRun, setFilterDryRun] = useState('ALL');
+  const [filterSymbol, setFilterSymbol] = useState('ALL');
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setLoadError(null);
+    try {
+      const [decRes, appRes] = await Promise.all([
+        fetch('/api/ai/decisions?limit=200'),
+        fetch('/api/ai/approvals?limit=200'),
+      ]);
+
+      const decisionRows: AiDecisionRow[] = decRes.ok
+        ? ((await decRes.json() as { decisions: AiDecisionRow[] }).decisions ?? [])
+        : [];
+      const approvalRows: AiApprovalRow[] = appRes.ok
+        ? ((await appRes.json() as { approvals: AiApprovalRow[] }).approvals ?? [])
+        : [];
+
+      const decisionEntries: AiHistoryEntry[] = decisionRows.map(r => ({
+        kind:       'decision',
+        id:         String(r.id),
+        ts:         r.ts,
+        symbol:     r.symbol || 'MULTI',
+        direction:  r.direction === 'NO_TRADE' ? 'CASH' : (r.direction || 'CASH'),
+        confidence: Math.round((r.confidence ?? 0) * 100),
+        dryRunResult: r.executionOutcome === 'SIMULATED' ? 'succeeded' : undefined,
+        rationale:  r.rationale ?? '',
+      }));
+
+      const approvalEntries: AiHistoryEntry[] = approvalRows.map(r => {
+        let symbol = 'MULTI';
+        let direction = 'CASH';
+        let confidence = 0;
+        let rationale = '';
+        try {
+          const d = JSON.parse(r.decisionJson) as {
+            primarySymbol?: string | null;
+            operatingState?: string;
+            confidence?: number;
+            stateRationale?: string;
+          };
+          symbol     = d.primarySymbol || 'MULTI';
+          direction  = d.operatingState || 'CASH';
+          confidence = d.confidence ?? 0;
+          rationale  = d.stateRationale ?? '';
+        } catch { /* use defaults */ }
+        return {
+          kind:          'approval',
+          id:            r.id,
+          ts:            r.createdAt,
+          symbol,
+          direction,
+          confidence,
+          approvalStatus: r.status,
+          dryRunResult:  r.executionOutcome ?? undefined,
+          retryCount:    r.retryCount ?? 0,
+          lastError:     r.lastError ?? null,
+          rationale,
+        };
+      });
+
+      // Merge and deduplicate, sort newest-first
+      const combined = [...decisionEntries, ...approvalEntries].sort(
+        (a, b) => new Date(b.ts).getTime() - new Date(a.ts).getTime(),
+      );
+      setEntries(combined);
+    } catch (e) {
+      setLoadError((e as Error).message ?? '불러오기 실패');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { void load(); }, [load]);
+
+  const uniqueSymbols = useMemo(
+    () => ['ALL', ...Array.from(new Set(entries.map(e => e.symbol))).sort()],
+    [entries],
+  );
+
+  const filtered = useMemo(() => entries.filter(e => {
+    if (filterStatus !== 'ALL') {
+      if (filterStatus === 'DECISION' && e.kind !== 'decision') return false;
+      if (filterStatus !== 'DECISION' && (e.kind !== 'approval' || e.approvalStatus !== filterStatus)) return false;
+    }
+    if (filterDir !== 'ALL' && e.direction !== filterDir) return false;
+    if (filterDryRun !== 'ALL') {
+      if (filterDryRun === 'succeeded' && e.dryRunResult !== 'succeeded') return false;
+      if (filterDryRun === 'failed' && e.dryRunResult !== 'failed') return false;
+      if (filterDryRun === 'retried' && (e.retryCount ?? 0) === 0) return false;
+      if (filterDryRun === 'none' && e.dryRunResult != null) return false;
+    }
+    if (filterSymbol !== 'ALL' && e.symbol !== filterSymbol) return false;
+    return true;
+  }), [entries, filterStatus, filterDir, filterDryRun, filterSymbol]);
+
+  const hasFilters = filterStatus !== 'ALL' || filterDir !== 'ALL' || filterDryRun !== 'ALL' || filterSymbol !== 'ALL';
+
+  return (
+    <div className="flex flex-col gap-3 h-full">
+      {/* ── Filters ── */}
+      <Card className="p-3 bg-card/50 border-border">
+        <div className="flex flex-wrap gap-3 items-center">
+          {/* Status */}
+          <Select value={filterStatus} onValueChange={setFilterStatus}>
+            <SelectTrigger className="w-36 h-8 text-xs bg-background border-border">
+              <SelectValue placeholder="상태" />
+            </SelectTrigger>
+            <SelectContent>
+              {['ALL', 'DECISION', 'PENDING', 'APPROVED', 'REJECTED', 'EXPIRED'].map(s => (
+                <SelectItem key={s} value={s} className="text-xs">
+                  {s === 'ALL' ? '전체 상태' : s === 'DECISION' ? 'AI 결정만' : s}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+
+          {/* Direction */}
+          <div className="flex rounded-md overflow-hidden border border-border">
+            {(['ALL', 'LONG', 'SHORT', 'CASH', 'HEDGE'] as const).map(d => (
+              <button
+                key={d}
+                onClick={() => setFilterDir(d)}
+                className={cn(
+                  'px-2.5 h-8 text-[10px] font-bold tracking-wide transition-colors',
+                  filterDir === d
+                    ? d === 'LONG'  ? 'bg-[var(--color-long)]/20 text-[var(--color-long)]'
+                    : d === 'SHORT' ? 'bg-[var(--color-short)]/20 text-[var(--color-short)]'
+                    : d === 'HEDGE' ? 'bg-violet-500/20 text-violet-400'
+                    :                 'bg-primary/20 text-primary'
+                    : 'bg-background text-muted-foreground hover:bg-muted/30',
+                )}
+              >{d}</button>
+            ))}
+          </div>
+
+          {/* Dry-run result */}
+          <Select value={filterDryRun} onValueChange={setFilterDryRun}>
+            <SelectTrigger className="w-36 h-8 text-xs bg-background border-border">
+              <SelectValue placeholder="드라이런 결과" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="ALL" className="text-xs">전체 결과</SelectItem>
+              <SelectItem value="succeeded" className="text-xs">성공</SelectItem>
+              <SelectItem value="failed" className="text-xs">실패</SelectItem>
+              <SelectItem value="retried" className="text-xs">재시도됨</SelectItem>
+              <SelectItem value="none" className="text-xs">결과 없음</SelectItem>
+            </SelectContent>
+          </Select>
+
+          {/* Symbol */}
+          <Select value={filterSymbol} onValueChange={setFilterSymbol}>
+            <SelectTrigger className="w-32 h-8 text-xs bg-background border-border">
+              <SelectValue placeholder="심볼" />
+            </SelectTrigger>
+            <SelectContent>
+              {uniqueSymbols.map(s => (
+                <SelectItem key={s} value={s} className="text-xs">
+                  {s === 'ALL' ? '전체 심볼' : s}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+
+          <div className="ml-auto flex items-center gap-2">
+            {hasFilters && (
+              <span className="text-xs text-muted-foreground">{filtered.length} / {entries.length}</span>
+            )}
+            {hasFilters && (
+              <Button size="sm" variant="ghost" className="h-8 px-2 gap-1 text-xs"
+                onClick={() => { setFilterStatus('ALL'); setFilterDir('ALL'); setFilterDryRun('ALL'); setFilterSymbol('ALL'); }}>
+                <X className="w-3.5 h-3.5" /> 초기화
+              </Button>
+            )}
+            <Button size="sm" variant="outline" className="h-8 px-2 gap-1 text-xs" onClick={load} disabled={loading}>
+              <RefreshCw className={cn('w-3.5 h-3.5', loading && 'animate-spin')} />
+              새로고침
+            </Button>
+          </div>
+        </div>
+      </Card>
+
+      {/* ── Table ── */}
+      <Card className="flex-1 flex flex-col overflow-hidden">
+        {loadError ? (
+          <div className="flex-1 flex items-center justify-center text-muted-foreground text-sm">
+            오류: {loadError}
+          </div>
+        ) : (
+          <div className="overflow-auto flex-1">
+            <table className="w-full text-sm">
+              <thead className="bg-secondary/50 sticky top-0 z-10 backdrop-blur-md border-b border-border">
+                <tr>
+                  <th className="text-left font-medium text-muted-foreground py-3 px-4 whitespace-nowrap text-xs">시각</th>
+                  <th className="text-left font-medium text-muted-foreground py-3 px-4 whitespace-nowrap text-xs">종류</th>
+                  <th className="text-left font-medium text-muted-foreground py-3 px-4 whitespace-nowrap text-xs">심볼</th>
+                  <th className="text-left font-medium text-muted-foreground py-3 px-4 whitespace-nowrap text-xs">방향</th>
+                  <th className="text-right font-medium text-muted-foreground py-3 px-4 whitespace-nowrap text-xs">신뢰도</th>
+                  <th className="text-left font-medium text-muted-foreground py-3 px-4 whitespace-nowrap text-xs">승인 상태</th>
+                  <th className="text-left font-medium text-muted-foreground py-3 px-4 whitespace-nowrap text-xs">드라이런</th>
+                  <th className="text-left font-medium text-muted-foreground py-3 px-4 text-xs">오류 / 근거</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {loading && entries.length === 0 ? (
+                  <tr>
+                    <td colSpan={8} className="py-12 text-center text-muted-foreground">
+                      <RefreshCw className="w-4 h-4 animate-spin mx-auto mb-2" />
+                      불러오는 중…
+                    </td>
+                  </tr>
+                ) : filtered.length === 0 ? (
+                  <tr>
+                    <td colSpan={8} className="py-12 text-center text-muted-foreground">
+                      {entries.length === 0 ? 'AI 이력이 없습니다' : '필터 조건에 맞는 항목이 없습니다'}
+                    </td>
+                  </tr>
+                ) : (
+                  filtered.map(e => (
+                    <tr key={`${e.kind}-${e.id}`} className="hover:bg-muted/30 transition-colors">
+                      <td className="py-2.5 px-4 text-muted-foreground font-mono text-[10px] whitespace-nowrap">
+                        {format(new Date(e.ts), 'MM-dd HH:mm:ss')}
+                      </td>
+                      <td className="py-2.5 px-4">
+                        <span className={cn(
+                          'text-[9px] font-bold px-1.5 py-0.5 rounded border',
+                          e.kind === 'approval'
+                            ? 'bg-violet-500/20 text-violet-400 border-violet-500/30'
+                            : 'bg-blue-500/20 text-blue-400 border-blue-500/30',
+                        )}>
+                          {e.kind === 'approval' ? '승인' : '결정'}
+                        </span>
+                      </td>
+                      <td className="py-2.5 px-4 font-mono text-xs font-bold">
+                        {e.symbol}
+                      </td>
+                      <td className="py-2.5 px-4">
+                        <DirectionBadge dir={e.direction} />
+                      </td>
+                      <td className="py-2.5 px-4 text-right font-mono text-xs">
+                        <span style={{
+                          color: e.confidence >= 75 ? 'var(--color-long)'
+                               : e.confidence >= 55 ? 'var(--color-warning)'
+                               : 'var(--color-short)',
+                        }}>
+                          {e.confidence}%
+                        </span>
+                      </td>
+                      <td className="py-2.5 px-4">
+                        {e.approvalStatus
+                          ? <StatusBadge status={e.approvalStatus} />
+                          : <span className="text-muted-foreground text-xs">—</span>}
+                      </td>
+                      <td className="py-2.5 px-4">
+                        <DryRunBadge result={e.dryRunResult} retryCount={e.retryCount} />
+                      </td>
+                      <td className="py-2.5 px-4 max-w-xs">
+                        {e.lastError ? (
+                          <span className="text-amber-400 text-[10px] font-mono line-clamp-1" title={e.lastError}>
+                            {e.lastError}
+                          </span>
+                        ) : (
+                          <span className="text-muted-foreground text-[10px] line-clamp-1" title={e.rationale}>
+                            {e.rationale || '—'}
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+// ── Main page ─────────────────────────────────────────────────────────────────
+
 export default function HistoryPage() {
   const { closedTrades, logs } = useTradingContext();
   const [activeTab, setActiveTab] = useState('trades');
 
-  // ── Filter state ─────────────────────────────────────────────────────────
+  // ── Trade filter state ────────────────────────────────────────────────────
   const [filterSymbol, setFilterSymbol] = useState('ALL');
   const [filterSide, setFilterSide] = useState<'ALL' | 'LONG' | 'SHORT'>('ALL');
   const [filterFrom, setFilterFrom] = useState('');
@@ -82,6 +472,9 @@ export default function HistoryPage() {
           <TabsList className="bg-card border border-border">
             <TabsTrigger value="trades" className="data-[state=active]:bg-primary/20 data-[state=active]:text-primary w-36">
               Trade History ({closedTrades.length})
+            </TabsTrigger>
+            <TabsTrigger value="ai" className="data-[state=active]:bg-primary/20 data-[state=active]:text-primary w-36">
+              AI 결정 & 승인
             </TabsTrigger>
             <TabsTrigger value="logs" className="data-[state=active]:bg-primary/20 data-[state=active]:text-primary w-36">
               Strategy Logs
@@ -237,6 +630,11 @@ export default function HistoryPage() {
               </table>
             </div>
           </Card>
+        </TabsContent>
+
+        {/* ── AI 결정 & 승인 이력 ── */}
+        <TabsContent value="ai" className="flex-1 mt-0 flex flex-col">
+          <AiHistoryTab />
         </TabsContent>
 
         {/* ── Strategy Logs ── */}

@@ -7,12 +7,13 @@
  *
  * Operator sees: state, symbol, size, leverage, TP/SL, trailing, reasoning, risk level.
  * After approve: dry-run validation badge (pending → success / failure).
+ * After failure: retry button re-invokes the dry-run; reject button marks REJECTED.
  */
 
 import { useEffect, useState } from 'react';
 import {
   CheckCircle2, XCircle, AlertTriangle, Clock,
-  Shield, Loader2, FlaskConical,
+  Shield, Loader2, FlaskConical, RotateCcw,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
@@ -47,9 +48,11 @@ function useCountdown(expiresAt: string) {
 function DryRunBadge({
   feedback,
   error,
+  retryCount,
 }: {
   feedback: 'pending' | 'ok' | 'failed';
   error?: string;
+  retryCount?: number;
 }) {
   if (feedback === 'pending') {
     return (
@@ -64,13 +67,25 @@ function DryRunBadge({
       <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-[var(--color-long)]/30 bg-[var(--color-long)]/5 text-[var(--color-long)] text-[10px] font-bold">
         <CheckCircle2 className="w-3 h-3" />
         드라이런 성공 — PAPER ONLY, 실제 주문 없음
+        {retryCount != null && retryCount > 0 && (
+          <span className="ml-1 px-1.5 py-0.5 rounded bg-[var(--color-long)]/20 font-mono">
+            {retryCount}회 재시도
+          </span>
+        )}
       </div>
     );
   }
   return (
-    <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-amber-500/30 bg-amber-500/5 text-amber-400 text-[10px] font-medium">
-      <XCircle className="w-3 h-3 shrink-0" />
-      <span>드라이런 실패 — {error ?? '검증 오류'}</span>
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-amber-500/30 bg-amber-500/5 text-amber-400 text-[10px] font-medium">
+        <XCircle className="w-3 h-3 shrink-0" />
+        <span>드라이런 실패 — {error ?? '검증 오류'}</span>
+        {retryCount != null && retryCount > 0 && (
+          <span className="ml-auto px-1.5 py-0.5 rounded bg-amber-500/20 font-mono text-[9px]">
+            {retryCount}회 재시도됨
+          </span>
+        )}
+      </div>
     </div>
   );
 }
@@ -237,14 +252,32 @@ function PendingApprovalItem({
   );
 }
 
-// ── Approved item (shows dry-run feedback for 90 s) ──────────────────────────
+// ── Approved item (shows dry-run feedback + retry/reject for failed) ───────────
 
-function ApprovedFeedbackItem({ approval }: { approval: PendingLiveApproval }) {
+function ApprovedFeedbackItem({
+  approval,
+  onRetry,
+  onReject,
+}: {
+  approval: PendingLiveApproval;
+  onRetry: () => void;
+  onReject: (reason?: string) => void;
+}) {
   const d   = approval.decision;
   const cfg = STATE_CFG[d.operatingState];
+  const isFailed  = approval.executionFeedback === 'failed';
+  const isRetrying = approval.retrying;
+
+  const [showRejectInput, setShowRejectInput] = useState(false);
+  const [rejectInput, setRejectInput] = useState('');
 
   return (
-    <div className="rounded-xl border border-[var(--color-long)]/25 bg-[var(--color-long)]/5 p-4 flex flex-col gap-2">
+    <div className={cn(
+      'rounded-xl border p-4 flex flex-col gap-2 transition-all',
+      isFailed
+        ? 'border-amber-500/30 bg-amber-500/5'
+        : 'border-[var(--color-long)]/25 bg-[var(--color-long)]/5',
+    )}>
       <div className="flex items-center gap-2">
         <span className={cn('inline-flex items-center gap-1.5 px-2 py-0.5 rounded-lg border text-xs font-black tracking-widest', cfg.bg, cfg.color)}>
           {cfg.icon} {d.operatingState}
@@ -252,12 +285,69 @@ function ApprovedFeedbackItem({ approval }: { approval: PendingLiveApproval }) {
         <span className="font-mono text-sm font-bold text-foreground">
           {d.primarySymbol ? `${d.primarySymbol}/USD` : '—'}
         </span>
-        <span className="text-[10px] text-muted-foreground ml-auto">승인됨</span>
+        <span className="text-[10px] text-muted-foreground ml-auto">
+          {isFailed ? '드라이런 실패' : approval.executionFeedback === 'pending' ? '검증 중' : '승인됨'}
+        </span>
       </div>
 
       {/* Dry-run badge */}
       {approval.executionFeedback && (
-        <DryRunBadge feedback={approval.executionFeedback} error={approval.executionError} />
+        <DryRunBadge
+          feedback={approval.executionFeedback}
+          error={approval.executionError}
+          retryCount={approval.retryCount}
+        />
+      )}
+
+      {/* ── Retry / Reject actions (only when dry-run failed) ── */}
+      {isFailed && !isRetrying && (
+        showRejectInput ? (
+          <div className="flex items-center gap-2 mt-1">
+            <input
+              className="flex-1 text-xs bg-background border border-border rounded px-2 py-1.5 text-foreground placeholder:text-muted-foreground"
+              placeholder="거부 사유 (선택)…"
+              value={rejectInput}
+              onChange={e => setRejectInput(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter') { onReject(rejectInput || undefined); }
+                if (e.key === 'Escape') setShowRejectInput(false);
+              }}
+              autoFocus
+            />
+            <Button size="sm" variant="destructive" onClick={() => onReject(rejectInput || undefined)} className="gap-1 text-xs">
+              <XCircle className="w-3.5 h-3.5" /> 거부 확인
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setShowRejectInput(false)} className="text-xs">취소</Button>
+          </div>
+        ) : (
+          <div className="flex items-center gap-2 mt-1">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={onRetry}
+              className="gap-1.5 text-xs border-primary/40 text-primary hover:bg-primary/10"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              재시도
+              {(approval.retryCount ?? 0) > 0 && (
+                <span className="ml-0.5 px-1.5 py-0.5 rounded bg-primary/20 text-[9px] font-mono">
+                  ×{approval.retryCount}
+                </span>
+              )}
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => setShowRejectInput(true)}
+              className="gap-1 text-xs text-[var(--color-short)] hover:bg-[var(--color-short)]/10"
+            >
+              <XCircle className="w-3.5 h-3.5" /> 거부
+            </Button>
+            <span className="text-[9px] text-muted-foreground/60 ml-auto">
+              재시도는 동일 파라미터로 드라이런을 재실행합니다
+            </span>
+          </div>
+        )
       )}
     </div>
   );
@@ -268,7 +358,7 @@ function ApprovedFeedbackItem({ approval }: { approval: PendingLiveApproval }) {
 const FEEDBACK_DISPLAY_MS = 90_000; // show approved feedback for 90 s
 
 export function LiveApprovalCard() {
-  const { pendingApprovals, approveLiveOrder, rejectLiveOrder } = useAiEngine();
+  const { pendingApprovals, approveLiveOrder, rejectLiveOrder, retryLiveApproval } = useAiEngine();
   const { engineState } = useAppContext();
 
   // Tick every 5 s so recentlyApproved filter stays accurate within 5 s
@@ -280,11 +370,17 @@ export function LiveApprovalCard() {
 
   const pending = pendingApprovals.filter(a => a.status === 'PENDING');
 
-  // Show recently approved items with dry-run feedback for FEEDBACK_DISPLAY_MS
+  // Show recently approved items with dry-run feedback for FEEDBACK_DISPLAY_MS,
+  // PLUS any failed-feedback items that haven't been rejected yet
+  // (they stay visible so the operator can retry or reject them).
   const recentlyApproved = pendingApprovals.filter(a =>
-    a.status === 'APPROVED' &&
-    a.approvedAt &&
-    now - new Date(a.approvedAt).getTime() < FEEDBACK_DISPLAY_MS,
+    a.status === 'APPROVED' && (
+      // Recently approved: show feedback for FEEDBACK_DISPLAY_MS
+      (a.approvedAt && now - new Date(a.approvedAt).getTime() < FEEDBACK_DISPLAY_MS) ||
+      // Failed dry-run: always show until operator retries (success) or rejects
+      a.executionFeedback === 'failed' ||
+      a.executionFeedback === 'pending'
+    )
   );
 
   const hasAnything = pending.length > 0 || recentlyApproved.length > 0;
@@ -337,9 +433,14 @@ export function LiveApprovalCard() {
         </div>
       )}
 
-      {/* Recently approved — show dry-run feedback */}
+      {/* Recently approved — show dry-run feedback + retry/reject for failed */}
       {recentlyApproved.map(approval => (
-        <ApprovedFeedbackItem key={approval.id} approval={approval} />
+        <ApprovedFeedbackItem
+          key={approval.id}
+          approval={approval}
+          onRetry={() => retryLiveApproval(approval.id)}
+          onReject={(reason) => rejectLiveOrder(approval.id, reason)}
+        />
       ))}
     </div>
   );

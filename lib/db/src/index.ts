@@ -53,6 +53,15 @@ const MIGRATIONS: { name: string; sql: string }[] = [
     name: "0004_live_approvals_execution_outcome",
     sql: `ALTER TABLE live_approvals ADD COLUMN IF NOT EXISTS execution_outcome text;`,
   },
+  {
+    name: "0005_live_approvals_retry",
+    sql: `
+      ALTER TABLE live_approvals
+        ADD COLUMN IF NOT EXISTS retry_count    integer NOT NULL DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS last_error     text,
+        ADD COLUMN IF NOT EXISTS last_retried_at timestamptz;
+    `,
+  },
   // Add future migrations here in chronological order.
 ];
 
