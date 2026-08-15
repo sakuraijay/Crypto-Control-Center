@@ -128,6 +128,8 @@ export interface GmxAccountState {
   lastSuccessUpdated: Date | null;
   /** Timestamp of the most recent fetch attempt (success or failure) */
   lastUpdated: Date | null;
+  /** Duration of the last successful subgraph round-trip in milliseconds */
+  lastFetchMs: number | null;
 }
 
 interface GmxAccountContextType extends GmxAccountState {
@@ -200,6 +202,7 @@ export function GmxAccountProvider({ children }: { children: ReactNode }) {
     error:              null,
     lastSuccessUpdated: null,
     lastUpdated:        null,
+    lastFetchMs:        null,
   });
 
   const abortRef = useRef<AbortController | null>(null);
@@ -211,6 +214,8 @@ export function GmxAccountProvider({ children }: { children: ReactNode }) {
     abortRef.current = ctrl;
 
     setState(prev => ({ ...prev, status: 'loading' }));
+
+    const fetchStart = Date.now();
 
     try {
       // ── Choose query based on cached schema-support flag ─────────────────
@@ -327,6 +332,7 @@ export function GmxAccountProvider({ children }: { children: ReactNode }) {
         error:              null,
         lastSuccessUpdated: now,  // only updated on success
         lastUpdated:        now,
+        lastFetchMs:        Date.now() - fetchStart,
       });
     } catch (err: unknown) {
       if ((err as Error)?.name === 'AbortError') return; // cancelled, don't update state
@@ -346,7 +352,7 @@ export function GmxAccountProvider({ children }: { children: ReactNode }) {
     if (!(wallet.status === 'connected' && wallet.isArbitrum && wallet.address)) {
       // Wallet disconnected or wrong network — reset state
       abortRef.current?.abort();
-      setState({ positions: [], status: 'idle', error: null, lastSuccessUpdated: null, lastUpdated: null });
+      setState({ positions: [], status: 'idle', error: null, lastSuccessUpdated: null, lastUpdated: null, lastFetchMs: null });
       return;
     }
 

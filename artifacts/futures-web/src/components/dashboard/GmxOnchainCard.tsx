@@ -14,12 +14,12 @@
  *   PAPER/Mock 대시보드 데이터와 완전히 별개의 실제 온체인 데이터입니다.
  */
 
-import { useCallback } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'wouter';
 import {
   Wallet, RefreshCw, ExternalLink, TrendingUp, TrendingDown,
   Loader2, AlertCircle, CheckCircle2, Unplug, Clock, XCircle,
-  Database, Activity,
+  Database, Activity, ChevronDown, ChevronUp, Zap,
 } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -28,6 +28,34 @@ import { useGmxAccount, type GmxOnchainPosition } from '@/lib/context/GmxAccount
 import { cn } from '@/lib/utils';
 import { formatDistanceToNow, format } from 'date-fns';
 import { ko } from 'date-fns/locale';
+
+// ── 1-second ticker ───────────────────────────────────────────────────────────
+
+function useNow() {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1_000);
+    return () => clearInterval(t);
+  }, []);
+  return now;
+}
+
+// ── Elapsed formatter ────────────────────────────────────────────────────────
+
+function formatElapsedKo(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  if (s < 60)  return `${s}초 전`;
+  const m = Math.floor(s / 60);
+  if (m < 60)  return `${m}분 전`;
+  return `${Math.floor(m / 60)}시간 전`;
+}
+
+/** amber at 60 s, red at 120 s */
+function elapsedColor(ms: number): string {
+  if (ms >= 120_000) return 'text-[var(--color-short)]';
+  if (ms >= 60_000)  return 'text-amber-400';
+  return 'text-muted-foreground';
+}
 
 // ── Network name helper ───────────────────────────────────────────────────────
 
@@ -173,6 +201,9 @@ function DiagBadge({
 export function GmxOnchainCard() {
   const wallet = useWallet();
   const gmx    = useGmxAccount();
+  const now    = useNow();
+
+  const [diagOpen, setDiagOpen] = useState(false);
 
   const isConnected = wallet.status === 'connected' && wallet.isArbitrum;
   const isWrongNet  = wallet.status === 'wrong_network';
@@ -180,6 +211,12 @@ export function GmxOnchainCard() {
   // Show error UI when subgraph failed — regardless of whether stale positions exist
   const hasError = gmx.error !== null && (gmx.status === 'unavailable' || gmx.status === 'error');
   const hasStaleError = gmx.error !== null && gmx.status === 'ok' && gmx.positions.length > 0;
+
+  /** Total notional exposure across all open positions */
+  const totalExposureUsd = gmx.positions.reduce((s, p) => s + p.sizeUsd, 0);
+
+  /** Elapsed since last success — drives real-time coloring */
+  const elapsedMs = gmx.lastSuccessUpdated ? now - gmx.lastSuccessUpdated.getTime() : null;
 
   const handleRefresh = useCallback(() => {
     gmx.refresh();
@@ -216,11 +253,14 @@ export function GmxOnchainCard() {
           </span>
         </div>
 
-        {/* Refresh + last successful update */}
+        {/* Refresh + live elapsed time */}
         <div className="flex items-center gap-2 shrink-0 mt-0.5">
-          {gmx.lastSuccessUpdated && (
-            <span className="text-[10px] text-muted-foreground">
-              {formatDistanceToNow(gmx.lastSuccessUpdated, { locale: ko, addSuffix: true })} 업데이트
+          {elapsedMs !== null && (
+            <span className={cn('text-[10px] font-mono transition-colors', elapsedColor(elapsedMs))}>
+              {formatElapsedKo(elapsedMs)}
+              {elapsedMs >= 60_000 && (
+                <span className="ml-1 font-bold">⚠</span>
+              )}
             </span>
           )}
           {isConnected && (
@@ -304,7 +344,7 @@ export function GmxOnchainCard() {
         {/* ── CONNECTED ── */}
         {isConnected && (
           <>
-            {/* ── 4-item diagnostic row ── */}
+            {/* ── Diagnostic badge row ── */}
             <div className="flex flex-wrap gap-2">
               <DiagBadge
                 icon={Wallet}
@@ -324,8 +364,8 @@ export function GmxOnchainCard() {
                 icon={Database}
                 label="서브그래프"
                 value={
-                  gmx.status === 'loading'  ? '조회 중…' :
-                  gmx.status === 'ok' && !gmx.error ? '정상' :
+                  gmx.status === 'loading'      ? '조회 중…' :
+                  gmx.status === 'ok' && !gmx.error ? `정상${gmx.lastFetchMs != null ? ` (${gmx.lastFetchMs}ms)` : ''}` :
                   gmx.status === 'unavailable' || gmx.error ? '실패' :
                   '대기'
                 }
@@ -342,6 +382,13 @@ export function GmxOnchainCard() {
                   ? format(gmx.lastSuccessUpdated, 'HH:mm:ss')
                   : '—'}
               />
+              {gmx.positions.length > 0 && (
+                <DiagBadge
+                  icon={Zap}
+                  label="총 노출"
+                  value={`$${totalExposureUsd.toLocaleString('en-US', { maximumFractionDigits: 0 })}`}
+                />
+              )}
             </div>
 
             {/* Wallet summary row */}
@@ -478,11 +525,83 @@ export function GmxOnchainCard() {
               )}
             </div>
 
-            {/* Disclaimer */}
-            <p className="text-[10px] text-muted-foreground/60 border-t border-border/50 pt-2">
-              조회 전용 — 서명·주문·자금 이동 없음. 이 카드는 PAPER 대시보드 데이터와
-              완전히 별개로 실제 GMX 온체인 데이터를 표시합니다.
-            </p>
+            {/* ── Collapsible diagnostic section ── */}
+            <div className="border-t border-border/50 pt-2">
+              <button
+                onClick={() => setDiagOpen(v => !v)}
+                className="flex items-center gap-1.5 text-[10px] text-muted-foreground/70 hover:text-muted-foreground transition-colors w-full text-left"
+              >
+                {diagOpen
+                  ? <ChevronUp className="w-3 h-3 shrink-0" />
+                  : <ChevronDown className="w-3 h-3 shrink-0" />}
+                진단 정보 {diagOpen ? '접기' : '펼치기'}
+              </button>
+
+              {diagOpen && (
+                <div className="mt-2 flex flex-col gap-1.5 px-3 py-2.5 rounded-lg bg-secondary/50 border border-border/40 text-[10px] font-mono">
+                  <div className="flex justify-between text-muted-foreground">
+                    <span>서브그래프 URL</span>
+                    <span className="text-foreground/80 truncate max-w-[60%] text-right" title="https://subgraph.satsuma-prod.com/…">
+                      satsuma-prod.com / gmx / synthetics-arbitrum-stats
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-muted-foreground">
+                    <span>마지막 성공</span>
+                    <span className={cn('font-semibold', elapsedMs !== null ? elapsedColor(elapsedMs) : 'text-muted-foreground')}>
+                      {gmx.lastSuccessUpdated
+                        ? `${format(gmx.lastSuccessUpdated, 'yyyy-MM-dd HH:mm:ss')} (${elapsedMs !== null ? formatElapsedKo(elapsedMs) : '—'})`
+                        : '이번 세션에 없음'}
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-muted-foreground">
+                    <span>응답 속도</span>
+                    <span className="text-foreground/80">
+                      {gmx.lastFetchMs != null ? `${gmx.lastFetchMs} ms` : '—'}
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-muted-foreground">
+                    <span>포지션 수</span>
+                    <span className="text-foreground/80">{gmx.positions.length}개</span>
+                  </div>
+                  <div className="flex justify-between text-muted-foreground">
+                    <span>총 노출 합계</span>
+                    <span className="text-foreground/80">
+                      ${totalExposureUsd.toLocaleString('en-US', { maximumFractionDigits: 2 })}
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-muted-foreground">
+                    <span>조회 상태</span>
+                    <span className={cn(
+                      'font-semibold',
+                      gmx.status === 'ok' && !gmx.error ? 'text-[var(--color-long)]' :
+                      gmx.status === 'unavailable' || gmx.error ? 'text-[var(--color-short)]' :
+                      'text-muted-foreground',
+                    )}>
+                      {gmx.status}{gmx.error ? ` — ${gmx.error}` : ''}
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-muted-foreground">
+                    <span>폴링 주기</span>
+                    <span className="text-foreground/80">30초</span>
+                  </div>
+                  {(hasError || hasStaleError) && (
+                    <Button
+                      size="sm" variant="outline"
+                      className="h-6 text-[10px] w-fit mt-1 gap-1 border-[var(--color-short)]/30 text-[var(--color-short)] hover:bg-[var(--color-short)]/10"
+                      onClick={handleRefresh}
+                      disabled={gmx.status === 'loading'}
+                    >
+                      <RefreshCw className={cn('w-2.5 h-2.5', gmx.status === 'loading' && 'animate-spin')} />
+                      재조회
+                    </Button>
+                  )}
+                </div>
+              )}
+
+              <p className="text-[10px] text-muted-foreground/50 mt-2">
+                조회 전용 — 서명·주문·자금 이동 없음. PAPER 대시보드 데이터와 별개의 실제 온체인 데이터.
+              </p>
+            </div>
           </>
         )}
       </div>

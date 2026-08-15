@@ -86,14 +86,21 @@ const WalletContext = createContext<WalletContextType | undefined>(undefined);
 // ── Provider ──────────────────────────────────────────────────────────────────
 
 export function WalletProvider({ children }: { children: ReactNode }) {
-  const [state, setState] = useState<WalletState>({
-    status:      'disconnected',
-    address:     null,
-    ethBalance:  null,
-    usdcBalance: null,
-    chainId:     null,
-    isArbitrum:  false,
-    error:       null,
+  // Detect EIP-1193 provider synchronously on first render.
+  // Using a lazy initializer avoids a flicker: no-provider browsers start at
+  // 'no_provider' immediately instead of briefly showing 'disconnected'.
+  const [state, setState] = useState<WalletState>(() => {
+    const hasProvider =
+      typeof window !== 'undefined' && !!(window as { ethereum?: unknown }).ethereum;
+    return {
+      status:      hasProvider ? 'disconnected' : 'no_provider',
+      address:     null,
+      ethBalance:  null,
+      usdcBalance: null,
+      chainId:     null,
+      isArbitrum:  false,
+      error:       null,
+    };
   });
 
   const addressRef = useRef<string | null>(null);

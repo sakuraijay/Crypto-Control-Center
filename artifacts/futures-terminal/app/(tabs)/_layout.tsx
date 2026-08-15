@@ -1,5 +1,5 @@
 import React from 'react';
-import { Platform, StyleSheet, useColorScheme, View } from 'react-native';
+import { Platform, StyleSheet, Text, useColorScheme, View } from 'react-native';
 import { useColors } from '@/hooks/useColors';
 import { Feather } from '@expo/vector-icons';
 import { BlurView } from 'expo-blur';
@@ -7,6 +7,32 @@ import { isLiquidGlassAvailable } from 'expo-glass-effect';
 import { Tabs } from 'expo-router';
 import { Icon, Label, NativeTabs } from 'expo-router/unstable-native-tabs';
 import { SymbolView } from 'expo-symbols';
+
+/**
+ * FrozenBanner — persistent app-shell notice shown on every tab.
+ * This app is frozen; new features go to futures-web only.
+ * Defined here (not in a tab screen) so it survives tab navigation.
+ */
+function FrozenBanner() {
+  return (
+    <View style={{
+      backgroundColor: '#78350f22',
+      borderBottomWidth: 1,
+      borderBottomColor: '#f59e0b44',
+      paddingVertical: 6,
+      paddingHorizontal: 14,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+    }}>
+      <Feather name="alert-triangle" size={11} color="#f59e0b" />
+      <Text style={{ color: '#f59e0b99', fontSize: 10, flex: 1, lineHeight: 14 }}>
+        <Text style={{ color: '#f59e0b', fontWeight: '700' }}>개발 동결 — </Text>
+        신규 기능은 데스크탑 웹(futures-web)에만 추가됩니다.
+      </Text>
+    </View>
+  );
+}
 
 function NativeTabLayout() {
   return (
@@ -160,8 +186,16 @@ function ClassicTabLayout() {
 }
 
 export default function TabLayout() {
-  if (isLiquidGlassAvailable()) {
-    return <NativeTabLayout />;
-  }
-  return <ClassicTabLayout />;
+  const tabs = isLiquidGlassAvailable()
+    ? <NativeTabLayout />
+    : <ClassicTabLayout />;
+
+  // Wrap every tab in a flex container so FrozenBanner stays fixed at the top
+  // of the entire tab shell, across all navigation and scroll actions.
+  return (
+    <View style={{ flex: 1 }}>
+      <FrozenBanner />
+      {tabs}
+    </View>
+  );
 }

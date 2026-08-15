@@ -98,10 +98,42 @@ export default function Settings() {
 
   const [closeAllPhase, setCloseAllPhase] = useState<0 | 1 | 2>(0);
   const [testNotifState, setTestNotifState] = useState<'idle' | 'sending' | 'sent' | 'denied' | 'unsupported'>('idle');
+  const [switchingNet, setSwitchingNet] = useState(false);
 
   const isEmergency = engineState === 'EMERGENCY_STOP';
   const isOffline   = consecutiveFailures >= OFFLINE_THRESHOLD;
   const isStale     = consecutiveFailures >= 1 && consecutiveFailures < OFFLINE_THRESHOLD;
+
+  /** Attempt wallet_switchEthereumChain → Arbitrum One (0xa4b1 = 42161) */
+  const handleSwitchToArbitrum = async () => {
+    const eth = (window as { ethereum?: { request: (args: { method: string; params?: unknown[] }) => Promise<unknown> } }).ethereum;
+    if (!eth) return;
+    setSwitchingNet(true);
+    try {
+      await eth.request({
+        method: 'wallet_switchEthereumChain',
+        params: [{ chainId: '0xa4b1' }],
+      });
+    } catch (e) {
+      // 4902 = chain not yet added — prompt to add
+      if ((e as { code?: number }).code === 4902) {
+        try {
+          await eth.request({
+            method: 'wallet_addEthereumChain',
+            params: [{
+              chainId: '0xa4b1',
+              chainName: 'Arbitrum One',
+              nativeCurrency: { name: 'Ethereum', symbol: 'ETH', decimals: 18 },
+              rpcUrls: ['https://arb1.arbitrum.io/rpc'],
+              blockExplorerUrls: ['https://arbiscan.io'],
+            }],
+          });
+        } catch { /* user rejected */ }
+      }
+    } finally {
+      setSwitchingNet(false);
+    }
+  };
 
   const handleTestNotif = async () => {
     setTestNotifState('sending');
@@ -187,14 +219,24 @@ export default function Settings() {
             const isConnected  = wallet.status === 'connected' && wallet.isArbitrum;
             const isWrongNet   = wallet.status === 'wrong_network';
             const isConnecting = wallet.status === 'connecting';
-            const borderColor  = isConnected
+            const hasProvider  = wallet.status !== 'no_provider';
+
+            /** 4-sub-state index: 0=no wallet, 1=detected·unconnected, 2=wrong network, 3=connected+arbitrum */
+            const subState =
+              isConnected ? 3 :
+              isWrongNet  ? 2 :
+              hasProvider ? 1 : 0;
+
+            const borderColor = isConnected
               ? 'border-[var(--color-long)]/30 bg-[var(--color-long)]/5'
               : isWrongNet
                 ? 'border-amber-500/30 bg-amber-500/5'
                 : 'border-border bg-card/30';
-            const circleColor  = isConnected
+            const circleColor = isConnected
               ? 'border-[var(--color-long)] text-[var(--color-long)]'
               : 'border-border text-muted-foreground';
+
+            const subLabels = ['지갑 없음', '감지됨·미연결', 'Wrong network', 'Arbitrum ✓'] as const;
 
             return (
               <div className={cn('flex items-start gap-4 p-4 rounded-lg border', borderColor)}>
@@ -202,7 +244,7 @@ export default function Settings() {
                   {isConnected ? '✓' : '2'}
                 </div>
                 <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 mb-1">
+                  <div className="flex items-center gap-2 mb-2">
                     <span className={cn('font-semibold text-sm', isConnected && 'text-[var(--color-long)]')}>
                       브라우저 지갑 연결
                     </span>
@@ -213,6 +255,30 @@ export default function Settings() {
                     ) : (
                       <span className="text-[9px] px-1.5 py-0.5 rounded-full border bg-secondary text-muted-foreground border-border font-bold">NOT CONNECTED</span>
                     )}
+                  </div>
+
+                  {/* Sub-state stepper strip ① ② ③ ④ */}
+                  <div className="flex items-center gap-1 mb-3">
+                    {subLabels.map((label, i) => {
+                      const done    = i < subState;
+                      const current = i === subState;
+                      return (
+                        <div key={i} className="flex items-center gap-1">
+                          <div className={cn(
+                            'flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-bold border transition-colors',
+                            done    ? 'border-[var(--color-long)]/30 bg-[var(--color-long)]/10 text-[var(--color-long)]' :
+                            current ? (isWrongNet ? 'border-amber-500/40 bg-amber-500/10 text-amber-400' : 'border-primary/40 bg-primary/10 text-primary') :
+                                      'border-border/40 text-muted-foreground/40',
+                          )}>
+                            {done ? '✓' : `${i + 1}`}
+                            <span className={cn('hidden sm:inline', !current && !done && 'opacity-40')}>{label}</span>
+                          </div>
+                          {i < 3 && (
+                            <div className={cn('w-3 h-px shrink-0', done ? 'bg-[var(--color-long)]/40' : 'bg-border/30')} />
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
 
                   {isConnected ? (
@@ -238,6 +304,31 @@ export default function Settings() {
                         </Button>
                       </div>
                     </div>
+                  ) : isWrongNet ? (
+                    <div>
+                      <p className="text-xs text-amber-400/90 mb-3 leading-relaxed">
+                        <AlertCircle className="inline w-3 h-3 mr-1" />
+                        MetaMask가 Arbitrum One (Chain 42161) 이외의 네트워크에 연결되어 있습니다.
+                        아래 버튼을 눌러 자동으로 전환하거나, MetaMask에서 직접 Arbitrum One으로 변경하세요.
+                      </p>
+                      <div className="flex gap-2">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={handleSwitchToArbitrum}
+                          disabled={switchingNet}
+                          className="h-7 text-xs border-amber-500/40 text-amber-400 hover:bg-amber-500/10"
+                        >
+                          {switchingNet
+                            ? <><Loader2 className="w-3 h-3 mr-1.5 animate-spin" />전환 중…</>
+                            : <><RefreshCw className="w-3 h-3 mr-1.5" />Arbitrum으로 전환</>
+                          }
+                        </Button>
+                        <Button size="sm" variant="ghost" onClick={wallet.disconnect} className="h-7 text-xs text-muted-foreground">
+                          연결 해제
+                        </Button>
+                      </div>
+                    </div>
                   ) : (
                     <div>
                       <p className="text-xs text-muted-foreground mb-2">
@@ -248,12 +339,9 @@ export default function Settings() {
                       {wallet.status === 'no_provider' ? (
                         <p className="text-xs text-amber-400 mb-2">
                           <AlertCircle className="inline w-3 h-3 mr-1" />
-                          MetaMask 또는 EIP-1193 호환 지갑이 설치되어 있지 않습니다.
-                        </p>
-                      ) : isWrongNet ? (
-                        <p className="text-xs text-amber-400 mb-2">
-                          <AlertCircle className="inline w-3 h-3 mr-1" />
-                          Arbitrum One(Chain 42161)으로 네트워크를 전환해주세요.
+                          MetaMask 또는 EIP-1193 호환 지갑이 설치되어 있지 않습니다.{' '}
+                          <a href="https://metamask.io" target="_blank" rel="noopener noreferrer"
+                            className="underline hover:text-amber-300">metamask.io에서 설치</a>
                         </p>
                       ) : wallet.error ? (
                         <p className="text-xs text-destructive mb-2">
