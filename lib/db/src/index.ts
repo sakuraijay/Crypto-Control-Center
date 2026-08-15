@@ -30,6 +30,10 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         ADD COLUMN IF NOT EXISTS size_in_usd         numeric(18,4);
     `,
   },
+  {
+    name: "0002_ai_full_json",
+    sql: `ALTER TABLE ai_decisions ADD COLUMN IF NOT EXISTS full_json text;`,
+  },
   // Add future migrations here in chronological order.
 ];
 

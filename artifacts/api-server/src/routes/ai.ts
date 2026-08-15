@@ -90,6 +90,7 @@ router.post("/ai/decisions", async (req, res) => {
         executionOutcome: String(b.executionOutcome  ?? "PENDING"),
         pnl:              b.pnl         != null ? Number(b.pnl)         : null,
         durationMs:       b.durationMs  != null ? Number(b.durationMs)  : null,
+        fullJson:         b.fullJson    ? String(b.fullJson)            : null,
       })
       .returning();
     res.status(201).json(inserted);

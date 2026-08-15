@@ -10,6 +10,10 @@ export type { StreamStatus };
 
 const WL_KEY = '@ft_watchlist_v2'; // v2 = GMX symbols (no USDT suffix)
 
+const API_BASE = process.env.EXPO_PUBLIC_DOMAIN
+  ? `https://${process.env.EXPO_PUBLIC_DOMAIN}/api-server/api`
+  : '/api-server/api';
+
 export interface WatchlistSymbol {
   symbol: string;          // GMX index symbol: "ETH", "BTC"
   displaySymbol: string;   // "ETH/USD"
@@ -106,6 +110,28 @@ export function WatchlistProvider({ children }: { children: React.ReactNode }) {
       }));
     });
   }, [symbolsList]);
+
+  // ── Fetch GMX 24h price change on mount + every 5 min ────────────
+  useEffect(() => {
+    const fetch24h = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/gmx/change24h`);
+        if (!res.ok) return;
+        const data = await res.json() as { symbol: string; change24hPct: number }[];
+        if (!Array.isArray(data) || data.length === 0) return;
+        const changeMap = new Map(data.map(d => [d.symbol, d.change24hPct]));
+        setSymbols(prev =>
+          prev.map(w => {
+            const change = changeMap.get(w.symbol);
+            return change !== undefined ? { ...w, change24h: change } : w;
+          })
+        );
+      } catch { /* non-fatal — keeps existing value */ }
+    };
+    void fetch24h();
+    const id = setInterval(fetch24h, 5 * 60_000);
+    return () => clearInterval(id);
+  }, []);
 
   // ── Strategy score simulation (independent of price feed) ────────
   useEffect(() => {

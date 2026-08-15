@@ -156,27 +156,38 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
             id: number; ts: string; symbol: string; direction: string;
             confidence: number; rationale: string; riskResult: string;
             riskNote?: string | null; executionOutcome: string;
+            fullJson?: string | null;
           }>;
         };
         if (!decisions?.length) return;
         const opStateMap: Record<string, AiOperatingState> = {
           LONG: 'LONG', SHORT: 'SHORT', NO_TRADE: 'CASH',
         };
-        const seeded = decisions.map((row): AiEngineDecision => ({
-          id: String(row.id), cycleNumber: 0, createdAt: row.ts,
-          operatingState: opStateMap[row.direction] ?? 'CASH',
-          prevState: 'CASH', stateChanged: false,
-          selectedSymbols: row.symbol ? [row.symbol] : [],
-          primarySymbol: row.symbol || null,
-          confidence: Math.round((row.confidence ?? 0) * 100),
-          marketCondition: 'RANGING', riskLevel: 'MEDIUM',
-          symbolAnalyses: [], marketRankings: [],
-          executionType: 'hold', entryStyle: 'none',
-          stateRationale: row.rationale ?? '', reasoning: [],
-          riskApproved: row.riskResult === 'APPROVED',
-          riskVetoReason: row.riskNote ?? undefined,
-          paperExecuted: row.executionOutcome === 'SIMULATED',
-        }));
+        const seeded = decisions.map((row): AiEngineDecision => {
+          // Full-fidelity replay: if full JSON was persisted, deserialise it directly
+          if (row.fullJson) {
+            try {
+              const parsed = JSON.parse(row.fullJson) as AiEngineDecision;
+              return { ...parsed, id: String(row.id) };
+            } catch { /* fall through to minimal conversion */ }
+          }
+          // Minimal conversion from scalar DB columns (older rows / VPS-originated)
+          return {
+            id: String(row.id), cycleNumber: 0, createdAt: row.ts,
+            operatingState: opStateMap[row.direction] ?? 'CASH',
+            prevState: 'CASH', stateChanged: false,
+            selectedSymbols: row.symbol ? [row.symbol] : [],
+            primarySymbol: row.symbol || null,
+            confidence: Math.round((row.confidence ?? 0) * 100),
+            marketCondition: 'RANGING', riskLevel: 'MEDIUM',
+            symbolAnalyses: [], marketRankings: [],
+            executionType: 'hold', entryStyle: 'none',
+            stateRationale: row.rationale ?? '', reasoning: [],
+            riskApproved: row.riskResult === 'APPROVED',
+            riskVetoReason: row.riskNote ?? undefined,
+            paperExecuted: row.executionOutcome === 'SIMULATED',
+          };
+        });
         setDecisionHistory(seeded);
       } catch { /* non-fatal */ }
     })();
@@ -291,6 +302,8 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
           executionOutcome: decision.paperExecuted ? 'SIMULATED' : 'PENDING',
           operatingState: decision.operatingState,
           cycleNumber: decision.cycleNumber,
+          // Full decision JSON — enables lossless replay after page refresh
+          fullJson: JSON.stringify(decision),
         }),
       });
     } catch { /* non-fatal */ }
@@ -316,13 +329,18 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
   }, []);
 
   // ── Forward approved order to VPS (with query-param config + 1 retry) ───────
-  const forwardToVps = useCallback(async (decision: AiEngineDecision): Promise<{ ok: boolean; error?: string }> => {
-    if (!vpsConfig.host?.trim()) return { ok: false, error: 'VPS not configured — set host in Settings' };
+  const forwardToVps = useCallback(async (
+    decision: AiEngineDecision,
+    snapshot?: { host: string; port: string; useSSL: boolean },
+  ): Promise<{ ok: boolean; error?: string }> => {
+    // Use config captured at queue time (snapshot) so a host change mid-approval doesn't mis-route the order
+    const target = snapshot ?? { host: vpsConfig.host ?? '', port: vpsConfig.port ?? '8080', useSSL: vpsConfig.useSSL ?? false };
+    if (!target.host?.trim()) return { ok: false, error: 'VPS not configured — set host in Settings' };
 
     const params = new URLSearchParams({
-      host: vpsConfig.host,
-      port: vpsConfig.port || '8080',
-      ssl:  String(vpsConfig.useSSL ?? false),
+      host: target.host,
+      port: target.port || '8080',
+      ssl:  String(target.useSSL ?? false),
     });
     const url  = `/api-server/api/vps/execute?${params}`;
     const body = JSON.stringify({
@@ -371,8 +389,8 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
       a.id === id ? { ...a, status: 'APPROVED' as ApprovalStatus, approvedAt: new Date().toISOString() } : a
     ));
 
-    // Forward to VPS
-    const result = await forwardToVps(approval.decision);
+    // Forward to VPS — use snapshotted config to prevent mis-routing on host change
+    const result = await forwardToVps(approval.decision, approval.vpsSnapshot);
     setPendingApprovals(prev => prev.map(a =>
       a.id === id ? { ...a, vpsForwarded: result.ok, vpsError: result.error } : a
     ));
@@ -450,6 +468,12 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
               createdAt: now,
               expiresAt: new Date(Date.now() + APPROVAL_TIMEOUT_MS).toISOString(),
               status: 'PENDING',
+              // Snapshot VPS config at queue time — prevents mis-routing if operator changes host while approval is pending
+              vpsSnapshot: {
+                host:   vpsConfig.host   ?? '',
+                port:   vpsConfig.port   ?? '8080',
+                useSSL: vpsConfig.useSSL ?? false,
+              },
             };
             setPendingApprovals(prev => [...prev, approval]);
           }

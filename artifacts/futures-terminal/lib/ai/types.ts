@@ -144,6 +144,8 @@ export interface PendingLiveApproval {
   rejectionReason?: string;
   vpsForwarded?: boolean;
   vpsError?: string;
+  /** VPS config captured at queue time — prevents mis-routing if operator changes host during approval window */
+  vpsSnapshot?: { host: string; port: string; useSSL: boolean };
 }
 
 export const APPROVAL_TIMEOUT_MS = 5 * 60 * 1000;
