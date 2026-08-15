@@ -163,3 +163,14 @@ ai.ts    — POST /api/ai/decisions (persist AI decision log)
 - GMX V2 on Arbitrum One is the **only** exchange. No Binance. No USDT pairs.
 - Collateral is USDC. Sizing is always USD-denominated (`sizeInUsd`).
 - Daily target is a monitoring KPI only — never enforced by logic.
+
+## Development focus (current priority)
+
+**Desktop-first web app only.** Do not add new mobile (Expo/React Native) features.
+
+- Optimize `artifacts/futures-web/` for desktop monitors (1280px+ / laptop browsers).
+- Responsive CSS is kept as a basic fallback only — do **not** actively optimize for mobile.
+- The `artifacts/futures-terminal/` (Expo) codebase is preserved but frozen — no new UI/nav/push-notification work.
+- Priority areas: dashboard usability, GMX V2 market/position/order flows, AI decision logs, risk controls, emergency controls, Internal Executor/Reserved VM execution health, Paper/Testnet/LIVE modes, GMX One-Click connection status.
+- Internal Replit Executor (`/api/executor/*`) is the default execution path. External VPS is optional/advanced.
+- Mobile-specific tasks (push notifications, mobile Settings UI) are cancelled — focus is the web terminal.

@@ -1,30 +1,52 @@
+/**
+ * Dashboard — primary desktop operator surface.
+ *
+ * Desktop-first layout (1280px+):
+ *   Top row:    AI Engine state (7/12) │ Execution Engine + Performance (5/12)
+ *   KPI rows:   Account metrics + Quick Controls
+ *   Data grid:  Equity curve + Positions table (2/3) │ Signals + Strategy logs (1/3)
+ */
+
 import { useState } from 'react';
 import { useTradingContext, useWatchlistContext, useAppContext, useStrategyContext } from '@/lib/context';
 import { Card } from '@/components/ui/card';
 import { Switch } from '@/components/ui/switch';
 import { Button } from '@/components/ui/button';
 import { Link } from 'wouter';
-import { ArrowRight, TrendingUp, TrendingDown, Activity, Clock, ShieldAlert, Layers, Plus } from 'lucide-react';
+import {
+  ArrowRight, TrendingUp, TrendingDown, Activity, Clock,
+  ShieldAlert, Layers, Plus, Target,
+} from 'lucide-react';
 import { format } from 'date-fns';
 import { AreaChart, Area, XAxis, Tooltip, ResponsiveContainer } from 'recharts';
 import { NewOrderDrawer } from '@/components/trading/NewOrderDrawer';
-import { VpsStatusPanel } from '@/components/vps/VpsStatusPanel';
 import { DailyTargetCard } from '@/components/dashboard/DailyTargetCard';
 import { AiStateCard } from '@/components/dashboard/AiStateCard';
 import { LiveApprovalCard } from '@/components/dashboard/LiveApprovalCard';
 import { SystemHealthBanner } from '@/components/dashboard/SystemHealthBanner';
 import { AiMarketRankingCard } from '@/components/dashboard/AiMarketRankingCard';
+import { ExecutorStatusWidget } from '@/components/dashboard/ExecutorStatusWidget';
 import { cn } from '@/lib/utils';
 
-function KpiCard({ label, value, sub, color }: { label: string; value: string; sub?: string; color?: string }) {
+// ── KPI card ─────────────────────────────────────────────────────────────────
+
+function KpiCard({ label, value, sub, color }: {
+  label: string; value: string; sub?: string; color?: string;
+}) {
   return (
     <Card className="p-4 flex flex-col justify-between min-w-0">
-      <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider truncate">{label}</span>
-      <span className={cn('text-2xl font-mono font-bold mt-1 truncate', color ?? 'text-foreground')}>{value}</span>
+      <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider truncate">
+        {label}
+      </span>
+      <span className={cn('text-2xl font-mono font-bold mt-1 truncate', color ?? 'text-foreground')}>
+        {value}
+      </span>
       {sub && <span className="text-[10px] text-muted-foreground mt-0.5 truncate">{sub}</span>}
     </Card>
   );
 }
+
+// ── Chart tooltip ─────────────────────────────────────────────────────────────
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function ChartTooltip({ active, payload }: any) {
@@ -37,6 +59,8 @@ function ChartTooltip({ active, payload }: any) {
   );
 }
 
+// ── Dashboard ─────────────────────────────────────────────────────────────────
+
 export default function Dashboard() {
   const { account, positions, logs, todayStats, equityHistory } = useTradingContext();
   const { watchlist } = useWatchlistContext();
@@ -45,12 +69,12 @@ export default function Dashboard() {
 
   const [orderOpen, setOrderOpen] = useState(false);
 
-  const minScore = (indicators.find(i => i.id === 'combined')?.params.minScore as number) ?? 60;
-  const signals = watchlist.filter(w => Math.abs(w.combinedScore) >= minScore / 2);
-  const recentLogs = logs.slice(0, 6);
+  const minScore  = (indicators.find(i => i.id === 'combined')?.params.minScore as number) ?? 60;
+  const signals   = watchlist.filter(w => Math.abs(w.combinedScore) >= minScore / 2);
+  const recentLogs = logs.slice(0, 8);
 
-  const winRate = todayStats.count > 0 ? ((todayStats.wins / todayStats.count) * 100).toFixed(0) : '—';
-  const equityData = equityHistory.slice(-48);
+  const winRate   = todayStats.count > 0 ? ((todayStats.wins / todayStats.count) * 100).toFixed(0) : '—';
+  const equityData = equityHistory.slice(-60);  // ~1 h at 60 s intervals
   const isEquityUp = equityData.length >= 2
     ? equityData[equityData.length - 1].equity >= equityData[0].equity
     : true;
@@ -58,29 +82,31 @@ export default function Dashboard() {
   return (
     <div className="flex flex-col gap-5 animate-in fade-in duration-500">
 
-      {/* ── System health / fail-closed warning ──────────────────────────────── */}
+      {/* ── Full-width alerts ─────────────────────────────────────────────── */}
       <SystemHealthBanner />
-
-      {/* ── Live operator approval gate (shown in LIVE_TRADING mode) ────────── */}
       <LiveApprovalCard />
 
-      {/* ── AI 5-State Engine Card (primary monitoring surface) ──────────────── */}
-      <AiStateCard />
+      {/* ── Primary monitoring: 2-column desktop grid ─────────────────────── */}
+      <div className="grid grid-cols-12 gap-5 items-start">
 
-      {/* ── AI Market Rankings ────────────────────────────────────────────────── */}
-      <AiMarketRankingCard />
+        {/* Left 7/12 — AI engine state (primary operator surface) */}
+        <div className="col-span-7 flex flex-col gap-4">
+          <AiStateCard />
+          <AiMarketRankingCard />
+        </div>
 
-      {/* ── VPS Engine Status ──────────────────────────────────────────────────── */}
-      <VpsStatusPanel />
+        {/* Right 5/12 — Execution health + daily performance */}
+        <div className="col-span-5 flex flex-col gap-4">
+          <ExecutorStatusWidget />
+          <DailyTargetCard />
+        </div>
+      </div>
 
-      {/* ── Daily Performance KPI ─────────────────────────────────────────────── */}
-      <DailyTargetCard />
-
-      {/* ── Row 1: Account KPIs ── */}
+      {/* ── Account KPI bar ───────────────────────────────────────────────── */}
       <div className="grid grid-cols-4 gap-3">
         <KpiCard
           label="Total Balance"
-          value={`$${account.balance.toLocaleString('en-US', { minimumFractionDigits: 2 })}`}
+          value={`$${account.balance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
         />
         <KpiCard
           label="Unrealized PnL"
@@ -93,21 +119,29 @@ export default function Dashboard() {
           color={account.marginRatio > 0.7 ? 'text-[var(--color-short)]' : account.marginRatio > 0.5 ? 'text-[var(--color-warning)]' : undefined}
           sub={`$${account.availableBalance.toFixed(0)} available`}
         />
+        {/* Quick Controls — emergency actions always visible */}
         <Card className="p-4 flex flex-col justify-between border-border bg-card/50">
-          <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">Quick Controls</span>
+          <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">
+            Quick Controls
+          </span>
           <div className="flex flex-col gap-2 mt-2">
             <div className="flex items-center justify-between">
               <span className="text-xs text-foreground">Stop New Orders</span>
               <Switch checked={stopNewOrders} onCheckedChange={toggleStopNewOrders} />
             </div>
-            <Button onClick={triggerEmergencyStop} variant="destructive" size="sm" className="w-full font-bold tracking-widest text-[10px] h-7">
+            <Button
+              onClick={triggerEmergencyStop}
+              variant="destructive"
+              size="sm"
+              className="w-full font-bold tracking-widest text-[10px] h-7"
+            >
               <ShieldAlert className="w-3 h-3 mr-1.5" /> EMERGENCY STOP
             </Button>
           </div>
         </Card>
       </div>
 
-      {/* ── Row 2: Today KPIs ── */}
+      {/* ── Performance KPI bar ───────────────────────────────────────────── */}
       <div className="grid grid-cols-4 gap-3">
         <KpiCard
           label="Today Realized"
@@ -118,12 +152,12 @@ export default function Dashboard() {
           label="Win Rate"
           value={winRate === '—' ? '—' : `${winRate}%`}
           sub={todayStats.count > 0 ? `${todayStats.wins}W / ${todayStats.losses}L` : 'No trades today'}
-          color={parseInt(winRate) >= 50 ? 'text-[var(--color-long)]' : winRate === '—' ? undefined : 'text-[var(--color-short)]'}
+          color={Number(winRate) >= 50 ? 'text-[var(--color-long)]' : winRate === '—' ? undefined : 'text-[var(--color-short)]'}
         />
         <KpiCard
-          label="Trades Today"
-          value={String(todayStats.count)}
-          sub={`${positions.length} positions open`}
+          label="Positions Open"
+          value={String(positions.length)}
+          sub={`${todayStats.count} trades today`}
         />
         <KpiCard
           label="Weekly PnL"
@@ -132,26 +166,31 @@ export default function Dashboard() {
         />
       </div>
 
-      {/* ── Main content ── */}
+      {/* ── Data grid: charts/tables left, signals/logs right ────────────── */}
       <div className="grid grid-cols-3 gap-5">
+
+        {/* Left 2/3 — equity + positions */}
         <div className="col-span-2 flex flex-col gap-5">
 
-          {/* Equity chart */}
+          {/* Equity curve */}
           <Card className="p-0 overflow-hidden">
             <div className="p-4 border-b border-border flex items-center justify-between bg-card/50">
               <h3 className="font-semibold text-sm flex items-center gap-2">
                 <Activity className="w-4 h-4 text-primary" /> Equity Curve
               </h3>
-              <span className={cn('text-xs font-mono', isEquityUp ? 'text-[var(--color-long)]' : 'text-[var(--color-short)]')}>
-                {equityData.length > 0 && `$${equityData[equityData.length - 1].equity.toFixed(2)}`}
-              </span>
+              <div className="flex items-center gap-3">
+                <span className="text-[10px] text-muted-foreground">last {equityData.length} cycles</span>
+                <span className={cn('text-xs font-mono font-bold', isEquityUp ? 'text-[var(--color-long)]' : 'text-[var(--color-short)]')}>
+                  {equityData.length > 0 ? `$${equityData[equityData.length - 1].equity.toFixed(2)}` : '—'}
+                </span>
+              </div>
             </div>
-            <div className="h-44 px-2 pt-3 pb-0">
+            <div className="h-60 px-2 pt-3 pb-0">
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={equityData} margin={{ top: 0, right: 8, bottom: 0, left: 8 }}>
                   <defs>
                     <linearGradient id="equityGrad" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor={isEquityUp ? 'var(--color-long)' : 'var(--color-short)'} stopOpacity={0.25} />
+                      <stop offset="5%"  stopColor={isEquityUp ? 'var(--color-long)' : 'var(--color-short)'} stopOpacity={0.3} />
                       <stop offset="95%" stopColor={isEquityUp ? 'var(--color-long)' : 'var(--color-short)'} stopOpacity={0} />
                     </linearGradient>
                   </defs>
@@ -175,7 +214,7 @@ export default function Dashboard() {
             </div>
           </Card>
 
-          {/* Positions mini-table */}
+          {/* Active positions table */}
           <Card className="flex flex-col overflow-hidden">
             <div className="p-4 border-b border-border flex items-center justify-between bg-card/50">
               <h3 className="font-semibold text-sm flex items-center gap-2">
@@ -190,58 +229,86 @@ export default function Dashboard() {
                 </Link>
               </div>
             </div>
-            <div className="p-0">
-              {positions.length === 0 ? (
-                <div className="py-8 text-center text-muted-foreground text-sm">No open positions</div>
-              ) : (
-                <table className="w-full text-sm">
-                  <thead className="bg-secondary/50">
-                    <tr>
-                      <th className="text-left font-medium text-muted-foreground py-2 px-4">Symbol</th>
-                      <th className="text-right font-medium text-muted-foreground py-2 px-4">Size</th>
-                      <th className="text-right font-medium text-muted-foreground py-2 px-4">Entry</th>
-                      <th className="text-right font-medium text-muted-foreground py-2 px-4">Mark</th>
-                      <th className="text-right font-medium text-muted-foreground py-2 px-4">PnL / ROE</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-border">
-                    {positions.slice(0, 5).map(pos => (
-                      <tr key={pos.id} className="hover:bg-muted/50 transition-colors">
-                        <td className="py-3 px-4 flex items-center gap-2">
-                          <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${pos.side === 'LONG' ? 'bg-[var(--color-long)]/20 text-[var(--color-long)]' : 'bg-[var(--color-short)]/20 text-[var(--color-short)]'}`}>
+            {positions.length === 0 ? (
+              <div className="py-8 text-center text-muted-foreground text-sm">No open positions</div>
+            ) : (
+              <table className="w-full text-sm">
+                <thead className="bg-secondary/50">
+                  <tr>
+                    <th className="text-left font-medium text-muted-foreground py-2 px-4 text-xs">Symbol</th>
+                    <th className="text-right font-medium text-muted-foreground py-2 px-4 text-xs">Size USD</th>
+                    <th className="text-right font-medium text-muted-foreground py-2 px-4 text-xs">Entry</th>
+                    <th className="text-right font-medium text-muted-foreground py-2 px-4 text-xs">Mark</th>
+                    <th className="text-right font-medium text-muted-foreground py-2 px-4 text-xs">TP / SL</th>
+                    <th className="text-right font-medium text-muted-foreground py-2 px-4 text-xs">PnL / ROE</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {positions.slice(0, 8).map(pos => (
+                    <tr key={pos.id} className="hover:bg-muted/40 transition-colors">
+                      <td className="py-2.5 px-4">
+                        <div className="flex items-center gap-2">
+                          <span className={cn(
+                            'text-[10px] font-bold px-1.5 py-0.5 rounded',
+                            pos.side === 'LONG'
+                              ? 'bg-[var(--color-long)]/20 text-[var(--color-long)]'
+                              : 'bg-[var(--color-short)]/20 text-[var(--color-short)]',
+                          )}>
                             {pos.side}
                           </span>
-                          <span className="font-bold">{pos.displaySymbol ?? pos.symbol}</span>
-                          <span className="text-xs text-muted-foreground">{pos.leverage}x</span>
-                        </td>
-                        <td className="py-3 px-4 text-right font-mono">${pos.sizeInUsd.toFixed(0)}</td>
-                        <td className="py-3 px-4 text-right font-mono">{pos.entryPrice.toFixed(2)}</td>
-                        <td className="py-3 px-4 text-right font-mono">{pos.markPrice.toFixed(2)}</td>
-                        <td className="py-3 px-4 text-right">
-                          <div className={`font-mono font-medium ${pos.unrealizedPnl >= 0 ? 'text-[var(--color-long)]' : 'text-[var(--color-short)]'}`}>
-                            {pos.unrealizedPnl >= 0 ? '+' : ''}{pos.unrealizedPnl.toFixed(2)}
-                          </div>
-                          <div className={`text-xs font-mono ${pos.roe >= 0 ? 'text-[var(--color-long)]' : 'text-[var(--color-short)]'}`}>
-                            {pos.roe >= 0 ? '+' : ''}{pos.roe.toFixed(2)}%
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </div>
+                          <span className="font-bold text-xs">{pos.displaySymbol ?? pos.symbol}</span>
+                          <span className="text-[10px] text-muted-foreground">{pos.leverage}x</span>
+                        </div>
+                      </td>
+                      <td className="py-2.5 px-4 text-right font-mono text-xs">
+                        ${pos.sizeInUsd.toFixed(0)}
+                        <div className="text-[10px] text-muted-foreground">
+                          ${pos.collateralUsd?.toFixed(0) ?? '—'} coll.
+                        </div>
+                      </td>
+                      <td className="py-2.5 px-4 text-right font-mono text-xs">{pos.entryPrice.toFixed(2)}</td>
+                      <td className="py-2.5 px-4 text-right font-mono text-xs">{pos.markPrice.toFixed(2)}</td>
+                      <td className="py-2.5 px-4 text-right text-[10px] font-mono">
+                        {pos.tpPrice != null
+                          ? <span className="text-[var(--color-long)]">TP {pos.tpPrice.toFixed(1)}</span>
+                          : <span className="text-muted-foreground">—</span>
+                        }
+                        <br />
+                        {pos.slPrice != null
+                          ? <span className="text-[var(--color-short)]">SL {pos.slPrice.toFixed(1)}</span>
+                          : <span className="text-muted-foreground">—</span>
+                        }
+                      </td>
+                      <td className="py-2.5 px-4 text-right">
+                        <div className={cn(
+                          'font-mono font-medium text-xs',
+                          pos.unrealizedPnl >= 0 ? 'text-[var(--color-long)]' : 'text-[var(--color-short)]',
+                        )}>
+                          {pos.unrealizedPnl >= 0 ? '+' : ''}{pos.unrealizedPnl.toFixed(2)}
+                        </div>
+                        <div className={cn(
+                          'text-[10px] font-mono',
+                          pos.roe >= 0 ? 'text-[var(--color-long)]' : 'text-[var(--color-short)]',
+                        )}>
+                          {pos.roe >= 0 ? '+' : ''}{pos.roe.toFixed(2)}%
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
           </Card>
         </div>
 
-        {/* ── Right column ── */}
+        {/* Right 1/3 — signals + logs */}
         <div className="col-span-1 flex flex-col gap-5">
 
-          {/* Active signals */}
+          {/* Active market signals */}
           <Card className="flex flex-col overflow-hidden">
             <div className="p-4 border-b border-border flex items-center justify-between bg-card/50">
               <h3 className="font-semibold text-sm flex items-center gap-2">
-                <Activity className="w-4 h-4 text-primary" /> Signals
+                <Target className="w-4 h-4 text-primary" /> Signals
               </h3>
               <div className="flex items-center gap-2">
                 <span className="text-[10px] text-muted-foreground">min {(minScore / 2).toFixed(0)}</span>
@@ -250,58 +317,67 @@ export default function Dashboard() {
                 </Link>
               </div>
             </div>
-            <div className="p-0">
-              {signals.length === 0 ? (
-                <div className="py-6 text-center text-muted-foreground text-xs">No signals above threshold</div>
-              ) : (
-                <div className="divide-y divide-border">
-                  {signals.slice(0, 6).map(sig => {
-                    const bias = sig.combinedScore > 0 ? 'LONG' : 'SHORT';
-                    const colorVar = bias === 'LONG' ? 'var(--color-long)' : 'var(--color-short)';
-                    const Icon = bias === 'LONG' ? TrendingUp : TrendingDown;
-                    return (
-                      <div key={sig.symbol} className="flex items-center justify-between px-4 py-2.5 hover:bg-muted/30 transition-colors">
-                        <div className="flex items-center gap-2">
-                          <Icon className="w-3.5 h-3.5" style={{ color: colorVar }} />
-                          <div>
-                            <div className="font-bold text-xs">{sig.symbol.replace('USDT', '')}</div>
-                            <div className="text-[10px] text-muted-foreground font-mono">{sig.price.toFixed(4)}</div>
+            {signals.length === 0 ? (
+              <div className="py-6 text-center text-muted-foreground text-xs">No signals above threshold</div>
+            ) : (
+              <div className="divide-y divide-border">
+                {signals.slice(0, 8).map(sig => {
+                  const bias     = sig.combinedScore > 0 ? 'LONG' : 'SHORT';
+                  const colorVar = bias === 'LONG' ? 'var(--color-long)' : 'var(--color-short)';
+                  const Icon     = bias === 'LONG' ? TrendingUp : TrendingDown;
+                  return (
+                    <div key={sig.symbol} className="flex items-center justify-between px-4 py-2.5 hover:bg-muted/30 transition-colors">
+                      <div className="flex items-center gap-2">
+                        <Icon className="w-3.5 h-3.5" style={{ color: colorVar }} />
+                        <div>
+                          <div className="font-bold text-xs">{sig.symbol.replace('USDT', '')}</div>
+                          <div className="text-[10px] text-muted-foreground font-mono">
+                            ${sig.price.toLocaleString('en-US', { maximumFractionDigits: 2 })}
                           </div>
                         </div>
-                        <div className="text-right">
-                          <div className="text-[10px] font-bold" style={{ color: colorVar }}>{bias}</div>
-                          <div className="text-xs font-mono">{sig.combinedScore >= 0 ? '+' : ''}{sig.combinedScore.toFixed(0)}</div>
-                        </div>
                       </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
+                      <div className="text-right">
+                        <div className="text-[10px] font-bold" style={{ color: colorVar }}>{bias}</div>
+                        <div className="text-xs font-mono">{sig.combinedScore >= 0 ? '+' : ''}{sig.combinedScore.toFixed(0)}</div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </Card>
 
-          {/* Strategy logs */}
+          {/* Strategy log */}
           <Card className="flex flex-col flex-1 overflow-hidden">
             <div className="p-4 border-b border-border flex items-center justify-between bg-card/50">
               <h3 className="font-semibold text-sm flex items-center gap-2">
-                <Clock className="w-4 h-4 text-primary" /> Strategy Logs
+                <Clock className="w-4 h-4 text-primary" /> Strategy Log
               </h3>
               <Link href="/history" className="text-xs text-primary hover:underline">Full Log</Link>
             </div>
-            <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-3">
-              {recentLogs.map(log => (
-                <div key={log.id} className="flex flex-col gap-1 pb-3 border-b border-border last:border-0 last:pb-0">
-                  <div className="flex items-center justify-between">
-                    <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
-                      log.level === 'INFO' ? 'bg-blue-500/20 text-blue-400' :
-                      log.level === 'WARN' ? 'bg-[var(--color-warning)]/20 text-[var(--color-warning)]' :
-                      'bg-[var(--color-long)]/20 text-[var(--color-long)]'
-                    }`}>{log.level}</span>
-                    <span className="text-[10px] text-muted-foreground font-mono">{format(log.timestamp, 'HH:mm:ss')}</span>
+            <div className="overflow-y-auto p-4 flex flex-col gap-3 max-h-96">
+              {recentLogs.length === 0 ? (
+                <div className="py-6 text-center text-muted-foreground text-xs">No entries yet</div>
+              ) : (
+                recentLogs.map(log => (
+                  <div key={log.id} className="flex flex-col gap-1 pb-3 border-b border-border last:border-0 last:pb-0">
+                    <div className="flex items-center justify-between">
+                      <span className={cn(
+                        'text-[9px] font-bold px-1.5 py-0.5 rounded',
+                        log.level === 'INFO'  ? 'bg-blue-500/20 text-blue-400' :
+                        log.level === 'WARN'  ? 'bg-[var(--color-warning)]/20 text-[var(--color-warning)]' :
+                                                'bg-[var(--color-long)]/20 text-[var(--color-long)]',
+                      )}>
+                        {log.level}
+                      </span>
+                      <span className="text-[10px] text-muted-foreground font-mono">
+                        {format(log.timestamp, 'HH:mm:ss')}
+                      </span>
+                    </div>
+                    <span className="text-xs leading-tight text-foreground/90">{log.message}</span>
                   </div>
-                  <span className="text-xs leading-tight text-foreground/90">{log.message}</span>
-                </div>
-              ))}
+                ))
+              )}
             </div>
           </Card>
         </div>
