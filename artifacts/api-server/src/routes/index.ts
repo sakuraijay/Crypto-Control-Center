@@ -5,6 +5,7 @@ import dataRouter from "./data";
 import aiRouter from "./ai";
 import approvalsRouter from "./approvals";
 import executorRouter from "./executor";
+import walletDiagnosticRouter from "./wallet-diagnostic";
 
 const router: IRouter = Router();
 
@@ -14,5 +15,6 @@ router.use(dataRouter);
 router.use(aiRouter);
 router.use(approvalsRouter);
 router.use(executorRouter);
+router.use(walletDiagnosticRouter);
 
 export default router;

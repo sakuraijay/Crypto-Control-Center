@@ -137,6 +137,22 @@ export function WalletProvider({ children }: { children: ReactNode }) {
           ? usdcRawToFormatted(usdcRaw)
           : '0.00',
       }));
+
+      // ── Privacy-preserving diagnostic snapshot (fire-and-forget) ──────────
+      // Sends ONLY boolean fetch-status flags — no balance amounts ever.
+      void fetch('/api/wallet/diagnostic', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          walletConnected:    true,
+          addressFingerprint: `${address.slice(0, 6)}\u2026${address.slice(-4)}`,
+          chainId:            42161,
+          isArbitrum:         true,
+          usdcFetchOk:        !!(usdcRaw && usdcRaw !== '0x'),
+          ethFetchOk:         !!ethWei,
+          lastRefreshAt:      new Date().toISOString(),
+        }),
+      }).catch(() => {});
     } catch {
       // 잔고 조회 실패는 non-fatal — 주소는 유지
     }

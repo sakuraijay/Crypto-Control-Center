@@ -395,8 +395,33 @@ export function GmxAccountProvider({ children }: { children: ReactNode }) {
         lastUpdated:        now,
         lastFetchMs:        Date.now() - fetchStart,
       });
+
+      // ── Diagnostic snapshot — subgraph result only, no financial amounts ──
+      void fetch('/api/wallet/diagnostic', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          walletConnected:    true,
+          addressFingerprint: `${address.slice(0, 6)}\u2026${address.slice(-4)}`,
+          subgraphOk:         true,
+          positionCount:      positions.length,
+          lastRefreshAt:      now.toISOString(),
+        }),
+      }).catch(() => {});
     } catch (err: unknown) {
       if ((err as Error)?.name === 'AbortError') return; // cancelled, don't update state
+
+      // Diagnostic: subgraph failure (fire-and-forget, no financial data)
+      void fetch('/api/wallet/diagnostic', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          subgraphOk:    false,
+          positionCount: 0,
+          lastRefreshAt: new Date().toISOString(),
+        }),
+      }).catch(() => {});
+
       console.warn('[GmxAccount] fetch failed:', err);
       setState(prev => ({
         ...prev,

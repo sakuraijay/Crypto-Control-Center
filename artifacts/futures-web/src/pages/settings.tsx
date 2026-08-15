@@ -117,6 +117,52 @@ function formatElapsed(ms: number): string {
   return `${Math.floor(m / 60)}시간 전`;
 }
 
+// ── useWalletDiagnostic — polls GET /api/wallet/diagnostic every 30 s ─────────
+
+interface WalletDiagSnapshot {
+  walletConnected:    boolean;
+  addressFingerprint: string | null;
+  chainId:            number | null;
+  isArbitrum:         boolean;
+  usdcFetchOk:        boolean;
+  ethFetchOk:         boolean;
+  subgraphOk:         boolean;
+  positionCount:      number;
+  lastRefreshAt:      string;
+  receivedAt:         string;
+  stale:              boolean;
+}
+
+interface WalletDiagResponse {
+  present: boolean;
+  stale:   boolean;
+  ageMs:   number;
+  snapshot: WalletDiagSnapshot | null;
+}
+
+function useWalletDiagnostic() {
+  const [data, setData]       = useState<WalletDiagResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await fetch('/api/wallet/diagnostic');
+      if (res.ok) setData(await res.json() as WalletDiagResponse);
+    } catch { /* non-fatal */ }
+    finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+    timerRef.current = setInterval(() => void refresh(), AUTO_REFRESH_MS);
+    return () => { if (timerRef.current) clearInterval(timerRef.current); };
+  }, [refresh]);
+
+  return { data, loading, refresh };
+}
+
 // ── Main settings page ────────────────────────────────────────────────────────
 
 export default function Settings() {
@@ -124,6 +170,7 @@ export default function Settings() {
   const { logout } = useAuthContext();
   const { clearAllPositions, positions, closedTrades, consecutiveLosses } = useTradingContext();
   const { health, loading: healthLoading, refresh: refreshHealth, lastSuccessAt, consecutiveFailures } = useExecutorHealth();
+  const { data: diagData, loading: diagLoading, refresh: refreshDiag } = useWalletDiagnostic();
   const wallet = useWallet();
   const gmx    = useGmxAccount();
   const { notificationPermission, requestNotificationPermission, sendTestNotification, weeklyRealizedPnl } = useAiEngine();
@@ -1662,6 +1709,70 @@ export default function Settings() {
               </span>
             </div>
           ))}
+        </Card>
+      </section>
+
+      {/* ── Server Wallet Diagnostic ── */}
+      <section className="flex flex-col gap-3">
+        <h2 className="text-xs font-bold uppercase tracking-wider text-muted-foreground px-1 flex items-center gap-2">
+          <Server className="w-3.5 h-3.5" />
+          Server Wallet Diagnostic
+          <span className="ml-auto text-[10px] font-normal normal-case tracking-normal text-muted-foreground/50">
+            서버 메모리 전용 · 재시작 시 초기화 · 잔고 미전송
+          </span>
+        </h2>
+        <Card className="overflow-hidden">
+          {/* Header: stale indicator + manual refresh */}
+          <div className="flex items-center justify-between px-4 py-2.5 border-b border-border/40 bg-muted/10">
+            <div className="flex items-center gap-2 text-xs">
+              {diagData?.present ? (
+                diagData.stale
+                  ? <span className="flex items-center gap-1.5 text-amber-400"><AlertCircle className="w-3.5 h-3.5" />Stale — 90초 이상 갱신 없음</span>
+                  : <span className="flex items-center gap-1.5 text-[var(--color-long)]"><CheckCircle2 className="w-3.5 h-3.5" />Active</span>
+              ) : (
+                <span className="text-muted-foreground/50 text-[11px]">스냅샷 없음 — 지갑 연결 후 자동 수신</span>
+              )}
+            </div>
+            <Button size="sm" variant="ghost" onClick={refreshDiag} disabled={diagLoading} className="h-7 text-xs gap-1">
+              <RefreshCw className={cn('w-3 h-3', diagLoading && 'animate-spin')} />
+              Refresh
+            </Button>
+          </div>
+
+          {/* Diagnostic rows */}
+          {diagData?.snapshot ? (() => {
+            const s = diagData.snapshot;
+            const rows: { label: string; pass: boolean; note: string }[] = [
+              { label: 'Connected',       pass: s.walletConnected, note: s.addressFingerprint ?? '—' },
+              { label: 'Arbitrum 42161',  pass: s.isArbitrum,      note: s.chainId != null ? `Chain ${s.chainId}` : '—' },
+              { label: 'USDC read OK',    pass: s.usdcFetchOk,     note: s.usdcFetchOk ? '조회 성공' : '조회 실패' },
+              { label: 'ETH read OK',     pass: s.ethFetchOk,      note: s.ethFetchOk  ? '조회 성공' : '조회 실패' },
+              { label: 'GMX subgraph OK', pass: s.subgraphOk,      note: s.subgraphOk  ? '연결됨'   : '연결 불가' },
+              { label: 'Position count',  pass: true,              note: String(s.positionCount) },
+              {
+                label: 'Last seen',
+                pass:  !diagData.stale,
+                note:  diagData.ageMs != null ? formatElapsed(diagData.ageMs) : '—',
+              },
+            ];
+            return rows.map((item, i) => (
+              <div key={i} className={cn('flex items-center justify-between px-4 py-2.5 text-xs border-t border-border/40')}>
+                <div className="flex items-center gap-2.5">
+                  {item.pass
+                    ? <CheckCircle2 className="w-3.5 h-3.5 text-[var(--color-long)] shrink-0" />
+                    : <XCircle      className="w-3.5 h-3.5 text-[var(--color-short)] shrink-0" />}
+                  <span className={item.pass ? 'text-foreground' : 'text-muted-foreground'}>{item.label}</span>
+                </div>
+                <span className={cn('text-[10px] font-mono', item.pass ? 'text-[var(--color-long)]/70' : 'text-[var(--color-short)]/70')}>
+                  {item.note}
+                </span>
+              </div>
+            ));
+          })() : (
+            <div className="px-4 py-6 text-center text-xs text-muted-foreground/50">
+              지갑을 연결하면 첫 30초 갱신 시 진단 데이터가 표시됩니다.
+            </div>
+          )}
         </Card>
       </section>
 
