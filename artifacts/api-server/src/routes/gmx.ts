@@ -201,6 +201,30 @@ function ensurePoller() {
   setInterval(() => void refreshChange24h(), 5 * 60_000);
 }
 
+// ── Internal exports (for server-side worker — avoids HTTP overhead) ──────────
+
+/**
+ * Returns the latest cached price ticks, or null when the cache is empty.
+ * Used by the AI worker to read prices without an HTTP round-trip.
+ */
+export function getCachedPrices(): PriceTick[] | null {
+  return priceCache ? priceCache.data : null;
+}
+
+/**
+ * Returns the latest cached 24h change % map, or null when unavailable.
+ * Used by the AI worker to enrich indicator calculations.
+ */
+export function getCachedChange24h(): Record<string, number> | null {
+  return change24hCache ? change24hCache.data : null;
+}
+
+/**
+ * Ensures the background price poller is running.
+ * Safe to call multiple times — idempotent via pollerStarted guard.
+ */
+export { ensurePoller as ensureGmxPoller };
+
 // ── Routes ───────────────────────────────────────────────────────────────────
 
 /**

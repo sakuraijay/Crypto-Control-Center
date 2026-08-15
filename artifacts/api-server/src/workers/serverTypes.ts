@@ -1,0 +1,133 @@
+/**
+ * Server-side type definitions for the AI engine.
+ * Mirrors the frontend AI types without React/browser dependencies.
+ */
+
+export type AiOperatingState = 'SPOT' | 'LONG' | 'SHORT' | 'HEDGE' | 'CASH';
+
+export type MarketCondition =
+  | 'TRENDING_UP'
+  | 'TRENDING_DOWN'
+  | 'RANGING'
+  | 'VOLATILE'
+  | 'LOW_LIQUIDITY';
+
+export type RiskLevel = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+
+export type ExecutionType =
+  | 'spot_swap'
+  | 'perp_long_open'
+  | 'perp_short_open'
+  | 'perp_close'
+  | 'hedge_open'
+  | 'scale_in'
+  | 'scale_out'
+  | 'hold'
+  | 'cash_exit';
+
+export type EntryStyle = 'immediate' | 'scaled' | 'wait' | 'none';
+
+export interface IndicatorValues {
+  rsi14: number;
+  ema9: number;
+  ema21: number;
+  emaCross: 'bullish' | 'bearish' | 'neutral';
+  atrPct: number;
+  priceChange24h: number;
+  priceChange1h: number;
+  momentum: number;
+  trend: 'up' | 'down' | 'sideways';
+}
+
+export interface SymbolAnalysis {
+  symbol: string;
+  displaySymbol: string;
+  price: number;
+  indicators: IndicatorValues;
+  bullishScore: number;
+  bearishScore: number;
+  directionalBias: number;
+  opportunityScore: number;
+}
+
+export interface MarketRanking {
+  symbol: string;
+  displaySymbol: string;
+  rank: number;
+  direction: 'LONG' | 'SHORT' | 'NEUTRAL';
+  opportunityScore: number;
+  bullishScore: number;
+  bearishScore: number;
+  confidence: number;
+  atrPct: number;
+  price: number;
+  priceChange24h: number;
+}
+
+export interface HedgeParams {
+  symbol: string;
+  direction: 'LONG' | 'SHORT';
+  sizeUsd: number;
+  leverage: number;
+  reason: string;
+}
+
+/** Minimal Position shape used by the AI risk engine (no wallet fields). */
+export interface Position {
+  symbol: string;
+  side: 'LONG' | 'SHORT';
+  sizeInUsd: number;
+  collateralUsd: number;
+  unrealizedPnl: number;
+  entryPrice: number;
+  leverage: number;
+}
+
+/** Strategy risk limits — mirrors StrategyContext.RiskLimits. */
+export interface RiskLimits {
+  dailyLossLimitUSDT: number;
+  maxDrawdownPercent: number;
+  consecutiveLossLimit: number;
+  maxLeverage: number;
+  maxMarginPerTrade: number;
+  maxTotalExposureUSDT: number;
+  tradingCapital: number;
+  reserveCashPct: number;
+  profitLockThresholdPct?: number;
+  maxSimultaneousPositions?: number;
+  maxRiskPerSymbolPct?: number;
+}
+
+/** Full AI decision record produced by one engine cycle. */
+export interface ServerAiDecision {
+  id: string;
+  cycleNumber: number;
+  createdAt: string;
+  operatingState: AiOperatingState;
+  prevState: AiOperatingState;
+  stateChanged: boolean;
+  selectedSymbols: string[];
+  primarySymbol: string | null;
+  confidence: number;
+  marketCondition: MarketCondition;
+  riskLevel: RiskLevel;
+  symbolAnalyses: SymbolAnalysis[];
+  marketRankings: MarketRanking[];
+  executionType: ExecutionType;
+  sizeUsd?: number;
+  leverage?: number;
+  entryStyle: EntryStyle;
+  tpPrice?: number;
+  slPrice?: number;
+  trailingStopPct?: number;
+  hedgeParams?: HedgeParams;
+  stateRationale: string;
+  reasoning: string[];
+  riskApproved: boolean;
+  riskVetoReason?: string;
+  profitLockStage: 0 | 1 | 2 | 3;
+  paperExecuted: false;
+  paperOrderId: null;
+  /** Source tag to distinguish worker decisions from browser decisions in UI */
+  source: 'server_worker';
+}

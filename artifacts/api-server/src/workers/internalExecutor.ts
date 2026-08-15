@@ -29,6 +29,8 @@
  *   GMX_SUBACCOUNT_ADDRESS — 위임 One-Click 서브계정 주소 (공개, 정보 제공 전용)
  */
 
+import { workerManager } from './aiWorker';
+
 export type DeploymentMode = 'reserved_vm' | 'development';
 
 export interface ExecutorStatus {
@@ -53,6 +55,15 @@ export interface ExecutorStatus {
   uptimeMs: number;
   startedAt: string;
   lastRpcCheckAt: string | null;
+  // ── AI Worker status ───────────────────────────────────────────────────────
+  /** true when an AI cycle is actively executing */
+  workerRunning: boolean;
+  /** ISO timestamp of the last completed AI cycle */
+  lastCycleAt: string | null;
+  /** Summary of the last AI cycle result */
+  lastCycleResult: import('./aiWorker').WorkerCycleResult | null;
+  /** Total number of AI cycles completed since startup */
+  cycleCount: number;
 }
 
 export interface ExecuteOrderParams {
@@ -130,16 +141,17 @@ export function startRpcHealthMonitor(): void {
 /** 현재 모니터 상태 반환 — 비밀값 절대 미포함 */
 export function getExecutorStatus(): ExecutorStatus {
   const rpcConfigured = Boolean(process.env.GMX_RPC_URL?.trim());
-
   const uptimeMs = Date.now() - START_TIME;
+
+  const workerStatus = workerManager.getStatus();
+
   return {
     mode:              'internal',
-    // 모니터링 준비 = RPC 연결 가능 여부 (서명 자격증명과 무관)
     ready:             rpcConfigured && gmxRpcHealthy,
     rpcConfigured,
-    gmxConnected:      gmxRpcHealthy,   // canonical field consumed by UI clients
-    gmxRpcHealthy,                       // alias kept for backwards compatibility
-    networkChainId:    42161 as const,   // Arbitrum One
+    gmxConnected:      gmxRpcHealthy,
+    gmxRpcHealthy,
+    networkChainId:    42161 as const,
     deploymentMode:    detectDeploymentMode(),
     walletAddress:     process.env.GMX_WALLET_ADDRESS ?? null,
     subaccountAddress: process.env.GMX_SUBACCOUNT_ADDRESS ?? null,
@@ -147,6 +159,11 @@ export function getExecutorStatus(): ExecutorStatus {
     uptimeMs,
     startedAt:         STARTED_AT,
     lastRpcCheckAt,
+    // AI Worker
+    workerRunning:    workerStatus.workerRunning,
+    lastCycleAt:      workerStatus.lastCycleAt,
+    lastCycleResult:  workerStatus.lastCycleResult,
+    cycleCount:       workerStatus.cycleCount,
   };
 }
 
