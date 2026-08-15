@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useAppContext, useAuthContext, useTradingContext, useWallet } from '@/lib/context';
 import { useAiEngine } from '@/lib/context/AiEngineContext';
+import { useStrategyContext } from '@/lib/context/StrategyContext';
 import { Card } from '@/components/ui/card';
 import { Switch } from '@/components/ui/switch';
 import { Button } from '@/components/ui/button';
@@ -96,9 +97,14 @@ export default function Settings() {
   const { notificationPermission, requestNotificationPermission, sendTestNotification } = useAiEngine();
   const now = useNow();
 
+  const { subaccountConfig, updateSubaccountConfig } = useStrategyContext();
+
   const [closeAllPhase, setCloseAllPhase] = useState<0 | 1 | 2>(0);
   const [testNotifState, setTestNotifState] = useState<'idle' | 'sending' | 'sent' | 'denied' | 'unsupported'>('idle');
   const [switchingNet, setSwitchingNet] = useState(false);
+  const [subDraftMaxActions, setSubDraftMaxActions] = useState(subaccountConfig.maxActions);
+  const [subDraftExpiresIn, setSubDraftExpiresIn]   = useState(subaccountConfig.expiresInDays);
+  const [subSaved, setSubSaved] = useState(false);
 
   const isEmergency = engineState === 'EMERGENCY_STOP';
   const isOffline   = consecutiveFailures >= OFFLINE_THRESHOLD;
@@ -133,6 +139,16 @@ export default function Settings() {
     } finally {
       setSwitchingNet(false);
     }
+  };
+
+  const handleSaveSubaccountConfig = () => {
+    updateSubaccountConfig({
+      maxActions:    subDraftMaxActions,
+      expiresInDays: subDraftExpiresIn,
+      status:        'ready',
+    });
+    setSubSaved(true);
+    setTimeout(() => setSubSaved(false), 3_000);
   };
 
   const handleTestNotif = async () => {
@@ -420,6 +436,227 @@ export default function Settings() {
             실제 서명은 항상 브라우저 지갑(사용자 기기)에서만 이루어집니다.
           </span>
         </div>
+      </section>
+
+      {/* ── LIVE 실행 준비 ── */}
+      <section className="flex flex-col gap-4">
+        {/* Section header + status badge */}
+        <div className="flex items-center gap-2 border-b border-border pb-2">
+          <h2 className="font-semibold flex items-center gap-2 text-lg flex-1">
+            <Lock className="w-5 h-5 text-muted-foreground" /> LIVE 실행 준비
+          </h2>
+          <span className={cn(
+            'text-[10px] font-bold px-2 py-1 rounded-full border',
+            subaccountConfig.status === 'ready'
+              ? 'border-amber-500/40 bg-amber-500/10 text-amber-400'
+              : 'border-border bg-secondary text-muted-foreground',
+          )}>
+            {subaccountConfig.status === 'ready' ? '위임 준비 완료 — 아직 미실행' : '준비 단계 — LIVE 실행 잠김'}
+          </span>
+        </div>
+
+        <p className="text-xs text-muted-foreground">
+          실제 GMX V2 주문을 활성화하려면 아래 4단계를 완료해야 합니다.
+          개인키·서명키를 서버에 저장하지 않고, 브라우저 지갑으로 제한 권한을 위임하는 방식입니다.
+          <strong className="text-foreground"> 위임이 완료되고 코드 수준 잠금이 해제될 때까지 LIVE 실행은 불가능합니다.</strong>
+        </p>
+
+        {/* 4-step checklist */}
+        <div className="flex flex-col gap-2">
+
+          {/* ① 지갑 연결 */}
+          {(() => {
+            const done = wallet.status === 'connected';
+            return (
+              <div className={cn(
+                'flex items-start gap-3 p-3 rounded-lg border text-xs',
+                done ? 'border-[var(--color-long)]/30 bg-[var(--color-long)]/5' : 'border-border bg-card/30',
+              )}>
+                <div className={cn(
+                  'w-6 h-6 rounded-full flex items-center justify-center font-bold text-xs shrink-0 mt-0.5 border-2',
+                  done ? 'border-[var(--color-long)] text-[var(--color-long)]' : 'border-border text-muted-foreground',
+                )}>
+                  {done ? '✓' : '1'}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className={cn('font-semibold mb-0.5', done && 'text-[var(--color-long)]')}>지갑 연결</div>
+                  <p className="text-muted-foreground">
+                    {done
+                      ? `MetaMask 연결됨 — ${wallet.address!.slice(0, 6)}…${wallet.address!.slice(-4)}`
+                      : 'MetaMask 등 EIP-1193 호환 지갑을 연결하세요 (위 "GMX 계정 연결 준비" 2단계).'}
+                  </p>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* ② Arbitrum One 전환 */}
+          {(() => {
+            const done = wallet.isArbitrum;
+            const isWrong = wallet.status === 'wrong_network';
+            return (
+              <div className={cn(
+                'flex items-start gap-3 p-3 rounded-lg border text-xs',
+                done ? 'border-[var(--color-long)]/30 bg-[var(--color-long)]/5'
+                  : isWrong ? 'border-amber-500/30 bg-amber-500/5'
+                  : 'border-border bg-card/30',
+              )}>
+                <div className={cn(
+                  'w-6 h-6 rounded-full flex items-center justify-center font-bold text-xs shrink-0 mt-0.5 border-2',
+                  done ? 'border-[var(--color-long)] text-[var(--color-long)]' : 'border-border text-muted-foreground',
+                )}>
+                  {done ? '✓' : '2'}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className={cn('font-semibold mb-0.5', done && 'text-[var(--color-long)]')}>Arbitrum One 전환</div>
+                  <p className="text-muted-foreground">
+                    {done
+                      ? 'Arbitrum One (Chain 42161) 연결됨'
+                      : isWrong
+                        ? 'MetaMask에서 Arbitrum One (Chain 42161)으로 전환하세요.'
+                        : '지갑 연결 후 Arbitrum One으로 전환하세요.'}
+                  </p>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* ③ 서브계정 권한 설정 저장 */}
+          {(() => {
+            const done = subaccountConfig.status !== 'not_configured';
+            return (
+              <div className={cn(
+                'flex items-start gap-3 p-3 rounded-lg border text-xs',
+                done ? 'border-amber-500/30 bg-amber-500/5' : 'border-border bg-card/30',
+              )}>
+                <div className={cn(
+                  'w-6 h-6 rounded-full flex items-center justify-center font-bold text-xs shrink-0 mt-0.5 border-2',
+                  done ? 'border-amber-500 text-amber-400' : 'border-border text-muted-foreground',
+                )}>
+                  {done ? '✓' : '3'}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className={cn('font-semibold mb-0.5', done && 'text-amber-400')}>서브계정 권한 설정 저장</div>
+                  <p className="text-muted-foreground">
+                    {done
+                      ? `설정 저장됨 — maxActions: ${subaccountConfig.maxActions}, 만료: ${subaccountConfig.expiresInDays}일. 실제 위임 트랜잭션은 아직 실행되지 않았습니다.`
+                      : '아래 폼에서 서브계정 파라미터를 설정하고 저장하세요. 설정만 저장되며 실제 트랜잭션은 없습니다.'}
+                  </p>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* ④ 최종 활성화 (코드 수준 잠금) */}
+          <div className="flex items-start gap-3 p-3 rounded-lg border border-border bg-card/20 text-xs opacity-70">
+            <div className="w-6 h-6 rounded-full flex items-center justify-center font-bold text-xs shrink-0 mt-0.5 border-2 border-border text-muted-foreground">
+              🔒
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="font-semibold mb-0.5 flex items-center gap-2">
+                최종 활성화
+                <span className="text-[9px] px-1.5 py-0.5 rounded border border-border/60 text-muted-foreground/60 font-mono normal-case">LOCKED</span>
+              </div>
+              <p className="text-muted-foreground leading-relaxed">
+                GMX SubaccountRouter.addSubaccount() 온체인 트랜잭션 서명 후 코드 수준 잠금(LIVE_EXECUTION_LOCKED)을 별도 해제합니다.
+                현재 항상 dry-run 반환 — 3단계 완료 + 별도 보안 검토 후 활성화 예정.
+              </p>
+            </div>
+          </div>
+
+        </div>
+
+        {/* Subaccount config form — only when wallet connected + Arbitrum */}
+        {wallet.status === 'connected' && wallet.isArbitrum ? (
+          <Card className="p-4 flex flex-col gap-4 border-border/60">
+
+            {/* "설정만 저장" info banner */}
+            <div className="flex items-start gap-2 px-3 py-2.5 rounded-lg border border-amber-500/20 bg-amber-500/5 text-xs text-amber-300/80">
+              <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5 text-amber-400" />
+              <span>
+                <strong className="text-amber-400">설정만 저장됩니다.</strong>{' '}
+                실제 권한 위임(GMX SubaccountRouter 트랜잭션)은 이 단계에서 실행되지 않습니다.
+                이 설정은 향후 delegateSubaccount 트랜잭션 파라미터로 사용될 예정입니다.
+              </span>
+            </div>
+
+            {/* maxActions */}
+            <div>
+              <div className="text-xs font-medium text-foreground mb-2">
+                최대 액션 수 <span className="font-mono text-primary">maxActions</span>
+                <span className="text-muted-foreground ml-2 font-normal">— 서브계정 허용 실행 횟수 상한</span>
+              </div>
+              <div className="flex gap-2">
+                {([50, 100, 200, 500] as const).map(v => (
+                  <button
+                    key={v}
+                    onClick={() => setSubDraftMaxActions(v)}
+                    className={cn(
+                      'px-3 py-1.5 text-xs font-mono rounded border transition-colors',
+                      subDraftMaxActions === v
+                        ? 'border-primary bg-primary/10 text-primary font-bold'
+                        : 'border-border text-muted-foreground hover:border-primary/40 bg-card/50',
+                    )}
+                  >
+                    {v}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* expiresInDays */}
+            <div>
+              <div className="text-xs font-medium text-foreground mb-2">
+                권한 만료 기간 <span className="font-mono text-primary">expiresInDays</span>
+                <span className="text-muted-foreground ml-2 font-normal">— 위임 권한 자동 만료 일수</span>
+              </div>
+              <div className="flex gap-2">
+                {([7, 30, 90] as const).map(v => (
+                  <button
+                    key={v}
+                    onClick={() => setSubDraftExpiresIn(v)}
+                    className={cn(
+                      'px-3 py-1.5 text-xs font-mono rounded border transition-colors',
+                      subDraftExpiresIn === v
+                        ? 'border-primary bg-primary/10 text-primary font-bold'
+                        : 'border-border text-muted-foreground hover:border-primary/40 bg-card/50',
+                    )}
+                  >
+                    {v}일
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Save button + status */}
+            <div className="flex items-center gap-3 pt-1 border-t border-border/40">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={handleSaveSubaccountConfig}
+                className="h-8 text-xs"
+              >
+                {subSaved
+                  ? <><CheckCircle2 className="w-3.5 h-3.5 mr-1.5 text-[var(--color-long)]" />저장 완료</>
+                  : <><Key className="w-3.5 h-3.5 mr-1.5" />설정 저장 (위임 준비 완료로 변경)</>
+                }
+              </Button>
+              {subaccountConfig.status === 'ready' && !subSaved && (
+                <span className="text-[11px] text-amber-400/80 flex items-center gap-1">
+                  <CheckCircle2 className="w-3 h-3" />
+                  위임 준비 완료 — 위임 트랜잭션 미실행
+                </span>
+              )}
+            </div>
+
+          </Card>
+        ) : (
+          <p className="text-xs text-muted-foreground/70 flex items-center gap-1.5">
+            <AlertCircle className="w-3 h-3 shrink-0" />
+            서브계정 설정 폼은 지갑 연결 + Arbitrum One 전환 후 표시됩니다.
+          </p>
+        )}
+
       </section>
 
       {/* ── Engine Mode ── */}

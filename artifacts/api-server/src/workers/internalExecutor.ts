@@ -31,6 +31,30 @@
 
 import { workerManager } from './aiWorker';
 
+/**
+ * LIVE_EXECUTION_LOCKED — 코드 수준 LIVE 실행 잠금 상수
+ *
+ * 이 상수가 true인 한, executeOrder()는 항상 페이퍼 시뮬레이션(dry-run)을 반환합니다.
+ * 실제 GMX V2 트랜잭션을 서명하거나 온체인 전송하지 않습니다.
+ *
+ * ── 향후 LIVE 실행 활성화 경로 (이 상수가 false로 변경될 때만) ────────────────
+ *
+ * 전제 조건 (모두 충족 필요):
+ *   1. Settings에서 서브계정 권한 설정 완료 (maxActions, expiresInDays)
+ *   2. GMX SubaccountRouter.addSubaccount() 온체인 트랜잭션 완료:
+ *        - params: { subaccountAddress, maxAllowedActions, expiresAt }
+ *        - 메인 지갑으로 MetaMask 서명 (브라우저 지갑에서만)
+ *        - Arbitrum One 트랜잭션 확인
+ *   3. 서브계정 공개 주소를 GMX_SUBACCOUNT_ADDRESS 환경 변수에 저장
+ *   4. 별도 보안 검토 완료
+ *   5. 이 상수를 false로 변경 + GMX SDK 실행 코드 구현
+ *
+ * ❌ 절대 금지 (이 상수가 false가 되어도 변경 불가):
+ *   - 서명 키, 개인키, 시드문구를 이 파일 또는 환경 변수에 저장
+ *   - Replit 환경에서 eth_sendTransaction 직접 호출
+ */
+export const LIVE_EXECUTION_LOCKED = true as const;
+
 export type DeploymentMode = 'reserved_vm' | 'development';
 
 export interface ExecutorStatus {
@@ -172,13 +196,34 @@ export function getExecutorStatus(): ExecutorStatus {
  *
  * 【중요 보안 원칙】
  * Replit 실행환경에는 GMX 개인키가 없으므로 실제 온체인 트랜잭션을 서명하지 않습니다.
- * 실제 GMX 주문 실행은 GMX One-Click 서브계정 구성 완료 후 task #32에서 구현 예정입니다.
+ * 실제 GMX 주문 실행은 GMX One-Click 서브계정 구성 완료 및 LIVE_EXECUTION_LOCKED 해제 후 구현 예정입니다.
  * 이 함수는 페이퍼 트레이딩 시뮬레이션 및 의사결정 로그 기록에 사용됩니다.
  */
 export async function executeOrder(params: ExecuteOrderParams): Promise<ExecuteOrderResult> {
   const ts = new Date().toISOString();
 
+  // ── LIVE 실행 잠금 어설션 ──────────────────────────────────────────────────────
+  // LIVE_EXECUTION_LOCKED = true인 동안 이 함수는 항상 dry-run을 반환합니다.
+  // 이 어설션은 코드 수준에서 실제 GMX 트랜잭션 호출을 방어합니다.
+  //
+  // 이 if 블록을 제거하거나 false로 변경하려면:
+  //   → LIVE_EXECUTION_LOCKED 상수의 향후 활성화 경로 주석을 먼저 확인하세요.
+  if (LIVE_EXECUTION_LOCKED) {
+    console.info(
+      `[Executor] LIVE_EXECUTION_LOCKED=true — dry-run 반환 ` +
+      `(decisionId=${params.decisionId} symbol=${params.symbol ?? 'MULTI'})`,
+    );
+    return {
+      ok:          true,
+      executedAt:  ts,
+      txHash:      null,
+      simulated:   true,
+      note:        'LIVE_EXECUTION_LOCKED=true — GMX One-Click 서브계정 설정 및 코드 수준 잠금 해제 후 실제 실행 가능.',
+    };
+  }
+
   // 페이퍼 시뮬레이션 — GMX 키 미보유, 실제 온체인 전송 불가
+  // (이 코드는 LIVE_EXECUTION_LOCKED = false가 된 이후 도달 가능)
   console.info(
     `[Executor] 페이퍼 시뮬레이션 — ` +
     `decisionId=${params.decisionId} type=${params.executionType} symbol=${params.symbol ?? 'MULTI'}`,
