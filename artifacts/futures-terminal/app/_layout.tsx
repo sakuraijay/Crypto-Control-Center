@@ -20,7 +20,6 @@ import { EngineProvider } from '@/contexts/EngineContext';
 import { TradingProvider } from '@/contexts/TradingContext';
 import { WatchlistProvider } from '@/contexts/WatchlistContext';
 import { StrategyProvider } from '@/contexts/StrategyContext';
-import { VpsProvider } from '@/contexts/VpsContext';
 import { AiEngineProvider } from '@/contexts/AiEngineContext';
 import { RiskAlertMonitor } from '@/components/RiskAlertMonitor';
 import { setupAndroidChannel } from '@/services/notifications';
@@ -39,7 +38,6 @@ function RootLayoutNav() {
     if (isLoading) return;
     const inTabs  = segments[0] === '(tabs)';
     const inLogin = segments[0] === 'login';
-    // Login bypass: dev auth always passes, so we always route to tabs
     if (!isAuthenticated && !inLogin) {
       router.replace('/login');
     } else if (isAuthenticated && !inTabs) {
@@ -56,7 +54,6 @@ function RootLayoutNav() {
 }
 
 export default function RootLayout() {
-  // Android notification channels — all three channels at startup
   useEffect(() => { setupAndroidChannel(); }, []);
 
   const [fontsLoaded, fontError] = useFonts({
@@ -79,24 +76,22 @@ export default function RootLayout() {
           <GestureHandlerRootView style={{ flex: 1 }}>
             <KeyboardProvider>
               <AuthProvider>
-                <VpsProvider>
-                  <StrategyProvider>
-                    <WatchlistProvider>
-                      <TradingProvider>
-                        <EngineProvider>
-                          {/*
-                            AiEngineProvider must be inside Engine, Trading, Strategy, Watchlist
-                            so it can read all upstream contexts.
-                          */}
-                          <AiEngineProvider>
-                            <RiskAlertMonitor />
-                            <RootLayoutNav />
-                          </AiEngineProvider>
-                        </EngineProvider>
-                      </TradingProvider>
-                    </WatchlistProvider>
-                  </StrategyProvider>
-                </VpsProvider>
+                <StrategyProvider>
+                  <WatchlistProvider>
+                    <TradingProvider>
+                      <EngineProvider>
+                        {/*
+                          AiEngineProvider must be inside Engine, Trading, Strategy, Watchlist
+                          so it can read all upstream contexts.
+                        */}
+                        <AiEngineProvider>
+                          <RiskAlertMonitor />
+                          <RootLayoutNav />
+                        </AiEngineProvider>
+                      </EngineProvider>
+                    </TradingProvider>
+                  </WatchlistProvider>
+                </StrategyProvider>
               </AuthProvider>
             </KeyboardProvider>
           </GestureHandlerRootView>

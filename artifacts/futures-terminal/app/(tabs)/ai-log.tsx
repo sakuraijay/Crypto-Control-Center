@@ -17,8 +17,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { useColors } from '@/hooks/useColors';
-import { useVps, OperatingMode } from '@/contexts/VpsContext';
-import { useAiEngine }           from '@/contexts/AiEngineContext';
+import { useAiEngine, OperatingMode } from '@/contexts/AiEngineContext';
 import type { AiEngineDecision, IndicatorValues, SymbolAnalysis } from '@/lib/ai/types';
 
 // ── API historical decision type (flat, persisted) ────────────────────────────
@@ -374,8 +373,7 @@ const SOURCE_FILTERS           = ['ALL', 'SESSION', 'HISTORY'] as const;
 export default function AiLogScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
-  const { operatingMode } = useVps();
-  const { decisionHistory: sessionDecisions, stats: aiStats, pendingCount } = useAiEngine();
+  const { operatingMode, decisionHistory: sessionDecisions, stats: aiStats, pendingCount } = useAiEngine();
 
   const [apiDecisions, setApiDecisions] = useState<ApiDecision[]>([]);
   const [apiStats, setApiStats] = useState<ApiStats>({ today: 0, todayApproved: 0, todayVetoed: 0, todayFilled: 0, avgConfidence: 0 });

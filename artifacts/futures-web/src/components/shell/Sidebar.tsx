@@ -1,7 +1,7 @@
 import { Link, useLocation } from 'wouter';
 import { LayoutDashboard, List, Activity, Settings, History, Layers, FlaskConical, Brain } from 'lucide-react';
 import { useAppContext } from '@/lib/context';
-import { useVpsContext, OperatingMode } from '@/lib/context/VpsContext';
+import { useAiEngine, type OperatingMode } from '@/lib/context/AiEngineContext';
 import { cn } from '@/lib/utils';
 
 const navItems = [
@@ -34,6 +34,7 @@ const MODE_CLS: Record<OperatingMode, string> = {
 export function Sidebar() {
   const [location] = useLocation();
   const { engineState } = useAppContext();
+  const { operatingMode } = useAiEngine();
 
   const getEngineColor = () => {
     switch (engineState) {
@@ -49,8 +50,6 @@ export function Sidebar() {
   };
 
   const getEngineText = () => engineState.replaceAll('_', ' ');
-
-  const { operatingMode } = useVpsContext();
 
   return (
     <div className="w-[220px] shrink-0 border-r border-border bg-sidebar flex flex-col h-[100dvh] fixed left-0 top-0 z-40">

@@ -130,7 +130,7 @@ export interface AiEngineDecision {
   paperOrderId?: string;
 
   // ── System health ──────────────────────────────────
-  /** Set when the engine skipped execution due to VPS/connectivity issues */
+  /** Set when the engine skipped execution due to connectivity issues */
   pausedReason?: string;
 }
 
@@ -165,15 +165,6 @@ export interface PendingLiveApproval {
   approvedAt?: string;
   rejectedAt?: string;
   rejectionReason?: string;
-  /** Whether the order was actually forwarded to VPS after approval */
-  vpsForwarded?: boolean;
-  vpsError?: string;
-  /**
-   * VPS connection config captured at queue time.
-   * Used by forwardToVps() so that if the operator changes the VPS host/port
-   * while the approval is pending, the order still reaches the intended server.
-   */
-  vpsSnapshot?: { host: string; port: string; useSSL: boolean };
 }
 
 /** How long the operator has to approve before a queued decision expires (ms) */

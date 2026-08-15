@@ -4,7 +4,7 @@ import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
 /**
- * AI Decision Log — records every autonomous trading decision made by the VPS AI.
+ * AI Decision Log — records every autonomous trading decision made by the AI engine.
  *
  * The AI independently selects symbols, decides LONG/SHORT/NO_TRADE/CLOSE/REVERSE,
  * determines entry/exit prices, sizes positions within risk limits, and manages

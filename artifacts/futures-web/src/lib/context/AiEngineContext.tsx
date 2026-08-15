@@ -32,7 +32,6 @@ import { useTradingContext } from './TradingContext';
 import { useAppContext } from './AppContext';
 import { useStrategyContext } from './StrategyContext';
 import { useWatchlistContext } from './WatchlistContext';
-import { useVpsContext } from './VpsContext';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -41,6 +40,17 @@ const MAX_BUFFER = 200;
 const CORE_SYMBOLS = ['BTC', 'ETH', 'SOL', 'ARB', 'LINK'];
 /** Prune expired approvals older than this (keep for audit) */
 const APPROVAL_HISTORY_KEEP_MS = 24 * 60 * 60 * 1000;
+
+// ── Operating mode ────────────────────────────────────────────────────────────
+
+export type OperatingMode = 'AUTONOMOUS_AI' | 'MANUAL_OVERRIDE' | 'RISK_LOCKED';
+
+function deriveOperatingMode(engineState: string, autoExecute: boolean): OperatingMode {
+  if (engineState === 'RISK_LOCKED' || engineState === 'EMERGENCY_STOP') return 'RISK_LOCKED';
+  if (engineState === 'LIVE_TRADING') return 'AUTONOMOUS_AI';
+  if (engineState === 'PAPER_TRADING' && autoExecute) return 'AUTONOMOUS_AI';
+  return 'MANUAL_OVERRIDE';
+}
 
 // ── Context type ──────────────────────────────────────────────────────────────
 
@@ -55,32 +65,33 @@ interface AiEngineContextType {
   clearHistory: () => void;
   nextCycleMs: number;
 
+  /** Derived operating mode for sidebar / status displays */
+  operatingMode: OperatingMode;
+
   // ── Market rankings ──────────────────────────────────────────────────────
   /** Ranked list of all analysed GMX markets from the latest cycle */
   marketRankings: MarketRanking[];
 
   // ── System health / pause ────────────────────────────────────────────────
-  /** True when the engine is paused due to VPS/connectivity issues */
+  /** True when the engine is paused */
   systemPaused: boolean;
   pauseReason: string | null;
 
   // ── Daily benchmark ──────────────────────────────────────────────────────
-  /** Target account size used for benchmark display only */
   benchmarkAccountSize: number;
-  /** Daily profit target range (min/max) for display only — NOT a guarantee */
   benchmarkDailyMin: number;
   benchmarkDailyMax: number;
 
   // ── Live approval gate ───────────────────────────────────────────────────
   /** All approvals (pending + historical) */
   pendingApprovals: PendingLiveApproval[];
-  /** Approve a queued live order → forward to VPS */
+  /** Approve a queued live order (logged; execution via GMX SDK when configured) */
   approveLiveOrder: (id: string) => Promise<void>;
   /** Reject a queued live order → discard */
   rejectLiveOrder: (id: string, reason?: string) => void;
   /** Count of currently pending (not yet approved/rejected/expired) */
   pendingCount: number;
-  /** Load the next page (200 rows) of older decisions from the server. Returns false when exhausted. */
+  /** Load the next page (200 rows) of older decisions from the server. */
   loadMoreHistory: () => Promise<boolean>;
 }
 
@@ -93,9 +104,6 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
   const { engineState, setEngineState } = useAppContext();
   const { limits } = useStrategyContext();
   const { watchlist } = useWatchlistContext();
-  // executorMode는 더 이상 forwardToVps에서 사용하지 않음
-  // (LIVE 실행은 항상 외부 VPS → executorMode는 모니터링 UI 전용)
-  const { connectionStatus, config: vpsConfig } = useVpsContext();
   const { toast } = useToast();
 
   const [currentDecision, setCurrentDecision] = useState<AiEngineDecision | null>(null);
@@ -112,8 +120,8 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
   const [nextCycleMs, setNextCycleMs] = useState(CYCLE_MS);
   const [pendingApprovals, setPendingApprovals] = useState<PendingLiveApproval[]>([]);
   const [marketRankings, setMarketRankings] = useState<MarketRanking[]>([]);
-  const [systemPaused, setSystemPaused] = useState(false);
-  const [pauseReason, setPauseReason] = useState<string | null>(null);
+  const [systemPaused] = useState(false);
+  const [pauseReason] = useState<string | null>(null);
 
   // ── Benchmark constants (display-only, not enforced by engine) ─────────────
   const BENCHMARK_ACCOUNT = 10_000;
@@ -126,9 +134,9 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
   const prevState = useRef<AiOperatingState>('CASH');
   const cycleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const countdownTimer = useRef<ReturnType<typeof setInterval> | null>(null);
-  const nextCycleAt      = useRef<number>(Date.now() + CYCLE_MS);
-  const seenApprovalIds  = useRef<Set<string>>(new Set());
-  const dbPage           = useRef(1); // page 0 loaded on mount
+  const nextCycleAt = useRef<number>(Date.now() + CYCLE_MS);
+  const seenApprovalIds = useRef<Set<string>>(new Set());
+  const dbPage = useRef(1); // page 0 loaded on mount
 
   // ── Feed price buffer from watchlist ───────────────────────────────────────
   useEffect(() => {
@@ -166,14 +174,12 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
           LONG: 'LONG', SHORT: 'SHORT', NO_TRADE: 'CASH',
         };
         const seeded = decisions.map((row): AiEngineDecision => {
-          // Full-fidelity replay: if full JSON was persisted, deserialise it directly
           if (row.fullJson) {
             try {
               const parsed = JSON.parse(row.fullJson) as AiEngineDecision;
               return { ...parsed, id: String(row.id) };
-            } catch { /* fall through to minimal conversion */ }
+            } catch { /* fall through */ }
           }
-          // Minimal conversion from scalar DB columns (older rows / VPS-originated)
           return {
             id: String(row.id), cycleNumber: 0, createdAt: row.ts,
             operatingState: opStateMap[row.direction] ?? 'CASH',
@@ -227,8 +233,8 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
     const weeklyLimit = limits.weeklyLossLimitUSDT ?? 0;
     const consecLimit = limits.consecutiveLossLimit ?? 3;
 
-    const hitDaily  = dailyLimit  > 0 && dailyLoss  < 0 && Math.abs(dailyLoss)  >= dailyLimit;
-    const hitWeekly = weeklyLimit > 0 && dailyLoss  < 0 && Math.abs(dailyLoss)  >= weeklyLimit;
+    const hitDaily  = dailyLimit  > 0 && dailyLoss < 0 && Math.abs(dailyLoss) >= dailyLimit;
+    const hitWeekly = weeklyLimit > 0 && dailyLoss < 0 && Math.abs(dailyLoss) >= weeklyLimit;
     const hitConsec = consecLimit > 0 && consecutiveLosses >= consecLimit;
 
     if (hitDaily || hitWeekly || hitConsec) {
@@ -252,7 +258,6 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
         }
         return a;
       }).filter(a =>
-        // Keep pending/recent; prune old history
         a.status === 'PENDING' ||
         new Date(a.createdAt).getTime() > now - APPROVAL_HISTORY_KEEP_MS
       ));
@@ -304,7 +309,6 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
           executionOutcome: decision.paperExecuted ? 'SIMULATED' : 'PENDING',
           operatingState: decision.operatingState,
           cycleNumber: decision.cycleNumber,
-          // Full decision JSON — enables lossless replay after page refresh
           fullJson: JSON.stringify(decision),
         }),
       });
@@ -330,93 +334,38 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
-  // ── 승인 주문을 외부 VPS로 전달 ────────────────────────────────────────────────
-  // ┌─ 보안 아키텍처 원칙 ────────────────────────────────────────────────────────┐
-  // │ LIVE 주문의 실제 GMX 서명·온체인 전송은 반드시 외부 VPS에서만 수행합니다.    │
-  // │ Replit (내부 실행기)은 모니터링·로깅·페이퍼 시뮬레이션 전용입니다.           │
-  // │ executorMode 설정값과 관계없이 LIVE 승인은 항상 외부 VPS /execute로 라우팅. │
-  // └────────────────────────────────────────────────────────────────────────────┘
-  const forwardToVps = useCallback(async (
-    decision: AiEngineDecision,
-    snapshot?: { host: string; port: string; useSSL: boolean },
-  ): Promise<{ ok: boolean; error?: string }> => {
-    // 스냅샷 우선: 승인 대기열 진입 시점의 VPS 설정 사용
-    // (승인 중 호스트 변경으로 인한 잘못된 라우팅 방지)
-    const target = snapshot ?? {
-      host:   vpsConfig.host ?? '',
-      port:   vpsConfig.port ?? '8080',
-      useSSL: vpsConfig.useSSL ?? false,
-    };
-
-    if (!target.host?.trim()) {
-      return {
-        ok: false,
-        error: 'LIVE 실행 불가 — 외부 VPS가 설정되지 않았습니다. Settings → External VPS 섹션에서 호스트를 구성하세요.',
-      };
-    }
-
-    const params = new URLSearchParams({
-      host: target.host,
-      port: target.port || '8080',
-      ssl:  String(target.useSSL ?? false),
-    });
-    const url = `/api-server/api/vps/execute?${params}`;
-
-    const body = JSON.stringify({
-      decisionId:      decision.id,
-      operatingState:  decision.operatingState,
-      symbol:          decision.primarySymbol,
-      executionType:   decision.executionType,
-      sizeUsd:         decision.sizeUsd,
-      leverage:        decision.leverage,
-      tpPrice:         decision.tpPrice,
-      slPrice:         decision.slPrice,
-      trailingStopPct: decision.trailingStopPct,
-      hedgeParams:     decision.hedgeParams,
-      cycleNumber:     decision.cycleNumber,
-    });
-    const headers = { 'Content-Type': 'application/json' } as const;
-
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const res = await fetch(url, { method: 'POST', headers, body });
-        if (!res.ok) {
-          const detail = await res.text().catch(() => '');
-          // 5xx: 1회 재시도
-          if (res.status >= 500 && attempt === 0) {
-            await new Promise(r => setTimeout(r, 2_000));
-            continue;
-          }
-          return {
-            ok: false,
-            error: `VPS 응답 오류 ${res.status}${detail ? ': ' + detail.slice(0, 120) : ''}`,
-          };
-        }
-        return { ok: true };
-      } catch (e) {
-        if (attempt === 0) { await new Promise(r => setTimeout(r, 2_000)); continue; }
-        return { ok: false, error: e instanceof Error ? e.message : '네트워크 오류 — VPS에 연결할 수 없습니다' };
-      }
-    }
-    return { ok: false, error: '재시도 후에도 VPS에 연결할 수 없습니다' };
-  }, [vpsConfig]);
-
   // ── Approve a live order ────────────────────────────────────────────────────
+  // Marks the approval as APPROVED and logs it. Actual GMX execution is handled
+  // by the GMX SDK integration (task #32) — no external VPS required.
   const approveLiveOrder = useCallback(async (id: string) => {
     const approval = pendingApprovals.find(a => a.id === id);
     if (!approval || approval.status !== 'PENDING') return;
 
-    // Mark approved immediately (optimistic)
     setPendingApprovals(prev => prev.map(a =>
-      a.id === id ? { ...a, status: 'APPROVED' as ApprovalStatus, approvedAt: new Date().toISOString() } : a
+      a.id === id
+        ? { ...a, status: 'APPROVED' as ApprovalStatus, approvedAt: new Date().toISOString() }
+        : a
     ));
 
-    // Forward to VPS — use snapshotted config to prevent mis-routing on host change
-    const result = await forwardToVps(approval.decision, approval.vpsSnapshot);
-    setPendingApprovals(prev => prev.map(a =>
-      a.id === id ? { ...a, vpsForwarded: result.ok, vpsError: result.error } : a
-    ));
-  }, [pendingApprovals, forwardToVps]);
+    // Log the approved decision to the API server for audit trail
+    try {
+      await fetch('/api-server/api/ai/decisions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ts: new Date().toISOString(),
+          symbol: approval.decision.primarySymbol ?? 'MULTI',
+          direction: approval.decision.operatingState,
+          confidence: approval.decision.confidence / 100,
+          rationale: `[LIVE APPROVED] ${approval.decision.stateRationale}`,
+          strategy: `AI_5STATE_LIVE_${approval.decision.operatingState}`,
+          riskResult: 'APPROVED',
+          executionOutcome: 'PENDING',
+          fullJson: JSON.stringify({ ...approval.decision, operatorApproved: true }),
+        }),
+      });
+    } catch { /* non-fatal */ }
+  }, [pendingApprovals]);
 
   // ── Reject a live order ─────────────────────────────────────────────────────
   const rejectLiveOrder = useCallback((id: string, reason?: string) => {
@@ -454,9 +403,8 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
         dataFreshMs,
       });
 
-      const isLiveTrade = engineState === 'LIVE_TRADING';
+      const isLiveTrade  = engineState === 'LIVE_TRADING';
       const isPaperTrade = !isLiveTrade && engineState !== 'EMERGENCY_STOP' && engineState !== 'RISK_LOCKED';
-      const isVpsConnected = connectionStatus === 'connected';
       const isActionable =
         rawDecision.riskApproved &&
         rawDecision.operatingState !== 'CASH' &&
@@ -464,47 +412,26 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
         !!rawDecision.sizeUsd && rawDecision.sizeUsd > 0 &&
         !!rawDecision.primarySymbol;
 
-      // ── Update market rankings every cycle ─────────────────────────────
       setMarketRankings(rawDecision.marketRankings ?? []);
 
       let paperExecuted = false;
       let paperOrderId: string | undefined;
-      let pausedReason: string | undefined;
 
       if (isActionable) {
         if (isLiveTrade) {
-          // ── LIVE: fail-closed when VPS is not reachable ──────────────
-          if (!isVpsConnected) {
-            pausedReason = 'VPS disconnected — no live orders queued until connection restored';
-            setSystemPaused(true);
-            setPauseReason(pausedReason);
-            console.warn(`[AiEngine] LIVE mode fail-closed — ${pausedReason}`);
-          } else {
-            setSystemPaused(false);
-            setPauseReason(null);
-            // ── Queue for operator approval ─────────────────────────────
-            const now = new Date().toISOString();
-            const approval: PendingLiveApproval = {
-              id: uuid(),
-              decision: { ...rawDecision, id: uuid(), createdAt: now, paperExecuted: false } as AiEngineDecision,
-              createdAt: now,
-              expiresAt: new Date(Date.now() + APPROVAL_TIMEOUT_MS).toISOString(),
-              status: 'PENDING',
-              // Snapshot VPS config at queue time — prevents mis-routing if operator changes host while approval is pending
-              vpsSnapshot: {
-                host:   vpsConfig.host   ?? '',
-                port:   vpsConfig.port   ?? '8080',
-                useSSL: vpsConfig.useSSL ?? false,
-              },
-            };
-            setPendingApprovals(prev => [...prev, approval]);
-          }
+          // ── LIVE: queue for operator approval ──────────────────────────────
+          const now = new Date().toISOString();
+          const approval: PendingLiveApproval = {
+            id: uuid(),
+            decision: { ...rawDecision, id: uuid(), createdAt: now, paperExecuted: false } as AiEngineDecision,
+            createdAt: now,
+            expiresAt: new Date(Date.now() + APPROVAL_TIMEOUT_MS).toISOString(),
+            status: 'PENDING',
+          };
+          setPendingApprovals(prev => [...prev, approval]);
 
         } else if (isPaperTrade && autoExecute) {
-          // ── PAPER: auto-execute locally (VPS down doesn't block paper) ──
-          if (!isVpsConnected) {
-            console.info('[AiEngine] VPS disconnected — paper trade running locally only');
-          }
+          // ── PAPER: auto-execute locally ────────────────────────────────────
           const sym = rawDecision.primarySymbol!;
           const side = rawDecision.operatingState === 'SHORT' ? 'SHORT' : 'LONG';
           const baseOrder = {
@@ -533,7 +460,6 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
         isPaperTrade && autoExecute &&
         positions.length > 0
       ) {
-        // ── CASH decision with open positions → exit all to USDC ──────────
         console.info('[AiEngine] CASH state with open positions — closing all (paper)');
         clearAllPositions();
       }
@@ -543,7 +469,6 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
         createdAt: new Date().toISOString(),
         paperExecuted,
         paperOrderId,
-        pausedReason,
         ...rawDecision,
       };
 
@@ -557,8 +482,8 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
     }
   }, [
     running, buildAnalyses, positions, account, limits, engineState,
-    connectionStatus, autoExecute, placeOrder, clearAllPositions,
-    updateStats, persistDecision,
+    autoExecute, placeOrder, clearAllPositions,
+    updateStats, persistDecision, consecutiveLosses,
   ]);
 
   // ── Schedule cycles ─────────────────────────────────────────────────────────
@@ -638,12 +563,14 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const pendingCount = pendingApprovals.filter(a => a.status === 'PENDING').length;
+  const operatingMode = deriveOperatingMode(String(engineState), autoExecute);
 
   return (
     <AiEngineContext.Provider value={{
       currentDecision, decisionHistory, stats,
       running, autoExecute, setAutoExecute,
       triggerCycle, clearHistory, nextCycleMs,
+      operatingMode,
       marketRankings,
       systemPaused, pauseReason,
       benchmarkAccountSize: BENCHMARK_ACCOUNT,

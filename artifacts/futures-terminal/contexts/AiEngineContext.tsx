@@ -5,7 +5,7 @@
  * Runs a 60-second decision cycle and:
  *  • Paper mode + autoExecute → placeOrder() locally (simulated)
  *  • LIVE_TRADING mode → queue as PendingLiveApproval (operator must APPROVE)
- *  • Sends push notifications for new live proposals, risk-lock events, connection alerts
+ *  • Sends push notifications for new live proposals, risk-lock events, emergency alerts
  *
  * Operator role:
  *  • Paper: monitoring + optional auto-execute toggle
@@ -30,7 +30,6 @@ import { useEngine, EngineState } from '@/contexts/EngineContext';
 import { useTrading } from '@/contexts/TradingContext';
 import { useStrategy } from '@/contexts/StrategyContext';
 import { useWatchlist } from '@/contexts/WatchlistContext';
-import { useVps } from '@/contexts/VpsContext';
 import {
   scheduleLiveApprovalAlert,
   scheduleRiskLockAlert,
@@ -51,17 +50,27 @@ const API_BASE = process.env.EXPO_PUBLIC_DOMAIN
   ? `https://${process.env.EXPO_PUBLIC_DOMAIN}/api-server/api`
   : '/api-server/api';
 
-// ── Simple ID generator (no uuid dep required) ─────────────────────────────────
+// ── Simple ID generator ───────────────────────────────────────────────────────
 
 function genId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
+// ── Operating mode ────────────────────────────────────────────────────────────
+
+export type OperatingMode = 'AUTONOMOUS_AI' | 'MANUAL_OVERRIDE' | 'RISK_LOCKED';
+
+function deriveOperatingMode(es: string, autoExecute: boolean): OperatingMode {
+  if (es === 'RISK_LOCKED' || es === 'EMERGENCY_STOP') return 'RISK_LOCKED';
+  if (es === 'LIVE_TRADING') return 'AUTONOMOUS_AI';
+  if (es === 'PAPER_TRADING' && autoExecute) return 'AUTONOMOUS_AI';
+  return 'MANUAL_OVERRIDE';
 }
 
 // ── Consecutive losses from trades ────────────────────────────────────────────
 
 function calcConsecutiveLosses(trades: { pnl: number; action: string }[]): number {
   let streak = 0;
-  // Iterate most-recent-first (trades array is already newest-first in TradingContext)
   for (const t of trades) {
     if (t.action !== 'CLOSE') continue;
     if (t.pnl < 0) streak++;
@@ -83,9 +92,12 @@ export interface AiEngineContextType {
   clearHistory: () => void;
   nextCycleMs: number;
 
+  /** Derived operating mode for UI display */
+  operatingMode: OperatingMode;
+
   /** Ranked list of all analysed GMX markets from the latest cycle */
   marketRankings: MarketRanking[];
-  /** True when the engine is paused (e.g. VPS disconnected in LIVE mode) */
+  /** True when engine is paused */
   systemPaused: boolean;
   pauseReason: string | null;
 
@@ -104,9 +116,8 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
   const { account, positions, trades, placeOrder, clearAllPositions } = useTrading();
   const { config: strategyConfig }  = useStrategy();
   const { symbols: watchlist }      = useWatchlist();
-  const { connectionStatus, config } = useVps();
 
-  const limits        = strategyConfig.riskLimits;
+  const limits            = strategyConfig.riskLimits;
   const consecutiveLosses = useMemo(() => calcConsecutiveLosses(trades), [trades]);
 
   const [currentDecision, setCurrentDecision] = useState<AiEngineDecision | null>(null);
@@ -123,8 +134,8 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
   const [nextCycleMs,     setNextCycleMs]     = useState(CYCLE_MS);
   const [pendingApprovals, setPendingApprovals] = useState<PendingLiveApproval[]>([]);
   const [marketRankings,   setMarketRankings]   = useState<MarketRanking[]>([]);
-  const [systemPaused,     setSystemPaused]     = useState(false);
-  const [pauseReason,      setPauseReason]      = useState<string | null>(null);
+  const [systemPaused]     = useState(false);
+  const [pauseReason]      = useState<string | null>(null);
 
   const priceBuffer      = useRef<PriceBuffer>(new Map());
   const lastPriceUpdate  = useRef<number>(Date.now());
@@ -133,7 +144,6 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
   const cycleTimer       = useRef<ReturnType<typeof setTimeout> | null>(null);
   const countdownTimer   = useRef<ReturnType<typeof setInterval> | null>(null);
   const nextCycleAt      = useRef<number>(Date.now() + CYCLE_MS);
-  // Track which risk event notifications we've sent to avoid spamming
   const notifiedRiskLock     = useRef(false);
   const prevEngineStateRef   = useRef<string | null>(null);
 
@@ -154,10 +164,10 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
     }
   }, [watchlist]);
 
-  // ── Daily / weekly / consecutive loss → RISK_LOCKED ──────────────────────
+  // ── Daily / weekly / consecutive loss → RISK_LOCKED ─────────────────────
   useEffect(() => {
     if (engineState === EngineState.EMERGENCY_STOP || engineState === EngineState.RISK_LOCKED) {
-      notifiedRiskLock.current = false; // reset so next lock triggers a new notification
+      notifiedRiskLock.current = false;
       return;
     }
     const dailyLoss   = account.realizedPnlToday;
@@ -230,37 +240,27 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
         }> };
         if (!decisions?.length) return;
 
-        // Convert DB rows → AiEngineDecision for display
         const seeded = decisions.map((row): AiEngineDecision => {
-          // If full JSON is stored, deserialise it for full fidelity
           if (row.fullJson) {
             try {
               const parsed = JSON.parse(row.fullJson) as AiEngineDecision;
               return { ...parsed, id: String(row.id) };
-            } catch { /* fall through to minimal conversion */ }
+            } catch { /* fall through */ }
           }
-          // Minimal conversion from DB fields
           const opStateMap: Record<string, AiOperatingState> = {
             LONG: 'LONG', SHORT: 'SHORT', NO_TRADE: 'CASH',
           };
           return {
-            id: String(row.id),
-            cycleNumber: 0,
-            createdAt: row.ts,
+            id: String(row.id), cycleNumber: 0, createdAt: row.ts,
             operatingState: opStateMap[row.direction] ?? 'CASH',
-            prevState: 'CASH',
-            stateChanged: false,
+            prevState: 'CASH', stateChanged: false,
             selectedSymbols: row.symbol ? [row.symbol] : [],
             primarySymbol: row.symbol || null,
             confidence: Math.round((row.confidence ?? 0) * 100),
-            marketCondition: 'RANGING',
-            riskLevel: 'MEDIUM',
-            symbolAnalyses: [],
-            marketRankings: [],
-            executionType: 'hold',
-            entryStyle: 'none',
-            stateRationale: row.rationale ?? '',
-            reasoning: [],
+            marketCondition: 'RANGING', riskLevel: 'MEDIUM',
+            symbolAnalyses: [], marketRankings: [],
+            executionType: 'hold', entryStyle: 'none',
+            stateRationale: row.rationale ?? '', reasoning: [],
             riskApproved: row.riskResult === 'APPROVED',
             riskVetoReason: row.riskNote ?? undefined,
             paperExecuted: row.executionOutcome === 'SIMULATED',
@@ -339,64 +339,9 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
-  // ── Forward approved order to VPS ─────────────────────────────────────────
-  const forwardToVps = useCallback(async (
-    decision: AiEngineDecision,
-    snapshot?: { host: string; port: string; useSSL: boolean },
-  ): Promise<{ ok: boolean; error?: string }> => {
-    const mode = config.executorMode ?? 'internal';
-    let url: string;
-
-    if (mode === 'internal') {
-      // Internal Replit executor — no host/port needed
-      url = `${API_BASE}/executor/execute`;
-    } else {
-      // External VPS mode — use snapshotted or current config
-      const target = snapshot ?? { host: config.host ?? '', port: config.port ?? '8080', useSSL: config.useSSL ?? false };
-      if (!target.host?.trim()) return { ok: false, error: 'External VPS not configured — set host in Settings → Advanced' };
-      const params = new URLSearchParams({
-        host: target.host,
-        port: target.port || '8080',
-        ssl: String(target.useSSL ?? false),
-      });
-      url = `${API_BASE}/vps/execute?${params}`;
-    }
-    const body = JSON.stringify({
-      decisionId: decision.id,
-      operatingState: decision.operatingState,
-      symbol: decision.primarySymbol,
-      executionType: decision.executionType,
-      sizeUsd: decision.sizeUsd,
-      leverage: decision.leverage,
-      tpPrice: decision.tpPrice,
-      slPrice: decision.slPrice,
-      trailingStopPct: decision.trailingStopPct,
-      hedgeParams: decision.hedgeParams,
-      cycleNumber: decision.cycleNumber,
-    });
-    const headers = { 'Content-Type': 'application/json' };
-
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const res = await fetch(url, { method: 'POST', headers, body });
-        if (!res.ok) {
-          const detail = await res.text().catch(() => '');
-          if (res.status >= 500 && attempt === 0) {
-            await new Promise(r => setTimeout(r, 2000));
-            continue;
-          }
-          return { ok: false, error: `VPS responded ${res.status}${detail ? ': ' + detail.slice(0, 120) : ''}` };
-        }
-        return { ok: true };
-      } catch (e) {
-        if (attempt === 0) { await new Promise(r => setTimeout(r, 2000)); continue; }
-        return { ok: false, error: e instanceof Error ? e.message : 'Network error' };
-      }
-    }
-    return { ok: false, error: 'VPS unreachable after retry' };
-  }, [config]);
-
   // ── Approve a live order ──────────────────────────────────────────────────
+  // Marks the approval as APPROVED and fires a notification.
+  // Actual GMX execution requires GMX SDK integration (task #32).
   const approveLiveOrder = useCallback(async (id: string) => {
     const approval = pendingApprovals.find(a => a.id === id);
     if (!approval || approval.status !== 'PENDING') return;
@@ -407,28 +352,18 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
         : a,
     ));
 
-    const result = await forwardToVps(approval.decision, approval.vpsSnapshot);
-    setPendingApprovals(prev => prev.map(a =>
-      a.id === id ? { ...a, vpsForwarded: result.ok, vpsError: result.error } : a,
-    ));
     void scheduleApprovalGrantedAlert(
       approval.decision.primarySymbol ?? 'MULTI',
       approval.decision.operatingState,
-      result.ok,
     );
-  }, [pendingApprovals, forwardToVps]);
+  }, [pendingApprovals]);
 
   // ── Reject a live order ───────────────────────────────────────────────────
   const rejectLiveOrder = useCallback((id: string, reason?: string) => {
     const approval = pendingApprovals.find(a => a.id === id);
     setPendingApprovals(prev => prev.map(a =>
       a.id === id && a.status === 'PENDING'
-        ? {
-            ...a,
-            status: 'REJECTED' as ApprovalStatus,
-            rejectedAt: new Date().toISOString(),
-            rejectionReason: reason,
-          }
+        ? { ...a, status: 'REJECTED' as ApprovalStatus, rejectedAt: new Date().toISOString(), rejectionReason: reason }
         : a,
     ));
     if (approval?.status === 'PENDING') {
@@ -470,7 +405,6 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
       const isPaperTrade = !isLiveTrade &&
         engineState !== EngineState.EMERGENCY_STOP &&
         engineState !== EngineState.RISK_LOCKED;
-      const isVpsConnected = connectionStatus === 'connected';
       const isActionable =
         rawDecision.riskApproved &&
         rawDecision.operatingState !== 'CASH' &&
@@ -478,7 +412,6 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
         !!rawDecision.sizeUsd && rawDecision.sizeUsd > 0 &&
         !!rawDecision.primarySymbol;
 
-      // ── Update market rankings every cycle ────────────────────────────
       setMarketRankings(rawDecision.marketRankings ?? []);
 
       let paperExecuted = false;
@@ -487,47 +420,32 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
 
       if (isActionable) {
         if (isLiveTrade) {
-          // ── LIVE: fail-closed when VPS is not reachable ──────────────
-          if (!isVpsConnected) {
-            pausedReason = 'VPS disconnected — no live orders queued until connection restored';
-            setSystemPaused(true);
-            setPauseReason(pausedReason);
-            console.warn(`[AiEngine] LIVE mode fail-closed — ${pausedReason}`);
-          } else {
-            setSystemPaused(false);
-            setPauseReason(null);
-            // ── Queue for operator approval ─────────────────────────────
-            const now      = new Date().toISOString();
-            const approvalId = genId();
-            const decId    = genId();
-            const fullDecision: AiEngineDecision = {
-              id: decId, createdAt: now, paperExecuted: false, ...rawDecision,
-            };
-            const approval: PendingLiveApproval = {
-              id:        approvalId,
-              decision:  fullDecision,
-              createdAt: now,
-              expiresAt: new Date(Date.now() + APPROVAL_TIMEOUT_MS).toISOString(),
-              status:    'PENDING',
-              vpsSnapshot: { host: config.host ?? '', port: config.port ?? '8080', useSSL: config.useSSL ?? false },
-            };
-            setPendingApprovals(prev => [...prev, approval]);
+          // ── LIVE: queue for operator approval ──────────────────────────────
+          const now        = new Date().toISOString();
+          const approvalId = genId();
+          const decId      = genId();
+          const fullDecision: AiEngineDecision = {
+            id: decId, createdAt: now, paperExecuted: false, ...rawDecision,
+          };
+          const approval: PendingLiveApproval = {
+            id:        approvalId,
+            decision:  fullDecision,
+            createdAt: now,
+            expiresAt: new Date(Date.now() + APPROVAL_TIMEOUT_MS).toISOString(),
+            status:    'PENDING',
+          };
+          setPendingApprovals(prev => [...prev, approval]);
 
-            // Notify operator
-            const expiresInMin = Math.round(APPROVAL_TIMEOUT_MS / 60_000);
-            scheduleLiveApprovalAlert(
-              approvalId,
-              rawDecision.primarySymbol ?? 'MULTI',
-              rawDecision.operatingState,
-              expiresInMin,
-            );
-          }
+          const expiresInMin = Math.round(APPROVAL_TIMEOUT_MS / 60_000);
+          scheduleLiveApprovalAlert(
+            approvalId,
+            rawDecision.primarySymbol ?? 'MULTI',
+            rawDecision.operatingState,
+            expiresInMin,
+          );
 
         } else if (isPaperTrade && autoExecute) {
-          // ── PAPER: auto-execute locally (VPS down doesn't block paper) ─
-          if (!isVpsConnected) {
-            console.info('[AiEngine] VPS disconnected — paper trade running locally only');
-          }
+          // ── PAPER: auto-execute locally ─────────────────────────────────────
           const sym  = rawDecision.primarySymbol!;
           const side = rawDecision.operatingState === 'SHORT' ? 'SHORT' : 'LONG';
           const baseOrder = {
@@ -555,8 +473,6 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
         isPaperTrade && autoExecute &&
         positions.length > 0
       ) {
-        // ── CASH decision with open positions → exit all to USDC (paper) ─
-        console.info('[AiEngine] CASH state — closing all open positions (paper)');
         clearAllPositions();
       }
 
@@ -579,7 +495,7 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
     }
   }, [
     running, buildAnalyses, positions, account, limits, engineState,
-    connectionStatus, consecutiveLosses, autoExecute, placeOrder,
+    consecutiveLosses, autoExecute, placeOrder,
     clearAllPositions, updateStats, persistDecision,
   ]);
 
@@ -621,13 +537,15 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
     setCurrentDecision(null);
   }, []);
 
-  const pendingCount = pendingApprovals.filter(a => a.status === 'PENDING').length;
+  const pendingCount   = pendingApprovals.filter(a => a.status === 'PENDING').length;
+  const operatingMode  = deriveOperatingMode(String(engineState), autoExecute);
 
   return (
     <AiEngineContext.Provider value={{
       currentDecision, decisionHistory, stats,
       running, autoExecute, setAutoExecute,
       triggerCycle, clearHistory, nextCycleMs,
+      operatingMode,
       marketRankings, systemPaused, pauseReason,
       pendingApprovals, approveLiveOrder, rejectLiveOrder, pendingCount,
     }}>

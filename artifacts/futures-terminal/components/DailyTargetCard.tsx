@@ -13,7 +13,7 @@ import { StyleSheet, Text, View } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { useColors } from '@/hooks/useColors';
 import { useTrading } from '@/contexts/TradingContext';
-import { useVps } from '@/contexts/VpsContext';
+import { useEngine, EngineState } from '@/contexts/EngineContext';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 // ── Config hook ───────────────────────────────────────────────────────────────
@@ -27,11 +27,9 @@ function useDailyConfig(): DailyConfig {
   const [cfg, setCfg] = useState<DailyConfig>(DEFAULT_CONFIG);
 
   useEffect(() => {
-    // Load from cache first
     AsyncStorage.getItem(STORAGE_KEY).then(raw => {
       if (raw) setCfg(JSON.parse(raw));
     });
-    // Fetch from strategy API (same limits object as web)
     const API_BASE = process.env.EXPO_PUBLIC_DOMAIN
       ? `https://${process.env.EXPO_PUBLIC_DOMAIN}/api-server/api`
       : '/api-server/api';
@@ -80,7 +78,7 @@ function fmtPnl(v: number): string {
 export function DailyTargetCard() {
   const colors  = useColors();
   const { account } = useTrading();
-  const { operatingMode } = useVps();
+  const { engineState } = useEngine();
   const cfg = useDailyConfig();
 
   const realized   = account.realizedPnlToday ?? 0;
@@ -89,7 +87,7 @@ export function DailyTargetCard() {
 
   const { startingCapital, dailyTargetUSDT: target } = cfg;
 
-  const isHalted   = operatingMode === 'RISK_LOCKED';
+  const isHalted   = engineState === EngineState.RISK_LOCKED || engineState === EngineState.EMERGENCY_STOP;
   const state      = deriveState(realized, totalPnL, target, isHalted);
 
   const achievedPct  = target > 0 ? Math.max(0, Math.min(100, (realized / target) * 100)) : 0;

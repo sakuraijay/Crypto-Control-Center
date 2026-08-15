@@ -11,7 +11,7 @@
 
 import { useTradingContext } from '@/lib/context';
 import { useStrategyContext } from '@/lib/context/StrategyContext';
-import { useVpsContext } from '@/lib/context/VpsContext';
+import { useAppContext } from '@/lib/context/AppContext';
 import { cn } from '@/lib/utils';
 import { AlertTriangle, CheckCircle2, ShieldAlert, TrendingDown, TrendingUp, Info } from 'lucide-react';
 
@@ -65,7 +65,7 @@ function StatItem({ label, value, cls }: { label: string; value: string; cls?: s
 export function DailyTargetCard({ className }: { className?: string }) {
   const { todayStats, account } = useTradingContext();
   const { limits } = useStrategyContext();
-  const { operatingMode } = useVpsContext();
+  const { engineState } = useAppContext();
 
   const realized    = todayStats?.realized    ?? 0;
   const unrealized  = account?.unrealizedPnl  ?? 0;
@@ -75,7 +75,7 @@ export function DailyTargetCard({ className }: { className?: string }) {
   const startingCap    = limits.startingCapital   ?? 10_000;
   const dailyLossLimit = limits.dailyLossLimitUSDT ?? 500;
 
-  const isHalted   = operatingMode === 'RISK_LOCKED';
+  const isHalted   = engineState === 'RISK_LOCKED' || engineState === 'EMERGENCY_STOP';
   const dailyState = deriveDailyState(realized, totalPnL, dailyTarget, isHalted);
   const stateMeta  = STATE_META[dailyState];
   const StateIcon  = stateMeta.icon;
@@ -84,7 +84,6 @@ export function DailyTargetCard({ className }: { className?: string }) {
   const totalPct    = Math.max(-100, Math.min(100, (totalPnL / dailyTarget) * 100));
   const realizedPct = Math.max(-100, Math.min(100, (realized  / dailyTarget) * 100));
   const isPositive  = totalPnL >= 0;
-  const barFillPct  = Math.min(100, Math.abs(totalPct));
 
   // Drawdown as % of starting capital
   const drawdownUsdt   = Math.min(0, realized + unrealized);
@@ -93,13 +92,15 @@ export function DailyTargetCard({ className }: { className?: string }) {
   const remaining = Math.max(0, dailyTarget - realized);
   const achievedPct = Math.max(0, Math.min(100, (realized / dailyTarget) * 100));
 
-  const progressColor = dailyState === 'REACHED'  ? '#f59e0b'  // gold
+  const progressColor = dailyState === 'REACHED'  ? '#f59e0b'
     : dailyState === 'DRAWDOWN' || dailyState === 'HALTED' ? 'var(--color-short)'
     : 'var(--color-long)';
 
   const unrealizedBarWidth = isPositive
     ? Math.max(0, Math.min(100, (Math.abs(totalPct) - Math.abs(realizedPct))))
     : 0;
+
+  void dailyLossLimit; // used in risk engine, not display
 
   return (
     <div className={cn(
@@ -140,7 +141,6 @@ export function DailyTargetCard({ className }: { className?: string }) {
 
         {/* Progress track */}
         <div className="relative h-5 rounded-full bg-secondary overflow-hidden">
-          {/* Realized fill */}
           <div
             className="absolute inset-y-0 left-0 rounded-full transition-all duration-700"
             style={{
@@ -149,7 +149,6 @@ export function DailyTargetCard({ className }: { className?: string }) {
               opacity: isPositive ? 1 : 0.9,
             }}
           />
-          {/* Unrealized overlay */}
           {unrealizedBarWidth > 0 && (
             <div
               className="absolute inset-y-0 transition-all duration-700"
@@ -161,9 +160,7 @@ export function DailyTargetCard({ className }: { className?: string }) {
               }}
             />
           )}
-          {/* Target line */}
           <div className="absolute inset-y-0 right-0 w-px bg-muted-foreground/30" />
-          {/* Progress label inside bar */}
           <div className="absolute inset-0 flex items-center justify-center">
             <span className="text-[10px] font-bold text-white/80 mix-blend-plus-lighter">
               {fmt(realized)} realized
@@ -172,7 +169,6 @@ export function DailyTargetCard({ className }: { className?: string }) {
           </div>
         </div>
 
-        {/* Target markers */}
         <div className="flex items-center justify-between text-[9px] text-muted-foreground font-mono">
           <span>$0</span>
           <span className="text-muted-foreground/60">─── target ───▶</span>

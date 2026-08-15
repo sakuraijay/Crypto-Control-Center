@@ -530,7 +530,7 @@ export default function AiLogPage() {
             <table className="w-full text-xs">
               <thead className="bg-secondary/50 border-b border-border">
                 <tr>
-                  {['시간', '결정 #', '심볼', '실행 유형', '상태', 'VPS 전달', '오류'].map(h => (
+                  {['시간', '결정 #', '심볼', '실행 유형', '상태'].map(h => (
                     <th key={h} className="text-left font-medium text-muted-foreground py-2 px-3 text-[10px] uppercase tracking-wider whitespace-nowrap">{h}</th>
                   ))}
                 </tr>
@@ -567,26 +567,6 @@ export default function AiLogPage() {
                           <div className="text-[9px] text-muted-foreground mt-0.5 max-w-[120px] truncate">{a.rejectionReason}</div>
                         )}
                       </td>
-                      <td className="px-3 py-2">
-                        {a.vpsForwarded === true && (
-                          <span className="inline-flex items-center gap-1 text-[10px] text-[var(--color-long)] font-semibold">
-                            <CheckCircle2 className="w-3 h-3" /> 전달됨
-                          </span>
-                        )}
-                        {a.vpsForwarded === false && (
-                          <span className="inline-flex items-center gap-1 text-[10px] text-[var(--color-short)] font-semibold">
-                            <XCircle className="w-3 h-3" /> 실패
-                          </span>
-                        )}
-                        {a.vpsForwarded == null && (
-                          <span className="text-[10px] text-muted-foreground">—</span>
-                        )}
-                      </td>
-                      <td className="px-3 py-2 text-[10px] text-[var(--color-short)] max-w-[180px]">
-                        {a.vpsError ? (
-                          <span className="truncate block" title={a.vpsError}>{a.vpsError.slice(0, 60)}</span>
-                        ) : '—'}
-                      </td>
                     </tr>
                   );
                 })}
@@ -603,8 +583,8 @@ export default function AiLogPage() {
           결정론적 리스크 컨트롤이 AI보다 <strong>절대 우선권</strong>을 가집니다.
           거부(Veto)된 결정은 로그에 기록되지만 절대 실행되지 않습니다.
           페이퍼 모드에서 자동 실행은 로컬 시뮬레이션입니다.
-          LIVE 거래는 외부 VPS에서 GMX One-Click 서브계정으로만 실행됩니다.
-          오퍼레이터 역할: <strong>모니터링 및 비상정지 전용</strong>.
+          LIVE 주문은 오퍼레이터 승인 후 GMX One-Click 서브계정으로만 실행됩니다.
+          오퍼레이터 역할: <strong>모니터링 · 승인 게이트 · 비상정지</strong>.
         </span>
       </div>
     </div>

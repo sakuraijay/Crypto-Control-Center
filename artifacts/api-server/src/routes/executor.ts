@@ -4,9 +4,8 @@
  * GET  /executor/status   — readiness & health (no secrets returned)
  * POST /executor/execute  — submit an operator-approved AI decision for execution
  *
- * These routes complement the existing /vps/* routes.
- * /vps/* remains for the optional external-VPS mode.
- * /executor/* is the default internal execution path for Reserved VM deployments.
+ * /executor/* is the Replit-hosted execution path for Reserved VM deployments.
+ * Actual GMX order signing requires a configured One-Click subaccount (task #32).
  */
 
 import { Router } from "express";

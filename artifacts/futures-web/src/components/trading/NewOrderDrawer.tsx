@@ -2,10 +2,9 @@ import { useState, useMemo } from 'react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { AlertCircle, TrendingUp, TrendingDown, Info, WifiOff } from 'lucide-react';
+import { AlertCircle, TrendingUp, TrendingDown, Info } from 'lucide-react';
 import { useTradingContext, useWatchlistContext, useStrategyContext, useAppContext } from '@/lib/context';
 import type { NewOrderParams } from '@/lib/context/AppContext';
-import { useVpsContext } from '@/lib/context/VpsContext';
 import { useToast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
 
@@ -35,13 +34,12 @@ export function NewOrderDrawer({ open, onClose, defaultSymbol }: Props) {
   const { watchlist } = useWatchlistContext();
   const { limits } = useStrategyContext();
   const { engineState, stopNewOrders } = useAppContext();
-  const { connectionStatus } = useVpsContext();
   const { toast } = useToast();
 
   const [symbol, setSymbol]           = useState(defaultSymbol ?? 'BTC');
   const [side, setSide]               = useState<'LONG' | 'SHORT'>('LONG');
   const [orderType, setOrderType]     = useState<'MarketIncrease' | 'LimitIncrease'>('MarketIncrease');
-  const [sizeUsd, setSizeUsd]         = useState('500');    // USD position size
+  const [sizeUsd, setSizeUsd]         = useState('500');
   const [leverage, setLeverage]       = useState('10');
   const [limitPrice, setLimitPrice]   = useState('');
   const [tpPrice, setTpPrice]         = useState('');
@@ -49,26 +47,19 @@ export function NewOrderDrawer({ open, onClose, defaultSymbol }: Props) {
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [submitting, setSubmitting]   = useState(false);
 
-  // Normalise: uppercase, strip USDT suffix if pasted
   const sym = symbol.toUpperCase().replace(/USDT$/, '').replace(/\/USD$/, '');
-
   const wlEntry     = watchlist.find(w => w.symbol === sym);
   const sizeUsdNum  = parseFloat(sizeUsd) || 0;
   const levNum      = Math.min(parseInt(leverage) || 10, limits.maxLeverage);
   const refPrice    = wlEntry?.price ?? 0;
-
-  // GMX collateral = sizeInUsd / leverage
   const collateralUsd = sizeUsdNum > 0 && levNum > 0 ? sizeUsdNum / levNum : 0;
 
-  const isLiveTrade = engineState === 'LIVE_TRADING';
-  const vpsDown = connectionStatus !== 'connected';
+  void refPrice;
 
   const validationErrors = useMemo(() => {
     const errs: string[] = [];
     if (engineState === 'EMERGENCY_STOP') errs.push('Emergency stop is active');
     if (stopNewOrders) errs.push('New orders are disabled');
-    // Fail-closed: block manual orders in LIVE mode when VPS is unreachable
-    if (isLiveTrade && vpsDown) errs.push('VPS disconnected — orders blocked in LIVE mode');
     if (!sym.trim()) errs.push('Symbol is required');
     if (sizeUsdNum <= 0) errs.push('Position size must be > 0');
     if (levNum < 1 || levNum > limits.maxLeverage) errs.push(`Leverage must be 1–${limits.maxLeverage}x`);
@@ -81,7 +72,7 @@ export function NewOrderDrawer({ open, onClose, defaultSymbol }: Props) {
       errs.push(`Total exposure $${totalExposure.toFixed(0)} would exceed limit $${limits.maxTotalExposureUSDT.toLocaleString()}`);
     }
     return errs;
-  }, [engineState, stopNewOrders, isLiveTrade, vpsDown, sym, sizeUsdNum, levNum, orderType, limitPrice, collateralUsd, limits, account, positions]);
+  }, [engineState, stopNewOrders, sym, sizeUsdNum, levNum, orderType, limitPrice, collateralUsd, limits, account, positions]);
 
   const handleSubmit = async () => {
     if (validationErrors.length > 0) return;
@@ -185,7 +176,7 @@ export function NewOrderDrawer({ open, onClose, defaultSymbol }: Props) {
             </div>
           </Field>
 
-          {/* Order type — GMX V2 names */}
+          {/* Order type */}
           <Field label="Order Type">
             <div className="flex gap-2">
               {(['MarketIncrease', 'LimitIncrease'] as const).map(t => (
@@ -205,7 +196,7 @@ export function NewOrderDrawer({ open, onClose, defaultSymbol }: Props) {
             </div>
           </Field>
 
-          {/* Size (USD) + Leverage */}
+          {/* Size + Leverage */}
           <div className="grid grid-cols-2 gap-3">
             <Field label="Size (USD)" hint={collateralUsd > 0 ? `Collateral: $${collateralUsd.toFixed(0)}` : undefined}>
               <Input
@@ -236,7 +227,6 @@ export function NewOrderDrawer({ open, onClose, defaultSymbol }: Props) {
             </Field>
           </div>
 
-          {/* Limit price (conditional) */}
           {orderType === 'LimitIncrease' && (
             <Field label="Limit Price">
               <Input
@@ -249,7 +239,6 @@ export function NewOrderDrawer({ open, onClose, defaultSymbol }: Props) {
             </Field>
           )}
 
-          {/* Collateral estimate */}
           {collateralUsd > 0 && (
             <div className="flex items-center justify-between text-xs p-3 bg-secondary rounded-md border border-border">
               <span className="text-muted-foreground flex items-center gap-1.5">
@@ -261,7 +250,6 @@ export function NewOrderDrawer({ open, onClose, defaultSymbol }: Props) {
             </div>
           )}
 
-          {/* TP/SL toggle */}
           <button
             onClick={() => setShowAdvanced(a => !a)}
             className="text-xs text-primary underline-offset-2 hover:underline text-left font-medium"
@@ -292,7 +280,6 @@ export function NewOrderDrawer({ open, onClose, defaultSymbol }: Props) {
             </div>
           )}
 
-          {/* Validation errors */}
           {validationErrors.length > 0 && (
             <div className="flex flex-col gap-1 p-3 bg-destructive/10 border border-destructive/30 rounded-md">
               {validationErrors.map(e => (
@@ -304,7 +291,6 @@ export function NewOrderDrawer({ open, onClose, defaultSymbol }: Props) {
           )}
         </div>
 
-        {/* Footer */}
         <div className="px-6 py-4 border-t border-border bg-card/50 flex gap-3">
           <Button variant="outline" className="flex-1" onClick={onClose}>Cancel</Button>
           <Button

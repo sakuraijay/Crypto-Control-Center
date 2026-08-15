@@ -4,7 +4,7 @@
  * Channels (Android):
  *  • risk-alerts     — Risk control events (RISK_LOCKED, emergency)
  *  • live-approvals  — New LIVE trade proposals awaiting operator approval
- *  • system-events   — Connection health, relay, reconciliation, restart
+ *  • system-events   — Connection health, engine restart, reconciliation
  *
  * All notifications fire immediately (trigger: null) and work when foregrounded
  * or backgrounded.
@@ -78,10 +78,6 @@ async function scheduleNow(
 
 // ── Risk alert ────────────────────────────────────────────────────────────────
 
-/**
- * Generic risk/safety alert.
- * Identifier can be reused to cancel a previous duplicate.
- */
 export async function scheduleRiskAlert(
   title: string,
   body: string,
@@ -94,10 +90,6 @@ export async function scheduleRiskAlert(
 
 /**
  * Fire when the AI queues a new live-trade proposal awaiting operator approval.
- * @param approvalId   Unique approval ID (used as notification identifier for dedup)
- * @param symbol       GMX index symbol, e.g. "BTC"
- * @param direction    AiOperatingState, e.g. "LONG"
- * @param expiresInMin Minutes until the proposal auto-expires
  */
 export async function scheduleLiveApprovalAlert(
   approvalId: string,
@@ -117,9 +109,6 @@ export async function scheduleLiveApprovalAlert(
 
 // ── Risk lock ─────────────────────────────────────────────────────────────────
 
-/**
- * Fire when engine transitions to RISK_LOCKED.
- */
 export async function scheduleRiskLockAlert(reason: string): Promise<string | null> {
   return scheduleNow(
     '⛔ Engine RISK LOCKED',
@@ -132,11 +121,6 @@ export async function scheduleRiskLockAlert(reason: string): Promise<string | nu
 
 // ── Connection / relay health ─────────────────────────────────────────────────
 
-/**
- * Fire when relay, RPC, or API server connection changes state.
- * @param status   'degraded' | 'down' | 'recovered'
- * @param message  Human-readable message
- */
 export async function scheduleConnectionHealthAlert(
   status: 'degraded' | 'down' | 'recovered',
   message: string,
@@ -155,10 +139,6 @@ export async function scheduleConnectionHealthAlert(
 
 // ── Reconciliation ────────────────────────────────────────────────────────────
 
-/**
- * Fire when the position reconciliation detects a mismatch between local
- * and on-chain state.
- */
 export async function scheduleReconciliationAlert(message: string): Promise<string | null> {
   return scheduleNow(
     '🔄 Position Reconciliation Required',
@@ -169,11 +149,8 @@ export async function scheduleReconciliationAlert(message: string): Promise<stri
   );
 }
 
-// ── Restart ───────────────────────────────────────────────────────────────────
+// ── Engine restart ────────────────────────────────────────────────────────────
 
-/**
- * Fire when the VPS or AI engine restarts.
- */
 export async function scheduleRestartAlert(message: string): Promise<string | null> {
   return scheduleNow(
     '🔁 Engine Restarted',
@@ -186,19 +163,18 @@ export async function scheduleRestartAlert(message: string): Promise<string | nu
 
 // ── Approval events ───────────────────────────────────────────────────────────
 
-/** Fire when operator approves a live trade and it's forwarded to VPS */
+/** Fire when operator approves a live trade */
 export async function scheduleApprovalGrantedAlert(
   symbol: string,
   direction: string,
-  vpsForwarded: boolean,
 ): Promise<string | null> {
-  const title = vpsForwarded
-    ? `✅ Trade Executed — ${symbol}/USD`
-    : `✅ Approved — ${symbol}/USD (VPS unreachable)`;
-  const body = vpsForwarded
-    ? `${direction} order forwarded to VPS for GMX execution.`
-    : `Order approved but VPS did not confirm. Check VPS connection.`;
-  return scheduleNow(title, body, { type: 'approval_granted', symbol, direction }, `approval-granted-${symbol}-${Date.now()}`, 'live-approvals');
+  return scheduleNow(
+    `✅ Trade Approved — ${symbol}/USD`,
+    `${direction} order approved. Awaiting GMX execution.`,
+    { type: 'approval_granted', symbol, direction },
+    `approval-granted-${symbol}-${Date.now()}`,
+    'live-approvals',
+  );
 }
 
 /** Fire when operator rejects a live trade proposal */

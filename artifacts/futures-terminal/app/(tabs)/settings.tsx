@@ -7,9 +7,9 @@ import {
   StyleSheet,
   Switch,
   Text,
-  TextInput,
   TouchableOpacity,
   View,
+  Linking,
 } from 'react-native';
 import { useColors } from '@/hooks/useColors';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -18,13 +18,6 @@ import * as Haptics from 'expo-haptics';
 import { useEngine, EngineState } from '@/contexts/EngineContext';
 import { useTrading } from '@/contexts/TradingContext';
 import { useAuth } from '@/contexts/AuthContext';
-import { Linking } from 'react-native';
-import {
-  useVps, STATE_COLORS, STATE_LABELS, timeAgo,
-  truncateAddress, subaccountExpiryStatus,
-  type VpsConnectionStatus,
-} from '@/contexts/VpsContext';
-import { VpsStatusCard } from '@/components/VpsStatusCard';
 import { EngineStatusBadge } from '@/components/EngineStatusBadge';
 import { ConfirmModal } from '@/components/ConfirmModal';
 import {
@@ -33,7 +26,12 @@ import {
   type NotificationPermission,
 } from '@/services/notifications';
 
-// ── Tiny UI helpers ───────────────────────────────────────────────
+const API_BASE = process.env.EXPO_PUBLIC_DOMAIN
+  ? `https://${process.env.EXPO_PUBLIC_DOMAIN}/api-server/api`
+  : '/api-server/api';
+
+// ── Tiny UI helpers ───────────────────────────────────────────────────────────
+
 function SectionHeader({ title }: { title: string }) {
   const colors = useColors();
   return (
@@ -77,86 +75,93 @@ function DangerButton({ label, icon, onPress, disabled }: {
   );
 }
 
-// ── GMX One-Click Subaccount panel ────────────────────────────────
+// ── GMX Executor Status Panel ─────────────────────────────────────────────────
+
+interface ExecutorHealth {
+  gmxConnected?: boolean;
+  networkChainId?: number;
+  walletAddress?: string;
+  subaccountAddress?: string;
+  subaccountExpiresAt?: string;
+  subaccountActionsRemaining?: number;
+  deploymentMode?: string;
+}
+
 function GmxSubaccountPanel() {
   const colors = useColors();
-  const { health, testConnection } = useVps();
+  const [health, setHealth] = useState<ExecutorHealth | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
-  const handleRefresh = useCallback(async () => {
+  const fetchHealth = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/executor/status`, { signal: AbortSignal.timeout(8_000) });
+      if (res.ok) setHealth(await res.json());
+    } catch { /* non-fatal */ }
+  }, []);
+
+  useEffect(() => { fetchHealth(); }, [fetchHealth]);
+
+  const handleRefresh = async () => {
     setRefreshing(true);
-    await testConnection();
+    await fetchHealth();
     setRefreshing(false);
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-  }, [testConnection]);
+  };
 
-  const sub   = health.subaccountAddress;
-  const expiry = subaccountExpiryStatus(health.subaccountExpiresAt);
+  const truncateAddr = (addr?: string) => addr ? `${addr.slice(0, 6)}…${addr.slice(-4)}` : '—';
 
-  const expiryColor = expiry.severity === 'expired' ? colors.short
-    : expiry.severity === 'warn' ? colors.warning : colors.long;
-  const quotaColor = health.subaccountActionsRemaining == null
-    ? colors.mutedForeground
-    : health.subaccountActionsRemaining < 10 ? colors.short
-    : health.subaccountActionsRemaining < 50 ? colors.warning : colors.long;
+  const expiresAt = health?.subaccountExpiresAt ? new Date(health.subaccountExpiresAt) : null;
+  const isExpired = expiresAt ? expiresAt.getTime() < Date.now() : false;
+  const expiresLabel = expiresAt
+    ? (isExpired ? 'EXPIRED' : `Expires ${expiresAt.toLocaleDateString()}`)
+    : '—';
+  const expiryColor = isExpired ? colors.short : expiresAt ? colors.long : colors.mutedForeground;
 
   return (
     <View style={[gsa.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
-
       {/* Security notice */}
       <View style={[gsa.secNote, { backgroundColor: colors.warning + '11', borderColor: colors.warning + '33' }]}>
         <Feather name="shield" size={12} color={colors.warning} />
         <Text style={[gsa.secNoteTxt, { color: colors.warning }]}>
-          This panel shows read-only subaccount metadata only. Private keys and seed phrases are
-          never stored or requested here. The delegated signer key lives exclusively on the VPS.
+          This panel shows read-only status from the execution engine. Private keys are never stored
+          or requested here.
         </Text>
       </View>
 
-      {/* Status rows */}
-      {sub ? (
+      {health ? (
         <>
-          <GsaRow label="Delegated subaccount" value={truncateAddress(sub)} valueColor={colors.long} />
-          {health.walletAddress && (
-            <GsaRow label="Primary wallet" value={truncateAddress(health.walletAddress)} />
+          {health.subaccountAddress && (
+            <GsaRow label="Delegated subaccount" value={truncateAddr(health.subaccountAddress)} valueColor={colors.long} />
           )}
-          <GsaRow
-            label="Authorization"
-            value={expiry.label}
-            valueColor={expiryColor}
-          />
+          {health.walletAddress && (
+            <GsaRow label="Primary wallet" value={truncateAddr(health.walletAddress)} />
+          )}
+          <GsaRow label="Authorization" value={expiresLabel} valueColor={expiryColor} />
           {health.subaccountActionsRemaining != null && (
             <GsaRow
               label="Action quota"
               value={`${health.subaccountActionsRemaining.toLocaleString()} remaining`}
-              valueColor={quotaColor}
+              valueColor={health.subaccountActionsRemaining < 10 ? colors.short : health.subaccountActionsRemaining < 50 ? colors.warning : colors.long}
             />
           )}
-          <GsaRow
-            label="Network"
-            value={`Arbitrum One (${health.networkChainId})`}
-          />
+          {health.networkChainId && (
+            <GsaRow label="Network" value={`Arbitrum One (${health.networkChainId})`} />
+          )}
           <GsaRow
             label="GMX RPC"
             value={health.gmxConnected ? 'Connected' : 'Disconnected'}
             valueColor={health.gmxConnected ? colors.long : colors.short}
           />
 
-          {/* Expiry warning */}
-          {expiry.severity !== 'ok' && (
-            <View style={[gsa.warnBox, {
-              backgroundColor: expiryColor + '11',
-              borderColor: expiryColor + '33',
-            }]}>
-              <Feather name="alert-triangle" size={12} color={expiryColor} />
-              <Text style={[gsa.warnTxt, { color: expiryColor }]}>
-                {expiry.severity === 'expired'
-                  ? 'Authorization expired. Re-authorize on GMX to resume live trading.'
-                  : 'Authorization expiring soon. Re-authorize on GMX before it lapses.'}
+          {isExpired && (
+            <View style={[gsa.warnBox, { backgroundColor: colors.short + '11', borderColor: colors.short + '33' }]}>
+              <Feather name="alert-triangle" size={12} color={colors.short} />
+              <Text style={[gsa.warnTxt, { color: colors.short }]}>
+                Authorization expired. Re-authorize on GMX to resume live trading.
               </Text>
             </View>
           )}
 
-          {/* Open GMX */}
           <TouchableOpacity
             onPress={() => Linking.openURL('https://app.gmx.io/#/trade')}
             style={[gsa.linkBtn, { borderColor: colors.border }]}
@@ -168,14 +173,13 @@ function GmxSubaccountPanel() {
         </>
       ) : (
         <>
-          {/* Not yet configured */}
           <View style={gsa.stepsBox}>
             <Text style={[gsa.stepsTitle, { color: colors.foreground }]}>How to set up One-Click Trading:</Text>
             {[
               'Open GMX and go to Settings → One-Click Trading',
-              'Authorize a delegated subaccount (generates a sub-key on the VPS)',
+              'Authorize a delegated subaccount',
               'Fund the subaccount with execution gas (ETH on Arbitrum)',
-              'The VPS uses only the delegated key — never your primary wallet',
+              'Execution uses only the delegated key — never your primary wallet',
             ].map((step, i) => (
               <Text key={i} style={[gsa.stepsTxt, { color: colors.mutedForeground }]}>
                 {i + 1}. {step}
@@ -194,7 +198,6 @@ function GmxSubaccountPanel() {
         </>
       )}
 
-      {/* Refresh */}
       <TouchableOpacity
         onPress={handleRefresh}
         disabled={refreshing}
@@ -206,7 +209,7 @@ function GmxSubaccountPanel() {
           : <Feather name="refresh-cw" size={13} color={colors.mutedForeground} />
         }
         <Text style={[gsa.refreshTxt, { color: colors.mutedForeground }]}>
-          {refreshing ? 'Refreshing…' : 'Refresh status from VPS'}
+          {refreshing ? 'Refreshing…' : 'Refresh executor status'}
         </Text>
       </TouchableOpacity>
     </View>
@@ -243,26 +246,14 @@ const gsa = StyleSheet.create({
   refreshTxt:  { fontFamily: 'Inter_400Regular', fontSize: 11 },
 });
 
-// ── Main screen ───────────────────────────────────────────────────
+// ── Main screen ───────────────────────────────────────────────────────────────
+
 export default function SettingsScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
   const { engineState, stopNewOrdersActive, toggleStopNewOrders, cancelOpenOrders, triggerEmergencyStop, resetFromEmergency } = useEngine();
   const { clearAllPositions } = useTrading();
   const { logout } = useAuth();
-
-  // VPS context — polls live status from API server proxy
-  const {
-    config: vpsConfig, vpsState, connectionStatus: vpsConnStatus,
-    connectionError: vpsConnError, health: vpsHealth,
-    saveConfig: saveVpsConfig, testConnection: testVpsConn, disconnect: disconnectVps,
-  } = useVps();
-
-  // Local form state (mirrors context config; saves on blur/test)
-  const [vpsHost, setVpsHost] = useState(vpsConfig.host);
-  const [vpsPort, setVpsPort] = useState(vpsConfig.port);
-  const [vpsSSL, setVpsSSL] = useState(vpsConfig.useSSL);
-  const [vpsTesting, setVpsTesting] = useState(false);
 
   const [cancelConfirm, setCancelConfirm] = useState(false);
   const [closeStep, setCloseStep] = useState<0 | 1 | 2>(0);
@@ -273,7 +264,7 @@ export default function SettingsScreen() {
   const topPad = insets.top + (Platform.OS === 'web' ? 67 : 0);
   const botPad = insets.bottom + (Platform.OS === 'web' ? 34 : 0);
 
-  // ── Notification permission ────────────────────────────────────
+  // ── Notification permission ────────────────────────────────────────────────
   const [notifPermission, setNotifPermission] = useState<NotificationPermission>('undetermined');
   const [notifRequesting, setNotifRequesting] = useState(false);
 
@@ -289,14 +280,6 @@ export default function SettingsScreen() {
     if (status === 'granted') Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
   };
 
-  const handleTestVps = async () => {
-    await saveVpsConfig({ ...vpsConfig, host: vpsHost, port: vpsPort, useSSL: vpsSSL });
-    setVpsTesting(true);
-    await testVpsConn();
-    setVpsTesting(false);
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-  };
-
   const handleCancelOrders = async () => {
     setCancelConfirm(false);
     setProcessing(true);
@@ -306,7 +289,6 @@ export default function SettingsScreen() {
   };
 
   const handleCloseStep1Confirm = () => {
-    setCloseStep(0);
     setCloseStep(2);
   };
 
@@ -324,14 +306,6 @@ export default function SettingsScreen() {
     triggerEmergencyStop();
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
   };
-
-  const statusColors: Record<VpsConnectionStatus, string> = {
-    connected: colors.long,
-    connecting: colors.warning,
-    error: colors.short,
-    disconnected: colors.mutedForeground,
-  };
-  const statusDotColor = statusColors[vpsConnStatus];
 
   return (
     <KeyboardAvoidingView style={[styles.root, { backgroundColor: colors.background }]} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
@@ -358,7 +332,7 @@ export default function SettingsScreen() {
         </SettingRow>
         <SettingRow
           label="Live Trading"
-          sub="Connect to VPS execution service to enable"
+          sub="Requires GMX One-Click subaccount configuration below"
         >
           <View style={[styles.disabledBadge, { backgroundColor: colors.secondary }]}>
             <Feather name="lock" size={12} color={colors.mutedForeground} />
@@ -366,11 +340,11 @@ export default function SettingsScreen() {
           </View>
         </SettingRow>
 
-        <View style={[styles.infoBox, { backgroundColor: colors.warning + '11', borderColor: colors.warning + '33' }]}>
-          <Feather name="info" size={14} color={colors.warning} />
-          <Text style={[styles.infoTxt, { color: colors.warning }]}>
-            Live trading requires connecting to a separate private VPS execution service.
-            Credentials are never stored on this device.
+        <View style={[styles.infoBox, { backgroundColor: colors.primary + '11', borderColor: colors.primary + '33' }]}>
+          <Feather name="info" size={14} color={colors.primary} />
+          <Text style={[styles.infoTxt, { color: colors.primary }]}>
+            Replit handles AI decisions, operator approval gate, and risk monitoring.
+            Real GMX order execution requires One-Click subaccount setup.
           </Text>
         </View>
 
@@ -408,88 +382,6 @@ export default function SettingsScreen() {
             )}
           </>
         )}
-
-        {/* ── VPS TRADING ENGINE — live status + arm/disarm ── */}
-        <SectionHeader title="VPS TRADING ENGINE" />
-
-        {/* Live VPS status card — includes health grid, arm/disarm, architecture note */}
-        <VpsStatusCard />
-
-        {/* VPS connection settings */}
-        <SectionHeader title="VPS CONNECTION SETTINGS" />
-        <View style={[styles.vpsForm, { backgroundColor: colors.card, borderColor: colors.border }]}>
-          <View style={[styles.vpsNote, { backgroundColor: colors.warning + '11', borderColor: colors.warning + '33' }]}>
-            <Feather name="alert-triangle" size={12} color={colors.warning} />
-            <Text style={[styles.vpsNoteTxt, { color: colors.warning }]}>
-              The VPS holds only a delegated GMX subaccount key — never your primary wallet. Only connection metadata is stored here.
-            </Text>
-          </View>
-
-          <View style={styles.vpsField}>
-            <Text style={[styles.vpsLabel, { color: colors.mutedForeground }]}>HOST / IP ADDRESS</Text>
-            <TextInput
-              value={vpsHost}
-              onChangeText={setVpsHost}
-              onBlur={() => saveVpsConfig({ ...vpsConfig, host: vpsHost, port: vpsPort, useSSL: vpsSSL })}
-              placeholder="e.g. 192.168.1.100 or my-vps.example.com"
-              placeholderTextColor={colors.mutedForeground}
-              style={[styles.vpsInput, { color: colors.foreground, backgroundColor: colors.background, borderColor: colors.border }]}
-              autoCapitalize="none"
-              autoCorrect={false}
-              keyboardType="url"
-            />
-          </View>
-
-          <View style={styles.vpsRow}>
-            <View style={[styles.vpsField, { flex: 1 }]}>
-              <Text style={[styles.vpsLabel, { color: colors.mutedForeground }]}>PORT</Text>
-              <TextInput
-                value={vpsPort}
-                onChangeText={setVpsPort}
-                onBlur={() => saveVpsConfig({ ...vpsConfig, host: vpsHost, port: vpsPort, useSSL: vpsSSL })}
-                placeholder="8080"
-                placeholderTextColor={colors.mutedForeground}
-                style={[styles.vpsInput, { color: colors.foreground, backgroundColor: colors.background, borderColor: colors.border }]}
-                keyboardType="number-pad"
-              />
-            </View>
-
-          </View>
-
-          <View style={[styles.settRow, { borderBottomColor: 'transparent', paddingHorizontal: 0 }]}>
-            <Text style={[styles.settLabel, { color: colors.foreground }]}>Use SSL / TLS</Text>
-            <Switch
-              value={vpsSSL}
-              onValueChange={v => { setVpsSSL(v); saveVpsConfig({ ...vpsConfig, host: vpsHost, port: vpsPort, useSSL: v }); }}
-              trackColor={{ false: '#2A2D3A', true: colors.primary + '44' }}
-              thumbColor={vpsSSL ? colors.primary : '#6B7280'}
-            />
-          </View>
-
-          <TouchableOpacity
-            style={[styles.vpsTestBtn, {
-              backgroundColor: vpsConnStatus === 'connected' ? colors.secondary : colors.primary,
-              opacity: vpsTesting || !vpsHost.trim() ? 0.6 : 1,
-            }]}
-            onPress={handleTestVps}
-            disabled={vpsTesting || !vpsHost.trim()}
-            activeOpacity={0.85}
-          >
-            {vpsTesting ? (
-              <ActivityIndicator size="small" color={colors.background} />
-            ) : (
-              <Feather name={vpsConnStatus === 'connected' ? 'wifi' : 'wifi-off'} size={15}
-                color={vpsConnStatus === 'connected' ? colors.mutedForeground : colors.background} />
-            )}
-            <Text style={[styles.vpsTestTxt, { color: vpsConnStatus === 'connected' ? colors.mutedForeground : colors.background }]}>
-              {vpsTesting ? 'Testing...' : vpsConnStatus === 'connected' ? 'Re-test Connection' : 'Test Connection'}
-            </Text>
-          </TouchableOpacity>
-
-            {vpsConnError ? (
-            <Text style={{ fontFamily: 'Inter_400Regular', fontSize: 11, color: colors.short }}>{vpsConnError}</Text>
-          ) : null}
-        </View>
 
         {/* ── GMX ONE-CLICK SUBACCOUNT ── */}
         <SectionHeader title="GMX ONE-CLICK SUBACCOUNT" />
@@ -550,7 +442,7 @@ export default function SettingsScreen() {
           </TouchableOpacity>
         )}
         <Text style={[styles.emergencyNote, { color: colors.mutedForeground }]}>
-          Emergency stop immediately halts all engine operations, cancels pending orders, and locks trading until manually reset.
+          Emergency stop immediately halts all engine operations and locks trading until manually reset.
         </Text>
 
         {/* ── SECURITY ── */}
@@ -566,8 +458,8 @@ export default function SettingsScreen() {
         {/* ── ABOUT ── */}
         <SectionHeader title="ABOUT" />
         <SettingRow label="Version" sub="Crypto Control Center v1.0.0 — Paper Trading" />
-        <SettingRow label="Mode" sub="Standalone local app — no cloud sync" />
-        <SettingRow label="Architecture" sub="VPS connection ready (configure above)" />
+        <SettingRow label="Mode" sub="Replit — AI decisions · Approval gate · Risk monitoring" />
+        <SettingRow label="Exchange" sub="GMX V2 · Arbitrum One" />
       </ScrollView>
 
       {/* Modals */}
@@ -611,7 +503,6 @@ export default function SettingsScreen() {
   );
 }
 
-// Shared sub-component styles extracted for SectionHeader / SettingRow
 const sh = StyleSheet.create({
   secHeader: { paddingHorizontal: 20, paddingVertical: 10, borderBottomWidth: 1, marginTop: 8 },
   secTitle: { fontFamily: 'Inter_600SemiBold', fontSize: 10, letterSpacing: 1.2 },
@@ -636,24 +527,6 @@ const styles = StyleSheet.create({
   disabledTxt: { fontFamily: 'Inter_600SemiBold', fontSize: 11 },
   infoBox: { flexDirection: 'row', gap: 10, padding: 14, borderRadius: 10, borderWidth: 1, marginHorizontal: 16, marginVertical: 8 },
   infoTxt: { fontFamily: 'Inter_400Regular', fontSize: 12, lineHeight: 18, flex: 1 },
-  // VPS
-  vpsStatusBar: { flexDirection: 'row', alignItems: 'center', gap: 8, marginHorizontal: 16, marginVertical: 6, padding: 12, borderRadius: 10, borderWidth: 1 },
-  vpsStatusDot: { width: 8, height: 8, borderRadius: 4 },
-  vpsStatusTxt: { fontFamily: 'Inter_700Bold', fontSize: 11, letterSpacing: 0.8 },
-  vpsLatency: { fontFamily: 'Inter_400Regular', fontSize: 11 },
-  vpsErrorTxt: { fontFamily: 'Inter_400Regular', fontSize: 11, flex: 1 },
-  vpsDisconnectBtn: { marginLeft: 'auto' as any, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6, borderWidth: 1 },
-  vpsDisconnectTxt: { fontFamily: 'Inter_600SemiBold', fontSize: 11 },
-  vpsForm: { marginHorizontal: 16, marginVertical: 6, borderRadius: 12, borderWidth: 1, padding: 16, gap: 14 },
-  vpsNote: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, padding: 10, borderRadius: 8, borderWidth: 1 },
-  vpsNoteTxt: { fontFamily: 'Inter_400Regular', fontSize: 11, lineHeight: 16, flex: 1 },
-  vpsField: { gap: 6 },
-  vpsRow: { flexDirection: 'row', gap: 10 },
-  vpsLabel: { fontFamily: 'Inter_600SemiBold', fontSize: 10, letterSpacing: 0.6 },
-  vpsInput: { height: 44, borderWidth: 1, borderRadius: 10, paddingHorizontal: 12, fontFamily: 'Inter_400Regular', fontSize: 14 },
-  vpsTestBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, padding: 14, borderRadius: 10 },
-  vpsTestTxt: { fontFamily: 'Inter_700Bold', fontSize: 14 },
-  // Controls
   dangerSection: { gap: 10 },
   emergencyActive: { margin: 16, padding: 16, borderRadius: 12, borderWidth: 1, alignItems: 'center', gap: 10 },
   emergencyActiveTxt: { fontFamily: 'Inter_700Bold', fontSize: 14 },

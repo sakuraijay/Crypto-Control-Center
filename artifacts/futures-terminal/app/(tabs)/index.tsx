@@ -5,8 +5,7 @@
  *  1. Emergency stop banner
  *  2. AI State Card — current 5-state operating state, confidence, next cycle
  *  3. Live Approvals — APPROVE / REJECT pending live trade proposals
- *  4. VPS status
- *  5. Daily performance KPI
+ *  4. Daily performance KPI
  *  6. Account summary (GMX: collateral, available, margin ratio)
  *  7. PnL stats
  *  8. Positions summary
@@ -31,7 +30,6 @@ import type { PendingLiveApproval } from '@/lib/ai/types';
 
 import { EngineStatusBadge } from '@/components/EngineStatusBadge';
 import { ConfirmModal }      from '@/components/ConfirmModal';
-import { VpsStatusCard }     from '@/components/VpsStatusCard';
 import { DailyTargetCard }   from '@/components/DailyTargetCard';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -430,9 +428,6 @@ export default function DashboardScreen() {
 
         {/* Live trade approval gate (only visible when relevant) */}
         <LiveApprovalsCard />
-
-        {/* VPS Engine status */}
-        <VpsStatusCard />
 
         {/* Daily performance KPI */}
         <DailyTargetCard />
