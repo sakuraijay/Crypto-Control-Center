@@ -19,6 +19,7 @@ import {
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { useAiEngine } from '@/lib/context/AiEngineContext';
+import { useWallet } from '@/lib/context/WalletContext';
 import { cn } from '@/lib/utils';
 import { format } from 'date-fns';
 
@@ -65,6 +66,7 @@ export function ExecutorStatusWidget() {
   const [lastFetch, setLastFetch] = useState<Date | null>(null);
 
   const { currentDecision, stats, nextCycleMs, running, operatingMode } = useAiEngine();
+  const wallet = useWallet();
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -158,9 +160,29 @@ export function ExecutorStatusWidget() {
             </div>
             {/* Row 2: Wallet + Subaccount */}
             <div className="grid grid-cols-2 gap-2">
-              <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-border bg-card/50 text-muted-foreground text-[10px] font-medium">
-                <Wallet className="w-3 h-3" />
-                지갑 미연결
+              <div className={cn(
+                'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-[10px] font-medium',
+                wallet.status === 'connected'
+                  ? 'border-[var(--color-long)]/30 bg-[var(--color-long)]/5 text-[var(--color-long)]'
+                  : wallet.status === 'wrong_network'
+                    ? 'border-amber-500/30 bg-amber-500/5 text-amber-400'
+                    : wallet.status === 'connecting'
+                      ? 'border-primary/30 bg-primary/5 text-primary'
+                      : 'border-border bg-card/50 text-muted-foreground',
+              )}>
+                {wallet.status === 'connected'
+                  ? <CheckCircle2 className="w-3 h-3" />
+                  : wallet.status === 'connecting'
+                    ? <Loader2 className="w-3 h-3 animate-spin" />
+                    : <Wallet className="w-3 h-3" />
+                }
+                {wallet.status === 'connected'
+                  ? `${wallet.address!.slice(0, 6)}…${wallet.address!.slice(-4)}`
+                  : wallet.status === 'wrong_network'
+                    ? '잘못된 네트워크'
+                    : wallet.status === 'connecting'
+                      ? '연결 중…'
+                      : '지갑 미연결'}
               </div>
               <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-border bg-card/50 text-muted-foreground text-[10px] font-medium">
                 <Key className="w-3 h-3" />

@@ -1,10 +1,10 @@
 import { useState, useEffect } from 'react';
-import { useAppContext, useAuthContext, useTradingContext } from '@/lib/context';
+import { useAppContext, useAuthContext, useTradingContext, useWallet } from '@/lib/context';
 import { Card } from '@/components/ui/card';
 import { Switch } from '@/components/ui/switch';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
-import { ShieldAlert, Server, Lock, AlertTriangle, AlertOctagon, Info, CheckCircle2, XCircle, Cpu, Loader2, Wallet, Key, FlaskConical, ChevronRight } from 'lucide-react';
+import { ShieldAlert, Server, Lock, AlertTriangle, AlertOctagon, Info, CheckCircle2, XCircle, Cpu, Loader2, Wallet, Key, FlaskConical, ChevronRight, AlertCircle, RefreshCw } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 // ── Executor status hook (fetches /api/executor/status directly) ───────────────
@@ -42,6 +42,7 @@ export default function Settings() {
   const { logout } = useAuthContext();
   const { clearAllPositions, positions } = useTradingContext();
   const { health, loading: healthLoading, refresh: refreshHealth } = useExecutorHealth();
+  const wallet = useWallet();
 
   const [closeAllPhase, setCloseAllPhase] = useState<0 | 1 | 2>(0);
 
@@ -92,7 +93,10 @@ export default function Settings() {
         </h2>
         <p className="text-xs text-muted-foreground -mt-2">
           실제 GMX 계정 조회 및 자동매매를 위해서는 아래 4단계를 순서대로 완료해야 합니다.
-          현재는 <strong className="text-foreground">1단계만 완료</strong>된 상태입니다.
+          현재는{' '}
+          <strong className="text-foreground">
+            {wallet.status === 'connected' && wallet.isArbitrum ? '2단계 완료' : '1단계만 완료'}
+          </strong>된 상태입니다.
           메인 지갑 개인키·시드문구는 절대 서버에 입력하지 마세요.
         </p>
 
@@ -115,27 +119,105 @@ export default function Settings() {
             </div>
           </div>
 
-          {/* Step 2 — 브라우저 지갑 (미완료) */}
-          <div className="flex items-start gap-4 p-4 rounded-lg border border-border bg-card/30">
-            <div className="flex items-center justify-center w-7 h-7 rounded-full border-2 border-border text-muted-foreground font-bold text-xs shrink-0 mt-0.5">
-              2
-            </div>
-            <div className="flex-1 min-w-0">
-              <div className="flex items-center gap-2 mb-1">
-                <span className="font-semibold text-sm">브라우저 지갑 연결</span>
-                <span className="text-[9px] px-1.5 py-0.5 rounded-full border bg-secondary text-muted-foreground border-border font-bold">NOT CONNECTED</span>
+          {/* Step 2 — 브라우저 지갑 */}
+          {(() => {
+            const isConnected = wallet.status === 'connected' && wallet.isArbitrum;
+            const isWrongNet  = wallet.status === 'wrong_network';
+            const isConnecting = wallet.status === 'connecting';
+            const borderColor = isConnected
+              ? 'border-[var(--color-long)]/30 bg-[var(--color-long)]/5'
+              : isWrongNet
+                ? 'border-amber-500/30 bg-amber-500/5'
+                : 'border-border bg-card/30';
+            const circleColor = isConnected
+              ? 'border-[var(--color-long)] text-[var(--color-long)]'
+              : 'border-border text-muted-foreground';
+
+            return (
+              <div className={cn('flex items-start gap-4 p-4 rounded-lg border', borderColor)}>
+                <div className={cn('flex items-center justify-center w-7 h-7 rounded-full border-2 font-bold text-xs shrink-0 mt-0.5', circleColor)}>
+                  {isConnected ? '✓' : '2'}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className={cn('font-semibold text-sm', isConnected && 'text-[var(--color-long)]')}>
+                      브라우저 지갑 연결
+                    </span>
+                    {isConnected ? (
+                      <span className="text-[9px] px-1.5 py-0.5 rounded-full border bg-[var(--color-long)]/10 text-[var(--color-long)] border-[var(--color-long)]/30 font-bold">CONNECTED</span>
+                    ) : isWrongNet ? (
+                      <span className="text-[9px] px-1.5 py-0.5 rounded-full border bg-amber-500/10 text-amber-400 border-amber-500/30 font-bold">WRONG NETWORK</span>
+                    ) : (
+                      <span className="text-[9px] px-1.5 py-0.5 rounded-full border bg-secondary text-muted-foreground border-border font-bold">NOT CONNECTED</span>
+                    )}
+                  </div>
+
+                  {isConnected ? (
+                    /* ── 연결됨 — 주소 + 잔고 표시 ── */
+                    <div className="flex flex-col gap-2">
+                      <div className="flex items-center gap-3 text-xs">
+                        <span className="text-muted-foreground">주소</span>
+                        <span className="font-mono text-foreground">
+                          {wallet.address!.slice(0, 8)}…{wallet.address!.slice(-6)}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-4 text-xs">
+                        <span className="text-muted-foreground">ETH</span>
+                        <span className="font-mono text-foreground">{wallet.ethBalance ?? '—'}</span>
+                        <span className="text-muted-foreground ml-2">USDC</span>
+                        <span className="font-mono text-foreground">{wallet.usdcBalance ?? '—'}</span>
+                      </div>
+                      <div className="flex gap-2 mt-1">
+                        <Button size="sm" variant="ghost" onClick={wallet.refreshBalances} className="h-7 text-xs">
+                          <RefreshCw className="w-3 h-3 mr-1.5" /> 잔고 새로고침
+                        </Button>
+                        <Button size="sm" variant="ghost" onClick={wallet.disconnect} className="h-7 text-xs text-muted-foreground">
+                          연결 해제
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    /* ── 미연결 / 오류 ── */
+                    <div>
+                      <p className="text-xs text-muted-foreground mb-2">
+                        MetaMask 등 브라우저 지갑으로 내 GMX 계정 주소를 연결합니다.
+                        <strong className="text-foreground"> read-only 조회 전용 — 서명·개인키 접근 없음.</strong>
+                        {' '}개인키·시드문구는 브라우저 지갑 내부에 보관되며 서버로 전송되지 않습니다.
+                      </p>
+                      {wallet.status === 'no_provider' ? (
+                        <p className="text-xs text-amber-400 mb-2">
+                          <AlertCircle className="inline w-3 h-3 mr-1" />
+                          MetaMask 또는 EIP-1193 호환 지갑이 설치되어 있지 않습니다.
+                        </p>
+                      ) : isWrongNet ? (
+                        <p className="text-xs text-amber-400 mb-2">
+                          <AlertCircle className="inline w-3 h-3 mr-1" />
+                          Arbitrum One(Chain 42161)으로 네트워크를 전환해주세요.
+                        </p>
+                      ) : wallet.error ? (
+                        <p className="text-xs text-destructive mb-2">
+                          <AlertCircle className="inline w-3 h-3 mr-1" />
+                          {wallet.error}
+                        </p>
+                      ) : null}
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={wallet.connect}
+                        disabled={isConnecting || wallet.status === 'no_provider'}
+                        className="h-7 text-xs"
+                      >
+                        {isConnecting
+                          ? <><Loader2 className="w-3 h-3 mr-1.5 animate-spin" />연결 중…</>
+                          : <><Wallet className="w-3 h-3 mr-1.5" />지갑 연결 (Read-only)</>
+                        }
+                      </Button>
+                    </div>
+                  )}
+                </div>
               </div>
-              <p className="text-xs text-muted-foreground mb-2">
-                MetaMask 등 브라우저 지갑으로 내 GMX 계정 주소를 연결합니다.
-                <strong className="text-foreground"> 이 단계는 read-only 조회용으로, 서명 권한을 부여하지 않습니다.</strong>
-                개인키·시드문구는 브라우저 지갑 내부에 보관되며 서버로 전송되지 않습니다.
-              </p>
-              <Button size="sm" variant="outline" disabled className="h-7 text-xs opacity-50 cursor-not-allowed">
-                <Wallet className="w-3 h-3 mr-1.5" />
-                지갑 연결 (미구현 — 2단계 준비 중)
-              </Button>
-            </div>
-          </div>
+            );
+          })()}
 
           {/* Step 3 — Read-only 계정 조회 */}
           <div className="flex items-start gap-4 p-4 rounded-lg border border-border bg-card/30 opacity-60">
@@ -261,8 +343,22 @@ export default function Settings() {
                   Chain {health.networkChainId}
                 </div>
               )}
-              <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-border bg-card/50 text-muted-foreground text-[11px] font-medium">
-                <Wallet className="w-3.5 h-3.5" /> 지갑 미연결
+              <div className={cn(
+                'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-[11px] font-medium',
+                wallet.status === 'connected' && wallet.isArbitrum
+                  ? 'border-[var(--color-long)]/30 bg-[var(--color-long)]/5 text-[var(--color-long)]'
+                  : wallet.status === 'wrong_network'
+                    ? 'border-amber-500/30 bg-amber-500/5 text-amber-400'
+                    : 'border-border bg-card/50 text-muted-foreground',
+              )}>
+                {wallet.status === 'connected' && wallet.isArbitrum
+                  ? <CheckCircle2 className="w-3.5 h-3.5" />
+                  : <Wallet className="w-3.5 h-3.5" />}
+                {wallet.status === 'connected' && wallet.isArbitrum
+                  ? `지갑 ${wallet.address!.slice(0, 6)}…${wallet.address!.slice(-4)}`
+                  : wallet.status === 'wrong_network'
+                    ? '잘못된 네트워크'
+                    : '지갑 미연결'}
               </div>
               <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-border bg-card/50 text-muted-foreground text-[11px] font-medium">
                 <Key className="w-3.5 h-3.5" /> 서브계정 미인증

@@ -34,6 +34,21 @@ const MIGRATIONS: { name: string; sql: string }[] = [
     name: "0002_ai_full_json",
     sql: `ALTER TABLE ai_decisions ADD COLUMN IF NOT EXISTS full_json text;`,
   },
+  {
+    name: "0003_live_approvals",
+    sql: `
+      CREATE TABLE IF NOT EXISTS live_approvals (
+        id               text PRIMARY KEY,
+        decision_json    text NOT NULL,
+        status           text NOT NULL DEFAULT 'PENDING',
+        created_at       timestamptz NOT NULL DEFAULT now(),
+        expires_at       timestamptz NOT NULL,
+        approved_at      timestamptz,
+        rejected_at      timestamptz,
+        rejection_reason text
+      );
+    `,
+  },
   // Add future migrations here in chronological order.
 ];
 

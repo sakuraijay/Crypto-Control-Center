@@ -202,6 +202,64 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ── Seed LIVE approval history from DB on mount ────────────────────────────
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch('/api-server/api/ai/approvals?limit=200');
+        if (!res.ok) return;
+        const { approvals } = await res.json() as {
+          approvals: Array<{
+            id: string; decisionJson: string; status: string;
+            createdAt: string; expiresAt: string;
+            approvedAt?: string | null; rejectedAt?: string | null;
+            rejectionReason?: string | null;
+          }>;
+        };
+        if (!approvals?.length) return;
+
+        const seeded = approvals.map((row): PendingLiveApproval => {
+          let decision: AiEngineDecision;
+          try {
+            decision = JSON.parse(row.decisionJson) as AiEngineDecision;
+          } catch {
+            // 파싱 실패 시 최소 구조로 복원
+            decision = {
+              id: row.id, cycleNumber: 0, createdAt: row.createdAt,
+              operatingState: 'CASH', prevState: 'CASH', stateChanged: false,
+              selectedSymbols: [], primarySymbol: null,
+              confidence: 0, marketCondition: 'RANGING', riskLevel: 'MEDIUM',
+              symbolAnalyses: [], marketRankings: [],
+              executionType: 'hold', entryStyle: 'none',
+              stateRationale: '', reasoning: [],
+              riskApproved: false, paperExecuted: false,
+            };
+          }
+          return {
+            id:              row.id,
+            decision,
+            createdAt:       row.createdAt,
+            expiresAt:       row.expiresAt,
+            status:          row.status as ApprovalStatus,
+            approvedAt:      row.approvedAt ?? undefined,
+            rejectedAt:      row.rejectedAt ?? undefined,
+            rejectionReason: row.rejectionReason ?? undefined,
+          };
+        });
+
+        // 현재 세션 메모리에 없는 항목만 추가 (중복 방지)
+        setPendingApprovals(prev => {
+          const existingIds = new Set(prev.map(a => a.id));
+          const newItems = seeded.filter(a => !existingIds.has(a.id));
+          return newItems.length > 0 ? [...newItems, ...prev] : prev;
+        });
+        // 로드된 항목을 seenApprovalIds에 추가 (중복 토스트 방지)
+        for (const a of seeded) seenApprovalIds.current.add(a.id);
+      } catch { /* non-fatal */ }
+    })();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // ── Browser Notification permission request (on first LIVE approval queue) ──
   const notifPermissionRef = useRef<NotificationPermission>('default');
   useEffect(() => {
@@ -378,24 +436,29 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
         : a
     ));
 
-    // Log the approved decision to the API server for audit trail
-    try {
-      await fetch('/api-server/api/ai/decisions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ts: new Date().toISOString(),
-          symbol: approval.decision.primarySymbol ?? 'MULTI',
-          direction: approval.decision.operatingState,
-          confidence: approval.decision.confidence / 100,
-          rationale: `[LIVE APPROVED] ${approval.decision.stateRationale}`,
-          strategy: `AI_5STATE_LIVE_${approval.decision.operatingState}`,
-          riskResult: 'APPROVED',
-          executionOutcome: 'PENDING',
-          fullJson: JSON.stringify({ ...approval.decision, operatorApproved: true }),
-        }),
-      });
-    } catch { /* non-fatal */ }
+    // DB에 APPROVED 상태 업데이트 (non-fatal)
+    fetch(`/api-server/api/ai/approvals/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'APPROVED' }),
+    }).catch(() => { /* non-fatal */ });
+
+    // Audit trail — AI decisions log에도 기록
+    fetch('/api-server/api/ai/decisions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ts: new Date().toISOString(),
+        symbol: approval.decision.primarySymbol ?? 'MULTI',
+        direction: approval.decision.operatingState,
+        confidence: approval.decision.confidence / 100,
+        rationale: `[LIVE APPROVED] ${approval.decision.stateRationale}`,
+        strategy: `AI_5STATE_LIVE_${approval.decision.operatingState}`,
+        riskResult: 'APPROVED',
+        executionOutcome: 'PENDING',
+        fullJson: JSON.stringify({ ...approval.decision, operatorApproved: true }),
+      }),
+    }).catch(() => { /* non-fatal */ });
   }, [pendingApprovals]);
 
   // ── Reject a live order ─────────────────────────────────────────────────────
@@ -405,6 +468,12 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
         ? { ...a, status: 'REJECTED' as ApprovalStatus, rejectedAt: new Date().toISOString(), rejectionReason: reason }
         : a
     ));
+    // DB에 REJECTED 상태 업데이트 (non-fatal)
+    fetch(`/api-server/api/ai/approvals/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'REJECTED', rejectionReason: reason ?? null }),
+    }).catch(() => { /* non-fatal */ });
   }, []);
 
   // ── Run one engine cycle ────────────────────────────────────────────────────
@@ -460,6 +529,17 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
             status: 'PENDING',
           };
           setPendingApprovals(prev => [...prev, approval]);
+
+          // DB에 영속 저장 (non-fatal)
+          fetch('/api-server/api/ai/approvals', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              id:           approval.id,
+              decisionJson: JSON.stringify(approval.decision),
+              expiresAt:    approval.expiresAt,
+            }),
+          }).catch(() => { /* non-fatal */ });
 
         } else if (isPaperTrade && autoExecute) {
           // ── PAPER: auto-execute locally ────────────────────────────────────

@@ -5,6 +5,7 @@ import { WatchlistProvider } from './WatchlistContext';
 import { StrategyProvider } from './StrategyContext';
 import { AuthProvider } from './AuthContext';
 import { AiEngineProvider } from './AiEngineContext';
+import { WalletProvider } from './WalletContext';
 
 export function GlobalProviders({ children }: { children: ReactNode }) {
   return (
@@ -15,7 +16,10 @@ export function GlobalProviders({ children }: { children: ReactNode }) {
             <StrategyProvider>
               {/* AiEngineProvider must be inside Trading + Watchlist + Strategy */}
               <AiEngineProvider>
-                {children}
+                {/* WalletProvider: read-only EIP-1193 browser wallet, no signing */}
+                <WalletProvider>
+                  {children}
+                </WalletProvider>
               </AiEngineProvider>
             </StrategyProvider>
           </WatchlistProvider>
@@ -31,3 +35,4 @@ export * from './WatchlistContext';
 export * from './StrategyContext';
 export * from './AuthContext';
 export * from './AiEngineContext';
+export * from './WalletContext';
