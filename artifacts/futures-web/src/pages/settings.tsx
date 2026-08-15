@@ -10,8 +10,9 @@ import {
   ShieldAlert, Server, Lock, AlertTriangle, AlertOctagon, Info,
   CheckCircle2, XCircle, Cpu, Loader2, Wallet, Key, FlaskConical,
   ChevronRight, AlertCircle, RefreshCw, Bell, BellOff, ExternalLink,
-  WifiOff, Send, Activity,
+  WifiOff, Send, Activity, Database, Eye, Zap,
 } from 'lucide-react';
+import { useGmxAccount } from '@/lib/context/GmxAccountContext';
 import { cn } from '@/lib/utils';
 import { format } from 'date-fns';
 // sendTestNotification is handled by AiEngineContext to keep permission state in sync.
@@ -124,6 +125,7 @@ export default function Settings() {
   const { clearAllPositions, positions, closedTrades, consecutiveLosses } = useTradingContext();
   const { health, loading: healthLoading, refresh: refreshHealth, lastSuccessAt, consecutiveFailures } = useExecutorHealth();
   const wallet = useWallet();
+  const gmx    = useGmxAccount();
   const { notificationPermission, requestNotificationPermission, sendTestNotification, weeklyRealizedPnl } = useAiEngine();
   const now = useNow();
 
@@ -437,45 +439,258 @@ export default function Settings() {
             );
           })()}
 
-          {/* Step 3 — Read-only 계정 조회 */}
-          <div className="flex items-start gap-4 p-4 rounded-lg border border-border bg-card/30 opacity-60">
-            <div className="flex items-center justify-center w-7 h-7 rounded-full border-2 border-border text-muted-foreground font-bold text-xs shrink-0 mt-0.5">
-              3
-            </div>
-            <div className="flex-1 min-w-0">
-              <div className="flex items-center gap-2 mb-1">
-                <span className="font-semibold text-sm">Read-only 계정 조회</span>
-                <span className="text-[9px] px-1.5 py-0.5 rounded-full border bg-secondary text-muted-foreground border-border font-bold">2단계 완료 후</span>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                실제 GMX 포지션·잔고·거래 내역을 조회합니다.
-                서명 없이 온체인 데이터만 읽습니다 — 주문을 낼 수 없습니다.
-              </p>
-            </div>
-          </div>
+          {/* Step 3 — Read-only 계정 조회 (동적) */}
+          {(() => {
+            const walletReady = wallet.status === 'connected' && wallet.isArbitrum;
+            const gmxOk      = gmx.status === 'ok' || gmx.status === 'unavailable';
+            const gmxLoading = gmx.status === 'loading';
+            const gmxErr     = gmx.status === 'error';
+            const totalExp   = gmx.positions.reduce((s, p) => s + p.sizeUsd, 0);
 
-          {/* Step 4 — Delegated Subaccount */}
-          <div className="flex items-start gap-4 p-4 rounded-lg border border-border bg-card/30 opacity-60">
-            <div className="flex items-center justify-center w-7 h-7 rounded-full border-2 border-border text-muted-foreground font-bold text-xs shrink-0 mt-0.5">
-              4
-            </div>
-            <div className="flex-1 min-w-0">
-              <div className="flex items-center gap-2 mb-1">
-                <span className="font-semibold text-sm">GMX Delegated Subaccount 승인</span>
-                <span className="text-[9px] px-1.5 py-0.5 rounded-full border bg-secondary text-muted-foreground border-border font-bold">NOT AUTHORIZED</span>
+            const borderCls = !walletReady
+              ? 'border-border bg-card/30'
+              : gmxErr
+                ? 'border-[var(--color-short)]/30 bg-[var(--color-short)]/5'
+                : gmxOk
+                  ? 'border-[var(--color-long)]/30 bg-[var(--color-long)]/5'
+                  : 'border-border bg-card/30';
+            const circleCls = !walletReady
+              ? 'border-border text-muted-foreground'
+              : gmxOk
+                ? 'border-[var(--color-long)] text-[var(--color-long)]'
+                : 'border-border text-muted-foreground';
+
+            const badgeText = !walletReady
+              ? '2단계 완료 후'
+              : gmxLoading ? '조회 중…'
+              : gmxErr     ? '조회 오류'
+              : gmx.status === 'unavailable' ? 'LIVE READ-ONLY (포지션 없음)'
+              : 'LIVE READ-ONLY';
+            const badgeCls = !walletReady
+              ? 'bg-secondary text-muted-foreground border-border'
+              : gmxErr
+                ? 'bg-[var(--color-short)]/10 text-[var(--color-short)] border-[var(--color-short)]/30'
+                : gmxOk
+                  ? 'bg-[var(--color-long)]/10 text-[var(--color-long)] border-[var(--color-long)]/30'
+                  : 'bg-primary/10 text-primary border-primary/30';
+
+            return (
+              <div className={cn('flex items-start gap-4 p-4 rounded-lg border transition-colors', borderCls, !walletReady && 'opacity-60')}>
+                <div className={cn('flex items-center justify-center w-7 h-7 rounded-full border-2 font-bold text-xs shrink-0 mt-0.5', circleCls)}>
+                  {walletReady && gmxOk ? '✓' : '3'}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-1 flex-wrap">
+                    <span className={cn('font-semibold text-sm', walletReady && gmxOk && 'text-[var(--color-long)]')}>
+                      Read-only 계정 조회
+                    </span>
+                    <span className={cn('text-[9px] px-1.5 py-0.5 rounded-full border font-bold', badgeCls)}>
+                      {badgeText}
+                    </span>
+                  </div>
+
+                  {walletReady ? (
+                    <div className="flex flex-col gap-3">
+                      <p className="text-xs text-muted-foreground">
+                        실제 GMX 온체인 데이터 — Arbitrum Satsuma 서브그래프 30초 주기 폴링.
+                        <strong className="text-foreground"> 서명 없이 조회 전용. PAPER 대시보드 데이터와 절대 혼합되지 않습니다.</strong>
+                      </p>
+
+                      {/* ── 진단 그리드 ── */}
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                        {/* 지갑 주소 */}
+                        <div className="flex flex-col gap-0.5 px-2.5 py-2 rounded-lg border border-border bg-card/60 text-[11px]">
+                          <div className="flex items-center gap-1 text-muted-foreground">
+                            <Wallet className="w-3 h-3" /> 지갑 주소
+                          </div>
+                          <span className="font-mono font-semibold text-foreground truncate">
+                            {wallet.address ? `${wallet.address.slice(0, 8)}…${wallet.address.slice(-6)}` : '—'}
+                          </span>
+                          <span className="text-[10px] text-[var(--color-long)]">Read-only · 서명 없음</span>
+                        </div>
+
+                        {/* USDC 잔고 */}
+                        <div className="flex flex-col gap-0.5 px-2.5 py-2 rounded-lg border border-border bg-card/60 text-[11px]">
+                          <div className="flex items-center gap-1 text-muted-foreground">
+                            <Database className="w-3 h-3" /> USDC 잔고
+                          </div>
+                          <span className="font-mono font-semibold text-foreground">
+                            {wallet.usdcBalance != null ? `$${wallet.usdcBalance}` : '—'}
+                          </span>
+                          <span className="text-[10px] text-muted-foreground">Arbitrum Native USDC</span>
+                        </div>
+
+                        {/* ETH 잔고 */}
+                        <div className="flex flex-col gap-0.5 px-2.5 py-2 rounded-lg border border-border bg-card/60 text-[11px]">
+                          <div className="flex items-center gap-1 text-muted-foreground">
+                            <Zap className="w-3 h-3" /> ETH 잔고
+                          </div>
+                          <span className="font-mono font-semibold text-foreground">
+                            {wallet.ethBalance != null ? `${wallet.ethBalance}` : '—'}
+                          </span>
+                          <span className="text-[10px] text-muted-foreground">가스비 예비</span>
+                        </div>
+
+                        {/* GMX 포지션 수 */}
+                        <div className="flex flex-col gap-0.5 px-2.5 py-2 rounded-lg border border-border bg-card/60 text-[11px]">
+                          <div className="flex items-center gap-1 text-muted-foreground">
+                            <Eye className="w-3 h-3" /> GMX 포지션
+                          </div>
+                          <span className="font-semibold text-foreground">{gmx.positions.length}개</span>
+                          <span className="text-[10px] text-muted-foreground">
+                            총 노출 ${totalExp.toLocaleString('en-US', { maximumFractionDigits: 0 })}
+                          </span>
+                        </div>
+
+                        {/* 마지막 갱신 */}
+                        <div className="flex flex-col gap-0.5 px-2.5 py-2 rounded-lg border border-border bg-card/60 text-[11px]">
+                          <div className="flex items-center gap-1 text-muted-foreground">
+                            <Activity className="w-3 h-3" /> 마지막 갱신
+                          </div>
+                          <span className="font-semibold text-foreground">
+                            {gmx.lastSuccessUpdated
+                              ? formatElapsed(now - gmx.lastSuccessUpdated.getTime())
+                              : gmxLoading ? '조회 중…' : '—'}
+                          </span>
+                          <span className="text-[10px] text-muted-foreground">폴링 주기: 30초</span>
+                        </div>
+
+                        {/* 데이터 소스 상태 */}
+                        <div className="flex flex-col gap-0.5 px-2.5 py-2 rounded-lg border border-border bg-card/60 text-[11px]">
+                          <div className="flex items-center gap-1 text-muted-foreground">
+                            <Server className="w-3 h-3" /> 데이터 소스
+                          </div>
+                          <span className={cn(
+                            'font-semibold',
+                            gmxOk  ? 'text-[var(--color-long)]'  :
+                            gmxErr ? 'text-[var(--color-short)]' :
+                            'text-muted-foreground',
+                          )}>
+                            {gmx.status === 'idle'        ? '대기'
+                            : gmx.status === 'loading'    ? '조회 중'
+                            : gmx.status === 'ok'         ? '정상'
+                            : gmx.status === 'unavailable'? '포지션 없음'
+                            :                               '오류'}
+                          </span>
+                          <span className="text-[10px] text-muted-foreground">Satsuma Subgraph</span>
+                        </div>
+                      </div>
+
+                      {/* 오류 메시지 */}
+                      {gmx.error && (
+                        <div className="flex items-start gap-1.5 text-xs text-[var(--color-short)]">
+                          <AlertCircle className="w-3 h-3 shrink-0 mt-0.5" />
+                          {gmx.error}
+                        </div>
+                      )}
+
+                      <p className="text-[10px] text-muted-foreground/50 flex items-center gap-1 border-t border-border/40 pt-2">
+                        <Database className="w-2.5 h-2.5" />
+                        조회 전용 — 서명·주문·자금 이동 없음. PAPER 시뮬레이션 데이터와 절대 혼합되지 않습니다.
+                      </p>
+                    </div>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">
+                      실제 GMX 포지션·잔고를 조회합니다. 서명 없이 온체인 데이터만 읽습니다 — 주문을 낼 수 없습니다.
+                    </p>
+                  )}
+                </div>
               </div>
-              <p className="text-xs text-muted-foreground">
-                메인 지갑에서 제한된 One-Click 거래 권한을 별도 서브계정에 위임합니다.
-                <strong className="text-foreground"> 메인 지갑 자금에 대한 전체 권한이 아닌, GMX 계약이 허용하는 제한된 실행 권한입니다.</strong>
-                서브계정 주소만 서버에 저장 가능하며, 서명키·개인키는 절대 서버에 저장하지 않습니다.
-                이 단계 완료 후 LIVE 모드 승인 시 실제 주문 전송이 가능합니다.
-              </p>
-              <div className="flex items-center gap-1.5 mt-2 text-[10px] text-amber-400/80">
-                <ChevronRight className="w-3 h-3" />
-                3단계 완료 + 별도 보안 검토 후 활성화 예정
+            );
+          })()}
+
+          {/* Step 4 — GMX One-Click Subaccount (위임 준비 단계) */}
+          {(() => {
+            const walletReady = wallet.status === 'connected' && wallet.isArbitrum;
+            // visual state: not_configured + wallet connected = wallet_connected intermediate
+            const visualState =
+              subaccountConfig.status === 'ready'   ? 'ready_to_authorize' :
+              subaccountConfig.status === 'active'  ? 'active' :
+              walletReady                            ? 'wallet_connected' :
+                                                      'not_configured';
+
+            const borderCls =
+              visualState === 'ready_to_authorize' ? 'border-amber-500/30 bg-amber-500/5' :
+              visualState === 'wallet_connected'   ? 'border-primary/20 bg-primary/5' :
+                                                     'border-border bg-card/30';
+            const circleCls =
+              visualState === 'ready_to_authorize' ? 'border-amber-500 text-amber-400' :
+              visualState === 'wallet_connected'   ? 'border-primary/60 text-primary' :
+                                                     'border-border text-muted-foreground';
+            const badgeText =
+              visualState === 'ready_to_authorize' ? '위임 준비 완료 — 트랜잭션 미실행' :
+              visualState === 'wallet_connected'   ? '지갑 연결됨 — 파라미터 설정 필요' :
+                                                     'NOT CONFIGURED';
+            const badgeCls =
+              visualState === 'ready_to_authorize' ? 'bg-amber-500/10 text-amber-400 border-amber-500/30' :
+              visualState === 'wallet_connected'   ? 'bg-primary/10 text-primary border-primary/30' :
+                                                     'bg-secondary text-muted-foreground border-border';
+
+            return (
+              <div className={cn(
+                'flex items-start gap-4 p-4 rounded-lg border transition-colors',
+                borderCls,
+                visualState === 'not_configured' && 'opacity-60',
+              )}>
+                <div className={cn('flex items-center justify-center w-7 h-7 rounded-full border-2 font-bold text-xs shrink-0 mt-0.5', circleCls)}>
+                  {visualState === 'ready_to_authorize' ? '✓' : '4'}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-2 flex-wrap">
+                    <span className={cn(
+                      'font-semibold text-sm',
+                      visualState === 'ready_to_authorize' && 'text-amber-400',
+                      visualState === 'wallet_connected'   && 'text-primary',
+                    )}>
+                      GMX One-Click Subaccount
+                    </span>
+                    <span className={cn('text-[9px] px-1.5 py-0.5 rounded-full border font-bold', badgeCls)}>
+                      {badgeText}
+                    </span>
+                  </div>
+
+                  <p className="text-xs text-muted-foreground leading-relaxed">
+                    메인 지갑에서 제한된 One-Click 거래 권한을 별도 서브계정에 위임합니다.
+                    <strong className="text-foreground"> 메인 지갑 자금에 대한 전체 권한이 아닌, GMX SubaccountRouter가 허용하는 제한된 실행 권한입니다.</strong>
+                    {' '}서브계정 주소(공개키)만 서버에 저장 가능하며, 서명키·개인키는 절대 이 앱에 저장하지 않습니다.
+                  </p>
+
+                  {/* 상태별 안내 */}
+                  {visualState === 'not_configured' && (
+                    <div className="flex items-center gap-1.5 mt-2 text-[10px] text-muted-foreground/70">
+                      <ChevronRight className="w-3 h-3" />
+                      지갑 연결 후 아래 "LIVE 실행 준비" 섹션에서 파라미터를 설정하세요.
+                    </div>
+                  )}
+                  {visualState === 'wallet_connected' && (
+                    <div className="flex items-center gap-1.5 mt-2 text-[10px] text-primary/80">
+                      <ChevronRight className="w-3 h-3" />
+                      아래 "LIVE 실행 준비" 섹션에서 maxActions와 만료일을 설정하고 저장하세요.
+                    </div>
+                  )}
+                  {visualState === 'ready_to_authorize' && (
+                    <div className="flex flex-col gap-1 mt-2">
+                      <div className="flex items-center gap-1.5 text-[10px] text-amber-400/80">
+                        <CheckCircle2 className="w-3 h-3" />
+                        설정 저장 완료 — maxActions: {subaccountConfig.maxActions}, 만료: {subaccountConfig.expiresInDays}일
+                      </div>
+                      <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground/60">
+                        <Lock className="w-3 h-3" />
+                        실제 위임 트랜잭션(GMX SubaccountRouter.addSubaccount) 및 코드 수준 잠금 해제는 별도 보안 검토 후 진행됩니다.
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 항상 표시: 보안 경고 */}
+                  <div className="flex items-center gap-1.5 mt-3 px-2.5 py-1.5 rounded border border-[var(--color-short)]/20 bg-[var(--color-short)]/5 text-[10px] text-[var(--color-short)]/80">
+                    <ShieldAlert className="w-3 h-3 shrink-0" />
+                    메인 지갑 개인키·시드문구·서브계정 signer key를 이 앱 또는 Replit에 절대 입력하지 마세요.
+                    실행은 항상 브라우저 지갑(사용자 기기)에서만 서명됩니다.
+                  </div>
+                </div>
               </div>
-            </div>
-          </div>
+            );
+          })()}
 
         </div>
 

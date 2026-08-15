@@ -220,11 +220,13 @@ function AiHistoryTab() {
           rationale  = d.stateRationale ?? '';
         } catch { /* use defaults */ }
         // 승인 행 dryRunResult 매핑:
+        // - CASH/NO_TRADE 방향이면 실행 자체가 없으므로 undefined → 배지 미표시
         // - 'succeeded'/'failed' → 그대로 사용 (DB에서 소문자로 저장)
         // - null/undefined/PENDING → 'pending' (아직 드라이런 미실행)
         // - SIMULATED → 'succeeded' (레거시 호환)
         const rawOutcome = r.executionOutcome;
-        const dryRunResult =
+        const isCashApproval = direction === 'CASH' || direction === 'NO_TRADE' || !direction;
+        const dryRunResult: string | undefined = isCashApproval ? undefined :
           rawOutcome === 'succeeded' ? 'succeeded' :
           rawOutcome === 'failed'    ? 'failed'    :
           rawOutcome === 'SIMULATED' ? 'succeeded' :
