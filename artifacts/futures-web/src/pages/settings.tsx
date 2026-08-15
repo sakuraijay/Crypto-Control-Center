@@ -844,6 +844,121 @@ export default function Settings() {
         </Card>
       </section>
 
+      {/* ── AI Worker 사이클 상태 ── */}
+      <section className="flex flex-col gap-4">
+        <h2 className="font-semibold flex items-center gap-2 border-b border-border pb-2 text-lg">
+          <Activity className="w-5 h-5 text-primary" /> AI Worker 사이클 상태
+        </h2>
+        <Card className="p-4 flex flex-col gap-4">
+          {health ? (
+            <>
+              {/* 상태 요약 행 */}
+              <div className="flex flex-wrap gap-2">
+                {/* Worker 실행 여부 */}
+                <div className={cn(
+                  'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-[11px] font-medium',
+                  health.workerRunning
+                    ? 'border-[var(--color-long)]/30 bg-[var(--color-long)]/5 text-[var(--color-long)]'
+                    : 'border-border bg-card/50 text-muted-foreground',
+                )}>
+                  {health.workerRunning
+                    ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> 사이클 실행 중</>
+                    : <><CheckCircle2 className="w-3.5 h-3.5" /> 대기 중</>}
+                </div>
+
+                {/* 총 사이클 수 */}
+                <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-border bg-card/50 text-muted-foreground text-[11px] font-medium">
+                  총 {health.cycleCount ?? 0}회 완료
+                </div>
+
+                {/* 마지막 결정 */}
+                {health.lastCycleResult && (
+                  <>
+                    <div className={cn(
+                      'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-[11px] font-bold',
+                      health.lastCycleResult.operatingState === 'LONG'
+                        ? 'border-[var(--color-long)]/30 bg-[var(--color-long)]/5 text-[var(--color-long)]'
+                        : health.lastCycleResult.operatingState === 'SHORT'
+                          ? 'border-[var(--color-short)]/30 bg-[var(--color-short)]/5 text-[var(--color-short)]'
+                          : 'border-border bg-card/50 text-muted-foreground',
+                    )}>
+                      {health.lastCycleResult.operatingState}
+                      {health.lastCycleResult.primarySymbol && (
+                        <span className="font-mono ml-1">{health.lastCycleResult.primarySymbol}</span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-border bg-card/50 text-muted-foreground text-[11px] font-medium">
+                      신뢰도 {Math.round(health.lastCycleResult.confidence * 100)}%
+                    </div>
+                    {health.lastCycleResult.error && (
+                      <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-amber-500/30 bg-amber-500/5 text-amber-400 text-[11px] font-medium max-w-xs truncate" title={health.lastCycleResult.error}>
+                        <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                        {health.lastCycleResult.error}
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+
+              {/* 타임스탬프 */}
+              {health.lastCycleAt && (
+                <p className="text-[10px] text-muted-foreground font-mono">
+                  마지막 사이클:{' '}
+                  {format(new Date(health.lastCycleAt), 'yyyy-MM-dd HH:mm:ss')}
+                  {' '}({formatElapsed(now - new Date(health.lastCycleAt).getTime())})
+                </p>
+              )}
+
+              {/* Equity HWM */}
+              {(health as { equityHwm?: number | null }).equityHwm != null && (
+                <div className="flex items-center gap-2 text-[11px] text-muted-foreground border-t border-border/60 pt-3">
+                  <span className="font-semibold text-foreground">Equity HWM</span>
+                  <span className="font-mono">
+                    ${(health as { equityHwm: number }).equityHwm.toLocaleString('en-US', { maximumFractionDigits: 2 })}
+                  </span>
+                  <span className="text-muted-foreground/60 text-[10px]">(서버 시작 이후 최고점)</span>
+                </div>
+              )}
+
+              {/* 핵심 Risk Limits (마지막 사이클 기준) */}
+              {(health as { lastLimitsUsed?: object | null }).lastLimitsUsed && (() => {
+                const lim = (health as { lastLimitsUsed: Record<string, number> }).lastLimitsUsed;
+                return (
+                  <div className="border-t border-border/60 pt-3 flex flex-col gap-2">
+                    <p className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">
+                      마지막 사이클 적용 한도
+                    </p>
+                    <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-[11px]">
+                      {[
+                        ['트레이딩 자본', `$${(lim.tradingCapital ?? 0).toLocaleString('en-US', { maximumFractionDigits: 0 })}`],
+                        ['최대 드로다운', `${lim.maxDrawdownPercent ?? 0}%`],
+                        ['일일 손실 한도', `$${lim.dailyLossLimitUSDT ?? 0}`],
+                        ['주간 손실 한도', `$${lim.weeklyLossLimitUSDT ?? 0}`],
+                        ['Rolling 24h 손실', `$${lim.rolling24hLossLimitUSDT ?? 0}`],
+                        ['시간당 최대 거래', `${lim.maxTradesPerHour ?? 0}건`],
+                        ['쿨다운', `${lim.cooldownMinutes ?? 0}분`],
+                        ['최대 레버리지', `${lim.maxLeverage ?? 0}x`],
+                      ].map(([label, value]) => (
+                        <div key={label} className="flex justify-between gap-2">
+                          <span className="text-muted-foreground">{label}</span>
+                          <span className="font-mono text-foreground font-semibold">{value}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
+            </>
+          ) : healthLoading ? (
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <Loader2 className="w-3.5 h-3.5 animate-spin" /> 상태 로딩 중…
+            </div>
+          ) : (
+            <p className="text-xs text-muted-foreground">Executor에서 AI Worker 상태를 불러올 수 없습니다.</p>
+          )}
+        </Card>
+      </section>
+
       {/* ── 브라우저 알림 ── */}
       <section className="flex flex-col gap-4">
         <h2 className="font-semibold flex items-center gap-2 border-b border-border pb-2 text-lg">

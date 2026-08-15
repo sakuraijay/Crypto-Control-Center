@@ -95,18 +95,33 @@ function StatusBadge({ status }: { status?: string }) {
 }
 
 function DryRunBadge({ result, retryCount }: { result?: string | null; retryCount?: number }) {
-  if (!result) return <span className="text-muted-foreground text-xs">—</span>;
-  const ok = result === 'succeeded';
+  // 'pending' = 아직 결과 없음 (실행 대기 중 또는 미실행)
+  const isPending = !result || result === 'pending' || result === 'PENDING';
+  const isOk      = result === 'succeeded';
+  const isFailed  = result === 'failed';
+
+  if (isPending) {
+    return (
+      <div className="flex items-center gap-1">
+        <span className="text-[9px] font-bold px-1.5 py-0.5 rounded border flex items-center gap-1 bg-secondary/50 text-muted-foreground border-border">
+          <Clock className="w-2.5 h-2.5" /> 대기
+        </span>
+      </div>
+    );
+  }
+
   return (
     <div className="flex items-center gap-1">
       <span className={cn(
         'text-[9px] font-bold px-1.5 py-0.5 rounded border flex items-center gap-1',
-        ok
+        isOk
           ? 'bg-[var(--color-long)]/20 text-[var(--color-long)] border-[var(--color-long)]/30'
-          : 'bg-amber-500/20 text-amber-400 border-amber-500/30',
+          : isFailed
+            ? 'bg-amber-500/20 text-amber-400 border-amber-500/30'
+            : 'bg-secondary/50 text-muted-foreground border-border',
       )}>
-        {ok ? <CheckCircle2 className="w-2.5 h-2.5" /> : <XCircle className="w-2.5 h-2.5" />}
-        {ok ? '성공' : '실패'}
+        {isOk ? <CheckCircle2 className="w-2.5 h-2.5" /> : isFailed ? <XCircle className="w-2.5 h-2.5" /> : <Clock className="w-2.5 h-2.5" />}
+        {isOk ? '성공' : isFailed ? '실패' : result}
       </span>
       {(retryCount ?? 0) > 0 && (
         <span className="text-[9px] text-muted-foreground flex items-center gap-0.5">
@@ -169,7 +184,12 @@ function AiHistoryTab() {
         symbol:     r.symbol || 'MULTI',
         direction:  r.direction === 'NO_TRADE' ? 'CASH' : (r.direction || 'CASH'),
         confidence: Math.round((r.confidence ?? 0) * 100),
-        dryRunResult: r.executionOutcome === 'SIMULATED' ? 'succeeded' : undefined,
+        // SIMULATED = 드라이런 성공; null/PENDING/undefined = 아직 실행 안 됨(대기)
+        dryRunResult: r.executionOutcome === 'SIMULATED'
+          ? 'succeeded'
+          : (r.executionOutcome === 'FAILED' || r.executionOutcome === 'failed')
+            ? 'failed'
+            : 'pending',
         rationale:  r.rationale ?? '',
       }));
 
@@ -190,6 +210,17 @@ function AiHistoryTab() {
           confidence = d.confidence ?? 0;
           rationale  = d.stateRationale ?? '';
         } catch { /* use defaults */ }
+        // 승인 행 dryRunResult 매핑:
+        // - 'succeeded'/'failed' → 그대로 사용 (DB에서 소문자로 저장)
+        // - null/undefined/PENDING → 'pending' (아직 드라이런 미실행)
+        // - SIMULATED → 'succeeded' (레거시 호환)
+        const rawOutcome = r.executionOutcome;
+        const dryRunResult =
+          rawOutcome === 'succeeded' ? 'succeeded' :
+          rawOutcome === 'failed'    ? 'failed'    :
+          rawOutcome === 'SIMULATED' ? 'succeeded' :
+          'pending';
+
         return {
           kind:          'approval',
           id:            r.id,
@@ -198,7 +229,7 @@ function AiHistoryTab() {
           direction,
           confidence,
           approvalStatus: r.status,
-          dryRunResult:  r.executionOutcome ?? undefined,
+          dryRunResult,
           retryCount:    r.retryCount ?? 0,
           lastError:     r.lastError ?? null,
           rationale,

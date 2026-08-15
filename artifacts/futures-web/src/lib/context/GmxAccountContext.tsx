@@ -41,6 +41,7 @@ const POSITIONS_QUERY_FULL = `
       market
       collateralToken
       sizeInUsd
+      sizeInTokens
       collateralAmount
       realisedPnlUsd
       isLong
@@ -62,6 +63,7 @@ const POSITIONS_QUERY_BASIC = `
       market
       collateralToken
       sizeInUsd
+      sizeInTokens
       collateralAmount
       realisedPnlUsd
       isLong
@@ -116,6 +118,22 @@ export interface GmxOnchainPosition {
    * Never estimated — only real subgraph values are stored here.
    */
   liquidationPrice: number | null;
+  /**
+   * Unrealized PnL in USD.
+   * Computed from: sizeInTokens (subgraph) + current mark price (/api/gmx/prices).
+   * null when either data source is unavailable — never estimated.
+   */
+  unrealizedPnlUsd: number | null;
+  /**
+   * Current mark price per token in USD (from /api/gmx/prices cache).
+   * null when price is unavailable.
+   */
+  markPriceUsd: number | null;
+  /**
+   * true when liquidationPrice is non-null AND markPrice is non-null AND
+   * the distance is ≤5% of markPrice — triggers a dashboard warning banner.
+   */
+  nearLiquidation: boolean;
 }
 
 export type GmxAccountLoadStatus = 'idle' | 'loading' | 'ok' | 'error' | 'unavailable';
@@ -223,9 +241,10 @@ export function GmxAccountProvider({ children }: { children: ReactNode }) {
         ? POSITIONS_QUERY_FULL
         : POSITIONS_QUERY_BASIC;
 
-      // Load market → symbol registry in parallel with subgraph query
-      const [symbolMap, sgRes] = await Promise.all([
+      // Load market → symbol registry AND current GMX mark prices in parallel with subgraph query
+      const [symbolMap, pricesRes, sgRes] = await Promise.all([
         getMarketSymbols(),
+        fetch('/api/gmx/prices', { signal: AbortSignal.timeout(5_000) }).catch(() => null),
         fetch(SUBGRAPH_URL, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -239,12 +258,24 @@ export function GmxAccountProvider({ children }: { children: ReactNode }) {
 
       if (!sgRes.ok) throw new Error(`Subgraph HTTP ${sgRes.status}`);
 
+      // Parse mark prices (silently ignore on error — unrealizedPnl will be null)
+      let markPriceBySymbol: Record<string, number> = {};
+      try {
+        if (pricesRes?.ok) {
+          const pricesData = await pricesRes.json() as Array<{ tokenSymbol: string; priceUsd: number }>;
+          for (const p of pricesData) {
+            if (p.priceUsd > 0) markPriceBySymbol[p.tokenSymbol] = p.priceUsd;
+          }
+        }
+      } catch { /* non-fatal */ }
+
       const json = await sgRes.json() as {
         data?: {
           positions?: Array<{
             id: string; account: string; market: string;
             collateralToken: string; sizeInUsd: string;
-            collateralAmount: string; realisedPnlUsd: string;
+            sizeInTokens?: string | null; collateralAmount: string;
+            realisedPnlUsd: string;
             isLong: boolean; increasedAtTime?: string | null;
             liquidationPrice?: string | null;
           }>;
@@ -311,6 +342,33 @@ export function GmxAccountProvider({ children }: { children: ReactNode }) {
             ? parseBigIntUsd(rawLiqPrice, GMX_PRECISION)
             : null;
 
+        // ── Unrealized PnL — sizeInTokens (1e18) + mark price ─────────────
+        // GMX V2 stores sizeInTokens with 18 decimals. sizeInUsd (1e30) / sizeInTokens (1e18)
+        // gives average entry price in USD per token (scaled by 1e12).
+        // Requires: sizeInTokens > 0 AND current mark price in cache.
+        // Never estimated — null when either source unavailable.
+        const markPriceUsd = markPriceBySymbol[sym] ?? null;
+        let unrealizedPnlUsd: number | null = null;
+        if (p.sizeInTokens && p.sizeInTokens !== '0' && markPriceUsd != null) {
+          try {
+            const sizeInTokensRaw = Number(BigInt(p.sizeInTokens)) / 1e18;
+            if (sizeInTokensRaw > 0 && sizeUsd > 0) {
+              const avgEntryPrice = sizeUsd / sizeInTokensRaw;  // USD per token at entry
+              const pnlPerToken   = p.isLong
+                ? (markPriceUsd - avgEntryPrice)
+                : (avgEntryPrice - markPriceUsd);
+              unrealizedPnlUsd = pnlPerToken * sizeInTokensRaw;
+            }
+          } catch { /* BigInt parse failed — leave null */ }
+        }
+
+        // Liquidation warning: mark price within 5% of liquidation price
+        const nearLiquidation =
+          liquidationPrice != null &&
+          markPriceUsd != null &&
+          markPriceUsd > 0 &&
+          Math.abs(markPriceUsd - liquidationPrice) / markPriceUsd <= 0.05;
+
         return {
           id:               p.id,
           symbol:           sym,
@@ -322,6 +380,9 @@ export function GmxAccountProvider({ children }: { children: ReactNode }) {
           openedAt:         p.increasedAtTime ? Number(p.increasedAtTime) : null,
           leverage,
           liquidationPrice,
+          unrealizedPnlUsd,
+          markPriceUsd,
+          nearLiquidation,
         };
       });
 

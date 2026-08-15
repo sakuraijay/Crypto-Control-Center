@@ -97,6 +97,14 @@ router.post("/ai/approvals/:id/retry", async (req, res) => {
         currentOutcome: approval.executionOutcome,
       });
     }
+    // 최대 3회 재시도 제한
+    const currentRetryCount = approval.retryCount ?? 0;
+    if (currentRetryCount >= 3) {
+      return void res.status(400).json({
+        error: "최대 재시도 횟수(3회) 초과",
+        retryCount: currentRetryCount,
+      });
+    }
 
     // decision JSON에서 실행 파라미터 추출
     let decision: {

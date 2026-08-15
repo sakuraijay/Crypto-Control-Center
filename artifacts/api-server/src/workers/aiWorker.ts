@@ -77,6 +77,10 @@ export interface WorkerStatus {
   lastCycleAt: string | null;
   lastCycleResult: WorkerCycleResult | null;
   cycleCount: number;
+  /** 마지막 사이클에 사용된 Risk Limits (상태 카드 표시용). null = 사이클 미실행 */
+  lastLimitsUsed: import('./serverTypes').RiskLimits | null;
+  /** 현재 계좌 Equity High-Water Mark (USD). null = HWM 미수립 */
+  equityHwm: number | null;
 }
 
 // ── WorkerManager ─────────────────────────────────────────────────────────────
@@ -96,6 +100,16 @@ class WorkerManager {
 
   /** 이전 사이클 결정 상태 (state transition 추적용) */
   private prevState: AiOperatingState = 'CASH';
+
+  /**
+   * 계좌 Equity High-Water Mark (USD).
+   * tradingCapital + totalRealizedPnl + totalUnrealizedPnl의 최댓값.
+   * 재시작 시 초기화 — 최대 드로다운 강제는 HWM 수립 이후부터 적용.
+   */
+  private equityHighWaterMark: number | null = null;
+
+  /** 마지막 사이클에서 사용된 Strategy Limits — 상태 엔드포인트 노출용 */
+  private lastLimitsUsed: RiskLimits | null = null;
 
   /** 심볼별 가격 히스토리 버퍼 */
   private priceBuffer = new Map<string, number[]>();
@@ -153,6 +167,8 @@ class WorkerManager {
       lastCycleAt:     this.lastCycleAt?.toISOString() ?? null,
       lastCycleResult: this.lastCycleResult,
       cycleCount:      this.cycleCount,
+      lastLimitsUsed:  this.lastLimitsUsed,
+      equityHwm:       this.equityHighWaterMark,
     };
   }
 
@@ -362,7 +378,19 @@ class WorkerManager {
     realizedPnLWeekly: number;
     consecutiveLosses: number;
     positions: import('./serverTypes').Position[];
+    /** OPEN 거래 수 (최근 1시간 내) — maxTradesPerHour 강제용 */
+    tradesInLastHour: number;
+    /** 마지막 OPEN 거래 Unix ms — cooldownMinutes 강제용. null = 기록 없음 */
+    lastOpenTradeTimestampMs: number | null;
+    /** mark-to-market 기준 미실현 PnL 합계 (USD) */
+    totalUnrealizedPnl: number;
   }> {
+    const ZEROS = {
+      realizedPnLToday: 0, realizedPnLRolling24h: 0, realizedPnLWeekly: 0,
+      consecutiveLosses: 0, positions: [],
+      tradesInLastHour: 0, lastOpenTradeTimestampMs: null, totalUnrealizedPnl: 0,
+    };
+
     try {
       const now = Date.now();
 
@@ -370,13 +398,14 @@ class WorkerManager {
       const todayStart = new Date();
       todayStart.setUTCHours(0, 0, 0, 0);
 
-      // Rolling 24h 시작
-      const rolling24hStart = new Date(now - 24 * 60 * 60 * 1000);
+      // Rolling 24h / 최근 1시간 시작
+      const rolling24hStart    = new Date(now - 24 * 60 * 60 * 1000);
+      const oneHourAgoMs       = now - 60 * 60 * 1000;
 
       // 이번 주 월요일 00:00 UTC
       const weekStart = new Date();
       weekStart.setUTCHours(0, 0, 0, 0);
-      const dow = weekStart.getUTCDay(); // 0=일, 1=월~6=토
+      const dow = weekStart.getUTCDay();
       weekStart.setUTCDate(weekStart.getUTCDate() - (dow === 0 ? 6 : dow - 1));
 
       // DB에서 전체 거래 조회 (최신순)
@@ -410,34 +439,77 @@ class WorkerManager {
         else break;
       }
 
-      // 미청산 포지션 추출: action=OPEN + closeTime=0
+      // ── 시간당 거래 횟수 + 쿨다운 추적 ───────────────────────────────────
       const openTrades = allTrades.filter(
         t => t.action === 'OPEN' && (!t.closeTime || t.closeTime === 0),
       );
+      const allOpenActions = allTrades.filter(t => t.action === 'OPEN');
+
+      const tradesInLastHour = allOpenActions.filter(t => {
+        const ts = new Date(t.timestamp as string | Date).getTime();
+        return ts >= oneHourAgoMs;
+      }).length;
+
+      // 가장 최근 OPEN 거래 시각 (쿨다운 기준)
+      const latestOpen = allOpenActions[0]; // 이미 최신순 정렬
+      const lastOpenTradeTimestampMs = latestOpen
+        ? new Date(latestOpen.timestamp as string | Date).getTime()
+        : null;
+
+      // ── 현재 GMX 시장가 캐시 (mark-to-market용) ─────────────────────────
+      const cachedPrices = getCachedPrices();
+      const priceMap = new Map<string, number>();
+      if (cachedPrices) {
+        for (const p of cachedPrices) {
+          if (p.priceUsd > 0) priceMap.set(p.tokenSymbol, p.priceUsd);
+        }
+      }
+
+      // ── 미청산 포지션 구성 + mark-to-market ──────────────────────────────
+      let totalUnrealizedPnl = 0;
+
       const positions: import('./serverTypes').Position[] = openTrades.map(t => {
-        const sizeInUsd = parseFloat(t.sizeInUsd ?? t.size ?? '0') || 0;
-        const price     = parseFloat(t.price ?? '0') || 0;
-        return {
-          symbol:        t.symbol,
-          side:          (t.side === 'SHORT' ? 'SHORT' : 'LONG') as 'LONG' | 'SHORT',
-          sizeInUsd,
-          collateralUsd: sizeInUsd,  // collateral ≈ sizeInUsd (레버리지 미기록)
-          unrealizedPnl: 0,           // DB에 미기록
-          entryPrice:    price,
-          leverage:      1,            // DB에 미기록
-        };
+        const sizeInUsd   = parseFloat(t.sizeInUsd ?? t.size ?? '0') || 0;
+        const entryPrice  = parseFloat(t.price ?? '0') || 0;
+
+        // Leverage: DB 기록값 우선, 없으면 1x (보수적 처리)
+        const leverage = parseFloat(t.leverage ?? '1') || 1;
+
+        // Collateral: DB 기록값 우선, 없으면 sizeInUsd/leverage 계산
+        const dbCollateral = parseFloat(t.collateralUsd ?? '0');
+        const collateralUsd = dbCollateral > 0
+          ? dbCollateral
+          : (leverage > 1 && sizeInUsd > 0 ? sizeInUsd / leverage : sizeInUsd);
+
+        const side = (t.side === 'SHORT' ? 'SHORT' : 'LONG') as 'LONG' | 'SHORT';
+
+        // ── Mark-to-market unrealized PnL ──────────────────────────────────
+        // 계산 조건: entryPrice > 0 AND 현재 시장가 캐시에 심볼이 있어야 함.
+        // 어느 한 조건이라도 없으면 0 (추정 금지 — 보수적 처리).
+        let unrealizedPnl = 0;
+        const currentPrice = priceMap.get(t.symbol) ?? 0;
+        if (entryPrice > 0 && currentPrice > 0 && sizeInUsd > 0) {
+          // 진입 당시 토큰 수량 ≈ sizeInUsd / entryPrice
+          const sizeInTokens = sizeInUsd / entryPrice;
+          const pnlPerToken  = side === 'LONG'
+            ? (currentPrice - entryPrice)
+            : (entryPrice - currentPrice);
+          unrealizedPnl = pnlPerToken * sizeInTokens;
+        }
+
+        totalUnrealizedPnl += unrealizedPnl;
+
+        return { symbol: t.symbol, side, sizeInUsd, collateralUsd, unrealizedPnl, entryPrice, leverage };
       });
 
       return {
         realizedPnLToday, realizedPnLRolling24h, realizedPnLWeekly,
         consecutiveLosses, positions,
+        tradesInLastHour, lastOpenTradeTimestampMs, totalUnrealizedPnl,
       };
     } catch (err) {
       console.warn('[AIWorker] loadPaperState 실패 — synthetic zeros 사용:', (err as Error).message);
-      return {
-        realizedPnLToday: 0, realizedPnLRolling24h: 0, realizedPnLWeekly: 0,
-        consecutiveLosses: 0, positions: [],
-      };
+      return ZEROS;
     }
   }
 
@@ -489,6 +561,57 @@ class WorkerManager {
         this.loadPaperState(),
       ]);
 
+      // 이번 사이클에 사용된 설정 저장 (상태 엔드포인트 노출용)
+      this.lastLimitsUsed = limits;
+
+      // ── Cooldown 강제 ─────────────────────────────────────────────────────
+      // 마지막 OPEN 거래 후 cooldownMinutes가 경과하지 않으면 신규 진입 차단.
+      const cooldownMs = (limits.cooldownMinutes ?? 0) * 60_000;
+      if (cooldownMs > 0 && paperState.lastOpenTradeTimestampMs !== null) {
+        const msSinceLastTrade = Date.now() - paperState.lastOpenTradeTimestampMs;
+        if (msSinceLastTrade < cooldownMs) {
+          const remainSec = Math.ceil((cooldownMs - msSinceLastTrade) / 1000);
+          console.info(`[AIWorker] 사이클 #${cycleNum} 쿨다운 — ${remainSec}s 남음 (설정: ${limits.cooldownMinutes}분)`);
+          this.lastCycleResult = {
+            cycleNumber: cycleNum, at: new Date().toISOString(),
+            operatingState: "CASH", primarySymbol: null, confidence: 0,
+            analysesCount: analyses.length, approvalCreated: false,
+            error: `쿨다운 중 (${remainSec}초 남음)`,
+          };
+          return;
+        }
+      }
+
+      // ── 시간당 거래 횟수 강제 ────────────────────────────────────────────
+      const maxTradesPerHour = limits.maxTradesPerHour ?? 0;
+      if (maxTradesPerHour > 0 && paperState.tradesInLastHour >= maxTradesPerHour) {
+        console.info(`[AIWorker] 사이클 #${cycleNum} 시간당 거래 한도 초과 — ${paperState.tradesInLastHour}/${maxTradesPerHour}건`);
+        this.lastCycleResult = {
+          cycleNumber: cycleNum, at: new Date().toISOString(),
+          operatingState: "CASH", primarySymbol: null, confidence: 0,
+          analysesCount: analyses.length, approvalCreated: false,
+          error: `시간당 거래 한도 초과 (${paperState.tradesInLastHour}/${maxTradesPerHour}건)`,
+        };
+        return;
+      }
+
+      // ── Equity HWM 및 계좌 드로다운 계산 ───────────────────────────────
+      const currentEquity =
+        limits.tradingCapital
+        + paperState.realizedPnLToday       // 오늘 실현 PnL (근사치 — 정확한 누적값은 HWM 기반)
+        + paperState.totalUnrealizedPnl;    // mark-to-market 미실현 PnL
+
+      // HWM 갱신: 첫 사이클은 현재 equity로 초기화
+      if (this.equityHighWaterMark === null || currentEquity > this.equityHighWaterMark) {
+        this.equityHighWaterMark = currentEquity;
+      }
+
+      // HWM 대비 드로다운 % (HWM > 0이고 현재 equity < HWM일 때만 의미 있음)
+      const accountDrawdownPct =
+        this.equityHighWaterMark !== null && this.equityHighWaterMark > 0
+          ? Math.max(0, (this.equityHighWaterMark - currentEquity) / this.equityHighWaterMark * 100)
+          : undefined;
+
       const engineResult = runAiEngine({
         cycleNumber:      cycleNum,
         prevState:        this.prevState,
@@ -497,7 +620,7 @@ class WorkerManager {
         account: {
           balance:          limits.tradingCapital,
           availableBalance: limits.tradingCapital * (1 - (limits.reserveCashPct ?? 20) / 100),
-          unrealizedPnl:    0,
+          unrealizedPnl:    paperState.totalUnrealizedPnl,
           realizedPnlToday: paperState.realizedPnLToday,
         },
         limits,
@@ -508,6 +631,7 @@ class WorkerManager {
         weeklyRealizedPnlUsd:     paperState.realizedPnLWeekly,
         rolling24hRealizedPnlUsd: paperState.realizedPnLRolling24h,
         tradingCapital:           limits.tradingCapital,
+        accountDrawdownPct,
       });
 
       // 상태 업데이트

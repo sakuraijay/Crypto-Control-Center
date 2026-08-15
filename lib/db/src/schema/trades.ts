@@ -29,6 +29,12 @@ export const tradesTable = pgTable("trades", {
   gmxMarketAddress: text("gmx_market_address"),
   collateralToken:  text("collateral_token").default("USDC"),
   sizeInUsd:        numeric("size_in_usd", { precision: 18, scale: 4 }),
+
+  // ── Risk-engine fields (additive, nullable for backward compat) ───────────
+  /** Leverage used at open. Null for legacy rows — treated conservatively as 1x. */
+  leverage:         numeric("leverage", { precision: 8, scale: 2 }),
+  /** Collateral (margin) in USD at open. Null for legacy rows. */
+  collateralUsd:    numeric("collateral_usd", { precision: 18, scale: 4 }),
 });
 
 export const insertTradeSchema = createInsertSchema(tradesTable).omit({ createdAt: true });

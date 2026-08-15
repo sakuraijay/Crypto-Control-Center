@@ -62,6 +62,14 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         ADD COLUMN IF NOT EXISTS last_retried_at timestamptz;
     `,
   },
+  {
+    name: "0006_trades_leverage",
+    sql: `
+      ALTER TABLE trades
+        ADD COLUMN IF NOT EXISTS leverage      numeric(8,2),
+        ADD COLUMN IF NOT EXISTS collateral_usd numeric(18,4);
+    `,
+  },
   // Add future migrations here in chronological order.
 ];
 

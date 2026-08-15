@@ -238,6 +238,12 @@ export interface EngineInput {
   weeklyRealizedPnlUsd?: number;
   /** Realized PnL in the rolling 24-hour window (negative = net loss). */
   rolling24hRealizedPnlUsd?: number;
+  /**
+   * Account-level drawdown from equity high-water mark (%).
+   * Computed by aiWorker: (HWM - currentEquity) / HWM * 100.
+   * undefined = HWM not yet established (first cycle).
+   */
+  accountDrawdownPct?: number;
 }
 
 export function runAiEngine(
@@ -248,6 +254,7 @@ export function runAiEngine(
     limits, engineState, consecutiveLosses, dataFreshMs,
     dailyRealizedPnlUsd, tradingCapital,
     weeklyRealizedPnlUsd = 0, rolling24hRealizedPnlUsd = 0,
+    accountDrawdownPct,
   } = input;
 
   const profitLockStage = computeProfitLockStage(
@@ -284,6 +291,20 @@ export function runAiEngine(
   if ((limits.weeklyLossLimitUSDT ?? 0) > 0 && weeklyRealizedPnlUsd < -(limits.weeklyLossLimitUSDT!)) {
     return CASH_DECISION(
       `주간 손실 한도 초과: -$${Math.abs(weeklyRealizedPnlUsd).toFixed(0)} / $${limits.weeklyLossLimitUSDT}`,
+    );
+  }
+
+  // ── Account drawdown from equity HWM ─────────────────────────────────────
+  // accountDrawdownPct is supplied by aiWorker from (HWM - equity) / HWM * 100.
+  // Only enforced when HWM is established (undefined on first cycle).
+  if (
+    accountDrawdownPct !== undefined &&
+    accountDrawdownPct > 0 &&
+    (limits.maxDrawdownPercent ?? 0) > 0 &&
+    accountDrawdownPct >= limits.maxDrawdownPercent
+  ) {
+    return CASH_DECISION(
+      `계좌 드로다운 한도 초과: ${accountDrawdownPct.toFixed(1)}% / ${limits.maxDrawdownPercent}%`,
     );
   }
 

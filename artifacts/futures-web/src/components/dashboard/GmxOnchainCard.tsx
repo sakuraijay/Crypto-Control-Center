@@ -19,7 +19,7 @@ import { Link } from 'wouter';
 import {
   Wallet, RefreshCw, ExternalLink, TrendingUp, TrendingDown,
   Loader2, AlertCircle, CheckCircle2, Unplug, Clock, XCircle,
-  Database, Activity, ChevronDown, ChevronUp, Zap,
+  Database, Activity, ChevronDown, ChevronUp, Zap, ShieldAlert,
 } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -117,7 +117,7 @@ function PositionRow({ pos }: { pos: GmxOnchainPosition }) {
         </div>
       </div>
 
-      {/* Right: size + collateral + leverage + liq price + realised PnL */}
+      {/* Right: size + collateral + leverage + liq price + unrealized PnL + realised PnL */}
       <div className="flex items-center gap-4 shrink-0 text-right">
         <div>
           <div className="font-mono font-semibold text-foreground">
@@ -137,9 +137,7 @@ function PositionRow({ pos }: { pos: GmxOnchainPosition }) {
             'font-mono font-semibold',
             pos.leverage != null ? 'text-foreground' : 'text-muted-foreground/50',
           )}>
-            {pos.leverage != null
-              ? `${pos.leverage.toFixed(1)}x`
-              : 'N/A'}
+            {pos.leverage != null ? `${pos.leverage.toFixed(1)}x` : 'N/A'}
           </div>
           <div className="text-[10px] text-muted-foreground">LEV</div>
         </div>
@@ -147,15 +145,33 @@ function PositionRow({ pos }: { pos: GmxOnchainPosition }) {
         <div>
           <div className={cn(
             'font-mono',
-            pos.liquidationPrice != null
-              ? 'text-[var(--color-short)] font-semibold'
-              : 'text-muted-foreground/50',
+            pos.nearLiquidation
+              ? 'text-[var(--color-short)] font-bold animate-pulse'
+              : pos.liquidationPrice != null
+                ? 'text-[var(--color-short)] font-semibold'
+                : 'text-muted-foreground/50',
           )}>
             {pos.liquidationPrice != null
               ? `$${pos.liquidationPrice.toLocaleString('en-US', { maximumFractionDigits: 2 })}`
               : 'N/A'}
           </div>
           <div className="text-[10px] text-muted-foreground">LIQ.PRICE</div>
+        </div>
+        {/* Unrealized PnL — mark-to-market. null when data unavailable */}
+        <div>
+          <div className={cn(
+            'font-mono font-semibold',
+            pos.unrealizedPnlUsd == null
+              ? 'text-muted-foreground/40'
+              : pos.unrealizedPnlUsd >= 0
+                ? 'text-[var(--color-long)]'
+                : 'text-[var(--color-short)]',
+          )}>
+            {pos.unrealizedPnlUsd != null
+              ? `${pos.unrealizedPnlUsd >= 0 ? '+' : ''}${pos.unrealizedPnlUsd.toLocaleString('en-US', { maximumFractionDigits: 2 })}`
+              : '—'}
+          </div>
+          <div className="text-[10px] text-muted-foreground">UNREALISED</div>
         </div>
         <div>
           <div className={cn('font-mono font-semibold', pnlColor)}>
@@ -461,6 +477,23 @@ export function GmxOnchainCard() {
                   >
                     <RefreshCw className="w-2.5 h-2.5 mr-1" /> 재시도
                   </Button>
+                </div>
+              )}
+
+              {/* ── 청산가 위험 근접 경고 배너 ── */}
+              {gmx.positions.some(p => p.nearLiquidation) && (
+                <div className="flex items-start gap-2.5 px-3 py-2.5 rounded-lg border border-[var(--color-short)]/40 bg-[var(--color-short)]/8 text-[11px] text-[var(--color-short)] mb-2">
+                  <ShieldAlert className="w-4 h-4 shrink-0 mt-0.5 animate-pulse" />
+                  <div>
+                    <span className="font-bold">청산가 위험 근접 경고</span>
+                    {' '}— 아래 포지션의 청산가가 현재 시장가 대비 5% 이내입니다:{' '}
+                    <span className="font-mono font-bold">
+                      {gmx.positions
+                        .filter(p => p.nearLiquidation)
+                        .map(p => `${p.symbol} ${p.direction} (청산: $${p.liquidationPrice?.toLocaleString('en-US', { maximumFractionDigits: 2 })} / 현재: $${p.markPriceUsd?.toLocaleString('en-US', { maximumFractionDigits: 2 })})`)
+                        .join(', ')}
+                    </span>
+                  </div>
                 </div>
               )}
 

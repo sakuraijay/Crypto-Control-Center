@@ -88,6 +88,10 @@ export interface ExecutorStatus {
   lastCycleResult: import('./aiWorker').WorkerCycleResult | null;
   /** Total number of AI cycles completed since startup */
   cycleCount: number;
+  /** Risk Limits used in the most recent cycle. null = no cycle has run yet */
+  lastLimitsUsed: import('./serverTypes').RiskLimits | null;
+  /** Equity high-water mark (USD) since server start. null = HWM not yet established */
+  equityHwm: number | null;
 }
 
 export interface ExecuteOrderParams {
@@ -188,6 +192,8 @@ export function getExecutorStatus(): ExecutorStatus {
     lastCycleAt:      workerStatus.lastCycleAt,
     lastCycleResult:  workerStatus.lastCycleResult,
     cycleCount:       workerStatus.cycleCount,
+    lastLimitsUsed:   workerStatus.lastLimitsUsed,
+    equityHwm:        workerStatus.equityHwm,
   };
 }
 
