@@ -225,14 +225,99 @@ export function getCachedChange24h(): Record<string, number> | null {
  */
 export { ensurePoller as ensureGmxPoller };
 
-// ── Positions proxy ──────────────────────────────────────────────────────────
+// ── Positions proxy — Satsuma (primary) + Arbitrum RPC (fallback) ─────────────
 //
-// Browser → GET /api/gmx/positions?account=0x…  →  server → Satsuma GraphQL
+// Browser → GET /api/gmx/positions?account=0x…
+//         → server tries:
+//             1. Satsuma GraphQL (richer data, incl. liquidationPrice)
+//             2. Arbitrum RPC via GMX V2 PositionReader (fallback)
+//             3. { positions: [], source: "unavailable" } (last resort)
 //
-// Rationale: Satsuma's CORS policy blocks direct browser requests in many
-// environments. Proxying through the API server removes that restriction and
-// lets the server add retry / fallback logic without affecting the browser.
-// The per-account 30s cache prevents excessive upstream calls.
+// Rationale: Satsuma's CORS policy blocks direct browser requests in some
+// environments. The RPC fallback ensures positions are visible even when
+// Satsuma is unreachable. "unavailable" is returned only when both upstreams
+// fail — the browser must NOT clear displayed positions in that case.
+//
+// Cache policy:
+//   - Successful result (subgraph / rpc): 30 s TTL
+//   - unavailable: 5 s TTL (avoids hammering upstreams on each poll)
+//
+// Privacy: wallet address only; no keys, signatures, or balances stored.
+
+import {
+  createPublicClient,
+  http,
+  keccak256,
+  encodeAbiParameters,
+  parseAbiParameters,
+} from "viem";
+import { arbitrum } from "viem/chains";
+
+// ── GMX V2 Arbitrum contract addresses (verified on-chain 2026-08-15) ────────
+// PositionReader: confirmed via eth_getCode (21535 bytes)
+// DataStore: confirmed via Reader.dataStore() → getAccountPositions returns 200
+const POSITION_READER_ADDRESS = "0x5Ca84c34a381434786738735265b9f3FD814b824" as const;
+const DATASTORE_ADDRESS       = "0xfd70de6b91282d8017aa4e741e9ae325cab992d8" as const;
+
+// Arbitrum public RPC nodes (confirmed reachable from Replit sandbox)
+const ARBITRUM_RPC_URLS = [
+  "https://arb1.arbitrum.io/rpc",
+  "https://rpc.ankr.com/arbitrum",
+] as const;
+
+/** GMX V2 PositionReader.getAccountPositions ABI fragment. */
+const POSITION_READER_ABI = [
+  {
+    name: "getAccountPositions",
+    type: "function" as const,
+    stateMutability: "view" as const,
+    inputs: [
+      { name: "dataStore", type: "address" as const },
+      { name: "account",   type: "address" as const },
+      { name: "start",     type: "uint256" as const },
+      { name: "end",       type: "uint256" as const },
+    ],
+    outputs: [
+      {
+        type: "tuple[]" as const,
+        components: [
+          {
+            name: "addresses",
+            type: "tuple" as const,
+            components: [
+              { name: "account",        type: "address" as const },
+              { name: "market",         type: "address" as const },
+              { name: "collateralToken",type: "address" as const },
+            ],
+          },
+          {
+            name: "numbers",
+            type: "tuple" as const,
+            components: [
+              { name: "sizeInUsd",                                 type: "uint256" as const },
+              { name: "sizeInTokens",                              type: "uint256" as const },
+              { name: "collateralAmount",                          type: "uint256" as const },
+              { name: "realisedPnlUsd",                            type: "int256"  as const },
+              { name: "increasedAtTime",                           type: "uint256" as const },
+              { name: "decreasedAtTime",                           type: "uint256" as const },
+              { name: "borrowingFactor",                           type: "uint256" as const },
+              { name: "fundingFeeAmountPerSize",                   type: "uint256" as const },
+              { name: "longTokenClaimableFundingAmountPerSize",    type: "uint256" as const },
+              { name: "shortTokenClaimableFundingAmountPerSize",   type: "uint256" as const },
+            ],
+          },
+          {
+            name: "flags",
+            type: "tuple" as const,
+            components: [
+              { name: "isLong", type: "bool" as const },
+            ],
+          },
+        ],
+      },
+    ],
+  },
+] as const;
 
 const SATSUMA_URL =
   'https://subgraph.satsuma-prod.com/3b2ced13c8d9/gmx/synthetics-arbitrum-stats/api';
@@ -255,7 +340,7 @@ const POSITIONS_QUERY_BASIC = `
   }
 `;
 
-/** Raw position shape returned by the Satsuma GraphQL schema. */
+/** Raw position shape shared by subgraph and RPC normaliser. */
 type SubgraphPosition = {
   id:               string;
   account:          string;
@@ -272,22 +357,27 @@ type SubgraphPosition = {
 
 export interface PositionsResult {
   positions: SubgraphPosition[];
-  /** 'subgraph' when Satsuma responded, 'unavailable' when all upstreams failed. */
-  source: 'subgraph' | 'unavailable';
+  /**
+   * 'subgraph' — Satsuma GraphQL responded (includes liquidationPrice when schema supports it)
+   * 'rpc'      — Satsuma failed; data read from Arbitrum RPC via PositionReader (no liquidationPrice)
+   * 'unavailable' — both upstreams failed; browser MUST keep showing last known positions
+   */
+  source: 'subgraph' | 'rpc' | 'unavailable';
 }
 
-/** Per-account cache (account → CacheEntry). TTL = 30 s. */
+/** Per-account position cache. */
 const positionsCache = new Map<string, CacheEntry<PositionsResult>>();
-const POSITIONS_CACHE_TTL = 30_000;
+const POSITIONS_CACHE_TTL         = 30_000; // successful fetch
+const POSITIONS_UNAVAILABLE_TTL   =  5_000; // failure — retry sooner
 
-/** Server-side flag: false once we confirm the Satsuma schema lacks liquidationPrice. */
+/** Server-side flag: false once we confirm Satsuma schema lacks liquidationPrice. */
 let sgSupportsLiqPrice = true;
 
 function isValidAddress(addr: string): boolean {
   return /^0x[0-9a-fA-F]{40}$/.test(addr);
 }
 
-/** Query Satsuma from the server side (no CORS). Returns null on any failure. */
+/** Primary: query Satsuma GraphQL from the server side (no CORS). */
 async function fetchFromSatsuma(account: string): Promise<SubgraphPosition[] | null> {
   const query = sgSupportsLiqPrice ? POSITIONS_QUERY_FULL : POSITIONS_QUERY_BASIC;
   try {
@@ -295,7 +385,7 @@ async function fetchFromSatsuma(account: string): Promise<SubgraphPosition[] | n
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ query, variables: { account } }),
-      signal:  AbortSignal.timeout(10_000),
+      signal:  AbortSignal.timeout(8_000),
     });
     if (!r.ok) return null;
 
@@ -304,7 +394,7 @@ async function fetchFromSatsuma(account: string): Promise<SubgraphPosition[] | n
       errors?: Array<{ message: string }>;
     };
 
-    // Detect missing liquidationPrice field and retry without it once.
+    // Detect missing liquidationPrice and retry without it once.
     if (
       json.errors?.length &&
       sgSupportsLiqPrice &&
@@ -318,7 +408,7 @@ async function fetchFromSatsuma(account: string): Promise<SubgraphPosition[] | n
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({ query: POSITIONS_QUERY_BASIC, variables: { account } }),
-        signal:  AbortSignal.timeout(10_000),
+        signal:  AbortSignal.timeout(8_000),
       });
       if (!r2.ok) return null;
       const j2 = await r2.json() as typeof json;
@@ -334,15 +424,81 @@ async function fetchFromSatsuma(account: string): Promise<SubgraphPosition[] | n
 }
 
 /**
+ * Fallback: read positions on-chain via GMX V2 PositionReader on Arbitrum.
+ * Uses viem for proper ABI decode. liquidationPrice is not available on-chain
+ * without oracle data, so it is left null.
+ */
+async function fetchFromRpc(account: string): Promise<SubgraphPosition[] | null> {
+  for (const rpcUrl of ARBITRUM_RPC_URLS) {
+    try {
+      const client = createPublicClient({
+        chain:     arbitrum,
+        transport: http(rpcUrl, { timeout: 8_000 }),
+      });
+
+      type RawPos = {
+        addresses: { account: `0x${string}`; market: `0x${string}`; collateralToken: `0x${string}` };
+        numbers:   { sizeInUsd: bigint; sizeInTokens: bigint; collateralAmount: bigint; realisedPnlUsd: bigint; increasedAtTime: bigint };
+        flags:     { isLong: boolean };
+      };
+
+      const rawPositions = await client.readContract({
+        address:      POSITION_READER_ADDRESS,
+        abi:          POSITION_READER_ABI,
+        functionName: "getAccountPositions",
+        args: [
+          DATASTORE_ADDRESS,
+          account as `0x${string}`,
+          0n,
+          20n,
+        ],
+      }) as unknown as RawPos[];
+
+      // Normalise on-chain data to the SubgraphPosition shape.
+      // Position key = keccak256(account || market || collateralToken || isLong) — matches GMX V2 spec.
+      return rawPositions.map(pos => {
+        const positionKey = keccak256(
+          encodeAbiParameters(
+            parseAbiParameters("address, address, address, bool"),
+            [
+              pos.addresses.account,
+              pos.addresses.market,
+              pos.addresses.collateralToken,
+              pos.flags.isLong,
+            ],
+          ),
+        );
+        return {
+          id:               positionKey,
+          account:          pos.addresses.account.toLowerCase(),
+          market:           pos.addresses.market.toLowerCase(),
+          collateralToken:  pos.addresses.collateralToken.toLowerCase(),
+          sizeInUsd:        pos.numbers.sizeInUsd.toString(),
+          sizeInTokens:     pos.numbers.sizeInTokens.toString(),
+          collateralAmount: pos.numbers.collateralAmount.toString(),
+          realisedPnlUsd:   pos.numbers.realisedPnlUsd.toString(),
+          isLong:           pos.flags.isLong,
+          increasedAtTime:  pos.numbers.increasedAtTime.toString(),
+          liquidationPrice: null, // not available from RPC without oracle prices
+        };
+      });
+    } catch {
+      // Try the next RPC endpoint.
+    }
+  }
+  return null; // all RPC endpoints failed
+}
+
+/**
  * GET /api/gmx/positions?account=0x…
  *
- * Returns positions for the given wallet address by querying the GMX Synthetics
- * subgraph (Satsuma) server-side.  Avoids browser CORS restrictions on Satsuma.
- * Per-account 30 s cache.  Returns { positions: [], source: "unavailable" } when
- * all upstreams are unreachable — never throws.
+ * Returns active GMX V2 positions for the given wallet address.
+ * Data source priority: Satsuma subgraph → Arbitrum RPC → unavailable.
  *
- * Privacy: only the wallet address is sent in the query parameter.
- * No private keys, balances, or signatures are accepted or stored.
+ * When source = "unavailable" the browser MUST NOT clear displayed positions —
+ * it should keep showing the last known positions as stale data.
+ *
+ * Cache TTL: 30 s on success, 5 s on unavailable (so the next poll retries quickly).
  */
 router.get("/gmx/positions", async (req, res) => {
   const account = String(req.query.account ?? "").toLowerCase();
@@ -359,14 +515,28 @@ router.get("/gmx/positions", async (req, res) => {
     return res.json(cached.data);
   }
 
-  // Try Satsuma (server-side → no CORS)
-  const fetched = await fetchFromSatsuma(account);
-  const result: PositionsResult =
-    fetched != null
-      ? { positions: fetched, source: "subgraph" }
-      : { positions: [], source: "unavailable" };
+  // 1. Try Satsuma (server-side, no CORS; richer data including liquidationPrice)
+  const sgPositions = await fetchFromSatsuma(account);
+  if (sgPositions != null) {
+    const result: PositionsResult = { positions: sgPositions, source: "subgraph" };
+    positionsCache.set(account, { data: result, expiresAt: Date.now() + POSITIONS_CACHE_TTL });
+    res.setHeader("Cache-Control", "no-cache");
+    return res.json(result);
+  }
 
-  positionsCache.set(account, { data: result, expiresAt: Date.now() + POSITIONS_CACHE_TTL });
+  // 2. Fallback: Arbitrum RPC via GMX V2 PositionReader (no liquidationPrice)
+  const rpcPositions = await fetchFromRpc(account);
+  if (rpcPositions != null) {
+    const result: PositionsResult = { positions: rpcPositions, source: "rpc" };
+    positionsCache.set(account, { data: result, expiresAt: Date.now() + POSITIONS_CACHE_TTL });
+    res.setHeader("Cache-Control", "no-cache");
+    return res.json(result);
+  }
+
+  // 3. Both upstreams failed — return empty with unavailable signal.
+  // Short cache TTL so the next browser poll retries in 5 s, not 30 s.
+  const result: PositionsResult = { positions: [], source: "unavailable" };
+  positionsCache.set(account, { data: result, expiresAt: Date.now() + POSITIONS_UNAVAILABLE_TTL });
   res.setHeader("Cache-Control", "no-cache");
   return res.json(result);
 });

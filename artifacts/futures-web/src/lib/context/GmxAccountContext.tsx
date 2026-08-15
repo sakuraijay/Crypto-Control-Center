@@ -219,8 +219,34 @@ export function GmxAccountProvider({ children }: { children: ReactNode }) {
 
       const { positions: rawPositions, source } = await posRes.json() as {
         positions: ProxyPosition[];
-        source:    string;
+        source:    'subgraph' | 'rpc' | 'unavailable';
       };
+
+      // When both Satsuma and RPC are unavailable, keep the existing positions
+      // on-screen rather than replacing them with an empty array.  The user
+      // sees their last known positions until connectivity is restored.
+      if (source === 'unavailable') {
+        setState(prev => ({
+          ...prev,
+          status:      prev.positions.length > 0 ? 'ok' : 'unavailable',
+          error:       'Position data temporarily unavailable — showing last known positions',
+          // lastSuccessUpdated NOT updated — preserves the last good timestamp
+          lastUpdated: new Date(),
+          lastFetchMs: Date.now() - fetchStart,
+        }));
+        void fetch('/api/wallet/diagnostic', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            walletConnected:    true,
+            addressFingerprint: `${address.slice(0, 6)}\u2026${address.slice(-4)}`,
+            subgraphOk:         false,
+            positionCount:      0,
+            lastRefreshAt:      new Date().toISOString(),
+          }),
+        }).catch(() => {});
+        return;
+      }
 
       // Parse mark prices (non-fatal — unrealizedPnl stays null on error)
       let markPriceBySymbol: Record<string, number> = {};
