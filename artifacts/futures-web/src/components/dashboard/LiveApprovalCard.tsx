@@ -1,65 +1,96 @@
 /**
- * LiveApprovalCard — Operator approval gate for live GMX V2 orders.
+ * LiveApprovalCard — Operator approval gate for LIVE mode.
  *
- * Shown only when engineState === 'LIVE_TRADING' and there are pending approvals.
- * The AI has proposed an order — real money moves ONLY after the operator clicks
- * APPROVE. Orders auto-expire after 5 minutes (market conditions change).
+ * PAPER / DRY-RUN ONLY — 이 컴포넌트는 실제 GMX 주문을 실행하지 않습니다.
+ * 승인 후 내부 executor가 파라미터를 검증하는 paper dry-run을 수행합니다.
+ * 실제 온체인 주문은 GMX One-Click 서브계정 구성 완료 후 활성화됩니다.
  *
  * Operator sees: state, symbol, size, leverage, TP/SL, trailing, reasoning, risk level.
- * One approval at a time — oldest pending shown first.
+ * After approve: dry-run validation badge (pending → success / failure).
  */
 
 import { useEffect, useState } from 'react';
-import { CheckCircle2, XCircle, AlertTriangle, Clock, TrendingUp, TrendingDown, Shield } from 'lucide-react';
+import {
+  CheckCircle2, XCircle, AlertTriangle, Clock,
+  Shield, Loader2, FlaskConical,
+} from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { useAiEngine } from '@/lib/context/AiEngineContext';
 import { useAppContext } from '@/lib/context';
 import { APPROVAL_TIMEOUT_MS } from '@/lib/ai/types';
 import type { PendingLiveApproval, AiOperatingState } from '@/lib/ai/types';
-import { formatDistanceToNowStrict } from 'date-fns';
 
 // ── Colours ───────────────────────────────────────────────────────────────────
 
 const STATE_CFG: Record<AiOperatingState, { icon: string; color: string; bg: string }> = {
-  SPOT:  { icon: '◈', color: 'text-sky-400',                  bg: 'bg-sky-500/10 border-sky-500/30'         },
-  LONG:  { icon: '▲', color: 'text-[var(--color-long)]',      bg: 'bg-[var(--color-long)]/10 border-[var(--color-long)]/30'  },
-  SHORT: { icon: '▼', color: 'text-[var(--color-short)]',     bg: 'bg-[var(--color-short)]/10 border-[var(--color-short)]/30' },
-  HEDGE: { icon: '⊕', color: 'text-violet-400',               bg: 'bg-violet-500/10 border-violet-500/30'   },
-  CASH:  { icon: '◯', color: 'text-muted-foreground',         bg: 'bg-secondary border-border'              },
+  SPOT:  { icon: '◈', color: 'text-sky-400',              bg: 'bg-sky-500/10 border-sky-500/30'                          },
+  LONG:  { icon: '▲', color: 'text-[var(--color-long)]',  bg: 'bg-[var(--color-long)]/10 border-[var(--color-long)]/30'  },
+  SHORT: { icon: '▼', color: 'text-[var(--color-short)]', bg: 'bg-[var(--color-short)]/10 border-[var(--color-short)]/30' },
+  HEDGE: { icon: '⊕', color: 'text-violet-400',           bg: 'bg-violet-500/10 border-violet-500/30'                    },
+  CASH:  { icon: '◯', color: 'text-muted-foreground',     bg: 'bg-secondary border-border'                               },
 };
 
 // ── Countdown hook ────────────────────────────────────────────────────────────
 
 function useCountdown(expiresAt: string) {
   const [msLeft, setMsLeft] = useState(() => new Date(expiresAt).getTime() - Date.now());
-
   useEffect(() => {
-    const t = setInterval(() => {
-      setMsLeft(new Date(expiresAt).getTime() - Date.now());
-    }, 500);
+    const t = setInterval(() => setMsLeft(new Date(expiresAt).getTime() - Date.now()), 500);
     return () => clearInterval(t);
   }, [expiresAt]);
-
   return Math.max(0, msLeft);
 }
 
-// ── Single approval row ───────────────────────────────────────────────────────
+// ── DryRunBadge ───────────────────────────────────────────────────────────────
 
-function ApprovalItem({
+function DryRunBadge({
+  feedback,
+  error,
+}: {
+  feedback: 'pending' | 'ok' | 'failed';
+  error?: string;
+}) {
+  if (feedback === 'pending') {
+    return (
+      <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-primary/30 bg-primary/5 text-primary text-[10px] font-medium">
+        <Loader2 className="w-3 h-3 animate-spin" />
+        드라이런 검증 중…
+      </div>
+    );
+  }
+  if (feedback === 'ok') {
+    return (
+      <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-[var(--color-long)]/30 bg-[var(--color-long)]/5 text-[var(--color-long)] text-[10px] font-bold">
+        <CheckCircle2 className="w-3 h-3" />
+        드라이런 성공 — PAPER ONLY, 실제 주문 없음
+      </div>
+    );
+  }
+  return (
+    <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-amber-500/30 bg-amber-500/5 text-amber-400 text-[10px] font-medium">
+      <XCircle className="w-3 h-3 shrink-0" />
+      <span>드라이런 실패 — {error ?? '검증 오류'}</span>
+    </div>
+  );
+}
+
+// ── Single pending approval item ──────────────────────────────────────────────
+
+function PendingApprovalItem({
   approval,
   onApprove,
   onReject,
 }: {
   approval: PendingLiveApproval;
   onApprove: () => void;
-  onReject: () => void;
+  onReject: (reason?: string) => void;
 }) {
-  const msLeft = useCountdown(approval.expiresAt);
+  const msLeft  = useCountdown(approval.expiresAt);
   const pctLeft = (msLeft / APPROVAL_TIMEOUT_MS) * 100;
   const secLeft = Math.ceil(msLeft / 1000);
-  const d = approval.decision;
-  const cfg = STATE_CFG[d.operatingState];
+  const d       = approval.decision;
+  const cfg     = STATE_CFG[d.operatingState];
   const isUrgent = pctLeft < 25;
 
   const [rejectInput, setRejectInput] = useState('');
@@ -73,10 +104,9 @@ function ApprovalItem({
       'border-[var(--color-warning)]/40 bg-[var(--color-warning)]/5',
       isUrgent && 'border-[var(--color-short)]/50 bg-[var(--color-short)]/5',
     )}>
-      {/* ── Header ──────────────────────────────────────────────── */}
+      {/* ── Header ── */}
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2">
-          {/* State badge */}
           <span className={cn('inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-sm font-black tracking-widest', cfg.bg, cfg.color)}>
             {cfg.icon} {d.operatingState}
           </span>
@@ -85,7 +115,6 @@ function ApprovalItem({
           </span>
           <span className="text-xs text-muted-foreground">Cycle #{d.cycleNumber}</span>
         </div>
-        {/* Countdown */}
         <div className={cn('flex items-center gap-1.5 text-xs font-bold', isUrgent ? 'text-[var(--color-short)]' : 'text-[var(--color-warning)]')}>
           <Clock className="w-3.5 h-3.5" />
           {secLeft}s
@@ -100,7 +129,7 @@ function ApprovalItem({
         />
       </div>
 
-      {/* ── Trade params grid ────────────────────────────────────── */}
+      {/* ── Trade params ── */}
       <div className="grid grid-cols-4 gap-3 text-xs font-mono">
         <div>
           <div className="text-[9px] text-muted-foreground uppercase tracking-wider mb-0.5">Size</div>
@@ -138,7 +167,7 @@ function ApprovalItem({
         </div>
       </div>
 
-      {/* ── Rationale ────────────────────────────────────────────── */}
+      {/* ── Rationale ── */}
       <div className="rounded-lg bg-background/60 border border-border/50 px-3 py-2">
         <p className={cn('text-xs font-semibold mb-1', cfg.color)}>{d.stateRationale}</p>
         <ul className="flex flex-col gap-0.5">
@@ -150,50 +179,85 @@ function ApprovalItem({
         </ul>
       </div>
 
-      {/* ── Hedge details if present ─────────────────────────────── */}
+      {/* ── Hedge details ── */}
       {d.hedgeParams && (
         <div className="rounded-lg bg-violet-500/5 border border-violet-500/20 px-3 py-1.5 text-[11px] font-mono text-violet-300">
           Hedge: {d.hedgeParams.direction} ${d.hedgeParams.sizeUsd.toLocaleString()} ×{d.hedgeParams.leverage}× {d.hedgeParams.symbol}/USD
         </div>
       )}
 
-      {/* ── Action buttons ───────────────────────────────────────── */}
+      {/* ── Action buttons ── */}
       {showRejectInput ? (
         <div className="flex items-center gap-2">
           <input
             className="flex-1 text-xs bg-background border border-border rounded px-2 py-1.5 text-foreground placeholder:text-muted-foreground"
-            placeholder="Rejection reason (optional)…"
+            placeholder="거부 사유 (선택)…"
             value={rejectInput}
             onChange={e => setRejectInput(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') onReject(); if (e.key === 'Escape') setShowRejectInput(false); }}
+            onKeyDown={e => {
+              if (e.key === 'Enter') { onReject(rejectInput || undefined); }
+              if (e.key === 'Escape') setShowRejectInput(false);
+            }}
             autoFocus
           />
-          <Button size="sm" variant="destructive" onClick={onReject} className="gap-1 text-xs">
-            <XCircle className="w-3.5 h-3.5" /> Confirm Reject
+          <Button size="sm" variant="destructive" onClick={() => onReject(rejectInput || undefined)} className="gap-1 text-xs">
+            <XCircle className="w-3.5 h-3.5" /> 거부 확인
           </Button>
-          <Button size="sm" variant="ghost" onClick={() => setShowRejectInput(false)} className="text-xs">Cancel</Button>
+          <Button size="sm" variant="ghost" onClick={() => setShowRejectInput(false)} className="text-xs">취소</Button>
         </div>
       ) : (
-        <div className="flex items-center gap-2">
-          {/* Approve */}
-          <Button
-            size="sm"
-            onClick={onApprove}
-            className="flex-1 bg-[var(--color-long)] hover:bg-[var(--color-long)]/90 text-black font-bold gap-1.5"
-          >
-            <CheckCircle2 className="w-4 h-4" />
-            APPROVE — Execute on GMX
-          </Button>
-          {/* Reject */}
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => setShowRejectInput(true)}
-            className="border-[var(--color-short)]/50 text-[var(--color-short)] hover:bg-[var(--color-short)]/10 gap-1.5"
-          >
-            <XCircle className="w-3.5 h-3.5" /> Reject
-          </Button>
+        <div className="flex flex-col gap-1.5">
+          <div className="flex items-center gap-2">
+            {/* Approve — triggers paper dry-run */}
+            <Button
+              size="sm"
+              onClick={onApprove}
+              className="flex-1 bg-[var(--color-long)] hover:bg-[var(--color-long)]/90 text-black font-bold gap-1.5"
+            >
+              <FlaskConical className="w-4 h-4" />
+              승인 및 드라이런
+            </Button>
+            {/* Reject */}
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setShowRejectInput(true)}
+              className="border-[var(--color-short)]/50 text-[var(--color-short)] hover:bg-[var(--color-short)]/10 gap-1.5"
+            >
+              <XCircle className="w-3.5 h-3.5" /> 거부
+            </Button>
+          </div>
+          {/* PAPER ONLY notice */}
+          <p className="text-[10px] text-muted-foreground/70 text-center">
+            PAPER ONLY — 실제 GMX 주문 없음 · 파라미터 드라이런 검증만 수행
+          </p>
         </div>
+      )}
+    </div>
+  );
+}
+
+// ── Approved item (shows dry-run feedback for 90 s) ──────────────────────────
+
+function ApprovedFeedbackItem({ approval }: { approval: PendingLiveApproval }) {
+  const d   = approval.decision;
+  const cfg = STATE_CFG[d.operatingState];
+
+  return (
+    <div className="rounded-xl border border-[var(--color-long)]/25 bg-[var(--color-long)]/5 p-4 flex flex-col gap-2">
+      <div className="flex items-center gap-2">
+        <span className={cn('inline-flex items-center gap-1.5 px-2 py-0.5 rounded-lg border text-xs font-black tracking-widest', cfg.bg, cfg.color)}>
+          {cfg.icon} {d.operatingState}
+        </span>
+        <span className="font-mono text-sm font-bold text-foreground">
+          {d.primarySymbol ? `${d.primarySymbol}/USD` : '—'}
+        </span>
+        <span className="text-[10px] text-muted-foreground ml-auto">승인됨</span>
+      </div>
+
+      {/* Dry-run badge */}
+      {approval.executionFeedback && (
+        <DryRunBadge feedback={approval.executionFeedback} error={approval.executionError} />
       )}
     </div>
   );
@@ -201,22 +265,40 @@ function ApprovalItem({
 
 // ── Main card ─────────────────────────────────────────────────────────────────
 
+const FEEDBACK_DISPLAY_MS = 90_000; // show approved feedback for 90 s
+
 export function LiveApprovalCard() {
   const { pendingApprovals, approveLiveOrder, rejectLiveOrder } = useAiEngine();
   const { engineState } = useAppContext();
 
+  // Tick every 5 s so recentlyApproved filter stays accurate within 5 s
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 5_000);
+    return () => clearInterval(t);
+  }, []);
+
   const pending = pendingApprovals.filter(a => a.status === 'PENDING');
 
-  // Only render in LIVE mode or when approvals exist
-  if (engineState !== 'LIVE_TRADING' && pending.length === 0) return null;
-  if (pending.length === 0) {
-    // LIVE mode but no pending — show waiting state
+  // Show recently approved items with dry-run feedback for FEEDBACK_DISPLAY_MS
+  const recentlyApproved = pendingApprovals.filter(a =>
+    a.status === 'APPROVED' &&
+    a.approvedAt &&
+    now - new Date(a.approvedAt).getTime() < FEEDBACK_DISPLAY_MS,
+  );
+
+  const hasAnything = pending.length > 0 || recentlyApproved.length > 0;
+
+  if (engineState !== 'LIVE_TRADING' && !hasAnything) return null;
+
+  if (!hasAnything) {
+    // LIVE mode but nothing to show — waiting state
     return (
       <div className="rounded-xl border border-[var(--color-long)]/20 bg-[var(--color-long)]/5 px-5 py-4 flex items-center gap-3">
         <Shield className="w-5 h-5 text-[var(--color-long)] shrink-0" />
         <div>
           <span className="text-[11px] font-bold tracking-wider text-[var(--color-long)]">LIVE TRADING ACTIVE</span>
-          <span className="text-[11px] text-muted-foreground ml-2">Awaiting next AI decision — you will be prompted to approve before any order executes</span>
+          <span className="text-[11px] text-muted-foreground ml-2">다음 AI 결정을 대기 중 — 승인 전까지 실제 주문 없음</span>
         </div>
       </div>
     );
@@ -225,38 +307,40 @@ export function LiveApprovalCard() {
   return (
     <div className="flex flex-col gap-3">
       {/* Banner */}
-      <div className="flex items-center gap-3 px-4 py-3 rounded-xl border border-[var(--color-warning)]/50 bg-[var(--color-warning)]/8">
-        <AlertTriangle className="w-5 h-5 text-[var(--color-warning)] animate-pulse shrink-0" />
-        <div className="flex-1">
-          <span className="text-[11px] font-bold tracking-wider text-[var(--color-warning)]">
-            {pending.length} ORDER{pending.length > 1 ? 'S' : ''} AWAITING APPROVAL
-          </span>
-          <span className="text-[11px] text-muted-foreground ml-2">
-            Real money will move only after you approve · Orders auto-expire if not actioned
-          </span>
+      {pending.length > 0 && (
+        <div className="flex items-center gap-3 px-4 py-3 rounded-xl border border-[var(--color-warning)]/50 bg-[var(--color-warning)]/8">
+          <AlertTriangle className="w-5 h-5 text-[var(--color-warning)] animate-pulse shrink-0" />
+          <div className="flex-1">
+            <span className="text-[11px] font-bold tracking-wider text-[var(--color-warning)]">
+              {pending.length}건 승인 대기
+            </span>
+            <span className="text-[11px] text-muted-foreground ml-2">
+              PAPER ONLY — 드라이런 모드 · 실제 주문 없음 · 미처리 시 자동 만료
+            </span>
+          </div>
         </div>
-        <div className="flex items-center gap-1 text-[10px] font-mono text-muted-foreground shrink-0">
-          {pending.length > 1 && (
-            <>{pending.length} pending</>
-          )}
-        </div>
-      </div>
+      )}
 
-      {/* Approval items — show oldest first (slice to max 2 visible at once) */}
+      {/* Pending items — oldest first, max 2 visible */}
       {pending.slice().reverse().slice(0, 2).map(approval => (
-        <ApprovalItem
+        <PendingApprovalItem
           key={approval.id}
           approval={approval}
           onApprove={() => approveLiveOrder(approval.id)}
-          onReject={() => rejectLiveOrder(approval.id)}
+          onReject={(reason) => rejectLiveOrder(approval.id, reason)}
         />
       ))}
 
       {pending.length > 2 && (
         <div className="text-center text-xs text-muted-foreground py-1">
-          + {pending.length - 2} more pending · approve or reject above first
+          + {pending.length - 2}건 더 대기 중 · 위 항목을 먼저 처리하세요
         </div>
       )}
+
+      {/* Recently approved — show dry-run feedback */}
+      {recentlyApproved.map(approval => (
+        <ApprovedFeedbackItem key={approval.id} approval={approval} />
+      ))}
     </div>
   );
 }

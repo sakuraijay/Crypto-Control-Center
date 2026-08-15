@@ -49,6 +49,10 @@ const MIGRATIONS: { name: string; sql: string }[] = [
       );
     `,
   },
+  {
+    name: "0004_live_approvals_execution_outcome",
+    sql: `ALTER TABLE live_approvals ADD COLUMN IF NOT EXISTS execution_outcome text;`,
+  },
   // Add future migrations here in chronological order.
 ];
 

@@ -214,6 +214,7 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
             createdAt: string; expiresAt: string;
             approvedAt?: string | null; rejectedAt?: string | null;
             rejectionReason?: string | null;
+            executionOutcome?: string | null;
           }>;
         };
         if (!approvals?.length) return;
@@ -235,6 +236,11 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
               riskApproved: false, paperExecuted: false,
             };
           }
+          // Rehydrate executionOutcome → executionFeedback so feedback survives refresh
+          const executionFeedback: PendingLiveApproval['executionFeedback'] =
+            row.executionOutcome === 'succeeded' ? 'ok'
+            : row.executionOutcome === 'failed'    ? 'failed'
+            : undefined;
           return {
             id:              row.id,
             decision,
@@ -244,6 +250,7 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
             approvedAt:      row.approvedAt ?? undefined,
             rejectedAt:      row.rejectedAt ?? undefined,
             rejectionReason: row.rejectionReason ?? undefined,
+            executionFeedback,
           };
         });
 
@@ -435,20 +442,26 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
-  // ── Approve a live order ────────────────────────────────────────────────────
-  // Marks the approval as APPROVED and logs it. Actual GMX on-chain execution
-  // will be wired up via GMX SDK integration (task #32).
+  // ── Approve a live order (paper dry-run validation) ─────────────────────────
+  // 1. Optimistically mark APPROVED + executionFeedback: 'pending'
+  // 2. Persist APPROVED status to DB
+  // 3. POST to /executor/execute with dryRun:true — paper simulation only, no real order
+  // 4. Update executionFeedback to 'ok' or 'failed' based on paper-sim result
+  // 5. Persist dry-run outcome to DB
   const approveLiveOrder = useCallback(async (id: string) => {
     const approval = pendingApprovals.find(a => a.id === id);
     if (!approval || approval.status !== 'PENDING') return;
 
+    const approvedAt = new Date().toISOString();
+
+    // Step 1 — optimistic update with feedback 'pending'
     setPendingApprovals(prev => prev.map(a =>
       a.id === id
-        ? { ...a, status: 'APPROVED' as ApprovalStatus, approvedAt: new Date().toISOString() }
+        ? { ...a, status: 'APPROVED' as ApprovalStatus, approvedAt, executionFeedback: 'pending' as const }
         : a
     ));
 
-    // DB에 APPROVED 상태 업데이트 (non-fatal)
+    // Step 2 — DB APPROVED (non-fatal)
     fetch(`/api-server/api/ai/approvals/${id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
@@ -460,17 +473,74 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        ts: new Date().toISOString(),
+        ts: approvedAt,
         symbol: approval.decision.primarySymbol ?? 'MULTI',
         direction: approval.decision.operatingState,
         confidence: approval.decision.confidence / 100,
-        rationale: `[LIVE APPROVED] ${approval.decision.stateRationale}`,
+        rationale: `[LIVE APPROVED — PAPER DRY-RUN] ${approval.decision.stateRationale}`,
         strategy: `AI_5STATE_LIVE_${approval.decision.operatingState}`,
         riskResult: 'APPROVED',
         executionOutcome: 'PENDING',
-        fullJson: JSON.stringify({ ...approval.decision, operatorApproved: true }),
+        fullJson: JSON.stringify({ ...approval.decision, operatorApproved: true, dryRun: true }),
       }),
     }).catch(() => { /* non-fatal */ });
+
+    // Step 3 — paper dry-run: validate params via executor (NO real order placed)
+    try {
+      const d = approval.decision;
+      const dryRunRes = await fetch('/api-server/api/executor/execute', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          decisionId:    d.id,
+          operatingState: d.operatingState,
+          symbol:        d.primarySymbol ?? d.selectedSymbols[0] ?? null,
+          executionType: d.executionType,
+          sizeUsd:       d.sizeUsd ?? null,
+          leverage:      d.leverage ?? null,
+          tpPrice:       d.tpPrice ?? null,
+          slPrice:       d.slPrice ?? null,
+          trailingStopPct: d.trailingStopPct ?? null,
+          cycleNumber:   d.cycleNumber,
+          dryRun:        true,  // paper simulation — no real order
+        }),
+      });
+
+      const result = await dryRunRes.json() as { ok: boolean; error?: string };
+      const feedback: 'ok' | 'failed' = result.ok ? 'ok' : 'failed';
+      const errMsg = result.ok ? undefined : (result.error ?? '드라이런 시뮬레이션 실패');
+
+      // Step 4 — update feedback state
+      setPendingApprovals(prev => prev.map(a =>
+        a.id === id
+          ? { ...a, executionFeedback: feedback, executionError: errMsg }
+          : a
+      ));
+
+      // Step 5 — persist outcome to DB (non-fatal)
+      fetch(`/api-server/api/ai/approvals/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          status: 'APPROVED',
+          executionOutcome: result.ok ? 'succeeded' : 'failed',
+        }),
+      }).catch(() => { /* non-fatal */ });
+
+    } catch (e) {
+      const msg = (e as Error).message ?? '드라이런 요청 실패';
+      setPendingApprovals(prev => prev.map(a =>
+        a.id === id
+          ? { ...a, executionFeedback: 'failed' as const, executionError: msg }
+          : a
+      ));
+      // Persist failure outcome to DB (non-fatal) — catch path must also sync
+      fetch(`/api-server/api/ai/approvals/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'APPROVED', executionOutcome: 'failed' }),
+      }).catch(() => { /* non-fatal */ });
+    }
   }, [pendingApprovals]);
 
   // ── Reject a live order ─────────────────────────────────────────────────────

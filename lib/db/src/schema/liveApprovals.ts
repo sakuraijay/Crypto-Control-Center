@@ -21,7 +21,9 @@ export const liveApprovalsTable = pgTable("live_approvals", {
   expiresAt:       timestamp("expires_at", { withTimezone: true }).notNull(),
   approvedAt:      timestamp("approved_at", { withTimezone: true }),
   rejectedAt:      timestamp("rejected_at", { withTimezone: true }),
-  rejectionReason: text("rejection_reason"),
+  rejectionReason:  text("rejection_reason"),
+  /** 드라이런 실행 결과 — 'succeeded' | 'failed' | null */
+  executionOutcome: text("execution_outcome"),
 });
 
 export type DbLiveApproval = typeof liveApprovalsTable.$inferSelect;

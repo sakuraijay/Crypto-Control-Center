@@ -71,9 +71,11 @@ router.post("/ai/approvals", async (req, res) => {
 router.patch("/ai/approvals/:id", async (req, res) => {
   try {
     const { id } = req.params;
-    const { status, rejectionReason } = req.body as {
+    const { status, rejectionReason, executionOutcome } = req.body as {
       status: "APPROVED" | "REJECTED" | "EXPIRED";
       rejectionReason?: string;
+      /** dry-run 결과: 'succeeded' | 'failed' */
+      executionOutcome?: string;
     };
 
     if (!["APPROVED", "REJECTED", "EXPIRED"].includes(status)) {
@@ -89,6 +91,7 @@ router.patch("/ai/approvals/:id", async (req, res) => {
       updates.rejectionReason = rejectionReason ?? null;
     }
     if (status === "EXPIRED")   updates.rejectedAt  = now; // 만료도 rejectedAt 기록
+    if (executionOutcome)       updates.executionOutcome = executionOutcome;
 
     const [updated] = await db
       .update(liveApprovalsTable)

@@ -165,6 +165,10 @@ export interface PendingLiveApproval {
   approvedAt?: string;
   rejectedAt?: string;
   rejectionReason?: string;
+  /** Paper dry-run validation result — set after operator approves */
+  executionFeedback?: 'pending' | 'ok' | 'failed';
+  /** Error message when executionFeedback === 'failed' */
+  executionError?: string;
 }
 
 /** How long the operator has to approve before a queued decision expires (ms) */
