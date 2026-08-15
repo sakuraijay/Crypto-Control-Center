@@ -71,6 +71,9 @@ export interface GmxAccountState {
   positions:   GmxOnchainPosition[];
   status:      GmxAccountLoadStatus;
   error:       string | null;
+  /** Timestamp of the most recent SUCCESSFUL subgraph response — never overwritten on failure */
+  lastSuccessUpdated: Date | null;
+  /** Timestamp of the most recent fetch attempt (success or failure) */
   lastUpdated: Date | null;
 }
 
@@ -139,10 +142,11 @@ export function GmxAccountProvider({ children }: { children: ReactNode }) {
   const wallet = useWallet();
 
   const [state, setState] = useState<GmxAccountState>({
-    positions:   [],
-    status:      'idle',
-    error:       null,
-    lastUpdated: null,
+    positions:          [],
+    status:             'idle',
+    error:              null,
+    lastSuccessUpdated: null,
+    lastUpdated:        null,
   });
 
   const abortRef = useRef<AbortController | null>(null);
@@ -204,19 +208,22 @@ export function GmxAccountProvider({ children }: { children: ReactNode }) {
         };
       });
 
+      const now = new Date();
       setState({
         positions,
-        status:      'ok',
-        error:       null,
-        lastUpdated: new Date(),
+        status:             'ok',
+        error:              null,
+        lastSuccessUpdated: now,  // only updated on success
+        lastUpdated:        now,
       });
     } catch (err: unknown) {
       if ((err as Error)?.name === 'AbortError') return; // cancelled, don't update state
       console.warn('[GmxAccount] fetch failed:', err);
       setState(prev => ({
         ...prev,
-        status:  prev.positions.length > 0 ? 'ok' : 'unavailable',
-        error:   (err as Error)?.message ?? String(err),
+        status:      prev.positions.length > 0 ? 'ok' : 'unavailable',
+        error:       (err as Error)?.message ?? String(err),
+        // lastSuccessUpdated intentionally NOT updated — preserves last good timestamp
         lastUpdated: new Date(),
       }));
     }
@@ -227,7 +234,7 @@ export function GmxAccountProvider({ children }: { children: ReactNode }) {
     if (!(wallet.status === 'connected' && wallet.isArbitrum && wallet.address)) {
       // Wallet disconnected or wrong network — reset state
       abortRef.current?.abort();
-      setState({ positions: [], status: 'idle', error: null, lastUpdated: null });
+      setState({ positions: [], status: 'idle', error: null, lastSuccessUpdated: null, lastUpdated: null });
       return;
     }
 
