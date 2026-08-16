@@ -8,6 +8,7 @@ import executorRouter from "./executor";
 import walletDiagnosticRouter from "./wallet-diagnostic";
 import notificationsRouter from "./notifications";
 import livetestRouter from "./livetest";
+import relayRouter from "./relay";
 
 const router: IRouter = Router();
 
@@ -20,5 +21,6 @@ router.use(executorRouter);
 router.use(walletDiagnosticRouter);
 router.use(notificationsRouter);
 router.use(livetestRouter);
+router.use(relayRouter);
 
 export default router;
