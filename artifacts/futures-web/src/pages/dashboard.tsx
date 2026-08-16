@@ -9,6 +9,7 @@
 
 import { useState } from 'react';
 import { useTradingContext, useWatchlistContext, useAppContext, useStrategyContext } from '@/lib/context';
+import { usePeriodPnl, formatPeriodPnl } from '@/hooks/usePeriodPnl';
 import { Card } from '@/components/ui/card';
 import { Switch } from '@/components/ui/switch';
 import { Button } from '@/components/ui/button';
@@ -70,6 +71,9 @@ export default function Dashboard() {
   const { indicators, limits } = useStrategyContext();
 
   const [orderOpen, setOrderOpen] = useState(false);
+
+  // 기간 PnL — 서버 equity 기준점 기반 (UTC); N/A/Unavailable 규칙은 훅 참조
+  const periodPnl = usePeriodPnl();
 
   // PAPER 계좌 데이터 상태 — 'ok'가 아니면 금융 숫자 대신 Unavailable 표시
   const paperDataOk      = dataStatus === 'ok';
@@ -179,10 +183,11 @@ export default function Dashboard() {
         />
         <KpiCard
           label="Weekly PnL"
-          value={paperDataOk
-            ? `${account.weeklyPnl >= 0 ? '+' : ''}$${account.weeklyPnl.toFixed(2)}`
-            : paperDataLoading ? '…' : 'Unavailable'}
-          color={paperDataOk ? (account.weeklyPnl >= 0 ? 'text-[var(--color-long)]' : 'text-[var(--color-short)]') : undefined}
+          value={formatPeriodPnl(periodPnl.data?.weeklyPnlUsd ?? null, periodPnl.status)}
+          sub="월요일 00:00 UTC 기준점 대비 equity 변화"
+          color={periodPnl.status === 'ok' && periodPnl.data?.weeklyPnlUsd != null
+            ? (periodPnl.data.weeklyPnlUsd >= 0 ? 'text-[var(--color-long)]' : 'text-[var(--color-short)]')
+            : undefined}
         />
       </div>
 

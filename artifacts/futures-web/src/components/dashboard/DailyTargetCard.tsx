@@ -14,6 +14,7 @@ import { useTradingContext } from '@/lib/context';
 import { useStrategyContext } from '@/lib/context/StrategyContext';
 import { useAppContext } from '@/lib/context/AppContext';
 import { useAiEngine } from '@/lib/context/AiEngineContext';
+import { usePeriodPnl, formatPeriodPnl } from '@/hooks/usePeriodPnl';
 import { cn } from '@/lib/utils';
 import { CheckCircle2, ShieldAlert, TrendingDown, TrendingUp, Info, Lock, Timer } from 'lucide-react';
 
@@ -82,9 +83,19 @@ export function DailyTargetCard({ className }: { className?: string }) {
   const cooldownRemainingMin = Math.ceil(cooldownRemainingMs / 60_000);
   const inCooldown = cooldownRemainingMs > 0;
 
+  // ── 기간 PnL: 서버 equity 기준점 기반 (UTC) ──────────────────────────────
+  // 기존 "realized + 열린 포지션 전체 미실현" 공식은 전날부터 보유한 포지션의
+  // 기존 미실현 수익을 오늘 수익으로 중복 계산하므로 사용하지 않는다.
+  const periodPnl = usePeriodPnl();
+
   const realized    = todayStats?.realized    ?? 0;
   const unrealized  = account?.unrealizedPnl  ?? 0;
-  const totalPnL    = realized + unrealized;
+  // Daily PnL = 현재 equity − 오늘 00:00 UTC 기준점 equity (서버 계산·영속)
+  const dailyPnlServer = periodPnl.data?.dailyPnlUsd ?? null;
+  const dailyPnlOk     = periodPnl.status === 'ok' && dailyPnlServer !== null;
+  const totalPnL       = dailyPnlOk ? dailyPnlServer : 0;
+  // breakdown: 미실현 변화분 = Daily PnL − 당일 실현 (합계가 equity 변화와 일치)
+  const unrealizedDelta = dailyPnlOk ? dailyPnlServer - realized : null;
 
   // PAPER 데이터 미로드/실패 시 $0로 표시하지 않는다 (mock/추정치 금지)
   if (dataStatus !== 'ok') {
@@ -154,7 +165,7 @@ export function DailyTargetCard({ className }: { className?: string }) {
             Daily PnL
           </span>
           <span className="text-[10px] text-muted-foreground leading-relaxed">
-            KPI 모니터링 전용 · AI 진입 결정을 강제하지 않습니다
+            KPI 모니터링 전용 · 00:00 UTC 기준점 대비 equity 변화 · AI 진입 결정을 강제하지 않습니다
           </span>
         </div>
         <div className="flex items-center gap-1.5 shrink-0">
@@ -180,8 +191,8 @@ export function DailyTargetCard({ className }: { className?: string }) {
       {/* ── Progress bar ── */}
       <div className="flex flex-col gap-1.5">
         <div className="flex items-center justify-between text-[11px]">
-          <span className="font-mono font-bold" style={{ color: isPositive ? 'var(--color-long)' : 'var(--color-short)' }}>
-            {fmt(totalPnL)} total PnL
+          <span className="font-mono font-bold" style={{ color: dailyPnlOk ? (isPositive ? 'var(--color-long)' : 'var(--color-short)') : 'var(--muted-foreground)' }}>
+            {dailyPnlOk ? `${fmt(totalPnL)} total PnL` : `${formatPeriodPnl(dailyPnlServer, periodPnl.status)} · Daily PnL`}
           </span>
           <span className="text-muted-foreground font-mono">
             {achievedPct.toFixed(1)}% of KPI · {realizedPnlPct >= 0 ? '+' : ''}{realizedPnlPct.toFixed(2)}% capital
@@ -233,9 +244,11 @@ export function DailyTargetCard({ className }: { className?: string }) {
           cls={realized >= 0 ? 'text-[var(--color-long)]' : 'text-[var(--color-short)]'}
         />
         <StatItem
-          label="Unrealized"
-          value={fmt(unrealized)}
-          cls={unrealized >= 0 ? 'text-[var(--color-long)]' : 'text-[var(--color-short)]'}
+          label="Unreal. Δ (today)"
+          value={unrealizedDelta !== null ? fmt(unrealizedDelta) : formatPeriodPnl(null, periodPnl.status)}
+          cls={unrealizedDelta !== null
+            ? (unrealizedDelta >= 0 ? 'text-[var(--color-long)]' : 'text-[var(--color-short)]')
+            : 'text-muted-foreground'}
         />
         <StatItem
           label="Remaining"

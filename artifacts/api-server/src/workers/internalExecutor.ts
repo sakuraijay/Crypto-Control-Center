@@ -101,6 +101,14 @@ export interface ExecutorStatus {
   liveTestAccumLossUsd: number;
   /** true = DB query succeeded; false = DB failed → LIVE TEST fail-closed */
   liveTestDbOk: boolean;
+  // ── 기간 PnL (equity 기준점 기반 — UTC; null = 기준점 없음 → UI는 N/A) ──────
+  dailyPnlUsd: number | null;
+  weeklyPnlUsd: number | null;
+  dailyBaseline: import('../lib/equityBaselines').EquityBaseline | null;
+  weeklyBaseline: import('../lib/equityBaselines').EquityBaseline | null;
+  dailyRealizedPnlUsd: number | null;
+  weeklyRealizedPnlUsd: number | null;
+  currentEquityUsd: number | null;
   // ── 활성 모드 (UI 배지 근거 — 클라이언트 설정값이 아닌 서버 상태) ─────────────
   /** WORKER_ENGINE_MODE 기준 실제 엔진 모드 ('LIVE'가 아니면 항상 PAPER) */
   engineMode: 'PAPER' | 'LIVE';
@@ -217,6 +225,14 @@ export function getExecutorStatus(): ExecutorStatus {
     liveTestVetoReason:   workerStatus.liveTestVetoReason,
     liveTestAccumLossUsd: workerStatus.liveTestAccumLossUsd,
     liveTestDbOk:         workerStatus.liveTestDbOk,
+    // 기간 PnL (equity 기준점 기반, UTC)
+    dailyPnlUsd:          workerStatus.dailyPnlUsd,
+    weeklyPnlUsd:         workerStatus.weeklyPnlUsd,
+    dailyBaseline:        workerStatus.dailyBaseline,
+    weeklyBaseline:       workerStatus.weeklyBaseline,
+    dailyRealizedPnlUsd:  workerStatus.dailyRealizedPnlUsd,
+    weeklyRealizedPnlUsd: workerStatus.weeklyRealizedPnlUsd,
+    currentEquityUsd:     workerStatus.currentEquityUsd,
   };
 }
 
