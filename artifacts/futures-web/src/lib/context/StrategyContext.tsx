@@ -1,34 +1,9 @@
 import { createContext, useContext, useState, useEffect, ReactNode, useCallback, useRef } from 'react';
 
-/**
- * SubaccountConfig — GMX One-Click 서브계정 위임 설정.
- *
- * 이 설정은 브라우저에서만 저장되며, 서버·Replit Secrets에 저장되지 않습니다.
- * 개인키·시드문구는 절대 이 구조에 포함되지 않습니다.
- *
- * status 상태 전이:
- *   not_configured → ready (운영자가 maxActions/expiresInDays 설정 저장 시)
- *   ready          → active (GMX Subaccount 위임 트랜잭션 완료 + 코드 수준 잠금 해제 시)
- *   active는 LIVE_EXECUTION_LOCKED = false + 별도 최종 활성화 시에만 가능 (현재 잠금)
- */
-export interface SubaccountConfig {
-  /** delegateSubaccount() 호출 시 허용할 최대 액션 수 */
-  maxActions: number;
-  /** 위임 권한 만료 기간 (일) */
-  expiresInDays: number;
-  /**
-   * not_configured — 설정 미완료 (기본값)
-   * ready          — 설정 완료, 위임 트랜잭션 미실행
-   * active         — 위임 완료 + LIVE 잠금 해제 (현재 불가)
-   */
-  status: 'not_configured' | 'ready' | 'active';
-}
-
-const DEFAULT_SUBACCOUNT: SubaccountConfig = {
-  maxActions:    100,
-  expiresInDays:  30,
-  status:         'not_configured',
-};
+// 6E-2 §4 — 구형 SubaccountConfig(브라우저 localStorage 기반 "위임 준비 완료")는 제거됨.
+// 승인 파라미터(maxAllowedCount·expiry·deadline)는 서버가 canonical 값으로 고정하며,
+// UI는 Owner Approval prepare 반환값을 검토·표시만 한다.
+const LEGACY_SUBACCOUNT_STORAGE_KEY = 'futures_subaccount_config';
 
 export interface IndicatorConfig {
   id: string;
@@ -139,7 +114,6 @@ export type StrategySyncStatus = 'idle' | 'saving' | 'saved' | 'error';
 interface StrategyContextType {
   indicators: IndicatorConfig[];
   limits: RiskLimits;
-  subaccountConfig: SubaccountConfig;
   /** 서버 동기화 상태: idle=대기, saving=저장 중, saved=저장 완료, error=저장 실패 */
   syncStatus: StrategySyncStatus;
   /** 동기화 실패 시 오류 메시지 */
@@ -148,7 +122,6 @@ interface StrategyContextType {
   updateLimit: (key: keyof RiskLimits, value: number) => void;
   /** Toggle LIVE TEST MODE on/off (saves all liveTest fields together) */
   updateLiveTestConfig: (config: Partial<Pick<RiskLimits, 'liveTestMode' | 'testBudgetUsd' | 'testMaxLossUsd' | 'testMaxLeverage'>>) => void;
-  updateSubaccountConfig: (updates: Partial<SubaccountConfig>) => void;
   resetToDefaults: () => void;
 }
 
@@ -176,15 +149,10 @@ export function StrategyProvider({ children }: { children: ReactNode }) {
     return { ...DEFAULT_LIMITS, ...raw };
   });
 
-  const [subaccountConfig, setSubaccountConfig] = useState<SubaccountConfig>(() => {
-    const saved = localStorage.getItem('futures_subaccount_config');
-    if (!saved) return DEFAULT_SUBACCOUNT;
-    try {
-      return { ...DEFAULT_SUBACCOUNT, ...JSON.parse(saved) as Partial<SubaccountConfig> };
-    } catch {
-      return DEFAULT_SUBACCOUNT;
-    }
-  });
+  // 구형 localStorage 위임 설정 정리 (일회성 — 남아 있으면 잘못된 "위임 준비 완료" 복원 위험)
+  useEffect(() => {
+    try { localStorage.removeItem(LEGACY_SUBACCOUNT_STORAGE_KEY); } catch { /* noop */ }
+  }, []);
 
   const [syncStatus, setSyncStatus] = useState<StrategySyncStatus>('idle');
   const [syncError, setSyncError]   = useState<string | null>(null);
@@ -286,26 +254,6 @@ export function StrategyProvider({ children }: { children: ReactNode }) {
     [],
   );
 
-  /**
-   * updateSubaccountConfig — 서브계정 설정 업데이트 (localStorage 영속화).
-   *
-   * 보안 제약:
-   * - status를 'active'로 직접 설정할 수 없습니다.
-   *   LIVE 활성화는 LIVE_EXECUTION_LOCKED = false + 온체인 위임 완료 시에만 가능합니다.
-   */
-  const updateSubaccountConfig = useCallback((updates: Partial<SubaccountConfig>) => {
-    setSubaccountConfig(prev => {
-      const next = { ...prev, ...updates };
-      // status는 코드 수준 잠금 해제 전까지 'active'로 설정 불가
-      if (next.status === 'active') {
-        console.warn('[SubaccountConfig] LIVE 실행은 코드 수준에서 잠금 상태입니다. status=active 설정 거부됨.');
-        next.status = prev.status;
-      }
-      localStorage.setItem('futures_subaccount_config', JSON.stringify(next));
-      return next;
-    });
-  }, []);
-
   const resetToDefaults = useCallback(() => {
     setIndicators(DEFAULT_INDICATORS);
     setLimits(DEFAULT_LIMITS);
@@ -313,9 +261,9 @@ export function StrategyProvider({ children }: { children: ReactNode }) {
 
   return (
     <StrategyContext.Provider value={{
-      indicators, limits, subaccountConfig,
+      indicators, limits,
       syncStatus, syncError,
-      updateIndicator, updateLimit, updateLiveTestConfig, updateSubaccountConfig, resetToDefaults,
+      updateIndicator, updateLimit, updateLiveTestConfig, resetToDefaults,
     }}>
       {children}
     </StrategyContext.Provider>

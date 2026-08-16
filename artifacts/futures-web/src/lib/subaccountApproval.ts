@@ -72,6 +72,10 @@ const STATE_VIEWS: Record<string, AuthStateView> = {
   REVOKED:                  { label: '해지됨/비활성',     tone: 'error', description: '온체인에서 해지되었거나 feature/integration이 비활성입니다.' },
   ACTION_LIMIT_REACHED:     { label: '실행 한도 소진',    tone: 'error', description: '허용된 실행 횟수를 모두 사용했습니다.' },
   AUTHORIZED:               { label: '온체인 승인됨',     tone: 'ok',    description: '온체인 approval이 활성 상태입니다. (LIVE 잠금은 별도)' },
+  // 6E-2 §2 — HTTP/인증 오류를 구성 오류와 구분해 표시 (401/403 ≠ env 미설정)
+  OPERATOR_AUTH_REQUIRED:   { label: '운영자 인증 필요',  tone: 'error', description: '운영자 PIN 인증이 실패했거나 필요합니다 (HTTP 401/403). 환경변수 미설정이 아닙니다.' },
+  NOT_AUTHORIZED:           { label: '온체인 미승인',     tone: 'warn',  description: 'canonical 온체인 approval이 아직 등록되지 않았습니다.' },
+  SIGNER_NOT_INITIALIZED:   { label: 'Signer 미초기화',   tone: 'muted', description: '서버 delegated signer가 아직 초기화되지 않았습니다.' },
 };
 
 export function mapAuthStateToView(state: string): AuthStateView {
@@ -138,17 +142,73 @@ export function formatUnixSeconds(value: string | null | undefined): string {
   return new Date(n * 1000).toLocaleString();
 }
 
+// ── Prepare 활성화 가드 (6E-2 §5 — fail-closed) ─────────────────────────────
+
+export interface PrepareGateInput {
+  guard: SignGuardResult;
+  auth: SubaccountAuthResponse | null;
+  /** fetch가 HTTP/네트워크 오류로 실패했는지 (auth=null과 구분) */
+  fetchErrorState: string | null;   // 'OPERATOR_AUTH_REQUIRED' | 'NOT_CONFIGURED' | 'ERROR' | 'UNVERIFIED' | null
+}
+
+export type PrepareGateResult = { ok: true } | { ok: false; reasons: string[] };
+
+/** Prepare 버튼 활성 조건 — 모든 조건 충족 전 비활성 (PIN만으로는 절대 진행 불가) */
+export function canPrepareApproval(input: PrepareGateInput): PrepareGateResult {
+  const reasons: string[] = [];
+  if (input.fetchErrorState) {
+    reasons.push(`서버 상태 조회 실패 (${input.fetchErrorState}) — 상태 확인 전 Prepare 불가`);
+  }
+  if (!input.guard.ok) reasons.push(input.guard.reason);
+  const a = input.auth;
+  if (!a) {
+    reasons.push('subaccount-auth 상태를 확인할 수 없습니다 (fail-closed)');
+    return { ok: false, reasons };
+  }
+  if (!a.relayConfigured) {
+    reasons.push(`GMX relay 구성 미완료${a.configReasons.length ? `: ${a.configReasons.join(', ')}` : ''}`);
+  }
+  if (!a.mainAccount) reasons.push('main wallet(GMX_WALLET_ADDRESS) 미설정');
+  if (!a.signerAddress) reasons.push('delegated signer 미초기화 — signer 준비 전 Prepare 불가');
+  if (a.chainId !== ARBITRUM_ONE_CHAIN_ID) reasons.push(`서버 chainId ${a.chainId} ≠ 42161`);
+  // 상태 기반 차단: 조회오류·미확인·해지 진행 등은 전부 차단
+  const blocked = new Set(['ERROR', 'UNVERIFIED', 'REVOKED', 'NOT_CONFIGURED', 'SIGNER_DISABLED']);
+  if (blocked.has(a.state)) reasons.push(`현재 상태(${a.state})에서는 Prepare가 차단됩니다`);
+  return reasons.length ? { ok: false, reasons } : { ok: true };
+}
+
 // ── API 호출 (순수 fetch 래퍼 — 서명 없음) ───────────────────────────────────
 
-export async function fetchSubaccountAuth(apiBase: string): Promise<SubaccountAuthResponse | null> {
+export type AuthFetchResult =
+  | { kind: 'ok'; data: SubaccountAuthResponse }
+  | { kind: 'http'; status: number }
+  | { kind: 'network' };
+
+/** 6E-2 §2 — HTTP status → 표시 상태 매핑. 401/403은 절대 NOT_CONFIGURED로 변환하지 않는다. */
+export function mapAuthFetchToDisplayState(result: AuthFetchResult): string | null {
+  if (result.kind === 'ok') return null;
+  if (result.kind === 'network') return 'UNVERIFIED';
+  if (result.status === 401 || result.status === 403) return 'OPERATOR_AUTH_REQUIRED';
+  if (result.status === 503) return 'NOT_CONFIGURED';
+  return 'ERROR';
+}
+
+export async function fetchSubaccountAuthDetailed(apiBase: string): Promise<AuthFetchResult> {
   try {
     const res = await fetch(`${apiBase}executor/subaccount-auth`);
-    if (!res.ok) return null;
+    if (!res.ok) return { kind: 'http', status: res.status };
     const json = await res.json();
-    return json?.ok ? (json as SubaccountAuthResponse) : null;
+    if (!json?.ok) return { kind: 'http', status: 500 };
+    return { kind: 'ok', data: json as SubaccountAuthResponse };
   } catch {
-    return null;   // 네트워크 오류 → UNVERIFIED 취급은 호출측에서
+    return { kind: 'network' };
   }
+}
+
+/** @deprecated 호환용 — 상태 구분이 필요한 곳은 fetchSubaccountAuthDetailed 사용 */
+export async function fetchSubaccountAuth(apiBase: string): Promise<SubaccountAuthResponse | null> {
+  const r = await fetchSubaccountAuthDetailed(apiBase);
+  return r.kind === 'ok' ? r.data : null;
 }
 
 export interface PrepareResponse {

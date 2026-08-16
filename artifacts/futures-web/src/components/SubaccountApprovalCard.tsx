@@ -12,8 +12,8 @@ import { ShieldCheck, ShieldAlert, RefreshCw, Loader2, PenLine, CheckCircle2, XC
 import { cn } from '@/lib/utils';
 import { useWallet } from '@/lib/context';
 import {
-  fetchSubaccountAuth, postPrepareApproval, postApprovalSignature,
-  mapAuthStateToView, canRequestOwnerSignature, mapSignError, formatUnixSeconds,
+  fetchSubaccountAuthDetailed, mapAuthFetchToDisplayState, postPrepareApproval, postApprovalSignature,
+  mapAuthStateToView, canRequestOwnerSignature, canPrepareApproval, mapSignError, formatUnixSeconds,
   APPROVAL_GRANTS, APPROVAL_DENIALS,
   type SubaccountAuthResponse, type PrepareResponse,
 } from '@/lib/subaccountApproval';
@@ -25,6 +25,8 @@ type Phase = 'idle' | 'preparing' | 'awaiting_signature' | 'submitting' | 'done'
 export function SubaccountApprovalCard() {
   const wallet = useWallet();
   const [auth, setAuth] = useState<SubaccountAuthResponse | null>(null);
+  // §2 — fetch 실패 종류별 표시 상태 ('OPERATOR_AUTH_REQUIRED'|'NOT_CONFIGURED'|'ERROR'|'UNVERIFIED'|null)
+  const [fetchErrorState, setFetchErrorState] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [pin, setPin] = useState('');
   const [phase, setPhase] = useState<Phase>('idle');
@@ -33,14 +35,20 @@ export function SubaccountApprovalCard() {
 
   const refresh = useCallback(async () => {
     setLoading(true);
-    const r = await fetchSubaccountAuth(API_BASE);
-    setAuth(r);
+    const r = await fetchSubaccountAuthDetailed(API_BASE);
+    if (r.kind === 'ok') {
+      setAuth(r.data);
+      setFetchErrorState(null);
+    } else {
+      setAuth(null);
+      setFetchErrorState(mapAuthFetchToDisplayState(r));
+    }
     setLoading(false);
   }, []);
 
   useEffect(() => { void refresh(); }, [refresh]);
 
-  const displayState = auth?.displayState ?? (auth ? auth.state : 'UNVERIFIED');
+  const displayState = fetchErrorState ?? auth?.displayState ?? (auth ? auth.state : 'UNVERIFIED');
   const view = mapAuthStateToView(displayState);
   const guard = canRequestOwnerSignature({
     walletStatus: wallet.status,
@@ -48,10 +56,12 @@ export function SubaccountApprovalCard() {
     walletAddress: wallet.address,
     mainAccount: auth?.mainAccount ?? null,
   });
+  // §5 — Prepare는 모든 조건 충족 전 비활성 (PIN만으로 진행 불가, fail-closed)
+  const prepareGate = canPrepareApproval({ guard, auth, fetchErrorState });
 
   const handlePrepare = useCallback(async () => {
     setMessage(null);
-    if (!guard.ok) { setMessage({ tone: 'error', text: guard.reason }); return; }
+    if (!prepareGate.ok) { setMessage({ tone: 'error', text: prepareGate.reasons.join(' · ') }); return; }
     if (pin.trim().length < 6) { setMessage({ tone: 'error', text: '운영자 PIN(6자 이상)을 입력하세요.' }); return; }
     setPhase('preparing');
     const r = await postPrepareApproval({ apiBase: API_BASE, pin: pin.trim(), walletAddress: wallet.address! });
@@ -125,14 +135,20 @@ export function SubaccountApprovalCard() {
       </div>
       <p className="text-[11px] text-muted-foreground leading-relaxed">{view.description}</p>
 
-      {/* 온체인/구성 요약 */}
+      {/* 온체인/구성 요약 — fetch 실패 시 '미설정'으로 오표시하지 않는다 (§2) */}
       <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[10px]">
         <span className="text-muted-foreground">Main wallet</span>
-        <span className="font-mono truncate" data-testid="text-main-account">{auth?.mainAccount ?? '미설정'}</span>
+        <span className="font-mono truncate" data-testid="text-main-account">
+          {fetchErrorState ? '확인 불가 (조회 실패)' : auth?.mainAccount ?? '미설정'}
+        </span>
         <span className="text-muted-foreground">Subaccount (signer)</span>
-        <span className="font-mono truncate">{auth?.signerAddress ?? '미초기화'}</span>
+        <span className="font-mono truncate">
+          {fetchErrorState ? '확인 불가 (조회 실패)' : auth?.signerAddress ?? '미초기화'}
+        </span>
         <span className="text-muted-foreground">Relay router</span>
-        <span className="font-mono truncate">{auth?.relayRouter ?? '미구성'}</span>
+        <span className="font-mono truncate">
+          {fetchErrorState ? '확인 불가 (조회 실패)' : auth?.relayRouter ?? '미구성'}
+        </span>
         <span className="text-muted-foreground">Chain</span>
         <span>Arbitrum One (42161)</span>
         {oc && (<>
@@ -184,14 +200,18 @@ export function SubaccountApprovalCard() {
           />
           <button
             onClick={() => void handlePrepare()}
-            disabled={phase === 'preparing' || !guard.ok}
+            disabled={phase === 'preparing' || !prepareGate.ok}
             className={cn('h-8 px-3 rounded text-xs font-semibold border',
-              guard.ok ? 'border-primary/40 bg-primary/10 text-primary hover:bg-primary/20' : 'border-border bg-secondary text-muted-foreground cursor-not-allowed')}
+              prepareGate.ok ? 'border-primary/40 bg-primary/10 text-primary hover:bg-primary/20' : 'border-border bg-secondary text-muted-foreground cursor-not-allowed')}
             data-testid="button-prepare-approval"
           >
             {phase === 'preparing' ? '준비 중…' : '승인 준비 (Prepare)'}
           </button>
-          {!guard.ok && <span className="text-[10px] text-muted-foreground">{guard.reason}</span>}
+          {!prepareGate.ok && (
+            <span className="text-[10px] text-muted-foreground" data-testid="text-prepare-blocked">
+              {prepareGate.reasons[0]}{prepareGate.reasons.length > 1 ? ` 외 ${prepareGate.reasons.length - 1}건` : ''}
+            </span>
+          )}
           <button disabled className="h-8 px-3 rounded text-xs border border-border bg-secondary text-muted-foreground cursor-not-allowed" title="온체인 revoke는 다음 단계에서 지원됩니다" data-testid="button-revoke-disabled">
             Revoke (비활성)
           </button>

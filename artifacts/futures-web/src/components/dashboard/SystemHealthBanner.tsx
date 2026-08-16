@@ -8,18 +8,15 @@
 
 import { AlertTriangle, Lock } from 'lucide-react';
 import { useAiEngine } from '@/lib/context/AiEngineContext';
-import { useStrategyContext } from '@/lib/context/StrategyContext';
 import { cn } from '@/lib/utils';
 
 export function SystemHealthBanner() {
   const { systemPaused, pauseReason } = useAiEngine();
-  const { subaccountConfig } = useStrategyContext();
 
   const showPauseBanner = systemPaused && !!pauseReason;
-  // LIVE 잠금 배지: 서브계정이 'active'가 아닌 동안 항상 표시 (현재 항상 true)
-  const showLiveLock = subaccountConfig.status !== 'active';
-
-  if (!showPauseBanner && !showLiveLock) return null;
+  // LIVE 잠금 배지: 코드 수준 잠금(LIVE_EXECUTION_LOCKED)이 해제되지 않는 한 항상 표시.
+  // (구형 브라우저 subaccountConfig 기반 표시는 6E-2 §4에서 제거 — 서버가 authoritative)
+  const showLiveLock = true;
 
   return (
     <div className="flex flex-col gap-2">

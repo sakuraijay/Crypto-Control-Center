@@ -2,6 +2,9 @@ import { useState, useEffect, useRef, useCallback, useMemo, Fragment } from 'rea
 import { useAppContext, useAuthContext, useTradingContext, useWallet } from '@/lib/context';
 import { SubaccountApprovalCard } from '@/components/SubaccountApprovalCard';
 import { RelayStatusCard } from '@/components/RelayStatusCard';
+import { ReadinessRefreshCard } from '@/components/ReadinessRefreshCard';
+import { formatConfidencePct } from '@/lib/formatConfidence';
+import { deriveLiveTestDisplay } from '@/lib/liveTestDisplay';
 import { useAiEngine } from '@/lib/context/AiEngineContext';
 import { useStrategyContext } from '@/lib/context/StrategyContext';
 import { Card } from '@/components/ui/card';
@@ -187,18 +190,22 @@ export default function Settings() {
   const { notificationPermission, requestNotificationPermission, sendTestNotification, weeklyRealizedPnl } = useAiEngine();
   const now = useNow();
 
-  const { subaccountConfig, updateSubaccountConfig, limits, syncStatus, updateLiveTestConfig, updateLimit } = useStrategyContext();
+  const { limits, syncStatus, updateLiveTestConfig, updateLimit } = useStrategyContext();
 
   const [closeAllPhase, setCloseAllPhase] = useState<0 | 1 | 2>(0);
   const [testNotifState, setTestNotifState] = useState<'idle' | 'sending' | 'sent' | 'denied' | 'unsupported'>('idle');
   const [switchingNet, setSwitchingNet] = useState(false);
-  const [subDraftMaxActions, setSubDraftMaxActions] = useState(subaccountConfig.maxActions);
-  const [subDraftExpiresIn, setSubDraftExpiresIn]   = useState(subaccountConfig.expiresInDays);
-  const [subSaved, setSubSaved] = useState(false);
   // LIVE TEST MODE draft state
   const [ltBudgetDraft, setLtBudgetDraft]   = useState(() => limits.testBudgetUsd   ?? 100);
   const [ltMaxLossDraft, setLtMaxLossDraft] = useState(() => limits.testMaxLossUsd  ?? 50);
   const [ltMaxLevDraft, setLtMaxLevDraft]   = useState(() => limits.testMaxLeverage ?? 2);
+
+  // §6 — LIVE TEST 표시 상태는 서버 /api/executor/status가 authoritative
+  const liveTestDisplay = useMemo(() => deriveLiveTestDisplay({
+    serverLiveTestMode: health?.liveTestMode,
+    serverStatusKnown: lastSuccessAt != null && health != null,
+    localLiveTestMode: limits.liveTestMode ?? false,
+  }), [health, lastSuccessAt, limits.liveTestMode]);
   // ── 핵심 리스크 한도 draft 상태 ──────────────────────────────────────────
   const [drawdownDraft,  setDrawdownDraft]  = useState(() => limits.maxDrawdownPercent  ?? 15);
   const [dailyLossDraft, setDailyLossDraft] = useState(() => limits.dailyLossLimitUSDT ?? 500);
@@ -338,16 +345,6 @@ export default function Settings() {
       // 체인 상태 즉시 재확인 — chainChanged 이벤트 지연으로 wrong_network 배지가 고착되는 문제 방지
       await wallet.refreshChainStatus();
     }
-  };
-
-  const handleSaveSubaccountConfig = () => {
-    updateSubaccountConfig({
-      maxActions:    subDraftMaxActions,
-      expiresInDays: subDraftExpiresIn,
-      status:        'ready',
-    });
-    setSubSaved(true);
-    setTimeout(() => setSubSaved(false), 3_000);
   };
 
   const handleTestNotif = async () => {
@@ -759,101 +756,49 @@ export default function Settings() {
             );
           })()}
 
-          {/* Step 4 — GMX One-Click Subaccount (위임 준비 단계) */}
-          {(() => {
-            const walletReady = wallet.status === 'connected' && wallet.isArbitrum;
-            // visual state: not_configured + wallet connected = wallet_connected intermediate
-            const visualState =
-              subaccountConfig.status === 'ready'   ? 'ready_to_authorize' :
-              subaccountConfig.status === 'active'  ? 'active' :
-              walletReady                            ? 'wallet_connected' :
-                                                      'not_configured';
-
-            const borderCls =
-              visualState === 'ready_to_authorize' ? 'border-amber-500/30 bg-amber-500/5' :
-              visualState === 'wallet_connected'   ? 'border-primary/20 bg-primary/5' :
-                                                     'border-border bg-card/30';
-            const circleCls =
-              visualState === 'ready_to_authorize' ? 'border-amber-500 text-amber-400' :
-              visualState === 'wallet_connected'   ? 'border-primary/60 text-primary' :
-                                                     'border-border text-muted-foreground';
-            const badgeText =
-              visualState === 'ready_to_authorize' ? '위임 준비 완료 — 트랜잭션 미실행' :
-              visualState === 'wallet_connected'   ? '지갑 연결됨 — 파라미터 설정 필요' :
-                                                     'NOT CONFIGURED';
-            const badgeCls =
-              visualState === 'ready_to_authorize' ? 'bg-amber-500/10 text-amber-400 border-amber-500/30' :
-              visualState === 'wallet_connected'   ? 'bg-primary/10 text-primary border-primary/30' :
-                                                     'bg-secondary text-muted-foreground border-border';
-
-            return (
-              <div className={cn(
-                'flex items-start gap-4 p-4 rounded-lg border transition-colors',
-                borderCls,
-                visualState === 'not_configured' && 'opacity-60',
-              )}>
-                <div className={cn('flex items-center justify-center w-7 h-7 rounded-full border-2 font-bold text-xs shrink-0 mt-0.5', circleCls)}>
-                  {visualState === 'ready_to_authorize' ? '✓' : '4'}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 mb-2 flex-wrap">
-                    <span className={cn(
-                      'font-semibold text-sm',
-                      visualState === 'ready_to_authorize' && 'text-amber-400',
-                      visualState === 'wallet_connected'   && 'text-primary',
-                    )}>
-                      GMX One-Click Subaccount
-                    </span>
-                    <span className={cn('text-[9px] px-1.5 py-0.5 rounded-full border font-bold', badgeCls)}>
-                      {badgeText}
-                    </span>
-                  </div>
-
-                  <p className="text-xs text-muted-foreground leading-relaxed">
-                    메인 지갑에서 제한된 One-Click 거래 권한을 별도 서브계정에 위임합니다.
-                    <strong className="text-foreground"> 메인 지갑 자금에 대한 전체 권한이 아닌, GMX SubaccountRouter가 허용하는 제한된 실행 권한입니다.</strong>
-                    {' '}서브계정 주소(공개키)만 서버에 저장 가능하며, 서명키·개인키는 절대 이 앱에 저장하지 않습니다.
-                  </p>
-
-                  {/* 상태별 안내 */}
-                  {visualState === 'not_configured' && (
-                    <div className="flex items-center gap-1.5 mt-2 text-[10px] text-muted-foreground/70">
-                      <ChevronRight className="w-3 h-3" />
-                      지갑 연결 후 아래 "LIVE 실행 준비" 섹션에서 파라미터를 설정하세요.
-                    </div>
-                  )}
-                  {visualState === 'wallet_connected' && (
-                    <div className="flex items-center gap-1.5 mt-2 text-[10px] text-primary/80">
-                      <ChevronRight className="w-3 h-3" />
-                      아래 "LIVE 실행 준비" 섹션에서 maxActions와 만료일을 설정하고 저장하세요.
-                    </div>
-                  )}
-                  {visualState === 'ready_to_authorize' && (
-                    <div className="flex flex-col gap-1 mt-2">
-                      <div className="flex items-center gap-1.5 text-[10px] text-amber-400/80">
-                        <CheckCircle2 className="w-3 h-3" />
-                        설정 저장 완료 — maxActions: {subaccountConfig.maxActions}, 만료: {subaccountConfig.expiresInDays}일
-                      </div>
-                      <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground/60">
-                        <Lock className="w-3 h-3" />
-                        실제 위임 트랜잭션(GMX SubaccountRouter.addSubaccount) 및 코드 수준 잠금 해제는 별도 보안 검토 후 진행됩니다.
-                      </div>
-                    </div>
-                  )}
-
-                  {/* 항상 표시: 보안 경고 */}
-                  <div className="flex items-center gap-1.5 mt-3 px-2.5 py-1.5 rounded border border-[var(--color-short)]/20 bg-[var(--color-short)]/5 text-[10px] text-[var(--color-short)]/80">
-                    <ShieldAlert className="w-3 h-3 shrink-0" />
-                    메인 지갑 개인키·시드문구·서브계정 signer key를 이 앱 또는 Replit에 절대 입력하지 마세요.
-                    실행은 항상 브라우저 지갑(사용자 기기)에서만 서명됩니다.
-                  </div>
-                </div>
+          {/* Step 4 — GMX Delegated Trading (서버 고정 규칙, 6E-2 §4) */}
+          <div className="flex items-start gap-4 p-4 rounded-lg border border-border bg-card/30">
+            <div className="flex items-center justify-center w-7 h-7 rounded-full border-2 border-border text-muted-foreground font-bold text-xs shrink-0 mt-0.5">
+              4
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 mb-2 flex-wrap">
+                <span className="font-semibold text-sm">GMX Delegated Trading (Owner Approval)</span>
+                <span className="text-[9px] px-1.5 py-0.5 rounded-full border font-bold bg-secondary text-muted-foreground border-border">
+                  서버 고정 파라미터
+                </span>
               </div>
-            );
-          })()}
+
+              <p className="text-xs text-muted-foreground leading-relaxed">
+                메인 지갑에서 제한된 주문 실행 권한을 서버 delegated signer에 위임합니다.
+                <strong className="text-foreground"> 승인 파라미터는 서버가 canonical 값으로 고정 생성하며, UI에서는 변경할 수 없습니다.</strong>
+                {' '}아래 Owner Approval 카드의 Prepare가 반환한 값을 검토·확인한 뒤에만 서명합니다.
+              </p>
+
+              {/* 최신 서버 규칙 표기 (§4) */}
+              <div className="grid grid-cols-2 gap-x-4 gap-y-1 mt-2 text-[10px]" data-testid="text-server-approval-rules">
+                <span className="text-muted-foreground">최대 실행 횟수 (maxAllowedCount)</span>
+                <span className="font-mono">기본 2회 (허용 범위 1~10회)</span>
+                <span className="text-muted-foreground">승인 만료 (expiresAt)</span>
+                <span className="font-mono">최대 1시간</span>
+                <span className="text-muted-foreground">서명 유효기한 (deadline)</span>
+                <span className="font-mono">10분</span>
+                <span className="text-muted-foreground">파라미터 결정 주체</span>
+                <span>서버 (canonical nonce·주소 고정) — UI는 검토·표시만</span>
+              </div>
+
+              {/* 항상 표시: 보안 경고 */}
+              <div className="flex items-center gap-1.5 mt-3 px-2.5 py-1.5 rounded border border-[var(--color-short)]/20 bg-[var(--color-short)]/5 text-[10px] text-[var(--color-short)]/80">
+                <ShieldAlert className="w-3 h-3 shrink-0" />
+                메인 지갑 개인키·시드문구를 이 앱 또는 Replit에 절대 입력하지 마세요.
+                Owner 서명은 항상 브라우저 지갑(사용자 기기)에서만 이루어집니다.
+              </div>
+            </div>
+          </div>
 
           {/* Step 4b — MetaMask owner approval (2단계) */}
           <SubaccountApprovalCard />
+          <ReadinessRefreshCard />
           <RelayStatusCard />
 
         </div>
@@ -872,25 +817,20 @@ export default function Settings() {
 
       {/* ── LIVE 실행 준비 ── */}
       <section className="flex flex-col gap-4">
-        {/* Section header + status badge */}
+        {/* Section header + status badge — 상태는 서버 subaccount-auth가 authoritative (Owner Approval 카드 참조) */}
         <div className="flex items-center gap-2 border-b border-border pb-2">
           <h2 className="font-semibold flex items-center gap-2 text-lg flex-1">
             <Lock className="w-5 h-5 text-muted-foreground" /> LIVE 실행 준비
           </h2>
-          <span className={cn(
-            'text-[10px] font-bold px-2 py-1 rounded-full border',
-            subaccountConfig.status === 'ready'
-              ? 'border-amber-500/40 bg-amber-500/10 text-amber-400'
-              : 'border-border bg-secondary text-muted-foreground',
-          )}>
-            {subaccountConfig.status === 'ready' ? '위임 준비 완료 — 아직 미실행' : '준비 단계 — LIVE 실행 잠김'}
+          <span className="text-[10px] font-bold px-2 py-1 rounded-full border border-border bg-secondary text-muted-foreground">
+            LIVE 실행 잠김 (구조적 비활성)
           </span>
         </div>
 
         <p className="text-xs text-muted-foreground">
-          실제 GMX V2 주문을 활성화하려면 아래 4단계를 완료해야 합니다.
-          개인키·서명키를 서버에 저장하지 않고, 브라우저 지갑으로 제한 권한을 위임하는 방식입니다.
-          <strong className="text-foreground"> 위임이 완료되고 코드 수준 잠금이 해제될 때까지 LIVE 실행은 불가능합니다.</strong>
+          실제 GMX V2 주문 준비는 위 "GMX 계정 연결 준비" 섹션의 Owner Approval 카드에서 진행합니다.
+          승인 파라미터(실행 횟수·만료·deadline)는 서버가 canonical 값으로 고정하며 브라우저에 저장되지 않습니다.
+          <strong className="text-foreground"> 코드 수준 잠금이 해제될 때까지 LIVE 실행은 구조적으로 불가능합니다.</strong>
         </p>
 
         {/* 4-step checklist */}
@@ -953,31 +893,19 @@ export default function Settings() {
             );
           })()}
 
-          {/* ③ 서브계정 권한 설정 저장 */}
-          {(() => {
-            const done = subaccountConfig.status !== 'not_configured';
-            return (
-              <div className={cn(
-                'flex items-start gap-3 p-3 rounded-lg border text-xs',
-                done ? 'border-amber-500/30 bg-amber-500/5' : 'border-border bg-card/30',
-              )}>
-                <div className={cn(
-                  'w-6 h-6 rounded-full flex items-center justify-center font-bold text-xs shrink-0 mt-0.5 border-2',
-                  done ? 'border-amber-500 text-amber-400' : 'border-border text-muted-foreground',
-                )}>
-                  {done ? '✓' : '3'}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className={cn('font-semibold mb-0.5', done && 'text-amber-400')}>서브계정 권한 설정 저장</div>
-                  <p className="text-muted-foreground">
-                    {done
-                      ? `설정 저장됨 — maxActions: ${subaccountConfig.maxActions}, 만료: ${subaccountConfig.expiresInDays}일. 실제 위임 트랜잭션은 아직 실행되지 않았습니다.`
-                      : '아래 폼에서 서브계정 파라미터를 설정하고 저장하세요. 설정만 저장되며 실제 트랜잭션은 없습니다.'}
-                  </p>
-                </div>
-              </div>
-            );
-          })()}
+          {/* ③ Owner Approval (서버 고정 파라미터) */}
+          <div className="flex items-start gap-3 p-3 rounded-lg border border-border bg-card/30 text-xs">
+            <div className="w-6 h-6 rounded-full flex items-center justify-center font-bold text-xs shrink-0 mt-0.5 border-2 border-border text-muted-foreground">
+              3
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="font-semibold mb-0.5">Owner Approval 서명 (MetaMask)</div>
+              <p className="text-muted-foreground">
+                위 Owner Approval 카드에서 Prepare → 서버가 반환한 파라미터(최대 2회 실행·1시간 만료·10분 deadline) 검토 → 서명.
+                파라미터는 서버가 고정하며 UI에서 조정할 수 없습니다.
+              </p>
+            </div>
+          </div>
 
           {/* ④ 최종 활성화 (코드 수준 잠금) */}
           <div className="flex items-start gap-3 p-3 rounded-lg border border-border bg-card/20 text-xs opacity-70">
@@ -990,104 +918,13 @@ export default function Settings() {
                 <span className="text-[9px] px-1.5 py-0.5 rounded border border-border/60 text-muted-foreground/60 font-mono normal-case">LOCKED</span>
               </div>
               <p className="text-muted-foreground leading-relaxed">
-                GMX SubaccountRouter.addSubaccount() 온체인 트랜잭션 서명 후 코드 수준 잠금(LIVE_EXECUTION_LOCKED)을 별도 해제합니다.
-                현재 항상 dry-run 반환 — 3단계 완료 + 별도 보안 검토 후 활성화 예정.
+                온체인 등록·LIVE 실행은 코드 수준 잠금(LIVE_EXECUTION_LOCKED)·환경변수 게이트로 구조적으로 비활성 상태입니다.
+                별도 보안 검토 후에만 해제됩니다.
               </p>
             </div>
           </div>
 
         </div>
-
-        {/* Subaccount config form — only when wallet connected + Arbitrum */}
-        {wallet.status === 'connected' && wallet.isArbitrum ? (
-          <Card className="p-4 flex flex-col gap-4 border-border/60">
-
-            {/* "설정만 저장" info banner */}
-            <div className="flex items-start gap-2 px-3 py-2.5 rounded-lg border border-amber-500/20 bg-amber-500/5 text-xs text-amber-300/80">
-              <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5 text-amber-400" />
-              <span>
-                <strong className="text-amber-400">설정만 저장됩니다.</strong>{' '}
-                실제 권한 위임(GMX SubaccountRouter 트랜잭션)은 이 단계에서 실행되지 않습니다.
-                이 설정은 향후 delegateSubaccount 트랜잭션 파라미터로 사용될 예정입니다.
-              </span>
-            </div>
-
-            {/* maxActions */}
-            <div>
-              <div className="text-xs font-medium text-foreground mb-2">
-                최대 액션 수 <span className="font-mono text-primary">maxActions</span>
-                <span className="text-muted-foreground ml-2 font-normal">— 서브계정 허용 실행 횟수 상한</span>
-              </div>
-              <div className="flex gap-2">
-                {([50, 100, 200, 500] as const).map(v => (
-                  <button
-                    key={v}
-                    onClick={() => setSubDraftMaxActions(v)}
-                    className={cn(
-                      'px-3 py-1.5 text-xs font-mono rounded border transition-colors',
-                      subDraftMaxActions === v
-                        ? 'border-primary bg-primary/10 text-primary font-bold'
-                        : 'border-border text-muted-foreground hover:border-primary/40 bg-card/50',
-                    )}
-                  >
-                    {v}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* expiresInDays */}
-            <div>
-              <div className="text-xs font-medium text-foreground mb-2">
-                권한 만료 기간 <span className="font-mono text-primary">expiresInDays</span>
-                <span className="text-muted-foreground ml-2 font-normal">— 위임 권한 자동 만료 일수</span>
-              </div>
-              <div className="flex gap-2">
-                {([7, 30, 90] as const).map(v => (
-                  <button
-                    key={v}
-                    onClick={() => setSubDraftExpiresIn(v)}
-                    className={cn(
-                      'px-3 py-1.5 text-xs font-mono rounded border transition-colors',
-                      subDraftExpiresIn === v
-                        ? 'border-primary bg-primary/10 text-primary font-bold'
-                        : 'border-border text-muted-foreground hover:border-primary/40 bg-card/50',
-                    )}
-                  >
-                    {v}일
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Save button + status */}
-            <div className="flex items-center gap-3 pt-1 border-t border-border/40">
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={handleSaveSubaccountConfig}
-                className="h-8 text-xs"
-              >
-                {subSaved
-                  ? <><CheckCircle2 className="w-3.5 h-3.5 mr-1.5 text-[var(--color-long)]" />저장 완료</>
-                  : <><Key className="w-3.5 h-3.5 mr-1.5" />설정 저장 (위임 준비 완료로 변경)</>
-                }
-              </Button>
-              {subaccountConfig.status === 'ready' && !subSaved && (
-                <span className="text-[11px] text-amber-400/80 flex items-center gap-1">
-                  <CheckCircle2 className="w-3 h-3" />
-                  위임 준비 완료 — 위임 트랜잭션 미실행
-                </span>
-              )}
-            </div>
-
-          </Card>
-        ) : (
-          <p className="text-xs text-muted-foreground/70 flex items-center gap-1.5">
-            <AlertCircle className="w-3 h-3 shrink-0" />
-            서브계정 설정 폼은 지갑 연결 + Arbitrum One 전환 후 표시됩니다.
-          </p>
-        )}
 
       </section>
 
@@ -1128,13 +965,13 @@ export default function Settings() {
           <h2 className="font-semibold flex items-center gap-2 text-lg flex-1">
             <FlaskConical className="w-5 h-5 text-amber-400" /> LIVE TEST MODE
           </h2>
-          {limits.liveTestMode ? (
+          {liveTestDisplay.checked ? (
             <span className="text-[10px] font-bold px-2 py-1 rounded-full border border-amber-500/40 bg-amber-500/10 text-amber-400">
-              활성 — 소액 검증 중
+              활성 — 소액 검증 중 (서버 기준)
             </span>
           ) : (
             <span className="text-[10px] font-bold px-2 py-1 rounded-full border border-border bg-secondary text-muted-foreground">
-              비활성 (기본)
+              비활성 (서버 기준)
             </span>
           )}
         </div>
@@ -1149,26 +986,38 @@ export default function Settings() {
 
         <Card className="p-5 flex flex-col gap-5 border-amber-500/20 bg-amber-500/5">
 
-          {/* 활성화 토글 */}
+          {/* 활성화 토글 — 표시 상태는 항상 서버 /api/executor/status 기준 (§6) */}
           <div className="flex items-center justify-between gap-4">
             <div>
               <div className="text-sm font-semibold text-foreground">LIVE TEST MODE 활성화</div>
               <p className="text-xs text-muted-foreground mt-0.5">
                 활성 시 AI 사이클이 LIVE 결정을 생성할 때 아래 하드캡을 먼저 검사합니다.
+                표시 상태는 서버(/api/executor/status)가 결정하며, 브라우저 저장값으로 복원되지 않습니다.
               </p>
             </div>
             <Switch
-              checked={limits.liveTestMode ?? false}
+              checked={liveTestDisplay.checked}
+              disabled={liveTestDisplay.toggleDisabled}
+              data-testid="switch-live-test-mode"
               onCheckedChange={v => {
+                // 요청만 전송 — 실제 표시 상태는 다음 서버 status 갱신이 결정 (낙관적 갱신 없음)
                 updateLiveTestConfig({
                   liveTestMode: v,
                   testBudgetUsd:   ltBudgetDraft,
                   testMaxLossUsd:  ltMaxLossDraft,
                   testMaxLeverage: ltMaxLevDraft,
                 });
+                void refreshHealth();
               }}
             />
           </div>
+
+          {liveTestDisplay.hint && (
+            <div className="flex items-start gap-2 px-3 py-2 rounded-lg border border-amber-500/20 bg-amber-500/5 text-[11px] text-amber-300/80" data-testid="text-live-test-hint">
+              <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5 text-amber-400" />
+              {liveTestDisplay.hint}
+            </div>
+          )}
 
           {/* 파라미터 */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -1265,8 +1114,8 @@ export default function Settings() {
 
           </div>
 
-          {/* 현황 — 활성일 때만 표시 */}
-          {limits.liveTestMode && (
+          {/* 현황 — 서버 기준 활성일 때만 표시 */}
+          {liveTestDisplay.checked && (
             <div className="border-t border-amber-500/20 pt-4">
               <div className="text-xs font-semibold text-foreground mb-3 flex items-center gap-2">
                 <Activity className="w-3.5 h-3.5 text-amber-400" />
@@ -1602,8 +1451,8 @@ export default function Settings() {
                         <span className="font-mono ml-1">{health.lastCycleResult.primarySymbol}</span>
                       )}
                     </div>
-                    <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-border bg-card/50 text-muted-foreground text-[11px] font-medium">
-                      신뢰도 {Math.round(health.lastCycleResult.confidence * 100)}%
+                    <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-border bg-card/50 text-muted-foreground text-[11px] font-medium" data-testid="text-cycle-confidence">
+                      신뢰도 {formatConfidencePct(health.lastCycleResult.confidence)}
                     </div>
                     {health.lastCycleResult.error && (
                       <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-amber-500/30 bg-amber-500/5 text-amber-400 text-[11px] font-medium max-w-xs truncate" title={health.lastCycleResult.error}>

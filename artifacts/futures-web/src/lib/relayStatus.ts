@@ -115,6 +115,45 @@ export async function fetchActivationStatus(apiBase: string, pin: string): Promi
   }
 }
 
+// ── 6E-2 §3 — Readiness Refresh (읽기 전용 검증) fetch 래퍼 ──────────────────
+
+export interface ReadinessRefreshView {
+  attempted: boolean;
+  atMs: number | null;
+  ok: boolean;
+  basis: string[];
+  failures: string[];
+}
+
+export type ReadinessRefreshResult =
+  | { kind: 'ok'; refresh: ReadinessRefreshView }
+  | { kind: 'auth' }            // 401/403 — 운영자 인증 실패 (env 미설정 아님)
+  | { kind: 'not_configured' }  // 503 — OPERATOR_MASTER_PIN 미설정
+  | { kind: 'error'; message: string };
+
+/**
+ * POST /api/executor/relay/readiness/refresh — 유일하게 호출하는 엔드포인트.
+ * 서명·주문·nonce 생성·task 생성을 수행하지 않는 읽기 전용 검증이다.
+ * PIN은 헤더로만 전달하고 어디에도 저장/로그하지 않는다.
+ */
+export async function postReadinessRefresh(params: { apiBase: string; pin: string }): Promise<ReadinessRefreshResult> {
+  try {
+    const res = await fetch(`${params.apiBase}executor/relay/readiness/refresh`, {
+      method: 'POST',
+      headers: { 'x-operator-pin': params.pin },
+    });
+    if (res.status === 401 || res.status === 403) return { kind: 'auth' };
+    if (res.status === 503) return { kind: 'not_configured' };
+    const json = await res.json().catch(() => null);
+    if (!res.ok || !json?.ok || !json.refresh) {
+      return { kind: 'error', message: json?.error ?? `readiness refresh 실패 (HTTP ${res.status})` };
+    }
+    return { kind: 'ok', refresh: json.refresh as ReadinessRefreshView };
+  } catch (e: unknown) {
+    return { kind: 'error', message: (e as Error).message || '네트워크 오류' };
+  }
+}
+
 export interface DryRunView {
   ok: boolean;
   mode: string;
