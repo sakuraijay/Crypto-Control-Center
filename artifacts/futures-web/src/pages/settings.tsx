@@ -59,6 +59,11 @@ interface ExecutorHealth {
   liveTestMode?: boolean;
   liveTestVetoReason?: string | null;
   liveTestAccumLossUsd?: number;
+  liveTestDbOk?: boolean;
+  /** True when GMX_RPC_URL env var is set server-side */
+  rpcConfigured?: boolean;
+  /** ISO timestamp of the last RPC health check (null = never checked) */
+  lastRpcCheckAt?: string | null;
 }
 
 const AUTO_REFRESH_MS = 30_000;
@@ -180,7 +185,7 @@ export default function Settings() {
   const { notificationPermission, requestNotificationPermission, sendTestNotification, weeklyRealizedPnl } = useAiEngine();
   const now = useNow();
 
-  const { subaccountConfig, updateSubaccountConfig, limits, syncStatus, updateLiveTestConfig } = useStrategyContext();
+  const { subaccountConfig, updateSubaccountConfig, limits, syncStatus, updateLiveTestConfig, updateLimit } = useStrategyContext();
 
   const [closeAllPhase, setCloseAllPhase] = useState<0 | 1 | 2>(0);
   const [testNotifState, setTestNotifState] = useState<'idle' | 'sending' | 'sent' | 'denied' | 'unsupported'>('idle');
@@ -192,6 +197,19 @@ export default function Settings() {
   const [ltBudgetDraft, setLtBudgetDraft]   = useState(() => limits.testBudgetUsd   ?? 100);
   const [ltMaxLossDraft, setLtMaxLossDraft] = useState(() => limits.testMaxLossUsd  ?? 50);
   const [ltMaxLevDraft, setLtMaxLevDraft]   = useState(() => limits.testMaxLeverage ?? 2);
+  // ── 핵심 리스크 한도 draft 상태 ──────────────────────────────────────────
+  const [drawdownDraft,  setDrawdownDraft]  = useState(() => limits.maxDrawdownPercent  ?? 15);
+  const [dailyLossDraft, setDailyLossDraft] = useState(() => limits.dailyLossLimitUSDT ?? 500);
+  // ── 알림 서버 로그 ─────────────────────────────────────────────────────────
+  const [notifLog, setNotifLog] = useState<Array<{ ts: string; channel: string; status: string; msg: string }>>([]);
+  useEffect(() => {
+    fetch('/api/notifications/status')
+      .then(r => r.ok ? r.json() : null)
+      .then((d: { log?: Array<{ ts: string; channel: string; status: string; msg: string }> } | null) => {
+        if (d && Array.isArray(d.log)) setNotifLog(d.log.slice(0, 5));
+      })
+      .catch(() => {});
+  }, [testNotifState]); // re-fetch after each test to show latest result
 
   const isEmergency = engineState === 'EMERGENCY_STOP';
   const isOffline   = consecutiveFailures >= OFFLINE_THRESHOLD;
@@ -1196,10 +1214,23 @@ export default function Settings() {
                   </div>
                 )}
 
-                {/* 손실 추적 안내 */}
-                <div className="px-3 py-2 rounded-lg border border-amber-500/20 bg-amber-500/5 text-xs text-amber-400/80">
-                  ⓘ 누적 손실 집계는 실제 거래 PnL 연동 후 활성화됩니다 (예정).
-                    현재 LIVE_EXECUTION_LOCKED=true 기간 동안은 차단 로직만 동작합니다.
+                {/* 누적 손실 현황 */}
+                <div className="flex items-center justify-between px-3 py-2 rounded-lg border border-amber-500/20 bg-amber-500/5 text-xs">
+                  <span className="text-amber-400/80 font-medium">누적 테스트 손실</span>
+                  {health?.liveTestDbOk === false ? (
+                    <span className="text-[var(--color-short)] font-bold">DB 오류 — fail-closed</span>
+                  ) : (
+                    <span className="text-foreground font-mono font-bold">
+                      ${(health?.liveTestAccumLossUsd ?? 0).toFixed(2)}
+                      {' '}
+                      <span className="text-muted-foreground font-normal font-sans">
+                        / ${limits.testMaxLossUsd ?? 50} 한도
+                      </span>
+                    </span>
+                  )}
+                </div>
+                <div className="px-3 py-2 rounded-lg border border-amber-500/10 bg-amber-500/3 text-[10px] text-amber-400/60">
+                  ⓘ test_mode=true CLOSE 거래의 손실 합계 — DB에서 매 사이클 재계산되므로 재시작 후에도 자동 복원됩니다.
                 </div>
 
               </div>
@@ -1229,6 +1260,79 @@ export default function Settings() {
         </Card>
 
 
+      </section>
+
+      {/* ── 핵심 리스크 한도 ── */}
+      <section className="flex flex-col gap-4">
+        <h2 className="font-semibold flex items-center gap-2 border-b border-border pb-2 text-lg">
+          <ShieldAlert className="w-5 h-5 text-primary" /> 핵심 리스크 한도
+        </h2>
+        <Card className="p-5 flex flex-col gap-5">
+          <p className="text-xs text-muted-foreground leading-relaxed">
+            Strategy 페이지와 공유하는 핵심 리스크 한도입니다. 변경하면 즉시 DB에 저장되고
+            새로고침·재시작 후에도 복원됩니다. DB에 값이 없으면 AI Worker 내장 기본값(%)이 자동 적용됩니다.
+          </p>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+            {/* maxDrawdownPercent */}
+            <div>
+              <label className="text-xs font-medium text-foreground mb-1.5 block">
+                최대 드로다운 비율
+                <span className="text-muted-foreground font-normal ml-1">(1~50 %)</span>
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min={1} max={50} step={1}
+                  value={drawdownDraft}
+                  onChange={e => setDrawdownDraft(Math.min(50, Math.max(1, Number(e.target.value))))}
+                  onBlur={() => updateLimit('maxDrawdownPercent', drawdownDraft)}
+                  className="w-24 h-8 px-2.5 rounded border border-border bg-card text-foreground text-xs font-mono focus:outline-none focus:ring-1 focus:ring-primary/40"
+                />
+                <span className="text-[10px] text-muted-foreground">
+                  DB: {limits.maxDrawdownPercent != null ? `${limits.maxDrawdownPercent}%` : '(기본 15%)'}
+                </span>
+              </div>
+              <p className="text-[10px] text-muted-foreground mt-1">
+                자본 고점(HWM) 대비 손실이 이 비율을 초과하면 AI 사이클이 자동 정지됩니다.
+              </p>
+            </div>
+
+            {/* dailyLossLimitUSDT */}
+            <div>
+              <label className="text-xs font-medium text-foreground mb-1.5 block">
+                일일 최대 손실 한도
+                <span className="text-muted-foreground font-normal ml-1">(USDT)</span>
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min={10} max={100000} step={10}
+                  value={dailyLossDraft}
+                  onChange={e => setDailyLossDraft(Math.min(100_000, Math.max(10, Number(e.target.value))))}
+                  onBlur={() => updateLimit('dailyLossLimitUSDT', dailyLossDraft)}
+                  className="w-28 h-8 px-2.5 rounded border border-border bg-card text-foreground text-xs font-mono focus:outline-none focus:ring-1 focus:ring-primary/40"
+                />
+                <span className="text-[10px] text-muted-foreground">
+                  DB: {limits.dailyLossLimitUSDT != null ? `$${limits.dailyLossLimitUSDT.toLocaleString()}` : '(기본 $500)'}
+                </span>
+              </div>
+              <p className="text-[10px] text-muted-foreground mt-1">
+                오늘 손실 합계가 이 한도를 초과하면 당일 신규 주문이 차단됩니다.
+              </p>
+            </div>
+          </div>
+
+          {/* Sync hint */}
+          <div className="flex items-center gap-2 text-[10px] text-muted-foreground border-t border-border/50 pt-3">
+            <Database className="w-3 h-3 shrink-0" />
+            <span>입력 필드에서 포커스 해제(Tab·클릭아웃)하면 DB에 저장됩니다 · 변경 이력 최근 10회 보관
+              <span className="ml-2 text-[9px] opacity-60">(worker_state.limitsChangelog)</span>
+            </span>
+            {syncStatus === 'saving' && <Loader2 className="w-3 h-3 animate-spin ml-auto text-primary" />}
+            {syncStatus === 'saved'  && <CheckCircle2 className="w-3 h-3 ml-auto text-[var(--color-long)]" />}
+          </div>
+        </Card>
       </section>
 
       {/* ── System Status ── */}
@@ -1288,6 +1392,19 @@ export default function Settings() {
 
           {health ? (
             <div className="flex flex-wrap gap-2">
+              {/* GMX RPC URL 설정 여부 — URL 값은 절대 표시하지 않음 */}
+              <div className={cn(
+                'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-[11px] font-medium',
+                health.rpcConfigured
+                  ? 'border-primary/30 bg-primary/5 text-primary'
+                  : 'border-[var(--color-short)]/30 bg-[var(--color-short)]/5 text-[var(--color-short)]',
+              )}>
+                {health.rpcConfigured
+                  ? <CheckCircle2 className="w-3.5 h-3.5" />
+                  : <AlertTriangle className="w-3.5 h-3.5" />}
+                GMX_RPC_URL {health.rpcConfigured ? '설정됨' : '미설정 — LIVE TEST 차단'}
+              </div>
+              {/* Arbitrum RPC 연결 상태 */}
               <div className={cn(
                 'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-[11px] font-medium',
                 health.gmxConnected
@@ -1295,7 +1412,12 @@ export default function Settings() {
                   : 'border-border bg-card/50 text-muted-foreground',
               )}>
                 {health.gmxConnected ? <CheckCircle2 className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
-                Arbitrum RPC {health.gmxConnected ? '연결됨 (시장 데이터)' : '연결 없음'}
+                Arbitrum RPC {health.gmxConnected ? '연결됨' : '연결 없음'}
+                {health.lastRpcCheckAt && (
+                  <span className="opacity-60 ml-1 font-normal">
+                    · {formatElapsed(now - new Date(health.lastRpcCheckAt).getTime())}
+                  </span>
+                )}
               </div>
               {health.deploymentMode && (
                 <div className={cn(
@@ -1638,6 +1760,36 @@ export default function Settings() {
                     ? '클릭 시 권한 요청 후 즉시 테스트 알림을 발송합니다'
                     : '즉시 데스크탑 알림을 발송해 동작 여부를 확인합니다'}
               </span>
+            </div>
+          )}
+
+          {/* ── 서버 알림 이력 ── */}
+          {notifLog.length > 0 && (
+            <div className="border-t border-border/50 pt-4">
+              <div className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider mb-2 flex items-center gap-1.5">
+                <Database className="w-3 h-3" /> 서버 기록 (최근 {notifLog.length}건)
+              </div>
+              <div className="flex flex-col gap-1">
+                {notifLog.map((e, i) => {
+                  const statusColor =
+                    e.status === 'sent'        ? 'text-[var(--color-long)]' :
+                    e.status === 'denied'      ? 'text-[var(--color-short)]' :
+                    e.status === 'unsupported' ? 'text-amber-400' :
+                                                 'text-muted-foreground';
+                  const statusLabel =
+                    e.status === 'sent'        ? '✅ 전송됨' :
+                    e.status === 'denied'      ? '🚫 권한 없음' :
+                    e.status === 'unsupported' ? '⚠️ 미지원' : '오류';
+                  const elapsed = formatElapsed(now - new Date(e.ts).getTime());
+                  return (
+                    <div key={i} className="flex items-center gap-2 text-[10px] px-2.5 py-1.5 rounded border border-border/50 bg-card/50">
+                      <span className={cn('font-semibold shrink-0', statusColor)}>{statusLabel}</span>
+                      <span className="text-muted-foreground truncate flex-1">{e.msg}</span>
+                      <span className="text-muted-foreground shrink-0 opacity-60">{elapsed}</span>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           )}
         </Card>

@@ -362,12 +362,23 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
     }
     if (perm !== 'granted') {
       setNotificationPermission(perm);  // ensure denied state is reflected
+      fetch('/api/notifications/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channel: 'browser', status: 'denied', msg: '알림 권한 없음 (사용자 차단)' }),
+      }).catch(() => {});
       return 'denied';
     }
     new Notification('Crypto Control Center', {
       body: '알림이 정상 동작합니다. ✅',
       icon: '/favicon.ico',
     });
+    // 서버에 결과 기록 (비동기, non-blocking — 실패해도 UI에 영향 없음)
+    fetch('/api/notifications/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ channel: 'browser', status: 'sent', msg: '테스트 알림 전송됨 ✅' }),
+    }).catch(() => {});
     return 'sent';
   }, []);
 

@@ -9,7 +9,7 @@
  */
 
 import { Router } from "express";
-import { db, tradesTable, strategyConfigTable } from "@workspace/db";
+import { db, tradesTable, strategyConfigTable, workerStateTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 
 const router = Router();
@@ -170,9 +170,9 @@ router.get("/data/strategy", async (_req, res) => {
 router.put("/data/strategy", async (req, res) => {
   try {
     const { indicators } = req.body;
-    // Clamp LIVE TEST MODE caps to conservative server-enforced bounds.
-    // These limits are authoritative regardless of what the UI sends.
-    const limits = clampLiveTestLimits(req.body.limits);
+    // Clamp risk limits (maxDrawdownPercent, dailyLossLimitUSDT, weeklyLossLimitUSDT)
+    // then LIVE TEST MODE hardcaps. Both are authoritative server-side.
+    const limits = clampLiveTestLimits(clampRiskLimits(req.body.limits));
 
     // Always upsert into row id=1
     const existing = await db.select({ id: strategyConfigTable.id }).from(strategyConfigTable).limit(1);
@@ -184,6 +184,8 @@ router.put("/data/strategy", async (req, res) => {
     } else {
       await db.insert(strategyConfigTable).values({ indicators, limits, updatedAt: new Date() });
     }
+    // Record limits change history (fire-and-forget — never blocks the response)
+    void recordLimitsChange(limits);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: "Failed to save strategy config" });
@@ -198,6 +200,74 @@ router.put("/data/strategy", async (req, res) => {
 function safeNum(val: unknown): number | undefined {
   const n = typeof val === 'string' ? parseFloat(val) : Number(val);
   return Number.isFinite(n) ? n : undefined;
+}
+
+/**
+ * clampRiskLimits — server-side enforcement of core risk limit bounds.
+ * Applied before clampLiveTestLimits on every strategy write.
+ * Fields handled: maxDrawdownPercent, dailyLossLimitUSDT, weeklyLossLimitUSDT.
+ * Missing / null values are left undefined so the worker falls back to its
+ * built-in defaults (never silently overwritten to 0).
+ */
+function clampRiskLimits(limits: unknown): unknown {
+  if (!limits || typeof limits !== 'object') return limits;
+  const lim     = limits as Record<string, unknown>;
+  const clamped: Record<string, unknown> = { ...lim };
+
+  // maxDrawdownPercent: 1% ≤ x ≤ 50% — above 50% is unsafe, below 1% blocks all trades
+  if ('maxDrawdownPercent' in clamped) {
+    const v = safeNum(clamped.maxDrawdownPercent);
+    clamped.maxDrawdownPercent = v !== undefined ? Math.min(50, Math.max(1, v)) : undefined;
+  }
+
+  // dailyLossLimitUSDT: $10 ≤ x ≤ $100,000
+  if ('dailyLossLimitUSDT' in clamped) {
+    const v = safeNum(clamped.dailyLossLimitUSDT);
+    clamped.dailyLossLimitUSDT = v !== undefined ? Math.min(100_000, Math.max(10, v)) : undefined;
+  }
+
+  // weeklyLossLimitUSDT: $10 ≤ x ≤ $500,000
+  if ('weeklyLossLimitUSDT' in clamped) {
+    const v = safeNum(clamped.weeklyLossLimitUSDT);
+    clamped.weeklyLossLimitUSDT = v !== undefined ? Math.min(500_000, Math.max(10, v)) : undefined;
+  }
+
+  return clamped;
+}
+
+/** CHANGELOG_KEY — worker_state key for limits change history (last 10 saves) */
+const CHANGELOG_KEY = 'limitsChangelog';
+
+interface LimitsChangeEntry {
+  ts: string;
+  snapshot: Record<string, unknown>;
+}
+
+/** Fire-and-forget: append a limits change entry to worker_state */
+async function recordLimitsChange(limits: unknown): Promise<void> {
+  try {
+    if (!limits || typeof limits !== 'object') return;
+    const lim = limits as Record<string, unknown>;
+    // Store only the sentinel fields for the log (never trading capital or secrets)
+    const snapshot: Record<string, unknown> = {};
+    const tracked = ['maxDrawdownPercent','dailyLossLimitUSDT','weeklyLossLimitUSDT',
+                     'testBudgetUsd','testMaxLossUsd','testMaxLeverage','liveTestMode',
+                     'cooldownMinutes','maxTradesPerHour','maxConsecutiveLosses'];
+    for (const k of tracked) if (k in lim) snapshot[k] = lim[k];
+
+    const entry: LimitsChangeEntry = { ts: new Date().toISOString(), snapshot };
+    const rows = await db.select().from(workerStateTable).where(eq(workerStateTable.key, CHANGELOG_KEY));
+    const existing: LimitsChangeEntry[] = rows[0] ? JSON.parse(rows[0].value) : [];
+    const updated = [entry, ...existing].slice(0, 10);
+    const now = new Date();
+    if (rows.length > 0) {
+      await db.update(workerStateTable)
+        .set({ value: JSON.stringify(updated), updatedAt: now })
+        .where(eq(workerStateTable.key, CHANGELOG_KEY));
+    } else {
+      await db.insert(workerStateTable).values({ key: CHANGELOG_KEY, value: JSON.stringify(updated), updatedAt: now });
+    }
+  } catch { /* fire-and-forget — never block the main response */ }
 }
 
 /**
