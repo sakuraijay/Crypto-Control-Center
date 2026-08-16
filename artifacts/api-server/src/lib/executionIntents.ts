@@ -167,12 +167,14 @@ export async function hasBlockingIntents(): Promise<boolean> {
 export type TerminalIntentStatus = 'CONFIRMED' | 'FAILED' | 'CANCELLED';
 
 export interface IntentEvidence {
-  receiptStatus?:     'success' | 'reverted';
-  orderKey?:          string;
-  orderCreatedBlock?: string;
-  resolutionTxHash?:  string | null;
-  resolutionBlock?:   string | null;
-  resolutionReason:   string;
+  receiptStatus?:       'success' | 'reverted';
+  orderKey?:            string;
+  orderCreatedBlock?:   string;
+  /** OrderCreated에 실제 일치한 EventEmitter 주소 — 주소 교체 후 reconcile 근거 */
+  orderEmitterAddress?: string;
+  resolutionTxHash?:    string | null;
+  resolutionBlock?:     string | null;
+  resolutionReason:     string;
 }
 
 /**
@@ -190,9 +192,10 @@ export async function resolveIntentTerminal(
     const updated = await db.update(executionIntentsTable)
       .set({
         status:            toStatus,
-        receiptStatus:     evidence.receiptStatus ?? null,
-        orderKey:          evidence.orderKey ?? null,
-        orderCreatedBlock: evidence.orderCreatedBlock ?? null,
+        receiptStatus:       evidence.receiptStatus ?? null,
+        orderKey:            evidence.orderKey ?? null,
+        orderCreatedBlock:   evidence.orderCreatedBlock ?? null,
+        orderEmitterAddress: evidence.orderEmitterAddress ?? null,
         resolutionTxHash:  evidence.resolutionTxHash ?? null,
         resolutionBlock:   evidence.resolutionBlock ?? null,
         resolutionReason:  evidence.resolutionReason,
@@ -224,6 +227,7 @@ export async function updateIntentEvidence(
     if (evidence.receiptStatus     !== undefined) set.receiptStatus     = evidence.receiptStatus;
     if (evidence.orderKey          !== undefined) set.orderKey          = evidence.orderKey;
     if (evidence.orderCreatedBlock !== undefined) set.orderCreatedBlock = evidence.orderCreatedBlock;
+    if (evidence.orderEmitterAddress !== undefined) set.orderEmitterAddress = evidence.orderEmitterAddress;
     if (evidence.resolutionReason  !== undefined) set.resolutionReason  = evidence.resolutionReason;
     if (evidence.error             !== undefined) set.error             = evidence.error;
     const updated = await db.update(executionIntentsTable)

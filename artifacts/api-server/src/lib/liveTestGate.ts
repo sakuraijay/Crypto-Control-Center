@@ -56,6 +56,8 @@ export interface CentralGateInput {
   reconciled:              boolean;
   /** durable execution intent 중 차단 상태(PREPARED/SUBMITTED/UNRESOLVED) 부재 여부 */
   noBlockingIntents:       boolean;
+  /** GMX EventEmitter 주소 설정 유효 여부 (resolveGmxEventEmitterAddress().ok) */
+  eventEmitterConfigured:  boolean;
 }
 
 /**
@@ -106,6 +108,13 @@ export function checkCentralExecutionGate(input: CentralGateInput): GateResult {
   checks.rpcOk = input.rpcOk === true;
   if (!checks.rpcOk) {
     return { allowed: false, reason: '[CENTRAL GATE] RPC 미설정/비정상 — 실제 실행 차단 (fail-closed)', checks };
+  }
+
+  // EventEmitter 설정이 유효하지 않으면 온체인 판정(reconciliation)이 불가능하므로
+  // 어떤 LIVE 실행도 허용하지 않는다 (fail-closed).
+  checks.eventEmitterConfigured = input.eventEmitterConfigured === true;
+  if (!checks.eventEmitterConfigured) {
+    return { allowed: false, reason: '[CENTRAL GATE] GMX EventEmitter 주소 설정 없음/형식 오류 — 실제 실행 차단 (fail-closed)', checks };
   }
 
   checks.reconciled = input.reconciled === true;

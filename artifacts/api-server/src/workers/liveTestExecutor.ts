@@ -52,6 +52,7 @@ import {
   reconcileBlockingIntentsOnchain,
   type IntentResolution,
 } from '../lib/intentReconciler';
+import { resolveGmxEventEmitterAddress } from '../lib/gmxOrderEvents';
 import {
   SUBACCOUNT_ROUTER_ABI,
   USDC_ADDRESS,
@@ -451,6 +452,7 @@ export async function executeLiveTestOrder(params: LiveOrderParams): Promise<Liv
     rpcOk:                  Boolean(rpcUrl),
     reconciled:             _reconciled,
     noBlockingIntents:      !(await hasBlockingIntents()),
+    eventEmitterConfigured: resolveGmxEventEmitterAddress().ok,
   });
   if (!central.allowed) {
     await appendAuditLog({
@@ -723,6 +725,7 @@ export async function closeLiveTestPosition(params: ClosePositionParams): Promis
     rpcOk:                  Boolean(rpcUrl),
     reconciled:             _reconciled,
     noBlockingIntents:      !(await hasBlockingIntents()),
+    eventEmitterConfigured: resolveGmxEventEmitterAddress().ok,
   });
   if (!central.allowed) {
     await appendAuditLog({

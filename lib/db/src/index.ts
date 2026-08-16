@@ -137,6 +137,14 @@ const MIGRATIONS: { name: string; sql: string }[] = [
       ALTER TABLE execution_intents ADD COLUMN IF NOT EXISTS resolved_at timestamptz;
     `,
   },
+  {
+    name: "0013_execution_intents_emitter_address",
+    sql: `
+      -- OrderCreated receipt에서 실제 일치한 EventEmitter 주소를 영속 저장.
+      -- GMX upgrade로 emitter 주소가 바뀌어도 기존 intent를 reconcile 가능하게 한다.
+      ALTER TABLE execution_intents ADD COLUMN IF NOT EXISTS order_emitter_address text;
+    `,
+  },
   // Add future migrations here in chronological order.
 ];
 

@@ -26,11 +26,13 @@ import {
   type TerminalIntentStatus,
 } from './executionIntents';
 import {
-  GMX_EVENT_EMITTER_ADDRESS,
   ARBITRUM_ONE_CHAIN_ID,
+  EVENT_LOG_2_TOPIC0,
   ORDER_EVENT_NAME_HASH,
   extractOrderKeyFromReceiptLogs,
   classifyOrderResolutionLogs,
+  resolveGmxEventEmitterAddress,
+  isValidEvmAddress,
   type RawLog,
 } from './gmxOrderEvents';
 
@@ -61,8 +63,8 @@ export interface OnchainClient {
   getChainId(): Promise<number>;
   /** receipt 미존재/pending → null. RPC 오류는 throw. */
   getTransactionReceipt(txHash: string): Promise<ReceiptResult | null>;
-  /** EventEmitter에서 orderKey에 대한 실행/취소/동결 이벤트 로그 조회 */
-  getOrderResolutionLogs(orderKey: string, fromBlock: string | null): Promise<RawLog[]>;
+  /** EventEmitter(허용 주소 집합)에서 orderKey에 대한 실행/취소/동결 이벤트 로그 조회 */
+  getOrderResolutionLogs(orderKey: string, fromBlock: string | null, emitters: string[]): Promise<RawLog[]>;
 }
 
 /** 실제 RPC 클라이언트 — GMX_RPC_URL 필수 (없으면 throw → 차단 유지) */
@@ -92,13 +94,13 @@ export function createViemOnchainClient(): OnchainClient {
         throw e;
       }
     },
-    async getOrderResolutionLogs(orderKey, fromBlock) {
+    async getOrderResolutionLogs(orderKey, fromBlock, emitters) {
       const params: Record<string, unknown> = {
-        address:   GMX_EVENT_EMITTER_ADDRESS,
+        address:   emitters, // 현재 설정 emitter ∪ intent에 영속된 과거 매칭 emitter
         fromBlock: fromBlock ? `0x${BigInt(fromBlock).toString(16)}` : 'earliest',
         toBlock:   'latest',
         topics: [
-          null, // EventLog2 signature hash — 추측 금지, eventNameHash+key로 판별
+          EVENT_LOG_2_TOPIC0, // 공식 EventLog2 signature — 좁은 필터 (위조 topic0 차단)
           [
             ORDER_EVENT_NAME_HASH.OrderExecuted,
             ORDER_EVENT_NAME_HASH.OrderCancelled,
@@ -157,6 +159,14 @@ export async function reconcileBlockingIntentsOnchain(
     return { ok: false, checked: blocking.length, resolutions: [], stillBlocking: blocking.length };
   }
 
+  // EventEmitter 주소 설정 검증 — 없거나 형식 오류면 어떤 판정도 하지 않는다 (fail-closed)
+  const emitterCfg = resolveGmxEventEmitterAddress();
+  if (!emitterCfg.ok) {
+    console.error(`[IntentReconciler] EventEmitter 설정 오류 — 판정 중단, 차단 유지: ${emitterCfg.reason}`);
+    return { ok: false, checked: blocking.length, resolutions: [], stillBlocking: blocking.length };
+  }
+  const configuredEmitter = emitterCfg.address;
+
   // chainId 검증 — Arbitrum One이 아니면 어떤 판정도 하지 않는다 (fail-closed)
   try {
     const chainId = await client.getChainId();
@@ -174,7 +184,7 @@ export async function reconcileBlockingIntentsOnchain(
 
   for (const intent of blocking) {
     try {
-      const resolved = await reconcileSingleIntent(client, intent);
+      const resolved = await reconcileSingleIntent(client, intent, configuredEmitter);
       if (resolved) resolutions.push(resolved);
       else stillBlocking++;
     } catch (e) {
@@ -196,7 +206,16 @@ type IntentRow = NonNullable<Awaited<ReturnType<typeof listBlockingIntents>>>[nu
 async function reconcileSingleIntent(
   client: OnchainClient,
   intent: IntentRow,
+  configuredEmitter: string,
 ): Promise<IntentResolution | null> {
+  // 허용 emitter 집합: 현재 설정값 ∪ 이 intent에 영속된 과거 매칭 주소.
+  // GMX upgrade로 주소가 교체돼도 기존 intent는 저장된 주소로 계속 판정 가능하다.
+  const allowedEmitters = [configuredEmitter];
+  const storedEmitter = (intent as { orderEmitterAddress?: string | null }).orderEmitterAddress;
+  if (isValidEvmAddress(storedEmitter) &&
+      storedEmitter.toLowerCase() !== configuredEmitter.toLowerCase()) {
+    allowedEmitters.push(storedEmitter);
+  }
   // 1) txHash 없음 → broadcast 여부 불명. 자동 FAILED 금지, 영구 차단 (운영자 판정 필요)
   if (!intent.txHash) {
     return null;
@@ -223,7 +242,7 @@ async function reconcileSingleIntent(
   let orderKey = intent.orderKey ?? null;
   let createdBlock = intent.orderCreatedBlock ?? null;
   if (!orderKey) {
-    const extraction = extractOrderKeyFromReceiptLogs(receipt.logs);
+    const extraction = extractOrderKeyFromReceiptLogs(receipt.logs, allowedEmitters);
     if (!extraction.ok) {
       // receipt는 성공했지만 주문 생성을 확인할 수 없음 → UNRESOLVED 유지 (근거만 기록)
       await updateIntentEvidence(intent.id, {
@@ -234,17 +253,22 @@ async function reconcileSingleIntent(
     }
     orderKey = extraction.orderKey;
     createdBlock = receipt.blockNumber;
-    // key·생성 block 영속화 (차단 상태 유지한 채 — 생성 확인만으로는 해소 아님)
+    // key·생성 block·실제 매칭 emitter 영속화 (차단 상태 유지한 채 —
+    // 생성 확인만으로는 해소 아님; emitter 저장은 주소 교체 후 reconcile 대비)
     await updateIntentEvidence(intent.id, {
-      receiptStatus:     'success',
+      receiptStatus:       'success',
       orderKey,
-      orderCreatedBlock: createdBlock,
+      orderCreatedBlock:   createdBlock,
+      orderEmitterAddress: extraction.emitterAddress,
     });
+    if (!allowedEmitters.some(a => a.toLowerCase() === extraction.emitterAddress.toLowerCase())) {
+      allowedEmitters.push(extraction.emitterAddress);
+    }
   }
 
-  // 5) 주문 실행/취소/동결 이벤트 확인
-  const logs = await client.getOrderResolutionLogs(orderKey, createdBlock);
-  const resolution = classifyOrderResolutionLogs(logs, orderKey);
+  // 5) 주문 실행/취소/동결 이벤트 확인 (허용 emitter + 정확한 EventLog2 topic0)
+  const logs = await client.getOrderResolutionLogs(orderKey, createdBlock, allowedEmitters);
+  const resolution = classifyOrderResolutionLogs(logs, orderKey, allowedEmitters);
 
   if (resolution === null) {
     // 생성만 확인됨 — 실행 증거 없음 → 계속 차단

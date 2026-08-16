@@ -42,6 +42,12 @@ export const executionIntentsTable = pgTable("execution_intents", {
   resolutionReason:  text("resolution_reason"),
   /** terminal 판정 시각 */
   resolvedAt:        timestamp("resolved_at", { withTimezone: true }),
+  /**
+   * OrderCreated receipt에서 실제 일치한 EventEmitter 주소 (migration 0013).
+   * GMX upgrade로 emitter 주소가 교체돼도, 이 intent는 저장된 과거 주소로
+   * 계속 reconcile할 수 있다 (허용 emitter 집합 = 현재 설정값 ∪ 이 값).
+   */
+  orderEmitterAddress: text("order_emitter_address"),
   createdAt:     timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt:     timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });

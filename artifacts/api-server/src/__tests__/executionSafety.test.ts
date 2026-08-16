@@ -147,6 +147,7 @@ function allowInput() {
     rpcOk:                  true,
     reconciled:             true,
     noBlockingIntents:      true,
+    eventEmitterConfigured: true,
   };
 }
 
