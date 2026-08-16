@@ -125,6 +125,11 @@ export function DailyTargetCard({ className }: { className?: string }) {
     ? `KPI 달성 · LOCK Lv.${profitLockStage}`
     : stateMeta.label;
 
+  // ⚠️ 서버 Daily PnL이 없으면(N/A/Unavailable) totalPnL=0에서 파생된
+  //    상태 배지·진행률 결론을 표시하지 않는다 (가짜 0 파생 UI 금지).
+  //    단 HALTED는 엔진 상태 기반이므로 항상 표시.
+  const pnlStateKnown = dailyPnlOk || dailyState === 'HALTED';
+
   // Progress bar math
   const totalPct    = Math.max(-100, Math.min(100, (totalPnL / dailyTarget) * 100));
   const realizedPct = Math.max(-100, Math.min(100, (realized  / dailyTarget) * 100));
@@ -181,10 +186,17 @@ export function DailyTargetCard({ className }: { className?: string }) {
               PROFIT-LOCK Lv.{profitLockStage}
             </div>
           )}
-          <div className={cn('flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-[10px] font-bold tracking-wider', stateMeta.cls)}>
-            <StateIcon className="w-3 h-3" />
-            {statusLabel}
-          </div>
+          {pnlStateKnown ? (
+            <div className={cn('flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-[10px] font-bold tracking-wider', stateMeta.cls)}>
+              <StateIcon className="w-3 h-3" />
+              {statusLabel}
+            </div>
+          ) : (
+            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-border text-[10px] font-bold tracking-wider text-muted-foreground">
+              <Info className="w-3 h-3" />
+              Daily PnL {formatPeriodPnl(null, periodPnl.status)}
+            </div>
+          )}
         </div>
       </div>
 

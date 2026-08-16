@@ -27,7 +27,12 @@ export interface PeriodPnlData {
   dailyRealizedPnlUsd: number | null;
   weeklyRealizedPnlUsd: number | null;
   currentEquityUsd: number | null;
+  /** 서버 기간 PnL 마지막 갱신 시각 (ISO). null = 미갱신 */
+  periodPnlUpdatedAt: string | null;
 }
+
+/** 서버 갱신 시각이 이보다 오래되면 stale → unavailable (사이클 60s + 여유) */
+export const PERIOD_PNL_STALE_MS = 5 * 60_000;
 
 export type PeriodPnlStatus = 'loading' | 'ok' | 'na' | 'unavailable';
 
@@ -40,10 +45,16 @@ export interface PeriodPnlState {
 export function derivePeriodPnlStatus(
   fetchOk: boolean,
   data: PeriodPnlData | null,
+  nowMs: number = Date.now(),
 ): PeriodPnlStatus {
   if (!fetchOk || data === null) return 'unavailable';
   // 기준점 미수립(워커 미가동·첫 사이클 전·DB 실패) → N/A. 가짜 0 표시 금지.
   if (data.dailyPnlUsd === null && data.weeklyPnlUsd === null) return 'na';
+  // 서버가 오래 갱신하지 못한 값(worker 정지·사이클 중단)은 신뢰하지 않음 → unavailable
+  if (data.periodPnlUpdatedAt !== null) {
+    const age = nowMs - Date.parse(data.periodPnlUpdatedAt);
+    if (Number.isFinite(age) && age > PERIOD_PNL_STALE_MS) return 'unavailable';
+  }
   return 'ok';
 }
 
@@ -80,6 +91,7 @@ export function usePeriodPnl(): PeriodPnlState {
         dailyRealizedPnlUsd:  (body.dailyRealizedPnlUsd  as number | null) ?? null,
         weeklyRealizedPnlUsd: (body.weeklyRealizedPnlUsd as number | null) ?? null,
         currentEquityUsd:     (body.currentEquityUsd     as number | null) ?? null,
+        periodPnlUpdatedAt:   (body.periodPnlUpdatedAt   as string | null) ?? null,
       };
       setState({ status: derivePeriodPnlStatus(true, data), data });
     } catch {

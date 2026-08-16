@@ -109,6 +109,7 @@ export interface ExecutorStatus {
   dailyRealizedPnlUsd: number | null;
   weeklyRealizedPnlUsd: number | null;
   currentEquityUsd: number | null;
+  periodPnlUpdatedAt: string | null;
   // ── 활성 모드 (UI 배지 근거 — 클라이언트 설정값이 아닌 서버 상태) ─────────────
   /** WORKER_ENGINE_MODE 기준 실제 엔진 모드 ('LIVE'가 아니면 항상 PAPER) */
   engineMode: 'PAPER' | 'LIVE';
@@ -233,6 +234,7 @@ export function getExecutorStatus(): ExecutorStatus {
     dailyRealizedPnlUsd:  workerStatus.dailyRealizedPnlUsd,
     weeklyRealizedPnlUsd: workerStatus.weeklyRealizedPnlUsd,
     currentEquityUsd:     workerStatus.currentEquityUsd,
+    periodPnlUpdatedAt:   workerStatus.periodPnlUpdatedAt,
   };
 }
 

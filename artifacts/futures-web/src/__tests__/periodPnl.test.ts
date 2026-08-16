@@ -12,6 +12,7 @@ import { derivePeriodPnlStatus, formatPeriodPnl, type PeriodPnlData } from '../h
 const data = (over: Partial<PeriodPnlData> = {}): PeriodPnlData => ({
   dailyPnlUsd: 12.5, weeklyPnlUsd: -30, dailyBaseline: null, weeklyBaseline: null,
   dailyRealizedPnlUsd: 10, weeklyRealizedPnlUsd: -25, currentEquityUsd: 10_012.5,
+  periodPnlUpdatedAt: new Date().toISOString(),
   ...over,
 });
 
@@ -28,6 +29,13 @@ describe('derivePeriodPnlStatus', () => {
   it('정상 값 → ok (0도 유효한 값)', () => {
     expect(derivePeriodPnlStatus(true, data())).toBe('ok');
     expect(derivePeriodPnlStatus(true, data({ dailyPnlUsd: 0, weeklyPnlUsd: 0 }))).toBe('ok');
+  });
+
+  it('서버 갱신이 5분 이상 오래된 값 → unavailable (stale 값 신뢰 금지)', () => {
+    const old = new Date(Date.now() - 6 * 60_000).toISOString();
+    expect(derivePeriodPnlStatus(true, data({ periodPnlUpdatedAt: old }))).toBe('unavailable');
+    const fresh = new Date(Date.now() - 60_000).toISOString();
+    expect(derivePeriodPnlStatus(true, data({ periodPnlUpdatedAt: fresh }))).toBe('ok');
   });
 });
 

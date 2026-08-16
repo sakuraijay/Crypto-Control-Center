@@ -115,6 +115,8 @@ export interface WorkerStatus {
   weeklyRealizedPnlUsd: number | null;
   /** 마지막 사이클의 currentEquity (USD). null = 사이클 미실행/DB 실패 */
   currentEquityUsd: number | null;
+  /** 기간 PnL 마지막 갱신 시각 (ISO). null = 미갱신 — 클라이언트는 stale 판정에 사용 */
+  periodPnlUpdatedAt: string | null;
 }
 
 // ── WorkerManager ─────────────────────────────────────────────────────────────
@@ -153,6 +155,8 @@ class WorkerManager {
   private lastDailyRealizedUsd:  number | null = null;
   private lastWeeklyRealizedUsd: number | null = null;
   private lastCurrentEquityUsd:  number | null = null;
+  /** 마지막 기간 PnL 갱신 시각 (ISO). 클라이언트 staleness 판정용 */
+  private periodPnlUpdatedAt: string | null = null;
 
   // ── LIVE TEST MODE class fields ─────────────────────────────────────────────
   /** Accumulated LIVE TEST losses persisted in worker_state DB */
@@ -241,6 +245,7 @@ class WorkerManager {
       dailyRealizedPnlUsd:  this.lastDailyRealizedUsd,
       weeklyRealizedPnlUsd: this.lastWeeklyRealizedUsd,
       currentEquityUsd:     this.lastCurrentEquityUsd,
+      periodPnlUpdatedAt:   this.periodPnlUpdatedAt,
     };
   }
 
@@ -267,8 +272,8 @@ class WorkerManager {
     }
   }
 
-  /** 기준점을 worker_state에 upsert (fire-and-forget). */
-  private async saveBaselineToDb(key: string, baseline: EquityBaseline): Promise<void> {
+  /** 기준점을 worker_state에 upsert. 성공 여부 반환 (fail-closed 판단용). */
+  private async saveBaselineToDb(key: string, baseline: EquityBaseline): Promise<boolean> {
     try {
       const value = JSON.stringify(baseline);
       await db
@@ -278,37 +283,52 @@ class WorkerManager {
           target: workerStateTable.key,
           set: { value, updatedAt: new Date() },
         });
+      return true;
     } catch (err) {
-      console.warn(`[AIWorker] 기준점 저장 실패 (${key}, 무시):`, (err as Error).message);
+      console.warn(`[AIWorker] 기준점 저장 실패 (${key}):`, (err as Error).message);
+      return false;
     }
+  }
+
+  /** 기간 PnL 상태를 전부 null로 (DB 실패·기준점 미확정 시 fail-closed → UI N/A) */
+  private clearPeriodPnl(): void {
+    this.lastCurrentEquityUsd  = null;
+    this.lastDailyPnlUsd       = null;
+    this.lastWeeklyPnlUsd      = null;
+    this.lastDailyRealizedUsd  = null;
+    this.lastWeeklyRealizedUsd = null;
+    this.periodPnlUpdatedAt    = null;
   }
 
   /**
    * 사이클마다 기간 PnL을 갱신합니다 (equity 기준점 기반, UTC).
-   * 기준점이 없거나 기간이 바뀌면 현재 equity로 새 기준점을 수립·영속화합니다.
+   * 기준점이 없거나 기간이 바뀌면 현재 equity로 새 기준점을 수립하고
+   * **영속화 성공을 확인한 뒤에만** 유효한 것으로 취급합니다 (fail-closed).
    * → 전날부터 보유한 포지션의 기존 미실현 수익이 오늘 PnL에 중복되지 않는다.
    */
-  private updatePeriodPnl(
+  private async updatePeriodPnl(
     currentEquity: number,
     dailyRealized: number,
     weeklyRealized: number,
     now: Date = new Date(),
-  ): void {
+  ): Promise<void> {
     const daily = rollBaseline(this.dailyBaseline, dailyPeriodStartUtc(now), currentEquity, now);
     if (daily.changed) {
-      this.dailyBaseline = daily.baseline;
-      void this.saveBaselineToDb(BASELINE_DAILY_KEY, daily.baseline);
+      // 저장 성공 전에는 새 기준점을 유효한 것으로 노출하지 않음 (재시작 연속성 보장)
+      const saved = await this.saveBaselineToDb(BASELINE_DAILY_KEY, daily.baseline);
+      this.dailyBaseline = saved ? daily.baseline : null;
     }
     const weekly = rollBaseline(this.weeklyBaseline, weeklyPeriodStartUtc(now), currentEquity, now);
     if (weekly.changed) {
-      this.weeklyBaseline = weekly.baseline;
-      void this.saveBaselineToDb(BASELINE_WEEKLY_KEY, weekly.baseline);
+      const saved = await this.saveBaselineToDb(BASELINE_WEEKLY_KEY, weekly.baseline);
+      this.weeklyBaseline = saved ? weekly.baseline : null;
     }
     this.lastCurrentEquityUsd    = currentEquity;
     this.lastDailyPnlUsd         = computePeriodPnl(currentEquity, this.dailyBaseline);
     this.lastWeeklyPnlUsd        = computePeriodPnl(currentEquity, this.weeklyBaseline);
     this.lastDailyRealizedUsd    = dailyRealized;
     this.lastWeeklyRealizedUsd   = weeklyRealized;
+    this.periodPnlUpdatedAt      = now.toISOString();
   }
 
   private async loadHwmFromDb(): Promise<void> {
@@ -760,6 +780,20 @@ class WorkerManager {
       // 이번 사이클에 사용된 설정 저장 (상태 엔드포인트 노출용)
       this.lastLimitsUsed = limits;
 
+      // ── 기간 PnL 갱신 (equity 기준점 기반, UTC) ─────────────────────────────
+      // ⚠️ 반드시 cooldown/거래한도 게이트보다 먼저 수행 — 게이트 조기 반환 시에도
+      //    PnL이 매 사이클 갱신되어 stale 값이 노출되지 않는다.
+      // paperState가 DB 실패로 synthetic zeros면 가짜 PnL을 만들지 않도록 스킵(fail-closed).
+      if (paperState.liveTestDbOk) {
+        const equityNow =
+          limits.tradingCapital
+          + paperState.totalRealizedPnlAllTime
+          + paperState.totalUnrealizedPnl;
+        await this.updatePeriodPnl(equityNow, paperState.realizedPnLToday, paperState.realizedPnLWeekly);
+      } else {
+        this.clearPeriodPnl();
+      }
+
       // ── Cooldown 강제 ─────────────────────────────────────────────────────
       // 마지막 OPEN 거래 후 cooldownMinutes가 경과하지 않으면 신규 진입 차단.
       const cooldownMs = (limits.cooldownMinutes ?? 0) * 60_000;
@@ -812,17 +846,7 @@ class WorkerManager {
           ? Math.max(0, (this.equityHighWaterMark - currentEquity) / this.equityHighWaterMark * 100)
           : undefined;
 
-      // ── 기간 PnL 갱신 (equity 기준점 기반, UTC — 기준점은 worker_state에 영속) ─
-      // paperState가 DB 실패로 synthetic zeros면 가짜 PnL을 만들지 않도록 스킵.
-      if (paperState.liveTestDbOk) {
-        this.updatePeriodPnl(currentEquity, paperState.realizedPnLToday, paperState.realizedPnLWeekly);
-      } else {
-        this.lastCurrentEquityUsd = null;
-        this.lastDailyPnlUsd = null;
-        this.lastWeeklyPnlUsd = null;
-        this.lastDailyRealizedUsd = null;
-        this.lastWeeklyRealizedUsd = null;
-      }
+      // (기간 PnL 갱신은 cooldown/거래한도 게이트 이전에 이미 수행됨 — 위 참조)
 
       const isLiveMode = process.env.WORKER_ENGINE_MODE === 'LIVE';
       // LIVE TEST verification: query GMX subgraph/RPC server-side using GMX_WALLET_ADDRESS.
