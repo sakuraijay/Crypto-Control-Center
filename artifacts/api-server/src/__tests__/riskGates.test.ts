@@ -132,7 +132,7 @@ describe('HWM 드로다운 게이트 (accountDrawdownPct)', () => {
 
   it('accountDrawdownPct = undefined 이면 HWM 체크 스킵 (첫 사이클)', () => {
     const input = makeInput({ analyses: [LONG_ANALYSIS] });
-    delete (input as Record<string, unknown>).accountDrawdownPct;
+    delete (input as unknown as Record<string, unknown>).accountDrawdownPct;
     const result = runAiEngine(input);
     expect(result.operatingState).toBe('LONG');
   });
