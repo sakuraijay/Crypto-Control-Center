@@ -22,7 +22,12 @@ import {
 } from '../lib/relayOrderAssembly';
 import {
   createRelayTask, safeTransition, listRecentRelayTasks, RELAY_TASK_STATUS,
+  listUnresolvedTasks, getRelayTaskById,
 } from '../lib/relayLifecycle';
+import { allocateUserNonce } from '../lib/relayNonce';
+import { evaluateActivationGate } from '../lib/relayActivationGate';
+import { reconcileVerdict, applyReconcileVerdict } from '../lib/relayTaskReconciler';
+import type { RelayTransport } from '../lib/relayTransport';
 import {
   prepareRevokeSession, submitRevokeSignature, getActiveRevokeSession, cancelRevokeSession,
 } from '../lib/revokeSession';
@@ -41,6 +46,13 @@ const router = Router();
 let canonicalClientFactory: () => DataStoreClient = createCanonicalDataStoreClient;
 export function __setRelayCanonicalClientFactoryForTests(f: () => DataStoreClient): void {
   canonicalClientFactory = f;
+}
+
+// 실제 transport는 프로덕션에서 주입되지 않는다(활성화 env 미설정) —
+// recheck 경로는 transport가 없으면 증거 재수집 불가로 응답한다. 테스트 전용 주입.
+let injectedTransport: RelayTransport | null = null;
+export function __setRelayTransportForTests(t: RelayTransport | null): void {
+  injectedTransport = t;
 }
 
 /** mock quote 기본 파라미터 — 실제 Gelato quote 아님 (LIVE 근거 사용 금지) */
@@ -256,7 +268,12 @@ router.post('/executor/relay/revoke/prepare', requireOperatorAuth, async (_req, 
     const quoteCheck = validateFeeQuote({ quote, nowMs, orderNotionalUsd: null, ethPriceUsd: null });
     if (!quoteCheck.ok) return res.status(503).json({ ok: false, error: `fee quote 검증 실패: ${quoteCheck.reason}` });
 
+    // durable userNonce allocation — epoch초 사용 금지 (4단계 §2)
+    const nonceAlloc = await allocateUserNonce({ mainAccount, purpose: 'REVOKE' });
+    if (!nonceAlloc.ok) return res.status(503).json({ ok: false, error: nonceAlloc.reason });
+
     const result = await prepareRevokeSession({
+      userNonce: nonceAlloc.nonce,
       mainAccount,
       subaccount: signer as Address,
       verifyingContract: cfg.config.subaccountGelatoRelayRouter as Address,
@@ -384,6 +401,117 @@ router.post('/executor/relay/revoke/dry-run', requireOperatorAuth, async (_req, 
     }
 
     return res.json({ ok: true, dryRun: result, revokeSession: revoke, task: taskRecord });
+  } catch (e: unknown) {
+    return res.status(500).json({ ok: false, error: sanitizeRpcError(e) });
+  }
+});
+
+// ── UNRESOLVED 조사 (4단계 §9) ────────────────────────────────────────────────
+
+function investigationView(row: NonNullable<Awaited<ReturnType<typeof getRelayTaskById>>>) {
+  return {
+    id: row.id,
+    kind: row.kind,
+    status: row.status,
+    relayTaskId: row.relayTaskId,
+    txHash: row.txHash,
+    orderKey: row.orderKey,
+    userNonce: row.userNonce,
+    approvalNonce: row.approvalNonce,
+    errorClass: row.errorClass,                 // sanitize된 오류 분류만 저장됨
+    resolutionBasis: row.resolutionBasis,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+    links: {
+      arbiscanTx: row.txHash ? `https://arbiscan.io/tx/${row.txHash}` : null,
+      gelatoTask: row.relayTaskId ? `https://api.gelato.digital/tasks/status/${row.relayTaskId}` : null,
+    },
+    // UNRESOLVED가 있는 동안 신규 제출이 차단되는 사유 표시용
+    blocking: row.status === RELAY_TASK_STATUS.UNRESOLVED,
+  };
+}
+
+// GET /executor/relay/unresolved — 조사 목록
+router.get('/executor/relay/unresolved', requireOperatorAuth, async (_req, res) => {
+  try {
+    const rows = await listUnresolvedTasks(50);
+    return res.json({ ok: true, tasks: rows.map(investigationView) });
+  } catch (e: unknown) {
+    return res.status(500).json({ ok: false, error: sanitizeRpcError(e) });
+  }
+});
+
+// POST /executor/relay/unresolved/recheck — 증거 재수집만 허용.
+// 강제 terminal 전환·payload 재제출·intent 삭제는 제공하지 않는다.
+router.post('/executor/relay/unresolved/recheck', requireOperatorAuth, async (req, res) => {
+  try {
+    const { taskId } = req.body ?? {};
+    if (typeof taskId !== 'string') return res.status(400).json({ ok: false, error: 'taskId 필요' });
+    const row = await getRelayTaskById(taskId);
+    if (!row) return res.status(404).json({ ok: false, error: 'task 없음' });
+    // SUBMITTING(taskId 저장 실패 등으로 stale 잔존)도 조사 대상 — 자동 종결은 없다
+    if (row.status !== RELAY_TASK_STATUS.UNRESOLVED && row.status !== RELAY_TASK_STATUS.SUBMITTING) {
+      return res.status(400).json({ ok: false, error: `상태 ${row.status} — UNRESOLVED/SUBMITTING만 재조회 대상` });
+    }
+
+    // 증거 재수집: Gelato task status (transport 필요) — 이번 단계에서는
+    // transport 미주입(활성화 env 미설정)이라 항상 "재수집 불가"로 응답.
+    if (!injectedTransport) {
+      return res.json({
+        ok: true,
+        rechecked: false,
+        reason: 'relay transport 비활성(GMX_RELAY_NETWORK_ENABLED 미설정) — 증거 재수집 불가, 상태 유지',
+        task: investigationView(row),
+      });
+    }
+    if (!row.relayTaskId) {
+      return res.json({
+        ok: true, rechecked: false,
+        reason: 'Gelato taskId 미확보 — task status 재조회 불가 (온체인 조사 필요)',
+        task: investigationView(row),
+      });
+    }
+
+    const status = await injectedTransport.getRelayTaskStatus({ taskId: row.relayTaskId });
+    const verdict = reconcileVerdict({
+      gelato: status.ok
+        ? { taskState: status.taskState, transactionHash: status.transactionHash }
+        : { taskState: null, transactionHash: null },
+      onchain: { event: null, txHash: null, orderKey: null, blockNumber: null },
+    });
+    await applyReconcileVerdict(row.id, verdict);
+    const updated = await getRelayTaskById(row.id);
+    return res.json({
+      ok: true, rechecked: true, verdictBasis: verdict.basis,
+      task: updated ? investigationView(updated) : null,
+    });
+  } catch (e: unknown) {
+    return res.status(500).json({ ok: false, error: sanitizeRpcError(e) });
+  }
+});
+
+// GET /executor/relay/activation — 활성화 이중 게이트 현황 (진단용)
+router.get('/executor/relay/activation', requireOperatorAuth, async (_req, res) => {
+  try {
+    const canonical = await checkCanonical();
+    const revoke = await getActiveRevokeSession();
+    const gate = evaluateActivationGate({
+      env: process.env,
+      liveTestMode: false,               // 서버 liveTestMode는 executor 상태에서 오되, 여기서는 보수적으로 false
+      signerInitialized: isSignerInitialized(),
+      canonicalAuthorized: canonical.confirmed && canonical.isSubaccountListed === true,
+      emergencyStopActive: false,
+      dbOk: true,
+      rpcOk: canonical.confirmed,
+      reconciliationComplete: false,     // 4단계: 실제 reconciliation 파이프 미가동 — fail-closed
+      blockingIntentCount: (await listUnresolvedTasks(1)).length,
+      activeRevokeInProgress: !!revoke,
+      freshLiveFeeQuote: false,          // live quote 경로 비활성
+      currentChainId: 42161,
+      gmxConfigOk: resolveGmxLiveRelayConfig().ok,
+      kind: 'OPEN',
+    });
+    return res.json({ ok: true, networkEligible: gate.networkEligible, missing: gate.missing });
   } catch (e: unknown) {
     return res.status(500).json({ ok: false, error: sanitizeRpcError(e) });
   }

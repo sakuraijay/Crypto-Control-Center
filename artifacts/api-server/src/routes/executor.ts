@@ -12,6 +12,7 @@ import { Router } from "express";
 import { getExecutorStatus, executeOrder } from "../workers/internalExecutor";
 import type { ExecuteOrderParams } from "../workers/internalExecutor";
 import { listRecentIntents } from "../lib/executionIntents";
+import { getActiveRevokeSession } from "../lib/revokeSession";
 
 const router = Router();
 
@@ -80,10 +81,15 @@ export function validateDryRunParams(params: ExecuteOrderParams): string | null 
 // Returns executor readiness without exposing any credential values.
 // Always returns HTTP 200 so clients can distinguish "server up, read failed"
 // from real network errors (404 / connection refused).
-router.get("/executor/status", (_req, res) => {
+router.get("/executor/status", async (_req, res) => {
   try {
     const status = getExecutorStatus();
-    return res.json(status);
+    // 4단계: revoke 진행 중 신규 주문 전면 차단용 boolean (PIN 불필요, 상세 미노출)
+    let activeRevoke = false;
+    try {
+      activeRevoke = (await getActiveRevokeSession()) !== null;
+    } catch { /* 조회 실패 시 false — 주문 경로는 서버측 게이트가 별도 차단 */ }
+    return res.json({ ...status, activeRevoke });
   } catch {
     return res.json({ ok: false, gmxConnected: false, error: "Failed to read executor status" });
   }
@@ -102,6 +108,25 @@ router.get("/executor/status", (_req, res) => {
 router.post("/executor/execute", async (req, res) => {
   const body = req.body as Record<string, unknown>;
   const isDryRun = body.dryRun === true;
+
+  // 4단계 §8: revoke 진행 중 신규 주문 전면 차단 (서버측 — UI 차단과 이중).
+  // 조회 실패도 fail-closed — 불확실하면 차단한다.
+  try {
+    const revoke = await getActiveRevokeSession();
+    if (revoke) {
+      return res.status(409).json({
+        ok: false,
+        code: "REVOKE_IN_PROGRESS",
+        error: "Subaccount revoke가 진행 중입니다 — 완료 또는 취소 전까지 신규 주문이 차단됩니다.",
+      });
+    }
+  } catch {
+    return res.status(503).json({
+      ok: false,
+      code: "REVOKE_STATE_UNKNOWN",
+      error: "Revoke 세션 상태 확인 실패 — 안전을 위해 주문을 차단합니다 (fail-closed).",
+    });
+  }
 
   if (!body.symbol || !body.executionType) {
     return res.status(400).json({
