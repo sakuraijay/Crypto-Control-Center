@@ -24,6 +24,12 @@ export const subaccountApprovalSessionsTable = pgTable("subaccount_approval_sess
   desChainId:         text("des_chain_id").notNull(),
   deadline:           text("deadline").notNull(),
   integrationId:      text("integration_id").notNull(),
+  /** APPROVAL(기본) | REVOKE — revoke 세션은 removeSubaccount owner 서명용 */
+  purpose:            text("purpose").notNull().default("APPROVAL"),
+  /** REVOKE 세션 전용 — RemoveSubaccount digest 재계산에 필요한 relayParams 구성값 */
+  relayFeeToken:      text("relay_fee_token"),
+  relayFeeAmount:     text("relay_fee_amount"),
+  relayUserNonce:     text("relay_user_nonce"),
   typedDataDigest:    text("typed_data_digest").notNull(),
   encryptedSignature: text("encrypted_signature"),            // 서명 제출 전 null
   status:             text("status").notNull(),               // PREPARED | OWNER_SIGNATURE_READY | INVALIDATED | CONSUMED | REVOKED

@@ -188,6 +188,55 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         WHERE status IN ('PREPARED', 'OWNER_SIGNATURE_READY');
     `,
   },
+  {
+    name: "0016_relay_tasks_and_revoke_purpose",
+    sql: `
+      -- GMX delegated trading 3단계 — durable relay lifecycle + revoke 세션.
+      CREATE TABLE IF NOT EXISTS relay_tasks (
+        id                  text PRIMARY KEY,
+        idempotency_key     text NOT NULL,
+        intent_id           text,
+        approval_session_id text,
+        kind                text NOT NULL,
+        status              text NOT NULL,
+        payload_hash        text NOT NULL,
+        calldata_hash       text,
+        relay_task_id       text,
+        tx_hash             text,
+        order_key           text,
+        fee_token           text,
+        fee_amount          text,
+        user_nonce          text,
+        approval_nonce      text,
+        error_class         text,
+        resolution_basis    text,
+        created_at          timestamptz NOT NULL DEFAULT now(),
+        updated_at          timestamptz NOT NULL DEFAULT now(),
+        resolved_at         timestamptz
+      );
+      -- 같은 idempotency key 중복 제출 금지 (DB 수준 최종 방어)
+      CREATE UNIQUE INDEX IF NOT EXISTS relay_tasks_idempotency_key_idx
+        ON relay_tasks (idempotency_key);
+      CREATE INDEX IF NOT EXISTS relay_tasks_status_idx ON relay_tasks (status);
+
+      -- 승인 세션에 purpose(APPROVAL|REVOKE) 추가.
+      ALTER TABLE subaccount_approval_sessions
+        ADD COLUMN IF NOT EXISTS purpose text NOT NULL DEFAULT 'APPROVAL';
+      -- REVOKE 세션 전용: RemoveSubaccount digest 재계산용 relayParams 구성값
+      ALTER TABLE subaccount_approval_sessions
+        ADD COLUMN IF NOT EXISTS relay_fee_token text;
+      ALTER TABLE subaccount_approval_sessions
+        ADD COLUMN IF NOT EXISTS relay_fee_amount text;
+      ALTER TABLE subaccount_approval_sessions
+        ADD COLUMN IF NOT EXISTS relay_user_nonce text;
+      -- 단일 활성 세션 인덱스를 (main_account, purpose) 기준으로 재구성 —
+      -- APPROVAL 활성 세션과 REVOKE 활성 세션은 별개로 각각 1개까지.
+      DROP INDEX IF EXISTS subaccount_approval_sessions_single_active_idx;
+      CREATE UNIQUE INDEX IF NOT EXISTS subaccount_approval_sessions_single_active_idx
+        ON subaccount_approval_sessions (main_account, purpose)
+        WHERE status IN ('PREPARED', 'OWNER_SIGNATURE_READY');
+    `,
+  },
   // Add future migrations here in chronological order.
 ];
 
