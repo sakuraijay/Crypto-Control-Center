@@ -6,12 +6,14 @@
  * ──────────────────────────────────────────────────────────────────────────────
  * 1. 모든 GMX V2 프로토콜 이벤트는 단일 EventEmitter 계약에서 방출된다.
  *    출처: https://docs.gmx.io/docs/api/contracts/events/
- * 2. 현재 공식 Arbitrum One EventEmitter 주소:
- *    0xAf2E131d483cedE068e21a9228aD91E623a989C2
+ * 2. EventEmitter 주소는 **하드코딩 기본값 없이** GMX_EVENT_EMITTER_ADDRESS
+ *    환경변수로만 설정한다. 미설정/형식 오류 → fail-closed (LIVE 실행·온체인
+ *    reconciliation 전면 차단). PAPER 모드는 emitter를 사용하지 않으므로 무영향.
+ *    근거: 과거 기본값 0xAf2E131d…89C2 는 공식 addresses 문서상 Botanix/MegaETH
+ *    체인의 EventEmitter였고, Arbitrum One(42161)의 공식 주소는
+ *    0xC8ee91A54287DB53897056e12D9819156D3822Fb 이다 (2026-08-17 문서 기준).
+ *    잘못된 기본값이 조용히 사용되는 사고를 막기 위해 기본값 자체를 제거한다.
  *    출처: https://docs.gmx.io/docs/api/contracts/addresses/ (Arbitrum 표)
- *    ⚠️ 공식 문서는 upgrade 시 주소가 변경될 수 있다고 경고한다. 따라서 이 값은
- *    기본값(문서·테스트 기준)일 뿐이며, 운영 주소는 GMX_EVENT_EMITTER_ADDRESS
- *    환경변수로 코드 수정 없이 교체할 수 있어야 한다 (아래 resolve 함수).
  * 3. gmx-io/gmx-synthetics contracts/order/OrderEventUtils.sol (main 브랜치):
  *    OrderCreated / OrderExecuted / OrderCancelled / OrderFrozen 은 전부
  *    `eventEmitter.emitEventLog2(eventName, key, Cast.toBytes32(account), data)`
@@ -36,13 +38,22 @@ import { keccak256, toHex, toEventSelector, type AbiEvent } from 'viem';
 // ── EventEmitter 주소 설정 ────────────────────────────────────────────────────
 
 /**
- * 현재 공식 Arbitrum One EventEmitter (문서·테스트 기준 기본값).
- * 운영에서는 GMX_EVENT_EMITTER_ADDRESS 환경변수가 우선한다.
+ * Arbitrum One(42161) 공식 EventEmitter — **문서화·설정 예시 전용** 상수.
+ * 코드가 이 값을 기본값으로 자동 사용하지 않는다. 운영자는 이 값을 직접 확인 후
+ * GMX_EVENT_EMITTER_ADDRESS 환경변수로 명시 설정해야 한다.
+ * 출처: https://docs.gmx.io/docs/api/contracts/addresses/ (2026-08-17 기준)
  */
-export const GMX_EVENT_EMITTER_ARBITRUM_DEFAULT = '0xAf2E131d483cedE068e21a9228aD91E623a989C2';
+export const GMX_EVENT_EMITTER_ARBITRUM_OFFICIAL_DOC = '0xC8ee91A54287DB53897056e12D9819156D3822Fb';
 
-/** 과거 문서에 기재됐던 이전 주소 — 오인 방지 테스트 기준 (허용 목록에 자동 포함 금지) */
-export const GMX_EVENT_EMITTER_LEGACY_ADDRESS = '0xC8ee91A54287DB53897056e12D9819156D3822Fb';
+/**
+ * 다른 체인의 EventEmitter로 공식 문서에 기재된 주소들 — Arbitrum 설정값으로
+ * 들어오면 구성 오류로 거부한다 (chain/address 교차 오설정 방지).
+ * 과거 이 코드베이스가 0xAf2E…를 Arbitrum 기본값으로 잘못 사용한 사고의 재발 방지.
+ */
+export const KNOWN_NON_ARBITRUM_EVENT_EMITTERS: ReadonlyArray<{ address: string; chain: string }> = [
+  { address: '0xAf2E131d483cedE068e21a9228aD91E623a989C2', chain: 'Botanix/MegaETH' },
+  { address: '0xDb17B211c34240B014ab6d61d4A31FA0C0e20c26', chain: 'Avalanche' },
+];
 
 export const ARBITRUM_ONE_CHAIN_ID = 42161;
 
@@ -53,28 +64,43 @@ export function isValidEvmAddress(addr: string | undefined | null): addr is stri
 }
 
 export type EmitterConfigResult =
-  | { ok: true; address: string; source: 'env' | 'default' }
+  | { ok: true; address: string; source: 'env' }
   | { ok: false; reason: string };
 
 /**
- * 유효 EventEmitter 주소 결정.
- *  - GMX_EVENT_EMITTER_ADDRESS 설정 시: 형식(0x + 40 hex) 검증 후 사용.
- *    형식 오류면 기본값으로 조용히 폴백하지 않고 실패 (fail-closed — LIVE 차단).
- *  - 미설정 시: 현재 공식 Arbitrum 기본값 사용.
+ * 유효 EventEmitter 주소 결정 — 기본값 없음, 환경변수 명시 설정 필수.
+ *  - 미설정 → 실패 (fail-closed: LIVE 실행·신규 reconciliation 차단. PAPER 무영향)
+ *  - 형식 오류(0x + 40 hex 아님) → 실패
+ *  - 알려진 타 체인(Botanix/MegaETH/Avalanche) EventEmitter 주소 → 실패
+ *    (Arbitrum One 42161 전용 구성 검증)
+ * intent에 영속된 과거 emitter 주소는 historical reconciliation 허용집합에만
+ * 쓰이며(intentReconciler 참조), 신규 주문 생성은 항상 현재 명시 설정을 요구한다.
  * chainId 검증은 reconciler가 판정 전에 별도로 수행한다 (42161 필수).
  */
 export function resolveGmxEventEmitterAddress(
   env: NodeJS.ProcessEnv = process.env,
 ): EmitterConfigResult {
   const raw = env.GMX_EVENT_EMITTER_ADDRESS;
-  if (raw !== undefined && raw.trim() !== '') {
-    const trimmed = raw.trim();
-    if (!isValidEvmAddress(trimmed)) {
-      return { ok: false, reason: 'GMX_EVENT_EMITTER_ADDRESS 형식 오류 (0x + 40 hex 필요) — fail-closed' };
-    }
-    return { ok: true, address: trimmed, source: 'env' };
+  if (raw === undefined || raw.trim() === '') {
+    return {
+      ok: false,
+      reason: 'GMX_EVENT_EMITTER_ADDRESS 미설정 — 기본값 없음, 공식 addresses 문서에서 Arbitrum One 주소 확인 후 명시 설정 필요 (fail-closed)',
+    };
   }
-  return { ok: true, address: GMX_EVENT_EMITTER_ARBITRUM_DEFAULT, source: 'default' };
+  const trimmed = raw.trim();
+  if (!isValidEvmAddress(trimmed)) {
+    return { ok: false, reason: 'GMX_EVENT_EMITTER_ADDRESS 형식 오류 (0x + 40 hex 필요) — fail-closed' };
+  }
+  const wrongChain = KNOWN_NON_ARBITRUM_EVENT_EMITTERS.find(
+    e => e.address.toLowerCase() === trimmed.toLowerCase(),
+  );
+  if (wrongChain) {
+    return {
+      ok: false,
+      reason: `GMX_EVENT_EMITTER_ADDRESS가 ${wrongChain.chain} 체인의 EventEmitter 주소임 — Arbitrum One(42161) 주소가 아님 (fail-closed)`,
+    };
+  }
+  return { ok: true, address: trimmed, source: 'env' };
 }
 
 // ── EventLog2 signature (topic0) — 공식 ABI에서 파생, 하드코딩 해시 금지 ───────

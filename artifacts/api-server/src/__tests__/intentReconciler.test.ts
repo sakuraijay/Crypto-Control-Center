@@ -35,8 +35,8 @@ vi.mock('../lib/executionIntents', () => ({
 }));
 
 import {
-  GMX_EVENT_EMITTER_ARBITRUM_DEFAULT,
-  GMX_EVENT_EMITTER_LEGACY_ADDRESS,
+  GMX_EVENT_EMITTER_ARBITRUM_OFFICIAL_DOC,
+  KNOWN_NON_ARBITRUM_EVENT_EMITTERS,
   EVENT_LOG_2_TOPIC0,
   ORDER_EVENT_NAME_HASH,
   extractOrderKeyFromReceiptLogs,
@@ -51,17 +51,23 @@ import {
   type ReceiptResult,
 } from '../lib/intentReconciler';
 
+// Arbitrum 공식 emitter(문서 기준)와 타 체인 emitter — 테스트용 명시 설정.
+// 기본값이 제거됐으므로 reconcile 경로 테스트를 위해 env를 명시 설정한다.
+const ARB_EMITTER   = GMX_EVENT_EMITTER_ARBITRUM_OFFICIAL_DOC;
+const OTHER_EMITTER = KNOWN_NON_ARBITRUM_EVENT_EMITTERS[0].address;
+process.env.GMX_EVENT_EMITTER_ADDRESS = ARB_EMITTER;
+
 // 정확한 EventLog2 signature (공식 ABI 파생) — topic0 검증에 사용
 const SIG      = EVENT_LOG_2_TOPIC0;
 const FAKE_SIG = '0x' + 'ab'.repeat(32); // 위조 signature
-const EMITTERS = [GMX_EVENT_EMITTER_ARBITRUM_DEFAULT]; // 기본 허용 emitter 집합
+const EMITTERS = [ARB_EMITTER]; // 기본 허용 emitter 집합
 const KEY  = ('0x' + '11'.repeat(32)) as `0x${string}`;
 const ACCT = ('0x' + '22'.repeat(32)) as `0x${string}`;
 
-function createdLog(key: string = KEY, address: string = GMX_EVENT_EMITTER_ARBITRUM_DEFAULT, sig: string = SIG): RawLog {
+function createdLog(key: string = KEY, address: string = ARB_EMITTER, sig: string = SIG): RawLog {
   return { address, topics: [sig, ORDER_EVENT_NAME_HASH.OrderCreated, key, ACCT] };
 }
-function resolutionLog(name: 'OrderExecuted' | 'OrderCancelled' | 'OrderFrozen', key: string = KEY, address: string = GMX_EVENT_EMITTER_ARBITRUM_DEFAULT, sig: string = SIG): RawLog {
+function resolutionLog(name: 'OrderExecuted' | 'OrderCancelled' | 'OrderFrozen', key: string = KEY, address: string = ARB_EMITTER, sig: string = SIG): RawLog {
   return {
     address,
     topics: [sig, ORDER_EVENT_NAME_HASH[name], key, ACCT],
@@ -105,7 +111,7 @@ beforeEach(() => {
 describe('gmxOrderEvents — receipt 로그 파싱', () => {
   it('OrderCreated 로그에서 order key(topic1=topics[2]) 추출', () => {
     const r = extractOrderKeyFromReceiptLogs([createdLog()], EMITTERS);
-    expect(r).toEqual({ ok: true, orderKey: KEY, emitterAddress: GMX_EVENT_EMITTER_ARBITRUM_DEFAULT });
+    expect(r).toEqual({ ok: true, orderKey: KEY, emitterAddress: ARB_EMITTER });
   });
 
   it('EventEmitter 외 주소·다른 이벤트는 무시 → not_found', () => {
@@ -373,10 +379,12 @@ describe('intentReconciler — 온체인 판정 (fail-closed)', () => {
 import { encodeEventTopics, keccak256, toHex } from 'viem';
 import { EVENT_LOG_2_ABI, isValidEvmAddress } from '../lib/gmxOrderEvents';
 
-describe('gmxOrderEvents — EventEmitter 주소 설정 (fail-closed)', () => {
-  it('환경변수 미설정 → 현재 공식 Arbitrum 기본값 사용', () => {
+describe('gmxOrderEvents — EventEmitter 주소 설정 (fail-closed, 기본값 없음)', () => {
+  it('환경변수 미설정 → ok=false (하드코딩 기본값 사용 금지)', () => {
     const r = resolveGmxEventEmitterAddress({} as NodeJS.ProcessEnv);
-    expect(r).toEqual({ ok: true, address: GMX_EVENT_EMITTER_ARBITRUM_DEFAULT, source: 'default' });
+    expect(r.ok).toBe(false);
+    const r2 = resolveGmxEventEmitterAddress({ GMX_EVENT_EMITTER_ADDRESS: '  ' } as NodeJS.ProcessEnv);
+    expect(r2.ok).toBe(false);
   });
 
   it('GMX_EVENT_EMITTER_ADDRESS 설정 시 그 값 사용 (코드 수정 없이 주소 교체)', () => {
@@ -392,30 +400,48 @@ describe('gmxOrderEvents — EventEmitter 주소 설정 (fail-closed)', () => {
     }
   });
 
-  it('기본값은 현재 공식 주소이며 이전(legacy) 주소가 아님', () => {
-    expect(GMX_EVENT_EMITTER_ARBITRUM_DEFAULT.toLowerCase())
-      .toBe('0xAf2E131d483cedE068e21a9228aD91E623a989C2'.toLowerCase());
-    expect(GMX_EVENT_EMITTER_ARBITRUM_DEFAULT.toLowerCase())
-      .not.toBe(GMX_EVENT_EMITTER_LEGACY_ADDRESS.toLowerCase());
-    expect(isValidEvmAddress(GMX_EVENT_EMITTER_ARBITRUM_DEFAULT)).toBe(true);
+  it('타 체인(Botanix/MegaETH/Avalanche) EventEmitter 주소 → ok=false (chain/address 교차 오설정 차단)', () => {
+    for (const e of KNOWN_NON_ARBITRUM_EVENT_EMITTERS) {
+      const r = resolveGmxEventEmitterAddress({ GMX_EVENT_EMITTER_ADDRESS: e.address } as NodeJS.ProcessEnv);
+      expect(r.ok).toBe(false);
+      const rLower = resolveGmxEventEmitterAddress({ GMX_EVENT_EMITTER_ADDRESS: e.address.toLowerCase() } as NodeJS.ProcessEnv);
+      expect(rLower.ok).toBe(false);
+    }
   });
 
-  it('이전 주소만으로 들어온 로그는 허용 집합에 없으면 무시 (현재 주소로 오인 금지)', () => {
-    const legacyOnly = [createdLog(KEY, GMX_EVENT_EMITTER_LEGACY_ADDRESS)];
+  it('과거 잘못 사용된 0xAf2E…를 Arbitrum 값으로 절대 허용하지 않음', () => {
+    const r = resolveGmxEventEmitterAddress({
+      GMX_EVENT_EMITTER_ADDRESS: '0xAf2E131d483cedE068e21a9228aD91E623a989C2',
+    } as NodeJS.ProcessEnv);
+    expect(r.ok).toBe(false);
+  });
+
+  it('공식 문서 상수는 Arbitrum 공식 주소(0xC8ee91…)이며 타 체인 주소가 아님', () => {
+    expect(ARB_EMITTER.toLowerCase())
+      .toBe('0xC8ee91A54287DB53897056e12D9819156D3822Fb'.toLowerCase());
+    expect(ARB_EMITTER.toLowerCase()).not.toBe(OTHER_EMITTER.toLowerCase());
+    expect(isValidEvmAddress(ARB_EMITTER)).toBe(true);
+    // 공식 주소를 env로 설정하면 정상 통과
+    const r = resolveGmxEventEmitterAddress({ GMX_EVENT_EMITTER_ADDRESS: ARB_EMITTER } as NodeJS.ProcessEnv);
+    expect(r).toEqual({ ok: true, address: ARB_EMITTER, source: 'env' });
+  });
+
+  it('타 체인 주소만으로 들어온 로그는 허용 집합에 없으면 무시 (현재 주소로 오인 금지)', () => {
+    const legacyOnly = [createdLog(KEY, OTHER_EMITTER)];
     expect(extractOrderKeyFromReceiptLogs(legacyOnly, EMITTERS)).toEqual({ ok: false, reason: 'not_found' });
-    expect(classifyOrderResolutionLogs([resolutionLog('OrderExecuted', KEY, GMX_EVENT_EMITTER_LEGACY_ADDRESS)], KEY, EMITTERS)).toBeNull();
+    expect(classifyOrderResolutionLogs([resolutionLog('OrderExecuted', KEY, OTHER_EMITTER)], KEY, EMITTERS)).toBeNull();
     // 허용 집합에 명시적으로 포함되면(과거 intent 영속값) 정상 처리
-    const withLegacy = [...EMITTERS, GMX_EVENT_EMITTER_LEGACY_ADDRESS];
+    const withLegacy = [...EMITTERS, OTHER_EMITTER];
     expect(extractOrderKeyFromReceiptLogs(legacyOnly, withLegacy))
-      .toEqual({ ok: true, orderKey: KEY, emitterAddress: GMX_EVENT_EMITTER_LEGACY_ADDRESS });
+      .toEqual({ ok: true, orderKey: KEY, emitterAddress: OTHER_EMITTER });
   });
 });
 
 describe('gmxOrderEvents — 정확한 EventLog2 signature (topic0)', () => {
   it('topic0이 공식 ABI 파생 signature와 다르면 위조 로그로 차단', () => {
-    const forged = [createdLog(KEY, GMX_EVENT_EMITTER_ARBITRUM_DEFAULT, FAKE_SIG)];
+    const forged = [createdLog(KEY, ARB_EMITTER, FAKE_SIG)];
     expect(extractOrderKeyFromReceiptLogs(forged, EMITTERS)).toEqual({ ok: false, reason: 'not_found' });
-    const forgedRes = [resolutionLog('OrderExecuted', KEY, GMX_EVENT_EMITTER_ARBITRUM_DEFAULT, FAKE_SIG)];
+    const forgedRes = [resolutionLog('OrderExecuted', KEY, ARB_EMITTER, FAKE_SIG)];
     expect(classifyOrderResolutionLogs(forgedRes, KEY, EMITTERS)).toBeNull();
   });
 
@@ -432,9 +458,9 @@ describe('gmxOrderEvents — 정확한 EventLog2 signature (topic0)', () => {
     expect(String(topics[2]).toLowerCase()).toBe(KEY.toLowerCase());         // topic1 = order key
     expect(String(topics[3]).toLowerCase()).toBe(ACCT.toLowerCase());        // topic2 = account
     // 이 ABI 인코딩 로그가 실제로 파서를 통과하는지 확인
-    const log: RawLog = { address: GMX_EVENT_EMITTER_ARBITRUM_DEFAULT, topics: topics as string[] };
+    const log: RawLog = { address: ARB_EMITTER, topics: topics as string[] };
     expect(extractOrderKeyFromReceiptLogs([log], EMITTERS))
-      .toEqual({ ok: true, orderKey: KEY.toLowerCase(), emitterAddress: GMX_EVENT_EMITTER_ARBITRUM_DEFAULT });
+      .toEqual({ ok: true, orderKey: KEY.toLowerCase(), emitterAddress: ARB_EMITTER });
   });
 });
 
@@ -464,7 +490,7 @@ describe('intentReconciler — emitter 설정·주소 교체 대응', () => {
     await reconcileBlockingIntentsOnchain(() => client);
     expect(state.evidenceCalls[0].evidence).toMatchObject({
       orderKey: KEY,
-      orderEmitterAddress: GMX_EVENT_EMITTER_ARBITRUM_DEFAULT,
+      orderEmitterAddress: ARB_EMITTER,
     });
   });
 
@@ -476,15 +502,15 @@ describe('intentReconciler — emitter 설정·주소 교체 대응', () => {
       // 교체 이전에 생성된 intent — 과거 emitter가 영속되어 있음
       state.blockingRows = [intent({
         orderKey: KEY, orderCreatedBlock: '90',
-        orderEmitterAddress: GMX_EVENT_EMITTER_ARBITRUM_DEFAULT,
+        orderEmitterAddress: ARB_EMITTER,
       })];
       const client = mockClient({
         getOrderResolutionLogs: async (_k: string, _fb: string | null, emitters: string[]) => {
           // 조회 대상 emitter 집합 = 새 설정값 ∪ 저장된 과거 주소
           expect(emitters.map(e => e.toLowerCase())).toEqual(
-            expect.arrayContaining([newEmitter.toLowerCase(), GMX_EVENT_EMITTER_ARBITRUM_DEFAULT.toLowerCase()]));
+            expect.arrayContaining([newEmitter.toLowerCase(), ARB_EMITTER.toLowerCase()]));
           // 과거 emitter가 방출한 실행 이벤트
-          return [resolutionLog('OrderExecuted', KEY, GMX_EVENT_EMITTER_ARBITRUM_DEFAULT)];
+          return [resolutionLog('OrderExecuted', KEY, ARB_EMITTER)];
         },
         getTransactionReceipt: async () => successReceipt([]),
       });
