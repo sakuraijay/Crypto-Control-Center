@@ -151,6 +151,8 @@ beforeEach(() => {
   store.failSelect = false;
   vi.unstubAllEnvs();
   vi.stubEnv('DELEGATED_SIGNER_ENCRYPTION_KEY', 'a'.repeat(64));
+  // encryptSensitiveHex는 scrypt(SESSION_SECRET) 기반 — CI에는 SESSION_SECRET이 없어 fixture로 stub
+  vi.stubEnv('SESSION_SECRET', 'test-session-secret-fixture-not-real');
 });
 
 // ═════════════════════════════════════ relayAdapter ═════════════════════════
