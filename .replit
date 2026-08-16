@@ -58,3 +58,10 @@ timeoutMs = 20000
 
 [nix]
 channel = "stable-25_05"
+
+[userenv]
+
+[userenv.shared]
+LIVE_TEST_EXECUTION_LOCKED = "true"
+DELEGATED_SIGNER_ENABLED = "false"
+GMX_WALLET_ADDRESS = "0x46c27887c5EC5E36b2a21E1Ec1BC69e7a593950e"
