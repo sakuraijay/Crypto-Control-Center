@@ -13,10 +13,15 @@
  *    commit 95bd0c97385737b3227e314fafb04371991bdf1b (2025-11-17, "add deployments")
  *  - Arbiscan verified (Exact Match, Contract Name=SubaccountGelatoRelayRouter,
  *    compiler v0.8.29) — 신규 0x517602… / 구 0xfD0596… 둘 다 verified.
- *  - 공식 docs(https://docs.gmx.io/docs/api/contracts/addresses/)는 확인 시점에
- *    아직 SubaccountGelatoRelayRouter=0xfD0596…을 표시 — deployment artifact와
- *    불일치 상태. 이 불일치는 해소 전까지 Production env 설정 금지 사유이며,
- *    docsDiscrepancy 필드로 명시 기록한다.
+ *  - 공식 docs(https://docs.gmx.io/docs/api/contracts/addresses/)는 CDN(엣지)별로
+ *    다른 내용을 반환하는 것이 관찰됨: 운영자 독립 확인(2026-08-17)에서는 Arbitrum
+ *    SubaccountGelatoRelayRouter=0x517602…(artifact와 일치)를 표시했으나, 본 환경
+ *    (Cloudflare POP BOM, cache-busting 포함 2회 fetch, 응답 본문 sha256
+ *    5e0a3d7dc9843f38fd8f8d46842eb33dc513b5a9fb5ea8251eaafede31d45b43,
+ *    date 2026-08-16T21:35Z)에서는 여전히 구주소 0xfD0596…을 반환.
+ *    "docs 전체가 구주소"가 아니라 "CDN 응답 불일치 관찰"이 정확한 상태이며,
+ *    docsDiscrepancy 필드로 명시 기록한다. 주소 pin 근거는 docs가 아니라
+ *    deployment artifact + Arbiscan verified이므로 pin은 영향 없음.
  *
  * DataStore/EventEmitter/OrderVault는 docs·artifact 양쪽에서 동일 (docs 명시:
  * "DataStore and RoleStore addresses are permanent").
@@ -30,8 +35,10 @@ export const GMX_DEPLOYMENT_MANIFEST = {
   sourceCommit: '95bd0c97385737b3227e314fafb04371991bdf1b',
   artifactPath: 'deployments/arbitrum/SubaccountGelatoRelayRouter.json',
   docsDiscrepancy:
-    '공식 docs 주소 페이지는 확인 시점에 여전히 0xfD0596…을 표시 — artifact(0x517602…)와 불일치. ' +
-    '해소 확인 전 Production env 설정 금지.',
+    'CDN 응답 불일치 관찰: 운영자 독립 확인(2026-08-17)에서는 공식 docs가 0x517602…(artifact 일치)를 ' +
+    '표시했으나, 본 환경(Cloudflare POP BOM, 2026-08-16T21:35Z, body sha256 5e0a3d7d…d45b43)에서는 ' +
+    '구주소 0xfD0596…을 반환. 주소 pin 근거는 artifact+Arbiscan이며 구주소는 차단 목록 유지. ' +
+    '모든 엣지에서 0x517602… 일관 확인 전 Production env 설정 금지.',
   addresses: {
     subaccountGelatoRelayRouter: '0x517602BaC704B72993997820981603f5E4901273',
     dataStore: '0xFD70de6b91282D8017aA4E741e9Ae325CAb992d8',
