@@ -65,6 +65,44 @@ export interface RelayStatusResponse {
   error?: string;
 }
 
+/** 5단계 §9 — activation 진단 상태 플래그 (표시 전용, 부작용 없음) */
+export interface ActivationStatusFlags {
+  codeReady: boolean;
+  networkDisabled: boolean;
+  signerDisabled: boolean;
+  canonicalUnverified: boolean;
+  canonicalReason: string | null;
+  reconciliationIncomplete: boolean;
+  reconciliationReasons: string[];
+  liveQuoteMissing: boolean;
+  liveQuoteReasons: string[];
+  revokeActive: boolean;
+  unresolvedPresent: boolean;
+  unresolvedCount: number;
+  liveLocked: boolean;
+  readyForControlledCanary: boolean;
+}
+
+export interface ActivationStatusResponse {
+  ok: boolean;
+  networkEligible: boolean;
+  missing: string[];
+  statusFlags: ActivationStatusFlags;
+  error?: string;
+}
+
+export async function fetchActivationStatus(apiBase: string, pin: string): Promise<ActivationStatusResponse | null> {
+  try {
+    const res = await fetch(`${apiBase}executor/relay/activation`, {
+      headers: { 'x-operator-pin': pin },
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as ActivationStatusResponse;
+  } catch {
+    return null;
+  }
+}
+
 export interface DryRunView {
   ok: boolean;
   mode: string;

@@ -15,9 +15,9 @@ import { useWallet } from '@/lib/context';
 import { canRequestOwnerSignature, mapSignError, formatUnixSeconds } from '@/lib/subaccountApproval';
 import {
   fetchRelayStatus, postRevokePrepare, postRevokeSignature, postRevokeCancel, postRevokeDryRun,
-  fetchUnresolvedTasks, postUnresolvedRecheck,
+  fetchUnresolvedTasks, postUnresolvedRecheck, fetchActivationStatus,
   mapRelayModeToView, mapRelayTaskStatusToView, formatWeiToEth,
-  type RelayStatusResponse, type DryRunView, type UnresolvedTaskView,
+  type RelayStatusResponse, type DryRunView, type UnresolvedTaskView, type ActivationStatusResponse,
 } from '@/lib/relayStatus';
 
 const API_BASE = `${import.meta.env.BASE_URL}api/`;
@@ -40,20 +40,23 @@ export function RelayStatusCard() {
   const [prepared, setPrepared] = useState<{ sessionId: string; typedData: unknown; summary?: Record<string, string> } | null>(null);
   const [dryRun, setDryRun] = useState<DryRunView | null>(null);
   const [unresolved, setUnresolved] = useState<UnresolvedTaskView[]>([]);
+  const [activation, setActivation] = useState<ActivationStatusResponse | null>(null);
   const [recheckBusy, setRecheckBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<{ tone: 'ok' | 'warn' | 'error'; text: string } | null>(null);
 
   const refresh = useCallback(async () => {
     // status 엔드포인트도 운영자 인증 필요 — PIN 없이는 조회하지 않음
     const p = pin.trim();
-    if (p.length < 6) { setStatus(null); setUnresolved([]); setLoading(false); return; }
+    if (p.length < 6) { setStatus(null); setUnresolved([]); setActivation(null); setLoading(false); return; }
     setLoading(true);
-    const [s, u] = await Promise.all([
+    const [s, u, a] = await Promise.all([
       fetchRelayStatus(API_BASE, p),
       fetchUnresolvedTasks(API_BASE, p),
+      fetchActivationStatus(API_BASE, p),
     ]);
     setStatus(s);
     setUnresolved(u ?? []);
+    setActivation(a);
     setLoading(false);
   }, [pin]);
 
@@ -285,6 +288,43 @@ export function RelayStatusCard() {
           )}
         </div>
       )}
+
+      {/* Activation 체크리스트 (5단계 §9) — 표시 전용, 어떤 부작용도 없음 */}
+      {activation?.statusFlags && (() => {
+        const f = activation.statusFlags;
+        const rows: Array<{ key: string; label: string; blocked: boolean; detail?: string | null }> = [
+          { key: 'code', label: '코드 준비 (Code ready)', blocked: !f.codeReady },
+          { key: 'network', label: 'Relay 네트워크 활성화', blocked: f.networkDisabled, detail: f.networkDisabled ? '환경변수 미설정 — 구조적 차단' : null },
+          { key: 'signer', label: 'Delegated signer 활성', blocked: f.signerDisabled },
+          { key: 'canonical', label: 'Canonical 승인 검증', blocked: f.canonicalUnverified, detail: f.canonicalReason },
+          { key: 'recon', label: 'Reconciliation 완료', blocked: f.reconciliationIncomplete, detail: f.reconciliationReasons[0] ?? null },
+          { key: 'quote', label: 'Live fee quote 신선', blocked: f.liveQuoteMissing, detail: f.liveQuoteReasons[0] ?? null },
+          { key: 'revoke', label: 'Revoke 미진행', blocked: f.revokeActive, detail: f.revokeActive ? '활성 revoke 세션 — 신규 주문 차단' : null },
+          { key: 'unresolved', label: 'UNRESOLVED 없음', blocked: f.unresolvedPresent, detail: f.unresolvedPresent ? `${f.unresolvedCount}건 조사 필요` : null },
+          { key: 'lock', label: 'LIVE 잠금 해제', blocked: f.liveLocked, detail: f.liveLocked ? 'LIVE_TEST_EXECUTION_LOCKED — 유지 중' : null },
+        ];
+        return (
+          <div className="flex flex-col gap-1.5 p-3 rounded border border-border bg-secondary/30" data-testid="list-activation-checklist">
+            <div className="text-[11px] font-semibold text-muted-foreground">Activation 체크리스트 (진단 전용)</div>
+            {rows.map((r) => (
+              <div key={r.key} className="flex items-center gap-2 text-[10px]">
+                <span className={cn('text-[9px] px-1.5 py-0.5 rounded-full border font-bold shrink-0', r.blocked ? toneCls.muted : toneCls.ok)}>
+                  {r.blocked ? '차단' : 'OK'}
+                </span>
+                <span>{r.label}</span>
+                {r.detail && <span className="text-muted-foreground/70 truncate">— {r.detail}</span>}
+              </div>
+            ))}
+            <div className={cn('mt-1 px-2.5 py-1.5 rounded border text-[10px] font-semibold',
+              f.readyForControlledCanary ? toneCls.warn : toneCls.muted)}
+              data-testid="text-canary-readiness">
+              {f.readyForControlledCanary
+                ? 'Ready for controlled canary — 모든 전제 조건 충족 (표시 전용, 자동 제출 없음)'
+                : '통제된 canary 준비 미완료 — 상단 차단 항목 해소 필요'}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* 최근 task */}
       {status && status.recentTasks.length > 0 && (
