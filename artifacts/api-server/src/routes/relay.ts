@@ -26,6 +26,12 @@ import {
 } from '../lib/relayLifecycle';
 import { allocateUserNonce } from '../lib/relayNonce';
 import { evaluateActivationGate } from '../lib/relayActivationGate';
+import {
+  computeReconciliationComplete, evaluateFreshLiveQuote,
+  getStartupReconciliationState, isReconciliationRunning,
+} from '../lib/relayActivationStatus';
+import { countBlockingIntentsOrNull } from '../lib/executionIntents';
+import { countOpenRelayTasksOrNull } from '../lib/relayLifecycle';
 import { reconcileVerdict, applyReconcileVerdict } from '../lib/relayTaskReconciler';
 import type { RelayTransport } from '../lib/relayTransport';
 import {
@@ -490,28 +496,80 @@ router.post('/executor/relay/unresolved/recheck', requireOperatorAuth, async (re
   }
 });
 
-// GET /executor/relay/activation — 활성화 이중 게이트 현황 (진단용)
+// GET /executor/relay/activation — 활성화 이중 게이트 현황 (진단용, 5단계 §4·§9)
+// 이 endpoint는 읽기 전용이다: 어떤 네트워크 호출·주문·설정 변경도 유발하지 않는다.
+// reconciliationComplete/freshLiveFeeQuote는 하드코딩이 아닌 실제 파생값이다.
 router.get('/executor/relay/activation', requireOperatorAuth, async (_req, res) => {
   try {
     const canonical = await checkCanonical();
     const revoke = await getActiveRevokeSession();
+    const env = process.env;
+
+    // DB 상태 파생 (조회 실패 = null → fail-closed)
+    const blockingIntents = await countBlockingIntentsOrNull();
+    const openRelayTasks = await countOpenRelayTasksOrNull();
+    const dbOk = blockingIntents !== null && openRelayTasks !== null;
+
+    // reconciliationComplete — startup reconciliation + 현재 DB 상태 파생
+    const recon = await computeReconciliationComplete({
+      countBlockingIntents: async () => blockingIntents,
+      countOpenRelayTasks: async () => openRelayTasks,
+      hasActiveRevoke: async () => !!revoke,
+      getStartupState: getStartupReconciliationState,
+      isRunning: isReconciliationRunning,
+      nowMs: () => Date.now(),
+    });
+
+    // freshLiveFeeQuote — 저장된 live quote가 없으므로 항상 false로 파생된다
+    // (mock quote는 구조적으로 불인정). 상태 조회가 quote 네트워크 호출을
+    // 유발하지 않는다 — 저장값 검증만.
+    const liveQuote = evaluateFreshLiveQuote({
+      quote: null, chainId: 42161, nowMs: Date.now(),
+      orderNotionalUsd: null, ethPriceUsd: null,
+      quoteBoundPayloadHash: null, targetPayloadHash: null,
+    });
+
+    const unresolvedCount = (await listUnresolvedTasks(50)).length;
+    const canonicalAuthorized = canonical.confirmed && canonical.isSubaccountListed === true;
+    const signerActive = isDelegatedSignerEnabled() && isSignerInitialized();
+    const liveLocked = isLiveTestExecutionLocked();
+
     const gate = evaluateActivationGate({
-      env: process.env,
+      env,
       liveTestMode: false,               // 서버 liveTestMode는 executor 상태에서 오되, 여기서는 보수적으로 false
       signerInitialized: isSignerInitialized(),
-      canonicalAuthorized: canonical.confirmed && canonical.isSubaccountListed === true,
+      canonicalAuthorized,
       emergencyStopActive: false,
-      dbOk: true,
+      dbOk,
       rpcOk: canonical.confirmed,
-      reconciliationComplete: false,     // 4단계: 실제 reconciliation 파이프 미가동 — fail-closed
-      blockingIntentCount: (await listUnresolvedTasks(1)).length,
+      reconciliationComplete: recon.complete,
+      blockingIntentCount: blockingIntents ?? 1,   // 조회 실패 → 차단으로 취급
       activeRevokeInProgress: !!revoke,
-      freshLiveFeeQuote: false,          // live quote 경로 비활성
+      freshLiveFeeQuote: liveQuote.fresh,
       currentChainId: 42161,
       gmxConfigOk: resolveGmxLiveRelayConfig().ok,
       kind: 'OPEN',
     });
-    return res.json({ ok: true, networkEligible: gate.networkEligible, missing: gate.missing });
+
+    // §9 UI 상태 구분 — 표시 전용 플래그 (어떤 부작용도 없음)
+    const statusFlags = {
+      codeReady: true,
+      networkDisabled: env.GMX_RELAY_NETWORK_ENABLED !== 'true' || env.GMX_RELAY_SUBMISSION_ENABLED !== 'true' || (env.GMX_RELAY_MODE ?? '').toUpperCase() !== 'LIVE',
+      signerDisabled: !signerActive,
+      canonicalUnverified: !canonicalAuthorized,
+      canonicalReason: canonical.reason,
+      reconciliationIncomplete: !recon.complete,
+      reconciliationReasons: recon.reasons,
+      liveQuoteMissing: !liveQuote.fresh,
+      liveQuoteReasons: liveQuote.reasons,
+      revokeActive: !!revoke,
+      unresolvedPresent: unresolvedCount > 0,
+      unresolvedCount,
+      liveLocked,
+      readyForControlledCanary: gate.networkEligible, // 전 조건 참일 때만
+    };
+
+    return res.json({ ok: true, networkEligible: gate.networkEligible, missing: gate.missing, statusFlags });
   } catch (e: unknown) {
     return res.status(500).json({ ok: false, error: sanitizeRpcError(e) });
   }

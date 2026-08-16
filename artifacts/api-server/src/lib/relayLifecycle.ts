@@ -218,6 +218,22 @@ export async function listUnresolvedTasks(limit = 50): Promise<RelayTaskRow[]> {
   }
 }
 
+/**
+ * 미종결(non-terminal) relay task 수 — 조회 실패는 null (fail-closed 판단용, 5단계).
+ * listUnresolvedTasks와 달리 오류를 빈 배열로 삼키지 않는다.
+ */
+export async function countOpenRelayTasksOrNull(): Promise<number | null> {
+  const nonTerminal = (Object.values(RELAY_TASK_STATUS) as RelayTaskStatus[])
+    .filter((s) => !TERMINAL_STATUSES.includes(s));
+  try {
+    const rows = await db.select({ id: relayTasksTable.id }).from(relayTasksTable)
+      .where(inArray(relayTasksTable.status, nonTerminal));
+    return rows.length;
+  } catch {
+    return null;
+  }
+}
+
 /** 최근 relay task 조회 (상태 API용) — 민감정보 없는 컬럼만 반환 */
 export async function listRecentRelayTasks(limit = 20): Promise<Array<{
   id: string; kind: string; status: string; relayTaskId: string | null; txHash: string | null;

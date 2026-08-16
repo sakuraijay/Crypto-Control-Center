@@ -72,6 +72,17 @@ export async function allocateUserNonce(params: {
   return { ok: false, reason: `nonce allocation ${MAX_ALLOCATION_ATTEMPTS}회 충돌 — 중단 (fail-closed)` };
 }
 
+/** task 미결속 nonce allocation 수 — 조회 실패는 null (fail-closed 판단용, 5단계) */
+export async function countUnboundNoncesOrNull(): Promise<number | null> {
+  try {
+    const rows = await db.select({ id: relayNoncesTable.id, taskId: relayNoncesTable.taskId })
+      .from(relayNoncesTable);
+    return rows.filter((r) => !r.taskId).length;
+  } catch {
+    return null;
+  }
+}
+
 /** allocation을 relay task에 결합 (감사 추적용) — 실패해도 nonce는 이미 소모됨 */
 export async function bindNonceToTask(allocationId: string, taskId: string): Promise<boolean> {
   try {

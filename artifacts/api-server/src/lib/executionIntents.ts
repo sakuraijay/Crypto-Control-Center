@@ -162,6 +162,18 @@ export async function hasBlockingIntents(): Promise<boolean> {
   }
 }
 
+/** blocking intent 수 — 조회 실패는 null (호출측 fail-closed 판단용, 5단계) */
+export async function countBlockingIntentsOrNull(): Promise<number | null> {
+  try {
+    const rows = await db.select({ id: executionIntentsTable.id })
+      .from(executionIntentsTable)
+      .where(inArray(executionIntentsTable.status, BLOCKING_INTENT_STATUSES));
+    return rows.length;
+  } catch {
+    return null;
+  }
+}
+
 // ── 온체인 판정 (터미널 전환 + 근거 영속화) ──────────────────────────────────
 
 export type TerminalIntentStatus = 'CONFIRMED' | 'FAILED' | 'CANCELLED';

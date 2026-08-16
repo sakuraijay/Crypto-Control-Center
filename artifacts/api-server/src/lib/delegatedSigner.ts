@@ -315,6 +315,21 @@ export async function getSignerEthBalance(rpcUrl: string): Promise<{ ethWei: big
 }
 
 /**
+ * digest 로컬 서명 (5단계 §3) — RPC 없음, 개인키는 이 함수 스코프 밖으로
+ * 절대 나가지 않는다. 게이트: enabled + initialized일 때만.
+ * 프로덕션에서는 활성화 게이트가 먼저 차단하므로 실제 서명은 테스트
+ * fixture 키로만 수행된다.
+ */
+export async function signDigestWithDelegatedSigner(digest: `0x${string}`): Promise<`0x${string}`> {
+  if (!isDelegatedSignerEnabled()) throw new Error('[DelegatedSigner] disabled — 서명 금지');
+  if (!_initialized || !_privateKeyHex) throw new Error('[DelegatedSigner] 미초기화 — 서명 금지');
+  if (!/^0x[0-9a-fA-F]{64}$/.test(digest)) throw new Error('[DelegatedSigner] digest 형식 오류');
+  // 요청 로컬 범위: account 객체는 이 스코프에서만 생성·사용
+  const account = privateKeyToAccount(`0x${_privateKeyHex}` as `0x${string}`);
+  return account.sign({ hash: digest });
+}
+
+/**
  * 내부 검증: 개인키가 주어진 주소와 일치하는지 확인.
  * 보안 검사 전용 — 개인키 자체는 절대 외부 반환하지 않음.
  */

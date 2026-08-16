@@ -96,6 +96,14 @@ export interface SubmitFlowInput {
    * 게이트에서 먼저 차단된다.
    */
   verifySignatureBinding: () => Promise<{ ok: boolean; reason?: string }>;
+  /**
+   * 제출 직전 canonical used-digest readback (5단계 §2).
+   * 온체인 replay 방어는 digest 맵(BaseGelatoRelayRouter.digests)이므로,
+   * DB 복원 등으로 동일 digest가 이미 사용됐을 가능성을 제출 직전에 확인한다.
+   *  - 조회 실패(ok:false) → 제출 0회, PREPARED 유지 (fail-closed)
+   *  - 이미 사용(used:true) → UNRESOLVED 전환(조사), 새 nonce 자동 재제출 금지
+   */
+  checkDigestUnused: () => Promise<{ ok: true; used: boolean } | { ok: false; reason: string }>;
 }
 
 export type SubmitFlowResult = {
@@ -164,6 +172,23 @@ export async function runSubmitFlow(input: SubmitFlowInput): Promise<SubmitFlowR
       patch: { errorClass: 'SIGNATURE_BINDING', resolutionBasis: '제출 전 서명 결속 검증 실패 — broadcast 없음' },
     });
     result.finalStatus = RELAY_TASK_STATUS.FAILED_PRE_BROADCAST;
+    return result;
+  }
+
+  // 8.5 제출 직전 canonical used-digest readback (5단계 §2)
+  const digestCheck = await input.checkDigestUnused();
+  if (!digestCheck.ok) {
+    blockReasons.push(`digest readback 실패 — 제출 차단 (fail-closed): ${digestCheck.reason}`);
+    // PREPARED 유지 — broadcast 없음이 확실하지만 readback 재확인 후에만 재시도 가능
+    return result;
+  }
+  if (digestCheck.used) {
+    blockReasons.push('동일 digest 온체인 사용 이력 감지 — 재제출 금지, 조사 필요');
+    await transitionRelayTask({
+      taskId: created.taskId, from: RELAY_TASK_STATUS.PREPARED, to: RELAY_TASK_STATUS.UNRESOLVED,
+      patch: { errorClass: 'DIGEST_ALREADY_USED', resolutionBasis: 'canonical readback: digests(digest)=true — 동일 payload가 과거 제출됐을 수 있음 (DB 복원 의심), 새 nonce 자동 재제출 금지' },
+    });
+    result.finalStatus = RELAY_TASK_STATUS.UNRESOLVED;
     return result;
   }
 

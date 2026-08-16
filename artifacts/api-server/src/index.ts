@@ -8,6 +8,11 @@ import { reconcileOnRestart, loadEmergencyStopFromDb, startPeriodicIntentReconci
 import { resolveStaticDir, assertStaticDirReady, attachStaticServing } from "./lib/staticSite";
 import { parsePort } from "./lib/port";
 import { markNotReady, markReady } from "./lib/readiness";
+import { runStartupRelayReconciliation } from "./lib/relayActivationStatus";
+import { countBlockingIntentsOrNull } from "./lib/executionIntents";
+import { countOpenRelayTasksOrNull } from "./lib/relayLifecycle";
+import { countUnboundNoncesOrNull } from "./lib/relayNonce";
+import { getActiveRevokeSession } from "./lib/revokeSession";
 
 // PORT 검증: 1~65535 정수만 허용 (순수 함수 — port.test.ts에서 격리 검증)
 const port = parsePort(process.env["PORT"]);
@@ -72,6 +77,27 @@ httpServer = app.listen(port, (err) => {
       reconcileOnRestart().catch(() => {});
       // 차단 intent 온체인 재판정 (차단 intent 없으면 no-op — PAPER 무영향)
       startPeriodicIntentReconciliation();
+
+      // Relay startup reconciliation (5단계 §8) — migration 이후 순서 고정.
+      // 어떤 실패도 서버·Worker를 중단시키지 않는다. canonical readback은
+      // 네트워크 비활성 단계라 "미수행"으로 기록되어 reconciliationComplete는
+      // fail-closed로 false를 유지한다 (LIVE 제출 차단 유지).
+      runStartupRelayReconciliation({
+        migrationsComplete: () => true, // runMigrations() 성공 이후에만 도달
+        countBlockingIntents: countBlockingIntentsOrNull,
+        countOpenRelayTasks: countOpenRelayTasksOrNull,
+        countUnboundNonces: countUnboundNoncesOrNull,
+        hasActiveRevoke: async () => {
+          try { return !!(await getActiveRevokeSession()); } catch { return null; }
+        },
+        canonicalReadback: async () => ({
+          performed: false, ok: false,
+          reason: 'canonical authorization readback 미수행 — relay 네트워크 비활성(구조적 차단)',
+        }),
+        nowMs: () => Date.now(),
+      }).then((s) => {
+        logger.info({ complete: s.complete, reasons: s.reasons }, "Relay startup reconciliation recorded");
+      }).catch(() => {});
 
       // Start the 24/7 AI Worker after migrations complete
       // so the worker can read/write DB.

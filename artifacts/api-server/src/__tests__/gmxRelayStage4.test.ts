@@ -239,6 +239,7 @@ function baseFlowInput(transport: RelayTransport, overrides?: Partial<SubmitFlow
     receiverVerified: true,
     userNonce: 7n,
     verifySignatureBinding: async () => ({ ok: true }),
+    checkDigestUnused: async () => ({ ok: true, used: false }),
     ...overrides,
   };
 }
