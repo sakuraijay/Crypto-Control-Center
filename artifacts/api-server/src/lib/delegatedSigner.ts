@@ -1,15 +1,20 @@
 /**
  * Delegated Signer — Server-managed EOA for GMX V2 SubaccountRouter
  *
- * 보안 원칙:
- *   - 개인키는 AES-256-GCM + scrypt(SESSION_SECRET)로 암호화 후 DB 저장
- *   - 공개 주소만 외부 노출 (개인키·암호화키 절대 미노출)
- *   - 재시작 시 DB에서 복원 (동일 주소 유지)
- *   - 메인 지갑(MetaMask)의 Seed Phrase·Private Key 절대 요청/저장 금지
+ * 보안 정책 (명확한 분리):
+ *   - 메인 지갑(MetaMask)의 Private Key·Seed Phrase는 어떤 경우에도
+ *     요청·저장·출력하지 않는다 (절대 금지).
+ *   - 제한된 delegated signer(서버 생성 EOA)는 사용자가
+ *     DELEGATED_SIGNER_ENABLED=true 로 명시적으로 활성화한 경우에만 생성되며,
+ *     AES-256-GCM + scrypt(SESSION_SECRET)로 암호화 후 DB에 저장된다.
+ *   - 최초 PAPER Publish에서는 DELEGATED_SIGNER_ENABLED 미설정(=비활성)이어야 한다.
  *
- * 사용 전제:
- *   - SESSION_SECRET 환경변수 필수 (Replit Secrets에 설정)
- *   - DATABASE_URL 환경변수 필수
+ * Fail-closed 규칙:
+ *   - 신규 키 생성은 "DB 조회 성공 + 기존 signer가 확실히 없음"일 때만 허용
+ *   - DB 조회 실패 / 복호화 실패 / 메타데이터 손상 → 신규 생성·overwrite 금지,
+ *     signer는 초기화되지 않은 상태로 유지
+ *   - SESSION_SECRET 변경으로 복호화가 실패해도 새 signer로 자동 교체하지 않음
+ *   - 개인키·암호문·SESSION_SECRET은 로그와 API에 절대 출력하지 않음
  */
 
 import {
@@ -44,11 +49,37 @@ let _signerAddress: string | null = null;
 let _createdAt: string | null     = null;
 let _initialized                  = false;
 
+/** 테스트 전용 — 모듈 인메모리 상태 초기화 */
+export function __resetDelegatedSignerForTests(): void {
+  _privateKeyHex = null;
+  _signerAddress = null;
+  _createdAt     = null;
+  _initialized   = false;
+}
+
+// ── 명시적 활성화 게이트 ──────────────────────────────────────────────────────
+
+/**
+ * DELEGATED_SIGNER_ENABLED가 정확히 문자열 'true'일 때만 활성.
+ * 미설정, 빈 값, 그 외 모든 값은 false (기본값 false, fail-closed).
+ */
+export function isDelegatedSignerEnabled(): boolean {
+  return process.env.DELEGATED_SIGNER_ENABLED === 'true';
+}
+
 // ── 암호화 헬퍼 ───────────────────────────────────────────────────────────────
+
+/** SESSION_SECRET 최소 안전 길이 (문자). 값 자체는 절대 로그 출력하지 않음. */
+const MIN_SESSION_SECRET_LENGTH = 32;
 
 function getSessionSecret(): Buffer {
   const secret = process.env.SESSION_SECRET;
   if (!secret) throw new Error('[DelegatedSigner] SESSION_SECRET 환경변수가 설정되지 않았습니다');
+  if (secret.length < MIN_SESSION_SECRET_LENGTH) {
+    throw new Error(
+      `[DelegatedSigner] SESSION_SECRET이 최소 안전 길이(${MIN_SESSION_SECRET_LENGTH}자) 미만입니다`,
+    );
+  }
   return Buffer.from(secret, 'utf8');
 }
 
@@ -86,23 +117,58 @@ function decryptPrivateKey(encoded: string): string {
 
 // ── DB 읽기/쓰기 헬퍼 ──────────────────────────────────────────────────────────
 
-async function loadFromDb(): Promise<{ encryptedKey: string; createdAt: string } | null> {
+/**
+ * DB 조회 결과를 명시적으로 구분한다 (fail-closed의 핵심).
+ *  - found:    조회 성공 + 기존 encrypted signer 존재
+ *  - absent:   조회 성공 + 기존 signer 확실히 없음 (신규 생성이 허용되는 유일한 상태)
+ *  - db_error: 조회 실패 (신규 생성 절대 금지)
+ *  - corrupt:  signer 메타데이터 손상 (신규 생성·overwrite 금지)
+ */
+type SignerLoadResult =
+  | { status: 'found'; encryptedKey: string; createdAt: string }
+  | { status: 'absent' }
+  | { status: 'db_error' }
+  | { status: 'corrupt' };
+
+async function loadFromDb(): Promise<SignerLoadResult> {
+  let rows: { value: string }[];
+  let metaRows: { value: string }[];
   try {
-    const rows = await db
+    rows = await db
       .select()
       .from(workerStateTable)
       .where(eq(workerStateTable.key, SIGNER_KEY_STATE_KEY));
-    const metaRows = await db
+    metaRows = await db
       .select()
       .from(workerStateTable)
       .where(eq(workerStateTable.key, SIGNER_META_KEY));
-
-    if (!rows.length) return null;
-    const meta = metaRows.length ? JSON.parse(metaRows[0].value) as { createdAt: string } : null;
-    return { encryptedKey: rows[0].value, createdAt: meta?.createdAt ?? new Date().toISOString() };
   } catch {
-    return null;
+    // DB 오류를 '없음'으로 오인하면 기존 signer를 덮어쓸 수 있으므로 명시적으로 구분
+    return { status: 'db_error' };
   }
+
+  // 'absent'는 키·메타 두 레코드가 모두 없을 때만.
+  // 메타만 남은 부분 손상 상태에서 신규 생성하면 기존 기록을 덮어쓰게 되므로 corrupt 처리.
+  if (!rows.length) {
+    return metaRows.length ? { status: 'corrupt' } : { status: 'absent' };
+  }
+  if (rows.length > 1 || metaRows.length > 1) return { status: 'corrupt' };
+
+  const encryptedKey = rows[0].value;
+  if (typeof encryptedKey !== 'string' || encryptedKey.length === 0) {
+    return { status: 'corrupt' };
+  }
+
+  let createdAt = new Date().toISOString();
+  if (metaRows.length) {
+    try {
+      const meta = JSON.parse(metaRows[0].value) as { createdAt?: string };
+      if (meta && typeof meta.createdAt === 'string') createdAt = meta.createdAt;
+    } catch {
+      return { status: 'corrupt' };
+    }
+  }
+  return { status: 'found', encryptedKey, createdAt };
 }
 
 async function saveToDb(encryptedKey: string, createdAt: string): Promise<void> {
@@ -126,37 +192,69 @@ async function saveToDb(encryptedKey: string, createdAt: string): Promise<void> 
 // ── 공개 API ──────────────────────────────────────────────────────────────────
 
 /**
- * 서버 시작 시 한 번 호출.
- * DB에서 기존 키 복원 또는 신규 생성 후 DB 저장.
- * 개인키는 절대 로그 출력하지 않음.
+ * 서버 시작 시 한 번 호출. Fail-closed 규칙:
+ *  - DELEGATED_SIGNER_ENABLED !== 'true' → 아무것도 하지 않음 (DB 접근·키 생성 없음)
+ *  - SESSION_SECRET 미설정/길이 미달 → 오류 (키 생성 없음)
+ *  - DB 조회 실패 → 오류, 신규 생성 금지
+ *  - 복호화 실패(SESSION_SECRET 변경 포함) → 오류, 신규 생성·overwrite 금지
+ *  - 메타데이터 손상 → 오류, 신규 생성·overwrite 금지
+ *  - 신규 생성은 "DB 조회 성공 + 기존 signer 확실히 없음"일 때만
+ * 개인키·암호문·SESSION_SECRET은 절대 로그 출력하지 않음.
  */
 export async function initializeDelegatedSigner(): Promise<void> {
-  if (_initialized) return;
-
-  const existing = await loadFromDb();
-  if (existing) {
-    _privateKeyHex  = decryptPrivateKey(existing.encryptedKey);
-    const account   = privateKeyToAccount(`0x${_privateKeyHex}` as `0x${string}`);
-    _signerAddress  = account.address;
-    _createdAt      = existing.createdAt;
-    _initialized    = true;
-    console.info(`[DelegatedSigner] DB에서 복원 — address=${_signerAddress} createdAt=${_createdAt}`);
+  if (!isDelegatedSignerEnabled()) {
+    // 비활성 상태: 초기화·키 생성·DB 읽기/쓰기 전부 금지. 상태만 기록.
+    console.info('[DelegatedSigner] disabled — DELEGATED_SIGNER_ENABLED가 true가 아님 (기본값)');
     return;
   }
+  if (_initialized) return;
 
-  // 신규 생성
-  const rawKey   = randomBytes(32);
-  _privateKeyHex = rawKey.toString('hex');
-  const account  = privateKeyToAccount(`0x${_privateKeyHex}` as `0x${string}`);
-  _signerAddress = account.address;
-  _createdAt     = new Date().toISOString();
+  // SESSION_SECRET 존재·최소 길이 사전 검증 (값은 출력하지 않음)
+  getSessionSecret();
 
-  const encrypted = encryptPrivateKey(_privateKeyHex);
-  await saveToDb(encrypted, _createdAt);
+  const loaded = await loadFromDb();
 
-  _initialized = true;
-  console.info(`[DelegatedSigner] 신규 생성 — address=${_signerAddress}`);
-  // 개인키는 절대 로그에 출력하지 않음
+  switch (loaded.status) {
+    case 'db_error':
+      throw new Error('[DelegatedSigner] DB 조회 실패 — 기존 signer 존재 여부 불명, 신규 생성 금지 (fail-closed)');
+
+    case 'corrupt':
+      throw new Error('[DelegatedSigner] signer 데이터 손상 감지 — 신규 생성·overwrite 금지 (fail-closed)');
+
+    case 'found': {
+      let privateKeyHex: string;
+      try {
+        privateKeyHex = decryptPrivateKey(loaded.encryptedKey);
+      } catch {
+        // SESSION_SECRET 변경 등으로 복호화 실패 — 새 signer로 자동 교체하지 않음
+        throw new Error('[DelegatedSigner] 기존 signer 복호화 실패 — 신규 생성·overwrite 금지 (fail-closed)');
+      }
+      _privateKeyHex  = privateKeyHex;
+      const account   = privateKeyToAccount(`0x${_privateKeyHex}` as `0x${string}`);
+      _signerAddress  = account.address;
+      _createdAt      = loaded.createdAt;
+      _initialized    = true;
+      console.info(`[DelegatedSigner] DB에서 복원 — address=${_signerAddress} createdAt=${_createdAt}`);
+      return;
+    }
+
+    case 'absent': {
+      // 신규 생성이 허용되는 유일한 경로
+      const rawKey   = randomBytes(32);
+      _privateKeyHex = rawKey.toString('hex');
+      const account  = privateKeyToAccount(`0x${_privateKeyHex}` as `0x${string}`);
+      _signerAddress = account.address;
+      _createdAt     = new Date().toISOString();
+
+      const encrypted = encryptPrivateKey(_privateKeyHex);
+      await saveToDb(encrypted, _createdAt);
+
+      _initialized = true;
+      console.info(`[DelegatedSigner] 신규 생성 — address=${_signerAddress}`);
+      // 개인키는 절대 로그에 출력하지 않음
+      return;
+    }
+  }
 }
 
 /** 공개 주소 반환. initializeDelegatedSigner() 이전에 호출하면 null. */

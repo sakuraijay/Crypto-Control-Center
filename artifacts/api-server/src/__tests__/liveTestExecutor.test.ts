@@ -39,6 +39,8 @@ vi.mock('drizzle-orm', () => ({
 const MOCK_SIGNER = '0xSignerAddr1234567890123456789012345678';
 
 vi.mock('../lib/delegatedSigner', () => ({
+  isDelegatedSignerEnabled: vi.fn(() => process.env.DELEGATED_SIGNER_ENABLED === 'true'),
+  isSignerInitialized:   vi.fn().mockReturnValue(true),
   getSignerAddress:      vi.fn().mockReturnValue(MOCK_SIGNER),
   getSignerWalletClient: vi.fn().mockReturnValue({
     writeContract: vi.fn().mockResolvedValue('0xMockTxHash'),
@@ -111,6 +113,7 @@ function baseParams() {
     accumLossUsd:      0,
     dbOk:              true,
     openPositionCount: 0,
+    liveTestMode:      true,
   };
 }
 
@@ -160,6 +163,7 @@ describe('closeLiveTestPosition — LOCKED 상태 시뮬레이션', () => {
       mainAddress:     MOCK_MAIN,
       accumLossUsd:    0,
       dbOk:            true,
+      liveTestMode:    true,
     });
 
     expect(result.simulated).toBe(true);

@@ -21,8 +21,10 @@
 
 ## 진척도
 
-- 현재 전체 개발 진척도 추정: **약 74%**
-- **LIVE 주문 전송과 실제 수익 운용은 아직 완료되지 않았음**
+- 현재 전체 개발 진척도 추정: **약 74%** (Publish 안전성 보정 진행 중)
+- **LIVE 주문 전송 코드는 존재하나 잠금 상태이며 미검증** —
+  `LIVE_TEST_EXECUTION_LOCKED` 기본 잠금 + `DELEGATED_SIGNER_ENABLED` 기본 비활성 +
+  중앙 실행 게이트로 실제 실행이 차단되어 있음. 실제 수익 운용은 아직 완료되지 않았음
 - 실제 GMX 사이트에서의 지갑 연결과 Crypto Control Center의 Subaccount
   실행 권한은 **별개** — GMX 사이트 연결이 되어도 본 시스템의 주문 권한과 무관
 
@@ -55,9 +57,26 @@
 9. 극소액 LIVE 검증
 10. 24시간 안정성 검증
 
+## 키 저장 정책 (명확한 분리)
+
+- **메인 지갑(MetaMask) Private Key·Seed Phrase**: 어떤 형태로도 요청·저장·출력 금지
+- **제한된 delegated signer(서버 생성 EOA)**: `DELEGATED_SIGNER_ENABLED=true`로
+  명시 활성화한 경우에만 생성되며, AES-256-GCM + scrypt(SESSION_SECRET) 암호화 후
+  DB에 저장 (공개 주소만 노출). 기본값은 비활성 — 최초 PAPER Publish에서는 미설정 유지
+- DB 조회 실패·복호화 실패·메타데이터 손상 시 신규 생성/overwrite 금지 (fail-closed)
+
+## 실행 안전 장치 (Publish 전 보강 완료)
+
+- 중앙 실행 게이트: `WORKER_ENGINE_MODE=LIVE` + `liveTestMode` + 잠금 해제 +
+  `DELEGATED_SIGNER_ENABLED=true` + Emergency Stop 비활성 + signer 초기화 +
+  DB/RPC 정상 + reconciliation 완료가 **전부** 충족돼야 실제 트랜잭션 서명에 도달
+- 재시작 reconciliation: SUBMITTED 주문은 임의로 FAILED 처리하지 않고
+  `UNRESOLVED`로 보존(txHash 유지). 상태불명 주문이 남아 있으면 신규
+  LIVE TEST 주문 차단 유지 (시간 경과만으로 FAILED 전환 금지)
+
 ## 절대 금지 사항
 
-- 개인키·시드 문구·Secret 저장 또는 출력
+- 메인 지갑 개인키·시드 문구·Secret 저장 또는 출력
 - 승인 없는 LIVE 주문과 자금 이동
 - 중복 주문
 - 불확실한 체결 상태에서 추가 주문

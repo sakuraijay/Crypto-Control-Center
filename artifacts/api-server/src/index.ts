@@ -3,7 +3,7 @@ import { logger } from "./lib/logger";
 import { runMigrations } from "@workspace/db";
 import { startRpcHealthMonitor } from "./workers/internalExecutor";
 import { workerManager } from "./workers/aiWorker";
-import { initializeDelegatedSigner } from "./lib/delegatedSigner";
+import { initializeDelegatedSigner, isDelegatedSignerEnabled } from "./lib/delegatedSigner";
 import { reconcileOnRestart, loadEmergencyStopFromDb } from "./workers/liveTestExecutor";
 import { resolveStaticDir, assertStaticDirReady, attachStaticServing } from "./lib/staticSite";
 import { parsePort } from "./lib/port";
@@ -40,11 +40,16 @@ runMigrations()
       }
       logger.info({ port }, "Server listening");
 
-      // Delegated signer: 키 복원(재시작) 또는 신규 생성. SESSION_SECRET 필요.
-      // LIVE TEST 모드가 아니어도 주소를 미리 생성해두면 배포 후 즉시 확인 가능.
-      initializeDelegatedSigner()
-        .then(() => logger.info("Delegated signer initialized"))
-        .catch((e: Error) => logger.warn({ err: e }, "Delegated signer init failed (non-fatal)"));
+      // Delegated signer: DELEGATED_SIGNER_ENABLED=true(정확히 'true')일 때만
+      // 키 복원/신규 생성 시도. 기본값(미설정)에서는 DB 접근·키 생성·SESSION_SECRET
+      // 요구 전부 없음 — "disabled" 로그만 남긴다 (최초 PAPER Publish 안전 기본값).
+      if (isDelegatedSignerEnabled()) {
+        initializeDelegatedSigner()
+          .then(() => logger.info("Delegated signer initialized"))
+          .catch((e: Error) => logger.warn({ err: e }, "Delegated signer init failed (fail-closed — signer 비활성 유지)"));
+      } else {
+        logger.info("Delegated signer disabled (DELEGATED_SIGNER_ENABLED != 'true')");
+      }
 
       // Emergency Stop 상태 복원 + SUBMITTED 주문 reconciliation
       loadEmergencyStopFromDb().catch(() => {});

@@ -8,7 +8,8 @@
  *  ✅ LIVE_TEST_EXECUTION_LOCKED=false 명시 해제 시에만 실제 주문 제출
  *  ✅ 매 주문 직전 온체인 위임 상태 + 하드캡 검증
  *  ✅ 모든 주문에 txHash + orderKey 감사로그 기록
- *  ✅ 재시작 후 pending 주문 조회로 중복 체결 방지
+ *  ✅ writeContract 직전 중앙 실행 게이트 (checkCentralExecutionGate, fail-closed)
+ *  ✅ 재시작 후 SUBMITTED 주문은 UNRESOLVED 보존 — 상태불명 시 신규 주문 차단
  *  ✅ LIVE_EXECUTION_LOCKED=true as const 는 별도 영구 잠금 (무제한 LIVE)
  *
  * ⚠️  라이브 전 필수:
@@ -30,9 +31,14 @@ import {
 } from '../lib/gmxSubaccount';
 import {
   checkLiveTestGate,
+  checkCentralExecutionGate,
   isLiveTestExecutionLocked,
   type GateInput,
 } from '../lib/liveTestGate';
+import {
+  isDelegatedSignerEnabled,
+  isSignerInitialized,
+} from '../lib/delegatedSigner';
 import {
   SUBACCOUNT_ROUTER_ABI,
   USDC_ADDRESS,
@@ -73,7 +79,7 @@ export interface AuditLogEntry {
   collateralUsd: number;
   txHash:       string | null;
   orderKey:     string | null;
-  status:       'SUBMITTED' | 'CONFIRMED' | 'FAILED' | 'SIMULATED' | 'CANCELLED';
+  status:       'SUBMITTED' | 'CONFIRMED' | 'FAILED' | 'SIMULATED' | 'CANCELLED' | 'UNRESOLVED';
   error:        string | null;
   simulated:    boolean;
   gateChecks:   Record<string, boolean>;
@@ -83,49 +89,86 @@ export interface AuditLogEntry {
 
 // ── 감사로그 읽기/쓰기 ─────────────────────────────────────────────────────────
 
-async function loadAuditLog(): Promise<AuditLogEntry[]> {
+/** 감사로그 로드 결과 — DB/파싱 실패를 '빈 로그'로 오인하지 않도록 명시 구분 */
+type AuditLogLoad =
+  | { ok: true; entries: AuditLogEntry[] }
+  | { ok: false };
+
+async function loadAuditLogStrict(): Promise<AuditLogLoad> {
   try {
     const rows = await db.select().from(workerStateTable).where(eq(workerStateTable.key, AUDIT_LOG_KEY));
-    if (!rows.length) return [];
-    return JSON.parse(rows[0].value) as AuditLogEntry[];
-  } catch { return []; }
+    if (!rows.length) return { ok: true, entries: [] };
+    return { ok: true, entries: JSON.parse(rows[0].value) as AuditLogEntry[] };
+  } catch {
+    return { ok: false };
+  }
 }
 
-async function appendAuditLog(entry: AuditLogEntry): Promise<void> {
+/** @returns 저장 성공 여부. 실패는 삼키지 않고 호출자에게 알린다. */
+async function appendAuditLog(entry: AuditLogEntry): Promise<boolean> {
   try {
-    const existing = await loadAuditLog();
+    const loaded = await loadAuditLogStrict();
+    // 로드 실패 시 기존 로그를 덮어쓰면 감사기록이 유실되므로 저장하지 않는다.
+    if (!loaded.ok) {
+      console.error('[LiveTestExecutor] 감사로그 로드 실패 — 항목 저장 불가 (기존 기록 보호)');
+      return false;
+    }
     // 최대 500개 보존 (FIFO)
-    const updated = [...existing, entry].slice(-500);
+    const updated = [...loaded.entries, entry].slice(-500);
     const now = new Date();
     await db.insert(workerStateTable)
       .values({ key: AUDIT_LOG_KEY, value: JSON.stringify(updated), updatedAt: now })
       .onConflictDoUpdate({ target: workerStateTable.key, set: { value: JSON.stringify(updated), updatedAt: now } });
+    return true;
   } catch (e) {
     console.error('[LiveTestExecutor] 감사로그 저장 실패:', e);
+    return false;
   }
 }
 
 export async function getAuditLog(limit = 100): Promise<AuditLogEntry[]> {
-  const all = await loadAuditLog();
-  return all.slice(-limit);
+  const loaded = await loadAuditLogStrict();
+  if (!loaded.ok) return [];
+  return loaded.entries.slice(-limit);
 }
 
 // ── 재시작 Reconciliation ─────────────────────────────────────────────────────
 
 /**
- * 서버 재시작 후 pending 주문 중복 방지.
- * 감사로그에서 SUBMITTED 상태인 항목을 확인 → 재시작 전 이미 제출된 주문 파악.
- * 현재는 SUBMITTED 항목을 FAILED로 마킹 (온체인 확인 미구현 — 안전 우선).
+ * 서버 재시작 후 pending 주문 중복 방지 (fail-closed).
+ *
+ * 규칙:
+ *  - SUBMITTED 주문은 온체인 확인 없이 임의로 FAILED로 바꾸지 않는다.
+ *    (실제로 체결됐을 수 있는 주문을 "실패"로 잘못 기록하면 감사기록이 오염됨)
+ *  - 대신 UNRESOLVED로 마킹: txHash 등 감사기록은 그대로 보존, 온체인 확인 필요 표시.
+ *  - UNRESOLVED(상태불명) 주문이 하나라도 있으면 _reconciled=false 유지
+ *    → 중앙 게이트가 신규 LIVE TEST 주문을 차단한다.
+ *  - 상태불명 주문이 전혀 없을 때만 _reconciled=true.
+ *  - 시간 경과만으로 FAILED 전환 금지. 해소는 온체인 확인(추후 구현) 또는
+ *    운영자의 명시적 판정으로만 가능.
+ *  - PAPER 모드 운영에는 영향 없음 (게이트는 LIVE TEST 실행 경로에만 적용).
  */
 export async function reconcileOnRestart(): Promise<void> {
   try {
-    const log = await loadAuditLog();
-    const pending = log.filter(e => e.status === 'SUBMITTED');
-    if (pending.length > 0) {
-      console.warn(`[LiveTestExecutor] 재시작 reconciliation: ${pending.length}개 SUBMITTED 주문 발견 — FAILED로 마킹`);
+    const loaded = await loadAuditLogStrict();
+    if (!loaded.ok) {
+      // 감사로그를 읽을 수 없으면 상태불명 주문 존재 여부를 알 수 없음 → fail-closed
+      _reconciled = false;
+      console.error('[LiveTestExecutor] Reconciliation: 감사로그 로드 실패 — 신규 LIVE TEST 주문 차단 (fail-closed)');
+      return;
+    }
+    const log = loaded.entries;
+    const submitted  = log.filter(e => e.status === 'SUBMITTED');
+    const unresolved = log.filter(e => e.status === 'UNRESOLVED');
+
+    if (submitted.length > 0) {
+      console.warn(
+        `[LiveTestExecutor] 재시작 reconciliation: ${submitted.length}개 SUBMITTED 주문 발견 — ` +
+        `UNRESOLVED로 마킹 (txHash 보존, 온체인 확인 필요)`,
+      );
       const updated = log.map(e =>
         e.status === 'SUBMITTED'
-          ? { ...e, status: 'FAILED' as const, error: '서버 재시작으로 인한 상태 불명확 — 안전상 FAILED 처리', confirmedAt: new Date().toISOString() }
+          ? { ...e, status: 'UNRESOLVED' as const, error: '서버 재시작 시 상태 불명 — 온체인 확인 전까지 UNRESOLVED 유지' }
           : e
       );
       const now = new Date();
@@ -133,12 +176,25 @@ export async function reconcileOnRestart(): Promise<void> {
         .values({ key: AUDIT_LOG_KEY, value: JSON.stringify(updated), updatedAt: now })
         .onConflictDoUpdate({ target: workerStateTable.key, set: { value: JSON.stringify(updated), updatedAt: now } });
     }
+
+    const unresolvedTotal = submitted.length + unresolved.length;
+    if (unresolvedTotal > 0) {
+      // 상태불명 주문 존재 → fail-closed: 신규 LIVE TEST 주문 차단 유지
+      _reconciled = false;
+      const now = new Date();
+      await db.insert(workerStateTable)
+        .values({ key: RECONCILED_KEY, value: 'false', updatedAt: now })
+        .onConflictDoUpdate({ target: workerStateTable.key, set: { value: 'false', updatedAt: now } });
+      console.warn(`[LiveTestExecutor] 상태불명(UNRESOLVED) 주문 ${unresolvedTotal}개 — 신규 LIVE TEST 주문 차단 (fail-closed)`);
+      return;
+    }
+
     _reconciled = true;
     const now = new Date();
     await db.insert(workerStateTable)
       .values({ key: RECONCILED_KEY, value: 'true', updatedAt: now })
       .onConflictDoUpdate({ target: workerStateTable.key, set: { value: 'true', updatedAt: now } });
-    console.info('[LiveTestExecutor] Reconciliation 완료');
+    console.info('[LiveTestExecutor] Reconciliation 완료 — 상태불명 주문 없음');
   } catch (e) {
     console.error('[LiveTestExecutor] Reconciliation 실패:', e);
     _reconciled = false;
@@ -146,6 +202,13 @@ export async function reconcileOnRestart(): Promise<void> {
 }
 
 export function isReconciled(): boolean { return _reconciled; }
+
+/** 감사로그에 UNRESOLVED(상태불명) 주문이 있는지 조회. 로드 실패 시 true (fail-closed). */
+export async function hasUnresolvedOrders(): Promise<boolean> {
+  const loaded = await loadAuditLogStrict();
+  if (!loaded.ok) return true;
+  return loaded.entries.some(e => e.status === 'UNRESOLVED' || e.status === 'SUBMITTED');
+}
 
 // ── Emergency Stop ─────────────────────────────────────────────────────────────
 
@@ -190,6 +253,8 @@ export interface LiveOrderParams {
   dbOk:          boolean;
   /** 현재 열린 포지션 수 (온체인) */
   openPositionCount: number;
+  /** 운영자 설정 liveTestMode 플래그 (중앙 게이트 검증용, fail-closed) */
+  liveTestMode: boolean;
 }
 
 export interface LiveOrderResult {
@@ -237,7 +302,30 @@ export async function executeLiveTestOrder(params: LiveOrderParams): Promise<Liv
     return { ok: true, txHash: null, orderKey: null, simulated: true, executedAt };
   }
 
-  const rpcUrl    = process.env.GMX_RPC_URL ?? '';
+  const rpcUrl = process.env.GMX_RPC_URL ?? '';
+
+  // ── 중앙 실행 게이트 (writeContract에 도달하기 전 최종 fail-closed 검증) ──
+  const central = checkCentralExecutionGate({
+    workerEngineMode:       process.env.WORKER_ENGINE_MODE,
+    liveTestMode:           params.liveTestMode,
+    delegatedSignerEnabled: isDelegatedSignerEnabled(),
+    emergencyStop:          _emergencyStop,
+    signerInitialized:      isSignerInitialized(),
+    dbOk:                   params.dbOk,
+    rpcOk:                  Boolean(rpcUrl),
+    reconciled:             _reconciled,
+  });
+  if (!central.allowed) {
+    await appendAuditLog({
+      id: entryId, decisionId: params.decisionId, cycleNumber: params.cycleNumber,
+      symbol: params.symbol, orderType: 'MarketIncrease', isLong: params.isLong,
+      sizeUsd: params.sizeUsd, collateralUsd: params.collateralUsd,
+      txHash: null, orderKey: null, status: 'FAILED', error: central.reason,
+      simulated: false, gateChecks: central.checks, submittedAt: executedAt, confirmedAt: null,
+    });
+    return { ok: false, txHash: null, orderKey: null, simulated: false, error: central.reason ?? 'Central gate failed', executedAt };
+  }
+
   const signerAddr = getSignerAddress();
   if (!signerAddr) {
     return { ok: false, txHash: null, orderKey: null, simulated: false, error: '[LIVE TEST] 사이너 미초기화', executedAt };
@@ -350,7 +438,7 @@ export async function executeLiveTestOrder(params: LiveOrderParams): Promise<Liv
 
     console.info(`[LiveTestExecutor] ✅ 주문 제출 — symbol=${params.symbol} isLong=${params.isLong} size=$${params.sizeUsd} txHash=${txHash}`);
 
-    // 감사로그
+    // 감사로그 (SUBMITTED 기록은 재시작 중복 방지의 핵심 — 저장 실패 시 fail-closed)
     const entry: AuditLogEntry = {
       id: entryId, decisionId: params.decisionId, cycleNumber: params.cycleNumber,
       symbol: params.symbol, orderType: 'MarketIncrease', isLong: params.isLong,
@@ -359,7 +447,14 @@ export async function executeLiveTestOrder(params: LiveOrderParams): Promise<Liv
       simulated: false, gateChecks: gateResult.checks,
       submittedAt: executedAt, confirmedAt: null,
     };
-    await appendAuditLog(entry);
+    const audited = await appendAuditLog(entry);
+    if (!audited) {
+      // 제출된 tx가 감사로그에 없으면 재시작 reconciliation이 이를 발견할 수 없음.
+      // 이후 신규 주문을 차단해 중복 체결 가능성을 제거한다.
+      _reconciled = false;
+      console.error(`[LiveTestExecutor] ⚠️ SUBMITTED 감사기록 저장 실패 (txHash=${txHash}) — 신규 주문 차단 (fail-closed)`);
+      return { ok: false, txHash, orderKey: null, simulated: false, error: '[LIVE TEST] 주문은 제출되었으나 감사기록 저장 실패 — 신규 주문 차단', gateResult, executedAt };
+    }
 
     return { ok: true, txHash, orderKey: null, simulated: false, gateResult, executedAt };
   } catch (err: unknown) {
@@ -393,6 +488,8 @@ export interface ClosePositionParams {
   mainAddress:     string;
   accumLossUsd:    number;
   dbOk:            boolean;
+  /** 운영자 설정 liveTestMode 플래그 (중앙 게이트 검증용, fail-closed) */
+  liveTestMode:    boolean;
 }
 
 export async function closeLiveTestPosition(params: ClosePositionParams): Promise<LiveOrderResult> {
@@ -413,7 +510,30 @@ export async function closeLiveTestPosition(params: ClosePositionParams): Promis
     return { ok: true, txHash: null, orderKey: null, simulated: true, executedAt };
   }
 
-  const rpcUrl    = process.env.GMX_RPC_URL ?? '';
+  const rpcUrl = process.env.GMX_RPC_URL ?? '';
+
+  // ── 중앙 실행 게이트 (writeContract에 도달하기 전 최종 fail-closed 검증) ──
+  const central = checkCentralExecutionGate({
+    workerEngineMode:       process.env.WORKER_ENGINE_MODE,
+    liveTestMode:           params.liveTestMode,
+    delegatedSignerEnabled: isDelegatedSignerEnabled(),
+    emergencyStop:          _emergencyStop,
+    signerInitialized:      isSignerInitialized(),
+    dbOk:                   params.dbOk,
+    rpcOk:                  Boolean(rpcUrl),
+    reconciled:             _reconciled,
+  });
+  if (!central.allowed) {
+    await appendAuditLog({
+      id: entryId, decisionId: params.decisionId, cycleNumber: params.cycleNumber,
+      symbol: params.symbol, orderType: 'MarketDecrease', isLong: params.isLong,
+      sizeUsd: params.sizeUsd, collateralUsd: 0,
+      txHash: null, orderKey: null, status: 'FAILED', error: central.reason,
+      simulated: false, gateChecks: central.checks, submittedAt: executedAt, confirmedAt: null,
+    });
+    return { ok: false, txHash: null, orderKey: null, simulated: false, error: central.reason ?? 'Central gate failed', executedAt };
+  }
+
   const signerAddr = getSignerAddress();
   if (!signerAddr) return { ok: false, txHash: null, orderKey: null, simulated: false, error: '사이너 미초기화', executedAt };
 
@@ -494,13 +614,18 @@ export async function closeLiveTestPosition(params: ClosePositionParams): Promis
     });
 
     console.info(`[LiveTestExecutor] ✅ 청산 제출 — symbol=${params.symbol} txHash=${txHash}`);
-    await appendAuditLog({
+    const audited = await appendAuditLog({
       id: entryId, decisionId: params.decisionId, cycleNumber: params.cycleNumber,
       symbol: params.symbol, orderType: 'MarketDecrease', isLong: params.isLong,
       sizeUsd: params.sizeUsd, collateralUsd: 0,
       txHash, orderKey: null, status: 'SUBMITTED', error: null,
       simulated: false, gateChecks: gateResult.checks, submittedAt: executedAt, confirmedAt: null,
     });
+    if (!audited) {
+      _reconciled = false;
+      console.error(`[LiveTestExecutor] ⚠️ SUBMITTED 감사기록 저장 실패 (txHash=${txHash}) — 신규 주문 차단 (fail-closed)`);
+      return { ok: false, txHash, orderKey: null, simulated: false, error: '[LIVE TEST] 청산은 제출되었으나 감사기록 저장 실패 — 신규 주문 차단', gateResult, executedAt };
+    }
     return { ok: true, txHash, orderKey: null, simulated: false, gateResult, executedAt };
   } catch (err: unknown) {
     const msg = (err as Error).message ?? 'Unknown error';

@@ -881,6 +881,7 @@ class WorkerManager {
           accumLossUsd:      paperState.liveTestAccumLossUsd,
           dbOk:              paperState.liveTestDbOk,
           openPositionCount: liveTestData.positionCount,
+          liveTestMode:      Boolean(limits.liveTestMode),
         });
 
         if (result.simulated) {
@@ -906,6 +907,7 @@ class WorkerManager {
           mainAddress,
           accumLossUsd:    paperState.liveTestAccumLossUsd,
           dbOk:            paperState.liveTestDbOk,
+          liveTestMode:    Boolean(limits.liveTestMode),
         });
 
         if (result.simulated) {

@@ -28,9 +28,10 @@ vi.mock('drizzle-orm', () => ({
   eq: vi.fn((_col, val) => `eq(${String(val)})`),
 }));
 
-// ── SESSION_SECRET 설정 ──────────────────────────────────────────────────────
+// ── SESSION_SECRET / DELEGATED_SIGNER_ENABLED 설정 ───────────────────────────
 beforeAll(() => {
   process.env.SESSION_SECRET = 'test-session-secret-for-delegated-signer-init-test-abc';
+  process.env.DELEGATED_SIGNER_ENABLED = 'true';
 });
 
 // ── 테스트 ──────────────────────────────────────────────────────────────────
@@ -92,21 +93,96 @@ describe('delegatedSigner — validateSignerIntegrity', () => {
   });
 });
 
-describe('delegatedSigner — SESSION_SECRET 없음', () => {
-  it('SESSION_SECRET 없으면 initializeDelegatedSigner가 오류를 던진다', async () => {
+describe('delegatedSigner — 부분 손상 signer 레코드', () => {
+  it('메타만 존재하고 키 레코드가 없으면 corrupt — 신규 생성/overwrite 금지', async () => {
+    const mod = await import('../lib/delegatedSigner');
+    mod.__resetDelegatedSignerForTests();
+    // 1번째 select = 키 레코드(없음), 2번째 select = 메타 레코드(존재)
+    mockWhere
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ key: 'delegatedSignerMeta', value: '{"createdAt":"2026-01-01T00:00:00.000Z"}' }]);
+    mockValues.mockClear();
+    await expect(mod.initializeDelegatedSigner()).rejects.toThrow(/손상/);
+    expect(mod.isSignerInitialized()).toBe(false);
+    expect(mockValues).not.toHaveBeenCalled(); // DB overwrite 없음
+    mockWhere.mockResolvedValue([]); // 기본 동작 복구
+  });
+});
+
+describe('delegatedSigner — SESSION_SECRET 검증', () => {
+  it('SESSION_SECRET 없으면 initializeDelegatedSigner가 오류를 던진다 (키 생성 없음)', async () => {
     const saved = process.env.SESSION_SECRET;
     delete process.env.SESSION_SECRET;
     try {
-      // 인메모리 캐시가 이미 초기화된 상태이므로 직접 함수 내부 경로 테스트 대신
-      // 암호화 유틸 경로만 테스트 (getSessionSecret 직접 호출 불가)
-      // → SESSION_SECRET 없이 암호화 시도가 오류를 일으키는지 간접 검증
-      const { initializeDelegatedSigner } = await import('../lib/delegatedSigner');
-      // 이미 초기화된 경우 early return하므로 직접 오류가 나지 않을 수 있음
-      // 핵심 검증: SESSION_SECRET이 없는 상태에서 암호화 함수 호출 시 오류
-      // (Node.js crypto 경로는 직접 노출되지 않음 — 이 테스트는 보안 문서화 목적)
-      await initializeDelegatedSigner(); // already initialized → no-op
+      const mod = await import('../lib/delegatedSigner');
+      mod.__resetDelegatedSignerForTests();
+      await expect(mod.initializeDelegatedSigner()).rejects.toThrow(/SESSION_SECRET/);
+      expect(mod.isSignerInitialized()).toBe(false);
     } finally {
       process.env.SESSION_SECRET = saved;
+    }
+  });
+
+  it('SESSION_SECRET이 최소 길이(32자) 미만이면 오류 (값 비노출)', async () => {
+    const saved = process.env.SESSION_SECRET;
+    process.env.SESSION_SECRET = 'short-secret';
+    try {
+      const mod = await import('../lib/delegatedSigner');
+      mod.__resetDelegatedSignerForTests();
+      await expect(mod.initializeDelegatedSigner()).rejects.toThrow(/최소 안전 길이/);
+      // 오류 메시지에 secret 값 자체가 포함되지 않아야 함
+      await mod.initializeDelegatedSigner().catch((e: Error) => {
+        expect(e.message).not.toContain('short-secret');
+      });
+      expect(mod.isSignerInitialized()).toBe(false);
+    } finally {
+      process.env.SESSION_SECRET = saved;
+    }
+  });
+});
+
+describe('delegatedSigner — DELEGATED_SIGNER_ENABLED 게이트', () => {
+  it("미설정이면 isDelegatedSignerEnabled()=false (기본값 비활성)", async () => {
+    const saved = process.env.DELEGATED_SIGNER_ENABLED;
+    delete process.env.DELEGATED_SIGNER_ENABLED;
+    try {
+      const { isDelegatedSignerEnabled } = await import('../lib/delegatedSigner');
+      expect(isDelegatedSignerEnabled()).toBe(false);
+    } finally {
+      process.env.DELEGATED_SIGNER_ENABLED = saved;
+    }
+  });
+
+  it("'TRUE', '1', 'yes' 등 정확히 'true'가 아닌 값은 전부 비활성", async () => {
+    const saved = process.env.DELEGATED_SIGNER_ENABLED;
+    const { isDelegatedSignerEnabled } = await import('../lib/delegatedSigner');
+    try {
+      for (const v of ['TRUE', 'True', '1', 'yes', ' true', 'true ', '']) {
+        process.env.DELEGATED_SIGNER_ENABLED = v;
+        expect(isDelegatedSignerEnabled()).toBe(false);
+      }
+      process.env.DELEGATED_SIGNER_ENABLED = 'true';
+      expect(isDelegatedSignerEnabled()).toBe(true);
+    } finally {
+      process.env.DELEGATED_SIGNER_ENABLED = saved;
+    }
+  });
+
+  it('비활성 상태에서 initializeDelegatedSigner는 DB 접근·키 생성 없이 no-op', async () => {
+    const saved = process.env.DELEGATED_SIGNER_ENABLED;
+    delete process.env.DELEGATED_SIGNER_ENABLED;
+    try {
+      const mod = await import('../lib/delegatedSigner');
+      mod.__resetDelegatedSignerForTests();
+      mockWhere.mockClear();
+      mockValues.mockClear();
+      await expect(mod.initializeDelegatedSigner()).resolves.toBeUndefined();
+      expect(mod.isSignerInitialized()).toBe(false);
+      expect(mod.getSignerAddress()).toBeNull();
+      expect(mockWhere).not.toHaveBeenCalled();   // DB 읽기 없음
+      expect(mockValues).not.toHaveBeenCalled();  // DB 쓰기 없음
+    } finally {
+      process.env.DELEGATED_SIGNER_ENABLED = saved;
     }
   });
 });

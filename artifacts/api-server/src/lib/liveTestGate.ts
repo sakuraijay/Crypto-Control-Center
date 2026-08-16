@@ -35,6 +35,85 @@ export function isLiveTestExecutionLocked(): boolean {
   return process.env.LIVE_TEST_EXECUTION_LOCKED !== 'false';
 }
 
+// ── 중앙 실행 게이트 (writeContract 직전 최종 검증) ────────────────────────────
+
+export interface CentralGateInput {
+  /** process.env.WORKER_ENGINE_MODE — 정확히 'LIVE'만 허용 */
+  workerEngineMode:        string | undefined;
+  /** 운영자 설정 liveTestMode 플래그 */
+  liveTestMode:            boolean;
+  /** DELEGATED_SIGNER_ENABLED === 'true' 여부 */
+  delegatedSignerEnabled:  boolean;
+  /** Emergency Stop 활성 여부 */
+  emergencyStop:           boolean;
+  /** delegated signer 초기화 완료 여부 */
+  signerInitialized:       boolean;
+  /** DB 정상 여부 */
+  dbOk:                    boolean;
+  /** RPC 설정/정상 여부 */
+  rpcOk:                   boolean;
+  /** 재시작 reconciliation 정상 완료 여부 (UNRESOLVED 주문 없음) */
+  reconciled:              boolean;
+}
+
+/**
+ * 실제 트랜잭션 서명(writeContract) 직전에 반드시 통과해야 하는 중앙 게이트.
+ * 모든 조건이 명시적으로 충족되지 않으면 fail-closed (차단).
+ * 기본값(미설정 환경)에서는 항상 차단된다:
+ *   WORKER_ENGINE_MODE 미설정 → 차단, LIVE_TEST_EXECUTION_LOCKED 미설정 → 잠금,
+ *   DELEGATED_SIGNER_ENABLED 미설정 → 차단.
+ */
+export function checkCentralExecutionGate(input: CentralGateInput): GateResult {
+  const checks: Record<string, boolean> = {};
+
+  checks.engineModeLive = input.workerEngineMode === 'LIVE';
+  if (!checks.engineModeLive) {
+    return { allowed: false, reason: '[CENTRAL GATE] WORKER_ENGINE_MODE가 LIVE가 아님 — 실제 실행 차단', checks };
+  }
+
+  checks.liveTestMode = input.liveTestMode === true;
+  if (!checks.liveTestMode) {
+    return { allowed: false, reason: '[CENTRAL GATE] liveTestMode 비활성 — 실제 실행 차단', checks };
+  }
+
+  checks.executionUnlocked = !isLiveTestExecutionLocked();
+  if (!checks.executionUnlocked) {
+    return { allowed: false, reason: '[CENTRAL GATE] LIVE_TEST_EXECUTION_LOCKED 해제되지 않음 — 실제 실행 차단', checks };
+  }
+
+  checks.delegatedSignerEnabled = input.delegatedSignerEnabled === true;
+  if (!checks.delegatedSignerEnabled) {
+    return { allowed: false, reason: '[CENTRAL GATE] DELEGATED_SIGNER_ENABLED가 true가 아님 — 실제 실행 차단', checks };
+  }
+
+  checks.noEmergencyStop = !input.emergencyStop;
+  if (!checks.noEmergencyStop) {
+    return { allowed: false, reason: '[CENTRAL GATE] Emergency Stop 활성 — 실제 실행 차단', checks };
+  }
+
+  checks.signerInitialized = input.signerInitialized === true;
+  if (!checks.signerInitialized) {
+    return { allowed: false, reason: '[CENTRAL GATE] delegated signer 미초기화 — 실제 실행 차단', checks };
+  }
+
+  checks.dbOk = input.dbOk === true;
+  if (!checks.dbOk) {
+    return { allowed: false, reason: '[CENTRAL GATE] DB 비정상 — 실제 실행 차단 (fail-closed)', checks };
+  }
+
+  checks.rpcOk = input.rpcOk === true;
+  if (!checks.rpcOk) {
+    return { allowed: false, reason: '[CENTRAL GATE] RPC 미설정/비정상 — 실제 실행 차단 (fail-closed)', checks };
+  }
+
+  checks.reconciled = input.reconciled === true;
+  if (!checks.reconciled) {
+    return { allowed: false, reason: '[CENTRAL GATE] 재시작 reconciliation 미완료 또는 상태불명 주문 존재 — 실제 실행 차단', checks };
+  }
+
+  return { allowed: true, reason: null, checks };
+}
+
 // ── 게이트 입력/출력 타입 ──────────────────────────────────────────────────────
 
 export interface GateInput {
