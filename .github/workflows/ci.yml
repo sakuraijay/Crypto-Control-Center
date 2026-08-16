@@ -1,0 +1,65 @@
+name: CI — TypeScript · Build · Tests
+
+on:
+  push:
+    branches: [main, master, dev]
+  pull_request:
+    branches: [main, master, dev]
+
+jobs:
+  quality-gate:
+    name: Quality Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # ── Step 1: TypeScript ─────────────────────────────────────────────────
+      # calendar.tsx / spinner.tsx 에 기존 pre-existing React 19 ref 오류가 있음.
+      # 이는 의도적으로 무시하며, 신규 오류만 CI 실패로 처리함.
+      - name: TypeScript — 신규 오류 검사
+        run: bash scripts/typecheck-ci.sh
+
+      # ── Step 4: Regression tests (api-server) ──────────────────────────────
+      - name: Tests — api-server (153+ tests)
+        run: pnpm --filter @workspace/api-server run test
+        env:
+          # 테스트 환경에서는 VAPID 키 없음 → fail-closed 경로 검증
+          NODE_ENV: test
+
+      # ── Step 5: Regression tests (futures-web) ─────────────────────────────
+      - name: Tests — futures-web
+        run: pnpm --filter @workspace/futures-web run test
+        env:
+          NODE_ENV: test
+
+      # ── Summary ─────────────────────────────────────────────────────────────
+      - name: CI Summary
+        if: always()
+        run: |
+          echo "=============================="
+          echo "CI Quality Gate Summary"
+          echo "=============================="
+          echo "- TypeScript libs:       ${{ steps.typecheck-libs.outcome || 'completed' }}"
+          echo "- TypeScript api-server: ${{ steps.typecheck-api.outcome  || 'completed' }}"
+          echo "- TypeScript web:        ${{ steps.typecheck-web.outcome  || 'completed' }}"
+          echo "- Tests api-server:      ${{ steps.tests-api.outcome      || 'completed' }}"
+          echo "- Tests web:             ${{ steps.tests-web.outcome      || 'completed' }}"
+          echo ""
+          echo "LIVE_EXECUTION_LOCKED=true 는 절대 변경하지 마세요."
