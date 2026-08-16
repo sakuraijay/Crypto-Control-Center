@@ -5,6 +5,7 @@ import { startRpcHealthMonitor } from "./workers/internalExecutor";
 import { workerManager } from "./workers/aiWorker";
 import { initializeDelegatedSigner } from "./lib/delegatedSigner";
 import { reconcileOnRestart, loadEmergencyStopFromDb } from "./workers/liveTestExecutor";
+import { resolveStaticDir, assertStaticDirReady, attachStaticServing } from "./lib/staticSite";
 
 const rawPort = process.env["PORT"];
 
@@ -18,6 +19,21 @@ const port = Number(rawPort);
 
 if (Number.isNaN(port) || port <= 0) {
   throw new Error(`Invalid PORT value: "${rawPort}"`);
+}
+
+// 프로덕션(Reserved VM 단일 프로세스): 빌드된 프런트엔드 정적 파일 + SPA fallback 제공.
+// API 라우터는 app.ts에서 이미 마운트되어 있으므로 항상 우선 처리된다.
+// index.html이 없으면 명확한 오류와 함께 즉시 종료 (fail-fast).
+if (process.env["NODE_ENV"] === "production") {
+  const staticDir = resolveStaticDir();
+  try {
+    assertStaticDirReady(staticDir);
+  } catch (err) {
+    logger.error({ err, staticDir }, "Frontend build output missing — aborting startup");
+    throw err;
+  }
+  attachStaticServing(app, staticDir);
+  logger.info({ staticDir }, "Static frontend serving enabled (production)");
 }
 
 // Start internal executor RPC health monitor (non-blocking)

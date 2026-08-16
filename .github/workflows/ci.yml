@@ -45,6 +45,16 @@ jobs:
         env:
           NODE_ENV: production
 
+      # ── Step 3: Deploy build gate (Reserved VM 단일 프로세스) ───────────────
+      # PORT/BASE_PATH 미주입 상태에서 build:deploy가 성공하고
+      # 웹·API 산출물이 모두 존재해야 한다.
+      - name: Build — deploy bundle (web + api-server)
+        id: build-deploy
+        run: |
+          env -u PORT -u BASE_PATH NODE_ENV=production pnpm run build:deploy
+          test -f artifacts/futures-web/dist/public/index.html
+          test -f artifacts/api-server/dist/index.mjs
+
       # ── Step 4: Regression tests (api-server) ──────────────────────────────
       - name: Tests — api-server (153+ tests)
         id: tests-api
@@ -69,6 +79,7 @@ jobs:
           echo "=============================="
           echo "- TypeScript (all):      ${{ steps.typecheck.outcome || 'skipped' }}"
           echo "- Build futures-web:     ${{ steps.build-web.outcome || 'skipped' }}"
+          echo "- Build deploy bundle:   ${{ steps.build-deploy.outcome || 'skipped' }}"
           echo "- Tests api-server:      ${{ steps.tests-api.outcome || 'skipped' }}"
           echo "- Tests web:             ${{ steps.tests-web.outcome || 'skipped' }}"
           echo ""
