@@ -260,6 +260,7 @@ describe('gmxDataStore — Keys 골든 + read-only reader (mock 전용)', () => 
       if (fn === 'containsAddress') return true;
       if (fn === 'subaccountApprovalNonces') return 3n;
       if (fn === 'getBytes32') return ZERO32;
+      if (fn === 'getBool') return false;   // feature/integration disabled 아님
       // getUint: expiresAt / maxAllowed / used를 키로 구분
       const key = args[0];
       if (key === subaccountExpiresAtKey(owner.address, signer.address)) return NOW + 1000n;
@@ -291,7 +292,8 @@ describe('gmxDataStore — Keys 골든 + read-only reader (mock 전용)', () => 
 describe('subaccountAuthState — 상태 판정 (fail-closed)', () => {
   const oc = (over: Partial<Parameters<typeof deriveSubaccountAuthState>[0]['onchain'] & object> = {}) => ({
     isSubaccountListed: true, expiresAt: NOW + 1000n, maxAllowedCount: 10n,
-    usedCount: 0n, remaining: 10n, integrationId: ZERO32 as Hex, approvalNonce: 0n, ...over,
+    usedCount: 0n, remaining: 10n, integrationId: ZERO32 as Hex, approvalNonce: 0n,
+    featureDisabled: false, integrationDisabled: false, blockTimestamp: null, ...over,
   });
   const base = { relayConfigured: true, signerInitialized: true, delegatedSignerEnabled: true, onchain: oc(), onchainError: null, nowSec: NOW };
 
