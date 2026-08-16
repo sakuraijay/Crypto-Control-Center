@@ -643,9 +643,9 @@ export function GmxOnchainCard() {
               {diagOpen && (
                 <div className="mt-2 flex flex-col gap-1.5 px-3 py-2.5 rounded-lg bg-secondary/50 border border-border/40 text-[10px] font-mono">
                   <div className="flex justify-between text-muted-foreground">
-                    <span>서브그래프 URL</span>
-                    <span className="text-foreground/80 truncate max-w-[60%] text-right" title="https://subgraph.satsuma-prod.com/…">
-                      satsuma-prod.com / gmx / synthetics-arbitrum-stats
+                    <span>데이터 소스</span>
+                    <span className="text-foreground/80 truncate max-w-[60%] text-right" title="Arbitrum RPC → /api/gmx/positions 프록시">
+                      Arbitrum RPC · GMX V2 PositionReader
                     </span>
                   </div>
                   <div className="flex justify-between text-muted-foreground">

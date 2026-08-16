@@ -634,7 +634,7 @@ export default function Settings() {
                   {walletReady ? (
                     <div className="flex flex-col gap-3">
                       <p className="text-xs text-muted-foreground">
-                        실제 GMX 온체인 데이터 — Arbitrum Satsuma 서브그래프 30초 주기 폴링.
+                        실제 GMX 온체인 데이터 — Arbitrum RPC (GMX V2 PositionReader) 30초 주기 폴링.
                         <strong className="text-foreground"> 서명 없이 조회 전용. PAPER 대시보드 데이터와 절대 혼합되지 않습니다.</strong>
                       </p>
 
@@ -714,7 +714,7 @@ export default function Settings() {
                             : gmx.status === 'unavailable'? '포지션 없음'
                             :                               '오류'}
                           </span>
-                          <span className="text-[10px] text-muted-foreground">Satsuma Subgraph</span>
+                          <span className="text-[10px] text-muted-foreground">Arbitrum RPC</span>
                         </div>
                       </div>
 

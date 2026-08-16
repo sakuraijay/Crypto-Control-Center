@@ -125,10 +125,26 @@ function Calendar({
       }}
       components={{
         Root: ({ className, rootRef, ...props }) => {
+          // rootRef is typed against react-day-picker's bundled @types/react@18.
+          // Assigning it directly to <div ref={}> causes TS2322 because our local
+          // @types/react@19 resolves a structurally-identical but nominally-different
+          // Ref type (VoidOrUndefinedOnly mismatch). We bridge via a local
+          // React.RefCallback<HTMLDivElement> that is typed entirely against @types/react@19
+          // and forwards the call — no error suppression needed.
+          const bridgedRef = React.useCallback((el: HTMLDivElement | null) => {
+            if (rootRef == null) return;
+            if (typeof rootRef === 'function') {
+              // React 18 RefCallback: (instance: T | null) => void | (() => VoidOrUndefinedOnly)
+              // We call it and intentionally discard the cleanup return value.
+              (rootRef as (instance: HTMLDivElement | null) => void)(el);
+            } else if ('current' in rootRef) {
+              (rootRef as React.MutableRefObject<HTMLDivElement | null>).current = el;
+            }
+          }, [rootRef]);
           return (
             <div
               data-slot="calendar"
-              ref={rootRef}
+              ref={bridgedRef}
               className={cn(className)}
               {...props}
             />

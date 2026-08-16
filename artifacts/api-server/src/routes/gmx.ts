@@ -225,22 +225,19 @@ export function getCachedChange24h(): Record<string, number> | null {
  */
 export { ensurePoller as ensureGmxPoller };
 
-// ── Positions proxy — Satsuma (primary) + Arbitrum RPC (fallback) ─────────────
+// ── Positions proxy — Arbitrum RPC ────────────────────────────────────────────
 //
 // Browser → GET /api/gmx/positions?account=0x…
-//         → server tries:
-//             1. Satsuma GraphQL (richer data, incl. liquidationPrice)
-//             2. Arbitrum RPC via GMX V2 PositionReader (fallback)
-//             3. { positions: [], source: "unavailable" } (last resort)
+//         → server queries Arbitrum RPC (GMX V2 PositionReader)
+//         → { positions: SubgraphPosition[], source: "rpc" }
+//         → { positions: [], source: "unavailable" } on RPC failure
 //
-// Rationale: Satsuma's CORS policy blocks direct browser requests in some
-// environments. The RPC fallback ensures positions are visible even when
-// Satsuma is unreachable. "unavailable" is returned only when both upstreams
-// fail — the browser must NOT clear displayed positions in that case.
+// "unavailable" is returned only when RPC fails — the browser must NOT
+// clear displayed positions in that case; it shows last known positions.
 //
 // Cache policy:
-//   - Successful result (subgraph / rpc): 30 s TTL
-//   - unavailable: 5 s TTL (avoids hammering upstreams on each poll)
+//   - Successful result (rpc): 30 s TTL
+//   - unavailable: 5 s TTL (allows quick retry on next browser poll)
 //
 // Privacy: wallet address only; no keys, signatures, or balances stored.
 
@@ -319,7 +316,6 @@ const POSITION_READER_ABI = [
   },
 ] as const;
 
-// Satsuma GraphQL subgraph (subgraph.satsuma-prod.com) removed — DNS unreachable.
 // All position reads go through Arbitrum RPC (GMX V2 PositionReader). See fetchFromRpc().
 
 /** Raw position shape from Arbitrum RPC normaliser. */
@@ -371,7 +367,7 @@ let liveTestServerCache: LiveTestServerData | null = null;
  * fetchServerLiveTestData — authoritative server-side LIVE TEST position and
  * connectivity verification using GMX_WALLET_ADDRESS env var.
  *
- * Queries Arbitrum RPC directly (Satsuma subgraph DNS unreachable from this host).
+ * Queries Arbitrum RPC directly (GMX V2 PositionReader contract).
  * Results are cached for LIVE_TEST_VERIFY_TTL_OK ms on success to avoid
  * hammering the RPC on every AI cycle (typically 60s).
  * Browser-posted diagnostics are NOT used.
@@ -395,7 +391,7 @@ export async function fetchServerLiveTestData(): Promise<{ positionCount: number
     return { positionCount: 999, subgraphOk: false };
   }
 
-  // Use RPC directly (Satsuma subgraph DNS unreachable from this host).
+  // Use RPC directly (GMX V2 PositionReader contract on Arbitrum).
   const positions: SubgraphPosition[] | null = await fetchFromRpc(walletAddress);
   const ok = positions !== null;
 
@@ -490,7 +486,7 @@ async function fetchFromRpc(account: string): Promise<SubgraphPosition[] | null>
  * GET /api/gmx/positions?account=0x…
  *
  * Returns active GMX V2 positions for the given wallet address.
- * Data source: Arbitrum RPC (GMX V2 PositionReader). No Satsuma subgraph.
+ * Data source: Arbitrum RPC (GMX V2 PositionReader).
  *
  * When source = "unavailable" the browser MUST NOT clear displayed positions —
  * it should keep showing the last known positions as stale data.

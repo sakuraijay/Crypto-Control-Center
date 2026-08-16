@@ -1,16 +1,16 @@
 /**
  * GmxAccountContext — GMX V2 온체인 계정 데이터 (Read-only)
  *
- * 연결된 지갑 주소를 기준으로 GMX Synthetics 서브그래프에서
+ * 연결된 지갑 주소를 기준으로 Arbitrum RPC (GMX V2 PositionReader)에서
  * 실제 온체인 포지션을 조회합니다.
  *
  * 보안 원칙:
- *   ✅ eth_call / 서브그래프 read-only 조회만 허용
+ *   ✅ eth_call / RPC read-only 조회만 허용
  *   ❌ 서명, 트랜잭션 전송, 개인키 접근 금지
  *   ❌ 실제 주문 실행 없음
  *
  * 데이터 소스:
- *   - GMX Synthetics Subgraph (Satsuma) — 포지션 목록
+ *   - Arbitrum RPC (GMX V2 PositionReader) — 포지션 목록 (/api/gmx/positions 프록시)
  *   - /api/gmx/markets       — 마켓 주소 → 심볼 매핑
  */
 
@@ -22,16 +22,14 @@ import { useWallet } from './WalletContext';
 
 // ── Positions are fetched via the API server proxy (/api/gmx/positions) ───────
 //
-// The browser no longer calls the Satsuma subgraph directly.  Reasons:
-//   1. Satsuma's CORS policy blocks browser requests in many environments.
-//   2. Proxying through the API server lets the server handle schema fallbacks
-//      (liquidationPrice) and retry logic without involving the browser.
+// The browser calls /api/gmx/positions which proxies to the Arbitrum RPC.
+// Proxying through the API server handles caching and retry logic.
 //
-// The API server returns { positions: SubgraphPosition[], source: 'subgraph'|'unavailable' }.
-// When source = 'unavailable' the positions array is empty and subgraphOk=false
-// is reported to the wallet diagnostic.
+// The API server returns { positions: SubgraphPosition[], source: 'rpc'|'unavailable' }.
+// When source = 'unavailable' the positions array is empty and the context
+// preserves last-known positions until connectivity is restored.
 
-/** Raw position shape as returned by /api/gmx/positions (mirrors Satsuma GraphQL). */
+/** Raw position shape as returned by /api/gmx/positions (Arbitrum RPC PositionReader). */
 type ProxyPosition = {
   id:               string;
   account:          string;
@@ -204,8 +202,8 @@ export function GmxAccountProvider({ children }: { children: ReactNode }) {
     const fetchStart = Date.now();
 
     try {
-      // ── Fetch via API server proxy (no direct Satsuma call from browser) ──
-      // The server handles CORS, schema fallback, and caching.
+      // ── Fetch via API server proxy (Arbitrum RPC, no browser-side calls) ──
+      // The server handles caching and RPC retries.
       const [symbolMap, pricesRes, posRes] = await Promise.all([
         getMarketSymbols(),
         fetch('/api/gmx/prices', { signal: AbortSignal.timeout(5_000) }).catch(() => null),
@@ -219,12 +217,12 @@ export function GmxAccountProvider({ children }: { children: ReactNode }) {
 
       const { positions: rawPositions, source } = await posRes.json() as {
         positions: ProxyPosition[];
-        source:    'subgraph' | 'rpc' | 'unavailable';
+        source:    'rpc' | 'unavailable';
       };
 
-      // When both Satsuma and RPC are unavailable, keep the existing positions
-      // on-screen rather than replacing them with an empty array.  The user
-      // sees their last known positions until connectivity is restored.
+      // When RPC is unavailable, keep the existing positions on-screen rather
+      // than replacing them with an empty array.  The user sees their last
+      // known positions until connectivity is restored.
       if (source === 'unavailable') {
         setState(prev => ({
           ...prev,
@@ -347,7 +345,7 @@ export function GmxAccountProvider({ children }: { children: ReactNode }) {
         body: JSON.stringify({
           walletConnected:    true,
           addressFingerprint: `${address.slice(0, 6)}\u2026${address.slice(-4)}`,
-          subgraphOk:         source === 'subgraph' || source === 'rpc',
+          subgraphOk:         source === 'rpc',
           positionCount:      positions.length,
           lastRefreshAt:      now.toISOString(),
         }),
