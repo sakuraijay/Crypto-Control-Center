@@ -38,7 +38,25 @@ export interface RelayFeeQuote {
   gasPrice: bigint;         // wei
   feeSwapPath: Address[];   // 이번 단계: 반드시 []
   quotedAtMs: number;
-  source: 'mock';           // 실제 어댑터 추가 시 'gelato' 등 확장
+  source: 'mock' | 'gelato'; // 'gelato' = 실제 transport quote (4단계 — 이번 단계 미사용)
+}
+
+/**
+ * transport quote → RelayFeeQuote 변환 (4단계).
+ * transport가 실패했으면 null — fallback 숫자 생성 금지.
+ */
+export function buildLiveFeeQuote(params: {
+  estimatedFeeWei: bigint; gasLimit: bigint; gasPrice: bigint; quotedAtMs: number;
+}): RelayFeeQuote {
+  return {
+    feeToken: WETH_ARBITRUM,
+    feeAmount: params.estimatedFeeWei,
+    gasLimit: params.gasLimit,
+    gasPrice: params.gasPrice,
+    feeSwapPath: [],
+    quotedAtMs: params.quotedAtMs,
+    source: 'gelato',
+  };
 }
 
 /**

@@ -28,6 +28,8 @@ export const RELAY_TASK_STATUS = {
   CONFIRMED: 'CONFIRMED',
   CANCELLED: 'CANCELLED',
   FAILED_PRE_BROADCAST: 'FAILED_PRE_BROADCAST',
+  /** broadcast 이후 확정 실패 (tx revert 등 온체인 증거 필수) — 4단계 */
+  FAILED: 'FAILED',
   UNRESOLVED: 'UNRESOLVED',
 } as const;
 export type RelayTaskStatus = (typeof RELAY_TASK_STATUS)[keyof typeof RELAY_TASK_STATUS];
@@ -36,6 +38,7 @@ export const TERMINAL_STATUSES: readonly RelayTaskStatus[] = [
   RELAY_TASK_STATUS.CONFIRMED,
   RELAY_TASK_STATUS.CANCELLED,
   RELAY_TASK_STATUS.FAILED_PRE_BROADCAST,
+  RELAY_TASK_STATUS.FAILED,
 ];
 
 /** 재시작 시 복구(재판정) 대상 — 외부 제출이 있었을 수 있는 모든 상태 */
@@ -52,14 +55,17 @@ const ALLOWED_TRANSITIONS: Record<string, readonly RelayTaskStatus[]> = {
   PREPARED: ['DRY_RUN_VALIDATED', 'CANCELLED', 'FAILED_PRE_BROADCAST', 'UNRESOLVED'],
   DRY_RUN_VALIDATED: ['SUBMITTING', 'CANCELLED', 'FAILED_PRE_BROADCAST', 'UNRESOLVED'],
   SUBMITTING: ['TASK_ACCEPTED', 'FAILED_PRE_BROADCAST', 'UNRESOLVED'],
-  TASK_ACCEPTED: ['TX_SUBMITTED', 'UNRESOLVED', 'CANCELLED'],
-  TX_SUBMITTED: ['ORDER_CREATED', 'CONFIRMED', 'UNRESOLVED', 'CANCELLED'],
-  ORDER_CREATED: ['CONFIRMED', 'UNRESOLVED', 'CANCELLED'],
-  UNRESOLVED: ['TASK_ACCEPTED', 'TX_SUBMITTED', 'ORDER_CREATED', 'CONFIRMED', 'CANCELLED'],
+  TASK_ACCEPTED: ['TX_SUBMITTED', 'UNRESOLVED', 'CANCELLED', 'FAILED'],
+  TX_SUBMITTED: ['ORDER_CREATED', 'CONFIRMED', 'UNRESOLVED', 'CANCELLED', 'FAILED'],
+  ORDER_CREATED: ['CONFIRMED', 'UNRESOLVED', 'CANCELLED', 'FAILED'],
+  // UNRESOLVED → terminal은 온체인/task 증거(resolutionBasis) 기반 전이만 —
+  // 자동·수동 강제 FAILED 금지는 reconciler 정책에서 강제한다.
+  UNRESOLVED: ['TASK_ACCEPTED', 'TX_SUBMITTED', 'ORDER_CREATED', 'CONFIRMED', 'CANCELLED', 'FAILED'],
   // terminal — 전이 없음
   CONFIRMED: [],
   CANCELLED: [],
   FAILED_PRE_BROADCAST: [],
+  FAILED: [],
 };
 
 export function isTransitionAllowed(from: string, to: RelayTaskStatus): boolean {
@@ -183,6 +189,30 @@ export async function listRecoveryTasks(): Promise<RelayTaskRow[]> {
     return await db.select().from(relayTasksTable)
       .where(inArray(relayTasksTable.status, [...RECOVERY_STATUSES]))
       .orderBy(desc(relayTasksTable.createdAt)).limit(100);
+  } catch {
+    return [];
+  }
+}
+
+/** 단건 조회 (UNRESOLVED 조사용) — 민감정보 없는 원본 row */
+export async function getRelayTaskById(taskId: string): Promise<RelayTaskRow | null> {
+  try {
+    const rows = await db.select().from(relayTasksTable)
+      .where(eq(relayTasksTable.id, taskId)).limit(1);
+    return rows[0] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** UNRESOLVED task 목록 (조사 UI용) */
+export async function listUnresolvedTasks(limit = 50): Promise<RelayTaskRow[]> {
+  try {
+    // SUBMITTING 포함: transport 호출 후 상태 저장에 실패한 stale 행도
+    // 조사 대상에 포함해 운영자 개입으로 수렴시킨다 (자동 종결 금지).
+    return await db.select().from(relayTasksTable)
+      .where(inArray(relayTasksTable.status, [RELAY_TASK_STATUS.UNRESOLVED, RELAY_TASK_STATUS.SUBMITTING]))
+      .orderBy(desc(relayTasksTable.createdAt)).limit(limit);
   } catch {
     return [];
   }

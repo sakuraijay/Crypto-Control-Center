@@ -55,9 +55,11 @@ export async function prepareRevokeSession(params: {
   feeToken: Address;
   feeAmount: bigint;
   nowSec: bigint;
+  /** durable allocation된 userNonce (relayNonce.allocateUserNonce) — epoch초 사용 금지 */
+  userNonce: bigint;
 }): Promise<RevokePrepareResult> {
   const chainId = ARBITRUM_ONE_CHAIN_ID;
-  const userNonce = params.nowSec; // 공식 interface 관행: epoch 초
+  const userNonce = params.userNonce;
   const deadline = params.nowSec + BigInt(REVOKE_SIGNATURE_DEADLINE_SECONDS);
 
   const relayParams = buildMinimalRelayParams({

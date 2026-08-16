@@ -319,6 +319,43 @@ async function markInvalid(id: string, reason: string): Promise<void> {
   } catch { /* 무효화 실패는 비치명 — 이후 조회에서 재검증됨 */ }
 }
 
+/**
+ * 온체인 반영 감지 → CONSUMED 전이 (4단계 §6).
+ * router subaccountApprovalNonces가 세션 nonce보다 커졌으면(= 승인이 온체인
+ * 반영되어 nonce가 증가) READY 세션을 CONSUMED로 마감한다.
+ * relay task accepted만으로는 절대 CONSUMED 금지 — canonical nonce 증거만 인정.
+ */
+export async function markConsumedIfNonceAdvanced(params: {
+  canonicalNonce: bigint;
+}): Promise<{ consumed: boolean }> {
+  let rows: SubaccountApprovalSessionRow[];
+  try {
+    rows = await db.select().from(subaccountApprovalSessionsTable)
+      .where(and(
+        eq(subaccountApprovalSessionsTable.purpose, APPROVAL_PURPOSE),
+        eq(subaccountApprovalSessionsTable.status, SESSION_STATUS.OWNER_SIGNATURE_READY),
+      ));
+  } catch {
+    return { consumed: false };
+  }
+  let consumed = false;
+  for (const row of rows) {
+    if (params.canonicalNonce > BigInt(row.approvalNonce)) {
+      try {
+        const updated = await db.update(subaccountApprovalSessionsTable)
+          .set({ status: SESSION_STATUS.CONSUMED, invalidReason: `canonical nonce ${params.canonicalNonce} > 세션 nonce ${row.approvalNonce} — 온체인 반영 확인`, updatedAt: new Date() })
+          .where(and(
+            eq(subaccountApprovalSessionsTable.id, row.id),
+            eq(subaccountApprovalSessionsTable.status, SESSION_STATUS.OWNER_SIGNATURE_READY),
+          ))
+          .returning({ id: subaccountApprovalSessionsTable.id });
+        if (updated.length === 1) consumed = true;
+      } catch { /* 다음 조회에서 재시도 */ }
+    }
+  }
+  return { consumed };
+}
+
 export interface ActiveSessionSummary {
   sessionId: string;
   status: string;
