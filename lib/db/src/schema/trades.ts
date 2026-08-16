@@ -1,4 +1,4 @@
-import { pgTable, text, numeric, bigint, timestamp } from "drizzle-orm/pg-core";
+import { pgTable, text, numeric, bigint, timestamp, boolean } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
@@ -35,6 +35,8 @@ export const tradesTable = pgTable("trades", {
   leverage:         numeric("leverage", { precision: 8, scale: 2 }),
   /** Collateral (margin) in USD at open. Null for legacy rows. */
   collateralUsd:    numeric("collateral_usd", { precision: 18, scale: 4 }),
+  /** True for trades recorded during LIVE TEST MODE sessions (default false). */
+  testMode:         boolean("test_mode").notNull().default(false),
 });
 
 export const insertTradeSchema = createInsertSchema(tradesTable).omit({ createdAt: true });

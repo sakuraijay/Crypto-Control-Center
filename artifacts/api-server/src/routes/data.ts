@@ -99,6 +99,7 @@ router.post("/data/trades", async (req, res) => {
     // Risk fields — null-safe; only OPEN trades carry these
     const leverageVal    = r.leverage != null ? String(r.leverage) : null;
     const collateralUsdV = r.collateralUsd != null ? String(r.collateralUsd) : null;
+    const testModeVal    = r.testMode === true;           // LIVE TEST MODE flag
 
     await db
       .insert(tradesTable)
@@ -121,6 +122,7 @@ router.post("/data/trades", async (req, res) => {
         // ── Risk fields ────────────────────────────────────────────
         leverage:         leverageVal,
         collateralUsd:    collateralUsdV,
+        testMode:         testModeVal,
       })
       .onConflictDoUpdate({
         target: tradesTable.id,

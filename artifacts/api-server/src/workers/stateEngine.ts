@@ -260,6 +260,12 @@ export interface EngineInput {
    */
   walletSubgraphOk?: boolean;
   /**
+   * True when the liveTestAccumLossUsd DB query succeeded.
+   * Default true (backward compat). false → fail-closed: block new LIVE TEST
+   * positions so a DB outage cannot allow unlimited losses to accumulate untracked.
+   */
+  liveTestDbOk?: boolean;
+  /**
    * Number of real on-chain GMX positions from the wallet diagnostic snapshot.
    * Authoritative for the LIVE TEST one-position cap — takes precedence over the
    * paper DB positions array (which only tracks Replit-originated paper trades).
@@ -281,6 +287,7 @@ export function runAiEngine(
     liveTestAccumLossUsd = 0,
     walletSubgraphOk = true,
     livePositionCount,
+    liveTestDbOk = true,
   } = input;
 
   const profitLockStage = computeProfitLockStage(
@@ -529,14 +536,20 @@ export function runAiEngine(
   // Only activates when limits.liveTestMode=true AND caller is in LIVE mode.
   // Any hardcap breach forces CASH + records block reason (overrides risk gate).
   if (limits.liveTestMode && isLiveMode && state !== 'CASH') {
-    // NOTE: Accumulated-loss emergency stop is intentionally deferred to task #80
-    // (requires PnL tracking from actual trade execution, not available while
-    //  LIVE_EXECUTION_LOCKED=true). Only structural/connectivity hardcaps run here.
-    const maxLev = limits.testMaxLeverage ?? 2;   // hard cap: always ≤ 2×
-    const budget = limits.testBudgetUsd   ?? 100; // hard cap: single position ≤ budget
+    const maxLev  = limits.testMaxLeverage ?? 2;   // hard cap: always ≤ 2×
+    const budget  = limits.testBudgetUsd   ?? 100; // hard cap: single position ≤ budget
+    const maxLoss = limits.testMaxLossUsd  ?? 50;  // hard cap: accumulated test losses
 
     let ltVeto: string | undefined;
-    if ((sizeUsd ?? 0) > budget) {
+
+    // 0. DB 조회 실패 → fail-closed (DB 장애 시 손실 추적 불가 → 진입 차단)
+    if (!liveTestDbOk) {
+      ltVeto = `[LIVE TEST] DB 거래 이력 조회 실패 — 안전을 위해 신규 포지션 차단 (fail-closed)`;
+    // 1. 누적 테스트 손실 한도 초과 → 세션 차단
+    } else if (liveTestAccumLossUsd >= maxLoss) {
+      ltVeto = `[LIVE TEST] 누적 테스트 손실 $${liveTestAccumLossUsd.toFixed(2)} ≥ 한도 $${maxLoss.toFixed(0)} — 세션 차단`;
+    // 2. 포지션 규모 > 테스트 예산
+    } else if ((sizeUsd ?? 0) > budget) {
       ltVeto = `[LIVE TEST] 포지션 규모 $${(sizeUsd ?? 0).toFixed(0)} > 테스트 예산 $${budget.toFixed(0)} — 차단`;
     } else if (Math.max(positions.length, livePositionCount ?? 0) >= 1) {
       // Use whichever is higher: paper DB positions OR real on-chain count from subgraph.

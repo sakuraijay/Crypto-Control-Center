@@ -99,6 +99,8 @@ export interface ExecutorStatus {
   liveTestVetoReason: string | null;
   /** Accumulated test losses tracked since activation (USD) */
   liveTestAccumLossUsd: number;
+  /** true = DB query succeeded; false = DB failed → LIVE TEST fail-closed */
+  liveTestDbOk: boolean;
 }
 
 export interface ExecuteOrderParams {
@@ -205,6 +207,7 @@ export function getExecutorStatus(): ExecutorStatus {
     liveTestMode:         workerStatus.liveTestMode,
     liveTestVetoReason:   workerStatus.liveTestVetoReason,
     liveTestAccumLossUsd: workerStatus.liveTestAccumLossUsd,
+    liveTestDbOk:         workerStatus.liveTestDbOk,
   };
 }
 

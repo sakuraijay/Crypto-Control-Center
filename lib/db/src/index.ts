@@ -89,6 +89,10 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         ADD COLUMN IF NOT EXISTS test_mode boolean NOT NULL DEFAULT false;
     `,
   },
+  {
+    name: "0009_trades_test_mode",
+    sql: `ALTER TABLE trades ADD COLUMN IF NOT EXISTS test_mode boolean NOT NULL DEFAULT false;`,
+  },
   // Add future migrations here in chronological order.
 ];
 

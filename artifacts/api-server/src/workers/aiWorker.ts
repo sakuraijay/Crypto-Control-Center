@@ -89,6 +89,8 @@ export interface WorkerStatus {
   liveTestVetoReason: string | null;
   /** Accumulated test losses tracked since activation (USD) */
   liveTestAccumLossUsd: number;
+  /** true = DB query succeeded; false = DB failed → LIVE TEST fail-closed */
+  liveTestDbOk: boolean;
 }
 
 // ── WorkerManager ─────────────────────────────────────────────────────────────
@@ -126,6 +128,8 @@ class WorkerManager {
   private lastLiveTestVetoReason: string | null = null;
   /** Whether liveTestMode was active in the last cycle */
   private lastLiveTestMode: boolean = false;
+  /** Whether the liveTestAccumLossUsd DB query succeeded in the last cycle */
+  private lastLiveTestDbOk: boolean = true;
   // ────────────────────────────────────────────────────────────────────────────
 
   /** 심볼별 가격 히스토리 버퍼 */
@@ -193,12 +197,9 @@ class WorkerManager {
       liveTestMode:         this.lastLiveTestMode,
       liveTestVetoReason:   this.lastLiveTestVetoReason,
       liveTestAccumLossUsd: this.liveTestAccumLossUsd,
+      liveTestDbOk:         this.lastLiveTestDbOk,
     };
   }
-
-  // NOTE: LIVE TEST accumulated-loss persistence (loadLiveTestStateFromDb / saveLiveTestAccumLoss)
-  // is intentionally deferred to task #80. Loss tracking requires PnL data from real trade
-  // execution, which is not available while LIVE_EXECUTION_LOCKED=true.
 
   // ── Equity HWM persistence ───────────────────────────────────────────────────
 
@@ -458,12 +459,17 @@ class WorkerManager {
     lastOpenTradeTimestampMs: number | null;
     /** mark-to-market 기준 미실현 PnL 합계 (USD) */
     totalUnrealizedPnl: number;
+    /** LIVE TEST MODE test_mode=true CLOSE 거래의 누적 손실 절댓값 합계 (USD) */
+    liveTestAccumLossUsd: number;
+    /** true = DB 조회 성공; false = 실패 → LIVE TEST fail-closed */
+    liveTestDbOk: boolean;
   }> {
     const ZEROS = {
       realizedPnLToday: 0, realizedPnLRolling24h: 0, realizedPnLWeekly: 0,
       totalRealizedPnlAllTime: 0,
       consecutiveLosses: 0, positions: [],
       tradesInLastHour: 0, lastOpenTradeTimestampMs: null, totalUnrealizedPnl: 0,
+      liveTestAccumLossUsd: 0, liveTestDbOk: false,  // false = DB 실패 → fail-closed
     };
 
     try {
@@ -507,6 +513,12 @@ class WorkerManager {
         if (ts >= rolling24hStart.getTime()) realizedPnLRolling24h += pnl;
         if (ts >= weekStart.getTime())       realizedPnLWeekly     += pnl;
       }
+
+      // LIVE TEST 누적 손실: test_mode=true CLOSE 거래 중 pnl < 0인 것의 절댓값 합계.
+      // DB에서 매 사이클 재계산하므로 서버 재시작 후에도 자동 복원됩니다.
+      const liveTestAccumLossUsd = closeTrades
+        .filter(t => t.testMode === true && parseFloat(t.pnl ?? '0') < 0)
+        .reduce((sum, t) => sum + Math.abs(parseFloat(t.pnl ?? '0')), 0);
 
       // 연속 손실 카운트: 최신 CLOSE부터 연속 음수 PnL
       let consecutiveLosses = 0;
@@ -584,9 +596,11 @@ class WorkerManager {
         totalRealizedPnlAllTime,
         consecutiveLosses, positions,
         tradesInLastHour, lastOpenTradeTimestampMs, totalUnrealizedPnl,
+        liveTestAccumLossUsd,
+        liveTestDbOk: true,
       };
     } catch (err) {
-      console.warn('[AIWorker] loadPaperState 실패 — synthetic zeros 사용:', (err as Error).message);
+      console.warn('[AIWorker] loadPaperState 실패 — synthetic zeros 사용 (LIVE TEST fail-closed):', (err as Error).message);
       return ZEROS;
     }
   }
@@ -727,22 +741,23 @@ class WorkerManager {
         accountDrawdownPct,
         // ── LIVE TEST MODE ────────────────────────────────────────────────
         isLiveMode,
-        liveTestAccumLossUsd: this.liveTestAccumLossUsd,  // always 0 until task #80
+        liveTestAccumLossUsd: paperState.liveTestAccumLossUsd,  // DB 기반, 재시작 후 자동 복원
+        liveTestDbOk:         paperState.liveTestDbOk,           // false → stateEngine fail-closed
         walletSubgraphOk,  // false when stale, disconnected, or wrong-network
-        // Server-authoritative on-chain position count (subgraph → RPC → 999 fail-closed).
+        // Server-authoritative on-chain position count (RPC → 999 fail-closed).
         // Never uses browser-posted data; see fetchServerLiveTestData() in gmx.ts.
         livePositionCount: liveTestData.positionCount,
       });
 
-      // LIVE TEST MODE: 상태 업데이트 + 차단 이유 기록
+      // LIVE TEST MODE: 상태 업데이트 + 누적 손실 캐시 갱신
       const testModeActive = Boolean(limits.liveTestMode && isLiveMode);
-      this.lastLiveTestMode = testModeActive;
+      this.lastLiveTestMode     = testModeActive;
+      this.liveTestAccumLossUsd = paperState.liveTestAccumLossUsd;
+      this.lastLiveTestDbOk     = paperState.liveTestDbOk;
       if (testModeActive) {
         const vetoPrefix = '[LIVE TEST]';
         const isTestVeto = engineResult.riskVetoReason?.startsWith(vetoPrefix);
         this.lastLiveTestVetoReason = isTestVeto ? (engineResult.riskVetoReason ?? null) : null;
-        // NOTE: liveTestAccumLossUsd accumulation requires real trade PnL — deferred to task #80.
-        // Until then the value stays 0 and is not persisted.
       } else {
         this.lastLiveTestVetoReason = null;
       }

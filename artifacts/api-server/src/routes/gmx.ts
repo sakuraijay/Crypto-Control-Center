@@ -358,9 +358,9 @@ type SubgraphPosition = {
 export interface PositionsResult {
   positions: SubgraphPosition[];
   /**
-   * 'subgraph' — Satsuma GraphQL responded (includes liquidationPrice when schema supports it)
-   * 'rpc'      — Satsuma failed; data read from Arbitrum RPC via PositionReader (no liquidationPrice)
-   * 'unavailable' — both upstreams failed; browser MUST keep showing last known positions
+   * 'rpc'      — Arbitrum RPC via GMX V2 PositionReader (primary; no liquidationPrice)
+   * 'subgraph' — Satsuma GraphQL (reserved; DNS currently unreachable from this host)
+   * 'unavailable' — RPC failed; browser MUST keep showing last known positions
    */
   source: 'subgraph' | 'rpc' | 'unavailable';
 }
@@ -390,9 +390,10 @@ let liveTestServerCache: LiveTestServerData | null = null;
  * fetchServerLiveTestData — authoritative server-side LIVE TEST position and
  * connectivity verification using GMX_WALLET_ADDRESS env var.
  *
- * Queries Satsuma subgraph → Arbitrum RPC → fail-closed. Results are cached
- * for LIVE_TEST_VERIFY_TTL_OK ms on success to avoid hammering the subgraph
- * on every AI cycle (typically 60s). Browser-posted diagnostics are NOT used.
+ * Queries Arbitrum RPC directly (Satsuma subgraph DNS unreachable from this host).
+ * Results are cached for LIVE_TEST_VERIFY_TTL_OK ms on success to avoid
+ * hammering the RPC on every AI cycle (typically 60s).
+ * Browser-posted diagnostics are NOT used.
  *
  * Returns { positionCount: 999, subgraphOk: false } on any failure so the
  * LIVE TEST hardcap always fails closed when the data source is unavailable.
@@ -413,14 +414,9 @@ export async function fetchServerLiveTestData(): Promise<{ positionCount: number
     return { positionCount: 999, subgraphOk: false };
   }
 
-  // Try subgraph (primary), then RPC (fallback), then fail-closed
-  let positions: SubgraphPosition[] | null = await fetchFromSatsuma(walletAddress);
-  let ok = positions !== null;
-
-  if (!ok) {
-    positions = await fetchFromRpc(walletAddress);
-    ok = positions !== null;
-  }
+  // Use RPC directly (Satsuma subgraph DNS unreachable from this host).
+  const positions: SubgraphPosition[] | null = await fetchFromRpc(walletAddress);
+  const ok = positions !== null;
 
   if (ok && positions !== null) {
     const positionCount = positions.length;
@@ -584,16 +580,9 @@ router.get("/gmx/positions", async (req, res) => {
     return res.json(cached.data);
   }
 
-  // 1. Try Satsuma (server-side, no CORS; richer data including liquidationPrice)
-  const sgPositions = await fetchFromSatsuma(account);
-  if (sgPositions != null) {
-    const result: PositionsResult = { positions: sgPositions, source: "subgraph" };
-    positionsCache.set(account, { data: result, expiresAt: Date.now() + POSITIONS_CACHE_TTL });
-    res.setHeader("Cache-Control", "no-cache");
-    return res.json(result);
-  }
-
-  // 2. Fallback: Arbitrum RPC via GMX V2 PositionReader (no liquidationPrice)
+  // 1. Arbitrum RPC via GMX V2 PositionReader — primary path.
+  //    Satsuma subgraph (subgraph.satsuma-prod.com) DNS is unreachable from this
+  //    host; calling it first only introduces connection timeouts and error logs.
   const rpcPositions = await fetchFromRpc(account);
   if (rpcPositions != null) {
     const result: PositionsResult = { positions: rpcPositions, source: "rpc" };
@@ -602,7 +591,7 @@ router.get("/gmx/positions", async (req, res) => {
     return res.json(result);
   }
 
-  // 3. Both upstreams failed — return empty with unavailable signal.
+  // 2. RPC failed — return empty with unavailable signal.
   // Short cache TTL so the next browser poll retries in 5 s, not 30 s.
   const result: PositionsResult = { positions: [], source: "unavailable" };
   positionsCache.set(account, { data: result, expiresAt: Date.now() + POSITIONS_UNAVAILABLE_TTL });

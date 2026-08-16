@@ -17,6 +17,7 @@ import {
   TrendingUp, TrendingDown, CheckCircle2, XCircle,
   AlertTriangle, ChevronRight, Zap, ZapOff, BarChart2,
   ChevronDown, ServerCrash, Download, RotateCcw, BellOff,
+  FlaskConical, FileText,
 } from 'lucide-react';
 import { format, formatDistanceToNowStrict } from 'date-fns';
 import type { AiEngineDecision, AiOperatingState, RiskLevel, PendingLiveApproval } from '@/lib/ai/types';
@@ -65,6 +66,59 @@ function downloadApprovalsCSV(approvals: PendingLiveApproval[]) {
   const a    = document.createElement('a');
   a.href = url;
   a.download = `ai-approvals-${format(new Date(), 'yyyy-MM-dd')}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function downloadSessionReportCSV(decisions: AiEngineDecision[]) {
+  const testDecisions = [...decisions]
+    .filter(d => d.testMode)
+    .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+  if (testDecisions.length === 0) return;
+
+  const sessionStart  = testDecisions[0].createdAt;
+  const sessionEnd    = testDecisions[testDecisions.length - 1].createdAt;
+  const vetoCount     = testDecisions.filter(d => !d.riskApproved).length;
+  const approvedCount = testDecisions.filter(d => d.riskApproved).length;
+  const maxLeverage   = Math.max(...testDecisions.map(d => d.leverage ?? 1));
+  const maxSizeUsd    = Math.max(...testDecisions.map(d => d.sizeUsd ?? 0));
+  const avgConf       = testDecisions.reduce((s, d) => s + d.confidence, 0) / testDecisions.length;
+  const latestVeto    = [...testDecisions].reverse().find(d => d.riskVetoReason)?.riskVetoReason ?? '—';
+  const stateDist     = testDecisions.reduce((acc, d) => {
+    acc[d.operatingState] = (acc[d.operatingState] ?? 0) + 1; return acc;
+  }, {} as Record<string, number>);
+
+  const rows: (string | number)[][] = [
+    ['LIVE TEST 세션 종료 리포트'],
+    ['세션 시작', format(new Date(sessionStart), 'yyyy-MM-dd HH:mm:ss')],
+    ['세션 종료', format(new Date(sessionEnd),   'yyyy-MM-dd HH:mm:ss')],
+    ['총 결정 사이클', testDecisions.length],
+    ['리스크 통과', approvedCount],
+    ['리스크 VETO 횟수', vetoCount],
+    ['최대 레버리지', `${maxLeverage.toFixed(1)}x`],
+    ['최대 포지션 규모 (USD)', maxSizeUsd.toFixed(0)],
+    ['평균 신뢰도 (%)', avgConf.toFixed(1)],
+    ['마지막 VETO 사유', latestVeto],
+    ['실현손익', 'LIVE_EXECUTION_LOCKED=true — 드라이런 시뮬레이션 (실제 자금 없음)'],
+    [],
+    ['상태 분포'],
+    ...Object.entries(stateDist).map(([s, n]) => [s, n]),
+    [],
+    ['결정 상세'],
+    ['시각', '사이클#', '상태', '심볼', '신뢰도%', '리스크', '규모USD', '레버리지', 'VETO사유'],
+    ...testDecisions.map(d => [
+      format(new Date(d.createdAt), 'yyyy-MM-dd HH:mm:ss'),
+      d.cycleNumber ?? '', d.operatingState, d.primarySymbol ?? '',
+      d.confidence, d.riskLevel, d.sizeUsd ?? '', d.leverage ?? '',
+      `"${(d.riskVetoReason ?? '').replace(/"/g, '""')}"`,
+    ]),
+  ];
+  const csv  = rows.map(r => r.map(c => String(c)).join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href = url;
+  a.download = `live-test-session-${format(new Date(), 'yyyy-MM-dd')}.csv`;
   a.click();
   URL.revokeObjectURL(url);
 }
@@ -260,6 +314,134 @@ type RiskFilter = RiskLevel | 'ALL';
 
 const PAGE_SIZE = 50;
 
+// ── LIVE TEST Session Report component ────────────────────────────────────────
+function LiveTestSessionReport({
+  decisions,
+  onDownload,
+}: {
+  decisions: AiEngineDecision[];
+  onDownload: () => void;
+}) {
+  const testDecisions = [...decisions]
+    .filter(d => d.testMode)
+    .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+
+  if (testDecisions.length === 0) {
+    return (
+      <Card className="p-6 flex flex-col items-center gap-3 text-center border-amber-500/20 bg-amber-500/5">
+        <FlaskConical className="w-8 h-8 text-amber-500/30" />
+        <p className="text-sm text-muted-foreground font-medium">LIVE TEST 결정 이력이 없습니다</p>
+        <p className="text-xs text-muted-foreground/60 max-w-sm">
+          Settings에서 LIVE TEST MODE를 활성화하고 AI Worker가 LIVE 모드(WORKER_ENGINE_MODE=LIVE)로
+          실행될 때 testMode=true 결정이 누적됩니다.
+        </p>
+      </Card>
+    );
+  }
+
+  const sessionStart  = testDecisions[0].createdAt;
+  const sessionEnd    = testDecisions[testDecisions.length - 1].createdAt;
+  const totalCycles   = testDecisions.length;
+  const vetoCount     = testDecisions.filter(d => !d.riskApproved).length;
+  const approvedCount = testDecisions.filter(d => d.riskApproved).length;
+  const maxLeverage   = Math.max(...testDecisions.map(d => d.leverage ?? 1));
+  const maxSizeUsd    = Math.max(...testDecisions.map(d => d.sizeUsd ?? 0));
+  const avgConf       = testDecisions.reduce((s, d) => s + d.confidence, 0) / totalCycles;
+  const latestVeto    = [...testDecisions].reverse().find(d => d.riskVetoReason)?.riskVetoReason;
+  const stateDist     = testDecisions.reduce((acc, d) => {
+    acc[d.operatingState] = (acc[d.operatingState] ?? 0) + 1; return acc;
+  }, {} as Record<string, number>);
+
+  return (
+    <Card className="overflow-hidden border-amber-500/20">
+      {/* Header */}
+      <div className="flex items-center justify-between px-4 py-3 border-b border-amber-500/20 bg-amber-500/5">
+        <div className="flex items-center gap-2">
+          <FlaskConical className="w-4 h-4 text-amber-400" />
+          <span className="text-sm font-semibold text-amber-400">LIVE TEST 세션 리포트</span>
+          <span className="text-[10px] text-muted-foreground bg-secondary px-1.5 py-0.5 rounded">
+            {totalCycles}개 결정
+          </span>
+        </div>
+        <button
+          onClick={onDownload}
+          className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground hover:text-foreground transition-colors border border-border rounded px-2.5 py-1"
+        >
+          <Download className="w-3 h-3" /> CSV 내보내기
+        </button>
+      </div>
+
+      <div className="p-4 space-y-4">
+        {/* Timeline */}
+        <div className="flex items-center gap-3 text-[11px] font-mono text-muted-foreground">
+          <span className="text-foreground font-medium">시작</span>
+          {format(new Date(sessionStart), 'yyyy-MM-dd HH:mm:ss')}
+          <ChevronRight className="w-3 h-3" />
+          <span className="text-foreground font-medium">마지막</span>
+          {format(new Date(sessionEnd), 'yyyy-MM-dd HH:mm:ss')}
+          <span className="ml-auto text-[10px]">
+            {formatDistanceToNowStrict(new Date(sessionStart))} 경과
+          </span>
+        </div>
+
+        {/* Stats grid */}
+        <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+          {[
+            { label: '총 사이클', value: totalCycles,                     color: 'text-primary' },
+            { label: '통과',      value: approvedCount,                   color: 'text-[var(--color-long)]' },
+            { label: 'VETO',      value: vetoCount,                       color: 'text-[var(--color-short)]' },
+            { label: '평균신뢰도', value: `${avgConf.toFixed(1)}%`,        color: '' },
+            { label: '최대레버리지', value: `${maxLeverage.toFixed(1)}×`, color: '' },
+            { label: '최대규모',  value: maxSizeUsd > 0 ? `$${maxSizeUsd.toLocaleString()}` : '—', color: '' },
+          ].map(({ label, value, color }) => (
+            <div key={label} className="bg-secondary rounded-lg p-2.5 text-center">
+              <div className="text-[8px] text-muted-foreground uppercase tracking-wider mb-0.5">{label}</div>
+              <div className={cn('text-base font-bold font-mono', color)}>{value}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* State distribution */}
+        <div>
+          <div className="text-[9px] text-muted-foreground uppercase tracking-wider mb-1.5">상태 분포</div>
+          <div className="flex flex-wrap gap-1.5">
+            {Object.entries(stateDist).map(([state, count]) => {
+              const cfg = STATE_CFG[state as AiOperatingState] ?? {
+                color: 'text-foreground', bg: 'bg-secondary border-border', icon: '○', label: state,
+              };
+              return (
+                <span key={state} className={cn(
+                  'inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] font-bold border',
+                  cfg.bg, cfg.color,
+                )}>
+                  {cfg.icon} {state} <span className="font-mono opacity-70">×{count}</span>
+                </span>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* PnL note */}
+        <div className="flex items-start gap-2 p-3 rounded-lg bg-secondary/50 border border-border text-[11px]">
+          <AlertTriangle className="w-3.5 h-3.5 text-amber-400 mt-0.5 shrink-0" />
+          <div className="text-muted-foreground">
+            <span className="font-semibold text-foreground">실현손익 미표시 — </span>
+            LIVE_EXECUTION_LOCKED=true 동안 모든 실행은 드라이런 시뮬레이션입니다 (실제 자금이동 없음).
+            실제 PnL은 LIVE_EXECUTION_LOCKED 해제 후 체결된 test_mode=true 거래에서 자동 집계됩니다.
+          </div>
+        </div>
+
+        {/* Latest veto reason */}
+        {latestVeto && (
+          <div className="text-[11px] font-mono text-[var(--color-short)] bg-[var(--color-short)]/5 border border-[var(--color-short)]/20 rounded p-2.5 break-all">
+            <span className="text-muted-foreground font-sans mr-1">마지막 VETO:</span>{latestVeto}
+          </div>
+        )}
+      </div>
+    </Card>
+  );
+}
+
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function AiLogPage() {
@@ -272,14 +454,20 @@ export default function AiLogPage() {
 
   const [stateFilter,    setStateFilter]    = useState<StateFilter>('ALL');
   const [riskFilter,     setRiskFilter]     = useState<RiskFilter>('ALL');
-  const [showVetoed,     setShowVetoed]     = useState(true);
+  const [showVetoed,      setShowVetoed]      = useState(true);
+  const [showTestOnly,    setShowTestOnly]    = useState(false);
+  const [showSessionReport, setShowSessionReport] = useState(false);
   const [visibleCount,   setVisibleCount]   = useState(PAGE_SIZE);
   const [hasMoreServer,  setHasMoreServer]  = useState(true);
   const [isFetchingMore, setIsFetchingMore] = useState(false);
 
   const isEmergency = engineState === 'EMERGENCY_STOP';
 
+  // testDecisions for session report (independent of other filters)
+  const testDecisions = decisionHistory.filter(d => d.testMode);
+
   const filtered = decisionHistory.filter(d => {
+    if (showTestOnly && !d.testMode)                                 return false;
     if (stateFilter !== 'ALL' && d.operatingState !== stateFilter) return false;
     if (riskFilter  !== 'ALL' && d.riskLevel       !== riskFilter)  return false;
     if (!showVetoed && !d.riskApproved)                              return false;
@@ -290,7 +478,7 @@ export default function AiLogPage() {
   const hasMoreInMemory = filtered.length > visibleCount;
 
   // Reset visible page when filters change
-  useEffect(() => { setVisibleCount(PAGE_SIZE); }, [stateFilter, riskFilter, showVetoed]);
+  useEffect(() => { setVisibleCount(PAGE_SIZE); }, [stateFilter, riskFilter, showVetoed, showTestOnly]);
 
   const handleLoadMoreInMemory = () => setVisibleCount(c => c + PAGE_SIZE);
 
@@ -344,6 +532,23 @@ export default function AiLogPage() {
           </Button>
           <Button size="sm" variant="outline" onClick={() => downloadDecisionsCSV(filtered)} disabled={filtered.length === 0} className="gap-1.5 text-muted-foreground" title="현재 필터 적용된 결정 이력 CSV 다운로드">
             <Download className="w-3.5 h-3.5" /> Export CSV
+          </Button>
+          <Button
+            size="sm" variant="outline"
+            onClick={() => setShowSessionReport(v => !v)}
+            className={cn(
+              'gap-1.5 text-[11px]',
+              showSessionReport
+                ? 'text-amber-400 border-amber-500/30 bg-amber-500/10'
+                : 'text-muted-foreground',
+            )}
+            title="LIVE TEST 세션 리포트"
+          >
+            <FileText className="w-3.5 h-3.5" />
+            세션 리포트
+            {testDecisions.length > 0 && (
+              <span className="font-mono text-[9px] opacity-70">({testDecisions.length})</span>
+            )}
           </Button>
           <Button size="sm" variant="destructive" onClick={triggerEmergencyStop} className="gap-1.5 font-bold tracking-wider text-[10px]">
             <ShieldAlert className="w-3.5 h-3.5" /> EMERGENCY STOP
@@ -488,12 +693,37 @@ export default function AiLogPage() {
           <XCircle className="w-3 h-3" /> {showVetoed ? 'Hide vetoed' : 'Show vetoed'}
         </button>
 
+        <div className="w-px h-4 bg-border" />
+
+        {/* LIVE TEST only filter — amber, distinct from PAPER/LIVE mode label */}
+        <button
+          onClick={() => setShowTestOnly(v => !v)}
+          className={cn(
+            'text-[10px] font-bold px-2 py-1 rounded border transition-colors flex items-center gap-1',
+            showTestOnly
+              ? 'bg-amber-500/10 border-amber-500/30 text-amber-400'
+              : 'bg-secondary border-border text-muted-foreground hover:text-foreground'
+          )}
+          title="testMode=true 결정만 표시 (LIVE TEST MODE 결정)"
+        >
+          <FlaskConical className="w-3 h-3" />
+          {showTestOnly ? '🧪 TEST ONLY (해제)' : '🧪 TEST ONLY'}
+        </button>
+
         <span className="ml-auto text-[10px] text-muted-foreground flex items-center gap-1">
           <BarChart2 className="w-3 h-3" />
           Showing {visible.length} of {filtered.length}
           {decisionHistory.length !== filtered.length && ` (${decisionHistory.length} total)`}
         </span>
       </Card>
+
+      {/* ── LIVE TEST Session Report ──────────────────────────────────────────── */}
+      {showSessionReport && (
+        <LiveTestSessionReport
+          decisions={decisionHistory}
+          onDownload={() => downloadSessionReportCSV(decisionHistory)}
+        />
+      )}
 
       {/* ── Decision table ────────────────────────────────────────────────────── */}
       <Card className="overflow-hidden flex flex-col">
