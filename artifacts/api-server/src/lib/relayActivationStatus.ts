@@ -11,6 +11,15 @@
 
 import { validateFeeQuote, type RelayFeeQuote } from './relayFeeQuote';
 
+/**
+ * 최우선 구조적 네트워크 게이트 (5단계 리뷰 반영).
+ * true면 canonical RPC readback·signer 저장소 접근·transport 발신 등
+ * 어떤 실제 외부 접근도 시작해서는 안 된다 (fail-closed 결과만 반환).
+ */
+export function isRelayNetworkStructurallyDisabled(env: NodeJS.ProcessEnv): boolean {
+  return env['GMX_RELAY_NETWORK_ENABLED'] !== 'true';
+}
+
 /** 재조정(reconciliation) 결과가 유효하다고 보는 최대 age */
 export const RECONCILIATION_FRESHNESS_MS = 10 * 60_000; // 10분
 

@@ -8,7 +8,7 @@ import { reconcileOnRestart, loadEmergencyStopFromDb, startPeriodicIntentReconci
 import { resolveStaticDir, assertStaticDirReady, attachStaticServing } from "./lib/staticSite";
 import { parsePort } from "./lib/port";
 import { markNotReady, markReady } from "./lib/readiness";
-import { runStartupRelayReconciliation } from "./lib/relayActivationStatus";
+import { runStartupRelayReconciliation, isRelayNetworkStructurallyDisabled } from "./lib/relayActivationStatus";
 import { countBlockingIntentsOrNull } from "./lib/executionIntents";
 import { countOpenRelayTasksOrNull } from "./lib/relayLifecycle";
 import { countUnboundNoncesOrNull } from "./lib/relayNonce";
@@ -64,10 +64,15 @@ httpServer = app.listen(port, (err) => {
       // Delegated signer: DELEGATED_SIGNER_ENABLED=true(정확히 'true')일 때만
       // 키 복원/신규 생성 시도. 기본값(미설정)에서는 DB 접근·키 생성·SESSION_SECRET
       // 요구 전부 없음 — "disabled" 로그만 남긴다 (최초 PAPER Publish 안전 기본값).
-      if (isDelegatedSignerEnabled()) {
+      // 추가 구조적 게이트(5단계 리뷰 반영): signer는 relay 제출 전용이므로
+      // GMX_RELAY_NETWORK_ENABLED가 꺼진 배포에서는 flag가 켜져 있어도
+      // 키 복원·생성(=signer 저장소 접근)을 시작하지 않는다.
+      if (isDelegatedSignerEnabled() && !isRelayNetworkStructurallyDisabled(process.env)) {
         initializeDelegatedSigner()
           .then(() => logger.info("Delegated signer initialized"))
           .catch((e: Error) => logger.warn({ err: e }, "Delegated signer init failed (fail-closed — signer 비활성 유지)"));
+      } else if (isDelegatedSignerEnabled()) {
+        logger.info("Delegated signer init skipped — relay 네트워크 비활성(GMX_RELAY_NETWORK_ENABLED != 'true'), signer 저장소 미접근");
       } else {
         logger.info("Delegated signer disabled (DELEGATED_SIGNER_ENABLED != 'true')");
       }

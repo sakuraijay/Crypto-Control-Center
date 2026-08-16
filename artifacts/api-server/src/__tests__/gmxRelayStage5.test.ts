@@ -97,6 +97,7 @@ vi.mock('@workspace/db', () => {
     relayTasksTable: proxied(tasksTable),
     relayNoncesTable: proxied(noncesTable),
     executionIntentsTable: proxied(intentsTable),
+    workerStateTable: proxied({ __name: 'worker_state' }),
   };
 });
 
@@ -137,6 +138,8 @@ import {
   getStartupReconciliationState, isReconciliationRunning, __resetActivationStatusForTests,
   RECONCILIATION_FRESHNESS_MS, type StartupReconciliationDeps,
 } from '../lib/relayActivationStatus';
+import { isRelayNetworkStructurallyDisabled } from '../lib/relayActivationStatus';
+import { signDigestWithDelegatedSigner } from '../lib/delegatedSigner';
 import { RELAY_TASK_STATUS } from '../lib/relayLifecycle';
 import { EVENT_LOG_2_TOPIC0, ORDER_EVENT_NAME_HASH } from '../lib/gmxOrderEvents';
 
@@ -568,6 +571,30 @@ describe('relayActivationStatus — reconciliationComplete 파생 (5단계 §4·
       countBlockingIntents: async () => { throw new Error('boom'); },
     }));
     expect(s.complete).toBe(false);
+  });
+});
+
+describe('구조적 네트워크 게이트 + signer 서명 게이트 (리뷰 반영)', () => {
+  it('GMX_RELAY_NETWORK_ENABLED !== true면 구조적 비활성 — canonical RPC·signer 저장소 접근 금지 신호', () => {
+    expect(isRelayNetworkStructurallyDisabled({} as NodeJS.ProcessEnv)).toBe(true);
+    expect(isRelayNetworkStructurallyDisabled({ GMX_RELAY_NETWORK_ENABLED: 'false' } as NodeJS.ProcessEnv)).toBe(true);
+    expect(isRelayNetworkStructurallyDisabled({ GMX_RELAY_NETWORK_ENABLED: 'TRUE' } as NodeJS.ProcessEnv)).toBe(true);
+    expect(isRelayNetworkStructurallyDisabled({ GMX_RELAY_NETWORK_ENABLED: 'true' } as NodeJS.ProcessEnv)).toBe(false);
+  });
+
+  it('signDigestWithDelegatedSigner: disabled면 서명 거부 (키 접근 없음)', async () => {
+    vi.stubEnv('DELEGATED_SIGNER_ENABLED', 'false');
+    await expect(signDigestWithDelegatedSigner(DIGEST)).rejects.toThrow(/disabled/);
+  });
+
+  it('signDigestWithDelegatedSigner: enabled여도 미초기화면 서명 거부', async () => {
+    vi.stubEnv('DELEGATED_SIGNER_ENABLED', 'true');
+    await expect(signDigestWithDelegatedSigner(DIGEST)).rejects.toThrow(/미초기화/);
+  });
+
+  it('signDigestWithDelegatedSigner: digest 형식 오류 거부', async () => {
+    vi.stubEnv('DELEGATED_SIGNER_ENABLED', 'true');
+    await expect(signDigestWithDelegatedSigner('0x123' as Hex)).rejects.toThrow();
   });
 });
 

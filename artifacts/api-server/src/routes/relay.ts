@@ -29,6 +29,7 @@ import { evaluateActivationGate } from '../lib/relayActivationGate';
 import {
   computeReconciliationComplete, evaluateFreshLiveQuote,
   getStartupReconciliationState, isReconciliationRunning,
+  isRelayNetworkStructurallyDisabled,
 } from '../lib/relayActivationStatus';
 import { countBlockingIntentsOrNull } from '../lib/executionIntents';
 import { countOpenRelayTasksOrNull } from '../lib/relayLifecycle';
@@ -75,6 +76,16 @@ interface CanonicalCheck {
 }
 
 async function checkCanonical(): Promise<CanonicalCheck> {
+  // 최우선 구조적 게이트 (5단계 리뷰 반영): relay 네트워크 비활성이면
+  // RPC client 생성·호출 자체를 금지한다 — 상태 조회 경로에서 어떤 실제
+  // 네트워크 read도 발생하지 않는다 (fail-closed 결과만 반환).
+  if (isRelayNetworkStructurallyDisabled(process.env)) {
+    return {
+      confirmed: false,
+      reason: 'canonical readback 미수행 — relay 네트워크 비활성(GMX_RELAY_NETWORK_ENABLED 미설정, 구조적 차단)',
+      approvalNonce: null, isSubaccountListed: null, expiresAt: null, remaining: null,
+    };
+  }
   const cfg = resolveGmxLiveRelayConfig();
   const mainAccount = getConfiguredMainAccount();
   const signer = getSignerAddress();
