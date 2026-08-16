@@ -47,6 +47,12 @@ httpServer = app.listen(port, (err) => {
   // Each migration file uses IF NOT EXISTS guards — safe to run on every start.
   runMigrations()
     .then(() => {
+      // 종료 신호가 이미 들어온 경우: ready 전환·백그라운드 서비스 기동 생략
+      // (server.close() 드레인 중 worker/signer가 새로 시작되는 race 방지)
+      if (shuttingDown) {
+        logger.info("Shutdown in progress — skipping post-migration startup");
+        return;
+      }
       markReady();
       logger.info("Migrations complete — API ready");
 
@@ -78,7 +84,11 @@ httpServer = app.listen(port, (err) => {
 // Graceful shutdown — stop AI worker, close HTTP server, then exit.
 // Must call process.exit() explicitly because installing a SIGTERM handler
 // overrides Node's default exit-on-SIGTERM behaviour.
+let shuttingDown = false;
+
 function shutdown(signal: string) {
+  shuttingDown = true;
+  markNotReady();
   logger.info({ signal }, "Shutdown signal received — stopping services");
   workerManager.stop();
   if (httpServer) {
