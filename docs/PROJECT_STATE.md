@@ -157,6 +157,29 @@
   - 다음 단계 남은 작업: 저장된 서명의 온체인 등록/relay 제출 경로(Gelato)
     구현·검증, revoke 지원 — LIVE 실행은 여전히 잠금·금지 상태
 
+- GMX delegated trading 3단계 (Gelato relay 강제 DRY-RUN + revoke) — 완료:
+  - relay 모드: GMX_RELAY_SUBMISSION_ENABLED='true' + GMX_RELAY_MODE=DRY_RUN만
+    활성. LIVE 요청은 구조적으로 DISABLED 강등(사유 기록). 어떤 경로도
+    Gelato/온체인 제출 없음 — submitEligible 항상 false, externalCallBudget=0
+  - durable relay lifecycle: relay_tasks 테이블(migration 0016) + 전이 테이블
+    (PREPARED→DRY_RUN_VALIDATED→…→CONFIRMED / terminal 역행 금지 / UNRESOLVED
+    자동 FAILED 금지 / idempotency_key unique / 조건부 UPDATE 전이)
+  - fee 방어: mock quote(gas×price×1.3), WETH allowlist·feeSwapPath 금지·
+    절대상한 0.005 ETH·stale 30s·notional 100bps·ETH 가격 미확인 fail-closed
+  - revoke 세션: purpose='REVOKE' owner 서명 흐름(RemoveSubaccount typehash,
+    digest 재계산 변조검사, recoverAddress owner 일치, AES 암호화 저장,
+    단일활성). APPROVAL 경로와 purpose 완전 격리(교차 무효화 버그 수정).
+    활성 revoke 세션 중 신규 주문 relay 차단
+  - 라우트: /executor/relay/status·dry-run·revoke/* 전부 운영자 인증(PIN),
+    dry-run 결과는 OPEN/CLOSE/REVOKE 모두 relay_tasks에 durable 기록.
+    revoke dry-run은 OWNER_SIGNATURE_READY 세션 필수
+  - Settings UI: RelayStatusCard — 모드·게이트·quote·revoke 흐름·최근 task,
+    DRY_RUN_VALIDATED/TASK_ACCEPTED를 성공처럼 표시하지 않음
+  - 테스트: api-server 458 PASS(신규 44 — 골든 typehash·결정성·변조 거부·
+    fee 방어·전이표·교차-purpose 회귀), futures-web 78 PASS
+  - 다음 단계 남은 작업: 실제 Gelato 제출 경로(별도 승인 후에만),
+    UNRESOLVED 수동 복구 UI — LIVE 실행은 여전히 잠금·금지 상태
+
 ## 절대 금지 사항
 
 - 메인 지갑 개인키·시드 문구·Secret 저장 또는 출력
