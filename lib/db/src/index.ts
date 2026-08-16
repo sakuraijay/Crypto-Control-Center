@@ -124,6 +124,19 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         WHERE status IN ('PREPARED', 'SUBMITTED', 'UNRESOLVED');
     `,
   },
+  {
+    name: "0012_execution_intents_onchain_evidence",
+    sql: `
+      -- 온체인 판정 근거 컬럼: receipt·order key·판정 블록·사유를 영속 저장
+      ALTER TABLE execution_intents ADD COLUMN IF NOT EXISTS order_key text;
+      ALTER TABLE execution_intents ADD COLUMN IF NOT EXISTS order_created_block text;
+      ALTER TABLE execution_intents ADD COLUMN IF NOT EXISTS receipt_status text;
+      ALTER TABLE execution_intents ADD COLUMN IF NOT EXISTS resolution_tx_hash text;
+      ALTER TABLE execution_intents ADD COLUMN IF NOT EXISTS resolution_block text;
+      ALTER TABLE execution_intents ADD COLUMN IF NOT EXISTS resolution_reason text;
+      ALTER TABLE execution_intents ADD COLUMN IF NOT EXISTS resolved_at timestamptz;
+    `,
+  },
   // Add future migrations here in chronological order.
 ];
 

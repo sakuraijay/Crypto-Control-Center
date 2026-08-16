@@ -40,8 +40,9 @@
 
 ## 테스트 기준
 
-- api-server 289개 + futures-web 53개 = **총 342개** PASS
+- api-server 318개 + futures-web 53개 = **총 371개** PASS
 - durable execution intent 테스트 추가 (executionIntents.test.ts, durableExecutionIntent.test.ts)
+- 온체인 intent reconciliation 테스트 추가 (intentReconciler.test.ts — mock RPC·고정 fixture 전용)
 - CI: `bash scripts/typecheck-ci.sh` → 배포 빌드 → 전체 테스트
 
 ## 남은 작업 순서
@@ -82,11 +83,22 @@
   자동 FAILED 금지, UNRESOLVED 처리. 중앙 실행 게이트가 미해소 intent
   (PREPARED/SUBMITTED/UNRESOLVED) 존재 시 최종 차단. OPEN·CLOSE 동일 경로,
   PAPER 모드 무영향
-- **남은 reconciliation 작업**: UNRESOLVED intent의 온체인 확인(트랜잭션
-  조회로 CONFIRMED/FAILED 판정) 및 운영자 수동 판정 UI는 미구현 —
-  현재는 UNRESOLVED가 남으면 신규 LIVE 주문이 영구 차단됨 (fail-closed).
-  LIVE 실행은 여전히 잠금·미검증 상태이며 금지 유지.
-- migration 0010은 코드에만 존재 — Production DB에는 다음 Publish 시
+- **온체인 intent reconciliation** (migration 0012): SUBMITTED/UNRESOLVED
+  intent를 tx receipt + GMX EventEmitter 이벤트(OrderCreated→key 추출,
+  OrderExecuted/OrderCancelled/OrderFrozen 조회)라는 온체인 증거로만 판정.
+  receipt reverted→FAILED, OrderExecuted→CONFIRMED, OrderCancelled→CANCELLED
+  (terminal, FAILED와 구분), frozen·pending·key 추출 실패·RPC 오류·chainId
+  불일치(≠42161)→차단 유지. 판정 근거(orderKey·생성 block·resolution tx/block·
+  사유)는 execution_intents에 영속 저장. 상태 전환은 조건부 UPDATE(차단
+  상태에서만)로 원자적 — terminal→blocking 역행·동시 reconcile 중복 전환 불가.
+  재시작 시 + 5분 주기(차단 intent 존재 시에만 RPC) 실행, RPC 오류는 Worker를
+  중단시키지 않음. read-only 상태 API: GET /api/executor/intents (수동 변경
+  엔드포인트 없음). PAPER 모드에서는 RPC 조회·intent 변경 전무.
+- **남은 reconciliation 한계**: PREPARED+txHash 없음(broadcast 불명) intent와
+  OrderFrozen·판정 불가 intent는 온체인으로 해소되지 않고 영구 차단 유지 —
+  운영자 수동 판정 절차는 의도적으로 미구현(fail-closed). LIVE 실행은 여전히
+  잠금·미검증 상태이며 금지 유지.
+- migration 0010~0012는 코드에만 존재 — Production DB에는 다음 Publish 시
   서버 기동 마이그레이션으로 자동 적용됨 (수동 적용 금지)
 
 ## 절대 금지 사항

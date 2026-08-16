@@ -4,7 +4,7 @@ import { runMigrations } from "@workspace/db";
 import { startRpcHealthMonitor } from "./workers/internalExecutor";
 import { workerManager } from "./workers/aiWorker";
 import { initializeDelegatedSigner, isDelegatedSignerEnabled } from "./lib/delegatedSigner";
-import { reconcileOnRestart, loadEmergencyStopFromDb } from "./workers/liveTestExecutor";
+import { reconcileOnRestart, loadEmergencyStopFromDb, startPeriodicIntentReconciliation } from "./workers/liveTestExecutor";
 import { resolveStaticDir, assertStaticDirReady, attachStaticServing } from "./lib/staticSite";
 import { parsePort } from "./lib/port";
 import { markNotReady, markReady } from "./lib/readiness";
@@ -70,6 +70,8 @@ httpServer = app.listen(port, (err) => {
       // Emergency Stop 상태 복원 + SUBMITTED 주문 reconciliation
       loadEmergencyStopFromDb().catch(() => {});
       reconcileOnRestart().catch(() => {});
+      // 차단 intent 온체인 재판정 (차단 intent 없으면 no-op — PAPER 무영향)
+      startPeriodicIntentReconciliation();
 
       // Start the 24/7 AI Worker after migrations complete
       // so the worker can read/write DB.

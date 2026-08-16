@@ -11,8 +11,24 @@
 import { Router } from "express";
 import { getExecutorStatus, executeOrder } from "../workers/internalExecutor";
 import type { ExecuteOrderParams } from "../workers/internalExecutor";
+import { listRecentIntents } from "../lib/executionIntents";
 
 const router = Router();
+
+// ── GET /executor/intents ─────────────────────────────────────────────────────
+// Read-only execution intent 상태 조회 — 수동 상태 변경 엔드포인트는 의도적으로
+// 존재하지 않는다 (차단 해소는 온체인 증거로만 가능, fail-closed).
+router.get("/executor/intents", async (_req, res) => {
+  try {
+    const intents = await listRecentIntents(50);
+    if (intents === null) {
+      return res.json({ ok: false, error: "intent 목록 조회 실패" });
+    }
+    return res.json({ ok: true, intents });
+  } catch {
+    return res.json({ ok: false, error: "intent 목록 조회 실패" });
+  }
+});
 
 // ── Dry-run parameter validator ───────────────────────────────────────────────
 // Returns an error string on failure, null on success.

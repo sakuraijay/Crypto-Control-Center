@@ -117,6 +117,13 @@ vi.mock('../lib/executionIntents', () => {
     reconcileIntentsOnRestart:    intentMocks.reconcileIntentsOnRestart,
   };
 });
+// 온체인 reconciler는 별도 테스트(intentReconciler.test.ts)에서 검증 —
+// 여기서는 "해소 없음" no-op으로 고정 (차단 유지 시나리오 보존)
+vi.mock('../lib/intentReconciler', () => ({
+  reconcileBlockingIntentsOnchain: vi.fn(async () => ({
+    ok: true, checked: 0, resolutions: [], stillBlocking: 0,
+  })),
+}));
 
 // ── env ──────────────────────────────────────────────────────────────────────
 const ENV_KEYS = ['WORKER_ENGINE_MODE', 'LIVE_TEST_EXECUTION_LOCKED', 'DELEGATED_SIGNER_ENABLED', 'GMX_RPC_URL'] as const;
@@ -284,6 +291,7 @@ describe('PAPER(LOCKED) 회귀 — intent 미생성', () => {
 describe('재시작 reconciliation — intent 검사', () => {
   it('차단 intent 존재 → reconciled=false 유지', async () => {
     intentState.reconcile = { ok: true, blockingCount: 2 };
+    intentState.blocking  = true; // 온체인 판정 후에도 잔존
     const { reconcileOnRestart, isReconciled } = await import('../workers/liveTestExecutor');
     await reconcileOnRestart();
     expect(isReconciled()).toBe(false);

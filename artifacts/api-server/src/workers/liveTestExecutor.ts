@@ -49,6 +49,10 @@ import {
   reconcileIntentsOnRestart,
 } from '../lib/executionIntents';
 import {
+  reconcileBlockingIntentsOnchain,
+  type IntentResolution,
+} from '../lib/intentReconciler';
+import {
   SUBACCOUNT_ROUTER_ABI,
   USDC_ADDRESS,
   ZERO_ADDRESS,
@@ -157,13 +161,59 @@ export async function getAuditLog(limit = 100): Promise<AuditLogEntry[]> {
  *    운영자의 명시적 판정으로만 가능.
  *  - PAPER 모드 운영에는 영향 없음 (게이트는 LIVE TEST 실행 경로에만 적용).
  */
+/**
+ * intent 온체인 판정 결과를 감사로그에 동기화 — 같은 txHash를 가진
+ * SUBMITTED/UNRESOLVED 항목을 CONFIRMED/FAILED/CANCELLED로 갱신한다.
+ * (intent가 온체인 증거로 해소됐는데 감사로그가 영구 차단으로 남는 것 방지)
+ */
+async function applyIntentResolutionsToAuditLog(resolutions: IntentResolution[]): Promise<void> {
+  if (resolutions.length === 0) return;
+  try {
+    const loaded = await loadAuditLogStrict();
+    if (!loaded.ok) {
+      console.error('[LiveTestExecutor] 감사로그 로드 실패 — intent 판정 동기화 보류 (차단 유지)');
+      return;
+    }
+    const byTx = new Map(resolutions.filter(r => r.txHash).map(r => [r.txHash as string, r]));
+    let changed = false;
+    const updated = loaded.entries.map(e => {
+      if (!e.txHash) return e;
+      const r = byTx.get(e.txHash);
+      if (!r) return e;
+      if (e.status !== 'SUBMITTED' && e.status !== 'UNRESOLVED') return e; // terminal 역행 금지
+      changed = true;
+      return {
+        ...e,
+        status:      r.status,
+        error:       r.status === 'CONFIRMED' ? null : r.reason,
+        confirmedAt: r.status === 'CONFIRMED' ? new Date().toISOString() : e.confirmedAt,
+      };
+    });
+    if (!changed) return;
+    const now = new Date();
+    await db.insert(workerStateTable)
+      .values({ key: AUDIT_LOG_KEY, value: JSON.stringify(updated), updatedAt: now })
+      .onConflictDoUpdate({ target: workerStateTable.key, set: { value: JSON.stringify(updated), updatedAt: now } });
+    console.info(`[LiveTestExecutor] 감사로그 ${byTx.size}건 intent 온체인 판정과 동기화`);
+  } catch (e) {
+    console.error('[LiveTestExecutor] 감사로그 동기화 실패 (차단 유지):', e);
+  }
+}
+
 export async function reconcileOnRestart(): Promise<void> {
   try {
     // durable execution intents를 감사로그보다 먼저 reconcile —
     // 감사로그에 상태불명 항목이 있어 조기 반환하더라도 PREPARED intent가
     // PREPARED로 남지 않고 반드시 UNRESOLVED로 전환되도록 보장한다.
     const intentResult = await reconcileIntentsOnRestart();
-    const intentsBlocked = !intentResult.ok || intentResult.blockingCount > 0;
+
+    // 차단 intent가 있으면 온체인 증거로 판정 시도 (RPC 오류 → 차단 유지, throw 안 함)
+    if (intentResult.ok && intentResult.blockingCount > 0) {
+      const summary = await reconcileBlockingIntentsOnchain();
+      await applyIntentResolutionsToAuditLog(summary.resolutions);
+    }
+    // 판정 후 잔여 차단 intent 재조회 (조회 실패 → true, fail-closed)
+    const intentsBlocked = !intentResult.ok || await hasBlockingIntents();
 
     const loaded = await loadAuditLogStrict();
     if (!loaded.ok) {
@@ -212,8 +262,7 @@ export async function reconcileOnRestart(): Promise<void> {
         .values({ key: RECONCILED_KEY, value: 'false', updatedAt: nowI })
         .onConflictDoUpdate({ target: workerStateTable.key, set: { value: 'false', updatedAt: nowI } });
       console.warn(
-        `[LiveTestExecutor] 미해소 execution intent ${intentResult.ok ? intentResult.blockingCount + '개' : '조회 실패'} — ` +
-        `신규 LIVE TEST 주문 차단 (fail-closed)`,
+        '[LiveTestExecutor] 온체인 판정 후에도 미해소 execution intent 잔존 — 신규 LIVE TEST 주문 차단 (fail-closed)',
       );
       return;
     }
@@ -231,6 +280,52 @@ export async function reconcileOnRestart(): Promise<void> {
 }
 
 export function isReconciled(): boolean { return _reconciled; }
+
+// ── 주기적 온체인 intent reconciliation ────────────────────────────────────────
+
+let _intentReconcileTimer: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * Worker 운영 중 주기적으로 차단 intent를 온체인 증거로 재판정한다.
+ *
+ * - 차단 intent가 0건이면 hasBlockingIntents의 DB 조회 1회 외에 아무 것도 하지
+ *   않는다 (RPC 호출·상태 변경 없음 — PAPER 모드 무영향).
+ * - 재시작 전용 전환(SUBMITTED→UNRESOLVED)은 수행하지 않는다 — 방금 제출된
+ *   SUBMITTED intent를 오염시키지 않기 위함. 온체인 판정 규칙만 적용된다.
+ * - 오류는 전부 흡수 (Worker 중단 금지). 차단 해소는 온체인 증거로만.
+ */
+export async function runPeriodicIntentReconciliation(): Promise<void> {
+  try {
+    if (!(await hasBlockingIntents())) return;
+    const summary = await reconcileBlockingIntentsOnchain();
+    await applyIntentResolutionsToAuditLog(summary.resolutions);
+    if (summary.resolutions.length === 0) return;
+    // 해소된 것이 있으면 차단 플래그 재평가 (감사로그+intent 모두 깨끗해야 해제)
+    const auditLoaded = await loadAuditLogStrict();
+    const auditBlocked = !auditLoaded.ok ||
+      auditLoaded.entries.some(e => e.status === 'SUBMITTED' || e.status === 'UNRESOLVED');
+    const stillBlocked = auditBlocked || await hasBlockingIntents();
+    _reconciled = !stillBlocked;
+    const now = new Date();
+    await db.insert(workerStateTable)
+      .values({ key: RECONCILED_KEY, value: String(_reconciled), updatedAt: now })
+      .onConflictDoUpdate({ target: workerStateTable.key, set: { value: String(_reconciled), updatedAt: now } });
+    console.info(`[LiveTestExecutor] 주기 reconciliation: ${summary.resolutions.length}건 해소, 차단=${stillBlocked}`);
+  } catch (e) {
+    console.error('[LiveTestExecutor] 주기 intent reconciliation 오류 (차단 유지, Worker 계속):', e);
+  }
+}
+
+/** 주기 reconciliation 시작 (기본 5분). 중복 시작 방지. */
+export function startPeriodicIntentReconciliation(intervalMs = 5 * 60_000): void {
+  if (_intentReconcileTimer) return;
+  _intentReconcileTimer = setInterval(() => { void runPeriodicIntentReconciliation(); }, intervalMs);
+  console.info(`[LiveTestExecutor] 주기 intent reconciliation 시작 (${Math.round(intervalMs / 1000)}s 간격)`);
+}
+
+export function stopPeriodicIntentReconciliation(): void {
+  if (_intentReconcileTimer) { clearInterval(_intentReconcileTimer); _intentReconcileTimer = null; }
+}
 
 /** 감사로그에 UNRESOLVED(상태불명) 주문이 있는지 조회. 로드 실패 시 true (fail-closed). */
 export async function hasUnresolvedOrders(): Promise<boolean> {

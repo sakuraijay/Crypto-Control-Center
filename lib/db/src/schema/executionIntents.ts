@@ -25,8 +25,23 @@ export const executionIntentsTable = pgTable("execution_intents", {
   sizeUsd:       numeric("size_usd", { precision: 18, scale: 4 }).notNull(),
   collateralUsd: numeric("collateral_usd", { precision: 18, scale: 4 }).notNull(),
   txHash:        text("tx_hash"),
-  status:        text("status").notNull(),               // PREPARED | SUBMITTED | CONFIRMED | FAILED | UNRESOLVED
+  status:        text("status").notNull(),               // PREPARED | SUBMITTED | CONFIRMED | FAILED | CANCELLED | UNRESOLVED
   error:         text("error"),
+  // ── 온체인 판정 근거 (migration 0012) ──────────────────────────────────────
+  /** GMX order key (bytes32 hex) — OrderCreated 이벤트 topic1에서 추출 */
+  orderKey:          text("order_key"),
+  /** OrderCreated가 포함된 블록 번호 (문자열로 저장) */
+  orderCreatedBlock: text("order_created_block"),
+  /** 트랜잭션 receipt status: 'success' | 'reverted' */
+  receiptStatus:     text("receipt_status"),
+  /** 최종 판정 근거가 된 트랜잭션 해시 (실행/취소 이벤트의 tx) */
+  resolutionTxHash:  text("resolution_tx_hash"),
+  /** 최종 판정 근거가 된 블록 번호 (문자열) */
+  resolutionBlock:   text("resolution_block"),
+  /** 판정 사유 (예: 'OrderExecuted 이벤트 확인', 'receipt reverted') */
+  resolutionReason:  text("resolution_reason"),
+  /** terminal 판정 시각 */
+  resolvedAt:        timestamp("resolved_at", { withTimezone: true }),
   createdAt:     timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt:     timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });

@@ -17,9 +17,12 @@
  */
 
 import { db, executionIntentsTable } from '@workspace/db';
-import { eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray } from 'drizzle-orm';
 
-export type IntentStatus = 'PREPARED' | 'SUBMITTED' | 'CONFIRMED' | 'FAILED' | 'UNRESOLVED';
+export type IntentStatus =
+  | 'PREPARED' | 'SUBMITTED'                     // 차단 (진행 중)
+  | 'UNRESOLVED'                                 // 차단 (판정 불가)
+  | 'CONFIRMED' | 'FAILED' | 'CANCELLED';        // terminal (역행 금지)
 
 /** 신규 LIVE 주문을 차단해야 하는 상태 (해소는 온체인 확인 또는 운영자 판정으로만) */
 export const BLOCKING_INTENT_STATUSES: IntentStatus[] = ['PREPARED', 'SUBMITTED', 'UNRESOLVED'];
@@ -144,6 +147,113 @@ export async function hasBlockingIntents(): Promise<boolean> {
   } catch (e) {
     console.error('[ExecutionIntents] 차단 intent 조회 실패 — 차단 유지 (fail-closed):', e);
     return true;
+  }
+}
+
+// ── 온체인 판정 (터미널 전환 + 근거 영속화) ──────────────────────────────────
+
+export type TerminalIntentStatus = 'CONFIRMED' | 'FAILED' | 'CANCELLED';
+
+export interface IntentEvidence {
+  receiptStatus?:     'success' | 'reverted';
+  orderKey?:          string;
+  orderCreatedBlock?: string;
+  resolutionTxHash?:  string | null;
+  resolutionBlock?:   string | null;
+  resolutionReason:   string;
+}
+
+/**
+ * 차단 상태(PREPARED/SUBMITTED/UNRESOLVED)에서만 terminal 상태로 원자적 전환.
+ * 조건부 UPDATE(status IN 차단집합)라서:
+ *  - terminal → blocking 역행 불가
+ *  - 여러 프로세스가 동시에 reconcile해도 한 쪽만 전환 성공 (0행 = 이미 처리됨)
+ */
+export async function resolveIntentTerminal(
+  id: string,
+  toStatus: TerminalIntentStatus,
+  evidence: IntentEvidence,
+): Promise<boolean> {
+  try {
+    const updated = await db.update(executionIntentsTable)
+      .set({
+        status:            toStatus,
+        receiptStatus:     evidence.receiptStatus ?? null,
+        orderKey:          evidence.orderKey ?? null,
+        orderCreatedBlock: evidence.orderCreatedBlock ?? null,
+        resolutionTxHash:  evidence.resolutionTxHash ?? null,
+        resolutionBlock:   evidence.resolutionBlock ?? null,
+        resolutionReason:  evidence.resolutionReason,
+        resolvedAt:        new Date(),
+        updatedAt:         new Date(),
+      })
+      .where(and(
+        eq(executionIntentsTable.id, id),
+        inArray(executionIntentsTable.status, BLOCKING_INTENT_STATUSES),
+      ))
+      .returning({ id: executionIntentsTable.id });
+    return updated.length > 0;
+  } catch (e) {
+    console.error(`[ExecutionIntents] terminal 전환 실패 (id=${id} → ${toStatus}) — 차단 유지:`, e);
+    return false;
+  }
+}
+
+/**
+ * 차단 상태를 유지한 채 온체인 근거(order key, receipt status 등)만 영속화.
+ * 조건부 UPDATE — terminal 상태 행은 건드리지 않는다.
+ */
+export async function updateIntentEvidence(
+  id: string,
+  evidence: Partial<IntentEvidence> & { error?: string },
+): Promise<boolean> {
+  try {
+    const set: Record<string, unknown> = { updatedAt: new Date() };
+    if (evidence.receiptStatus     !== undefined) set.receiptStatus     = evidence.receiptStatus;
+    if (evidence.orderKey          !== undefined) set.orderKey          = evidence.orderKey;
+    if (evidence.orderCreatedBlock !== undefined) set.orderCreatedBlock = evidence.orderCreatedBlock;
+    if (evidence.resolutionReason  !== undefined) set.resolutionReason  = evidence.resolutionReason;
+    if (evidence.error             !== undefined) set.error             = evidence.error;
+    const updated = await db.update(executionIntentsTable)
+      .set(set)
+      .where(and(
+        eq(executionIntentsTable.id, id),
+        inArray(executionIntentsTable.status, BLOCKING_INTENT_STATUSES),
+      ))
+      .returning({ id: executionIntentsTable.id });
+    return updated.length > 0;
+  } catch (e) {
+    console.error(`[ExecutionIntents] 근거 저장 실패 (id=${id}) — 차단 유지:`, e);
+    return false;
+  }
+}
+
+/** 차단 상태 intent 전체 조회 (온체인 reconciliation 대상). 실패 시 null (fail-closed). */
+export async function listBlockingIntents(): Promise<
+  Array<typeof executionIntentsTable.$inferSelect> | null
+> {
+  try {
+    return await db.select()
+      .from(executionIntentsTable)
+      .where(inArray(executionIntentsTable.status, BLOCKING_INTENT_STATUSES));
+  } catch (e) {
+    console.error('[ExecutionIntents] 차단 intent 목록 조회 실패 (fail-closed):', e);
+    return null;
+  }
+}
+
+/** 최근 intent 목록 (read-only 상태 API용). 실패 시 null. */
+export async function listRecentIntents(limit = 50): Promise<
+  Array<typeof executionIntentsTable.$inferSelect> | null
+> {
+  try {
+    return await db.select()
+      .from(executionIntentsTable)
+      .orderBy(desc(executionIntentsTable.createdAt))
+      .limit(limit);
+  } catch (e) {
+    console.error('[ExecutionIntents] intent 목록 조회 실패:', e);
+    return null;
   }
 }
 

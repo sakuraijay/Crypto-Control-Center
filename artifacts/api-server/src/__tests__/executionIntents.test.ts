@@ -61,16 +61,21 @@ vi.mock('@workspace/db', () => {
         }),
       }),
       select: vi.fn().mockReturnValue({
-        from: vi.fn().mockReturnValue({ where: vi.fn().mockImplementation(whereObj) }),
+        from: vi.fn().mockReturnValue({
+          where: vi.fn().mockImplementation(whereObj),
+          orderBy: vi.fn().mockReturnValue({ limit: (_n: number) => selectResult() }),
+        }),
       }),
     },
-    executionIntentsTable: { id: 'id', status: 'status' },
+    executionIntentsTable: { id: 'id', status: 'status', createdAt: 'created_at' },
   };
 });
 
 vi.mock('drizzle-orm', () => ({
   eq:      vi.fn((_col, val) => `eq(${String(val)})`),
   inArray: vi.fn((_col, vals) => `inArray(${String(vals)})`),
+  and:     vi.fn((...args: unknown[]) => `and(${args.join(',')})`),
+  desc:    vi.fn((col: unknown) => `desc(${String(col)})`),
 }));
 
 beforeEach(() => {
@@ -189,5 +194,61 @@ describe('reconcileIntentsOnRestart', () => {
     const { reconcileIntentsOnRestart } = await import('../lib/executionIntents');
     const r = await reconcileIntentsOnRestart();
     expect(r.ok).toBe(false);
+  });
+});
+
+describe('resolveIntentTerminal — 조건부 terminal 전환', () => {
+  it('전환 성공 → true, 상태+증거 저장', async () => {
+    const { resolveIntentTerminal } = await import('../lib/executionIntents');
+    const ok = await resolveIntentTerminal('intent:open:d1', 'CONFIRMED', {
+      receiptStatus: 'success', orderKey: '0xkey', resolutionTxHash: '0xTx',
+      resolutionBlock: '123', resolutionReason: 'OrderExecuted 이벤트 확인',
+    });
+    expect(ok).toBe(true);
+    expect(dbState.lastUpdateSet).toMatchObject({
+      status: 'CONFIRMED', orderKey: '0xkey', resolutionBlock: '123',
+    });
+  });
+
+  it('0행 반환(이미 terminal / 동시 reconcile 선점) → false, 역행 없음', async () => {
+    dbState.updateReturning = [];
+    const { resolveIntentTerminal } = await import('../lib/executionIntents');
+    const ok = await resolveIntentTerminal('intent:open:d1', 'FAILED', {
+      resolutionReason: 'receipt reverted',
+    });
+    expect(ok).toBe(false);
+  });
+
+  it('UPDATE 예외 → false (차단 유지)', async () => {
+    dbState.updateThrows = true;
+    const { resolveIntentTerminal } = await import('../lib/executionIntents');
+    expect(await resolveIntentTerminal('x', 'CANCELLED', { resolutionReason: 'r' })).toBe(false);
+  });
+});
+
+describe('updateIntentEvidence — 차단 유지한 채 근거만 저장', () => {
+  it('orderKey·블록 저장, status는 건드리지 않음', async () => {
+    const { updateIntentEvidence } = await import('../lib/executionIntents');
+    const ok = await updateIntentEvidence('intent:open:d1', {
+      receiptStatus: 'success', orderKey: '0xkey', orderCreatedBlock: '100',
+    });
+    expect(ok).toBe(true);
+    expect(dbState.lastUpdateSet).toMatchObject({ orderKey: '0xkey', orderCreatedBlock: '100' });
+    expect(dbState.lastUpdateSet).not.toHaveProperty('status');
+  });
+});
+
+describe('listBlockingIntents / listRecentIntents', () => {
+  it('조회 실패 → null (fail-closed)', async () => {
+    dbState.selectThrows = true;
+    const { listBlockingIntents, listRecentIntents } = await import('../lib/executionIntents');
+    expect(await listBlockingIntents()).toBeNull();
+    expect(await listRecentIntents()).toBeNull();
+  });
+
+  it('정상 조회 → 행 반환', async () => {
+    dbState.selectRows = [{ id: 'a', status: 'UNRESOLVED' }];
+    const { listBlockingIntents } = await import('../lib/executionIntents');
+    expect(await listBlockingIntents()).toEqual([{ id: 'a', status: 'UNRESOLVED' }]);
   });
 });
