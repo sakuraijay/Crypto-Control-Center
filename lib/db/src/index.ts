@@ -93,6 +93,27 @@ const MIGRATIONS: { name: string; sql: string }[] = [
     name: "0009_trades_test_mode",
     sql: `ALTER TABLE trades ADD COLUMN IF NOT EXISTS test_mode boolean NOT NULL DEFAULT false;`,
   },
+  {
+    name: "0010_execution_intents",
+    sql: `
+      CREATE TABLE IF NOT EXISTS execution_intents (
+        id             text PRIMARY KEY,
+        decision_id    text NOT NULL,
+        cycle_number   integer NOT NULL,
+        symbol         text NOT NULL,
+        order_type     text NOT NULL,
+        is_long        boolean NOT NULL,
+        size_usd       numeric(18,4) NOT NULL,
+        collateral_usd numeric(18,4) NOT NULL,
+        tx_hash        text,
+        status         text NOT NULL,
+        error          text,
+        created_at     timestamptz NOT NULL DEFAULT now(),
+        updated_at     timestamptz NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS execution_intents_status_idx ON execution_intents (status);
+    `,
+  },
   // Add future migrations here in chronological order.
 ];
 

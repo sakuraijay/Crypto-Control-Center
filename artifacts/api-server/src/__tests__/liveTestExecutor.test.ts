@@ -33,6 +33,18 @@ vi.mock('@workspace/db', () => ({
 
 vi.mock('drizzle-orm', () => ({
   eq: vi.fn((_col, val) => `eq(${String(val)})`),
+  inArray: vi.fn(),
+}));
+
+// ── executionIntents 모킹 (LOCKED 경로는 도달하지 않음 — 무해한 기본값) ────────
+vi.mock('../lib/executionIntents', () => ({
+  buildIntentId:                (decisionId: string, orderType: string) => `intent:${orderType}:${decisionId}`,
+  createPreparedIntent:         vi.fn(async () => 'created'),
+  markIntentSubmitted:          vi.fn(async () => true),
+  markIntentUnresolved:         vi.fn(async () => true),
+  markIntentFailedPreBroadcast: vi.fn(async () => true),
+  hasBlockingIntents:           vi.fn(async () => false),
+  reconcileIntentsOnRestart:    vi.fn(async () => ({ ok: true, blockingCount: 0 })),
 }));
 
 // ── delegatedSigner 모킹 ─────────────────────────────────────────────────────

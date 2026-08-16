@@ -40,6 +40,15 @@ import {
   isSignerInitialized,
 } from '../lib/delegatedSigner';
 import {
+  buildIntentId,
+  createPreparedIntent,
+  markIntentSubmitted,
+  markIntentUnresolved,
+  markIntentFailedPreBroadcast,
+  hasBlockingIntents,
+  reconcileIntentsOnRestart,
+} from '../lib/executionIntents';
+import {
   SUBACCOUNT_ROUTER_ABI,
   USDC_ADDRESS,
   ZERO_ADDRESS,
@@ -189,6 +198,21 @@ export async function reconcileOnRestart(): Promise<void> {
       return;
     }
 
+    // durable execution intents 검사 — PREPARED/SUBMITTED → UNRESOLVED 전환 (txHash 보존)
+    const intentResult = await reconcileIntentsOnRestart();
+    if (!intentResult.ok || intentResult.blockingCount > 0) {
+      _reconciled = false;
+      const nowI = new Date();
+      await db.insert(workerStateTable)
+        .values({ key: RECONCILED_KEY, value: 'false', updatedAt: nowI })
+        .onConflictDoUpdate({ target: workerStateTable.key, set: { value: 'false', updatedAt: nowI } });
+      console.warn(
+        `[LiveTestExecutor] 미해소 execution intent ${intentResult.ok ? intentResult.blockingCount + '개' : '조회 실패'} — ` +
+        `신규 LIVE TEST 주문 차단 (fail-closed)`,
+      );
+      return;
+    }
+
     _reconciled = true;
     const now = new Date();
     await db.insert(workerStateTable)
@@ -314,6 +338,7 @@ export async function executeLiveTestOrder(params: LiveOrderParams): Promise<Liv
     dbOk:                   params.dbOk,
     rpcOk:                  Boolean(rpcUrl),
     reconciled:             _reconciled,
+    noBlockingIntents:      !(await hasBlockingIntents()),
   });
   if (!central.allowed) {
     await appendAuditLog({
@@ -367,7 +392,11 @@ export async function executeLiveTestOrder(params: LiveOrderParams): Promise<Liv
     return { ok: false, txHash: null, orderKey: null, simulated: false, error: gateResult.reason ?? 'Gate failed', gateResult, executedAt };
   }
 
-  // 실제 트랜잭션 제출
+  // ── 1) calldata 빌드 (broadcast 이전 — 실패 시 intent 없이 FAILED 기록) ──
+  let sendTokensDataBuilt: `0x${string}`;
+  let createOrderDataBuilt: `0x${string}`;
+  let routerAddrBuilt: `0x${string}`;
+  let execFeeBuilt: bigint;
   try {
     const routerAddr  = getSubaccountRouterAddress();
     const vaultAddr   = getOrderVaultAddress();
@@ -426,53 +455,112 @@ export async function executeLiveTestOrder(params: LiveOrderParams): Promise<Liv
       ],
     });
 
-    // 3. 멀티콜 제출 (subaccount가 서명)
-    const walletClient = getSignerWalletClient(rpcUrl);
-    const txHash = await walletClient.writeContract({
-      address:      routerAddr,
-      abi:          SUBACCOUNT_ROUTER_ABI,
-      functionName: 'multicall',
-      args:         [[sendTokensData, createOrderData]],
-      value:        execFee,
-    });
-
-    console.info(`[LiveTestExecutor] ✅ 주문 제출 — symbol=${params.symbol} isLong=${params.isLong} size=$${params.sizeUsd} txHash=${txHash}`);
-
-    // 감사로그 (SUBMITTED 기록은 재시작 중복 방지의 핵심 — 저장 실패 시 fail-closed)
-    const entry: AuditLogEntry = {
-      id: entryId, decisionId: params.decisionId, cycleNumber: params.cycleNumber,
-      symbol: params.symbol, orderType: 'MarketIncrease', isLong: params.isLong,
-      sizeUsd: params.sizeUsd, collateralUsd: params.collateralUsd,
-      txHash, orderKey: null, status: 'SUBMITTED', error: null,
-      simulated: false, gateChecks: gateResult.checks,
-      submittedAt: executedAt, confirmedAt: null,
-    };
-    const audited = await appendAuditLog(entry);
-    if (!audited) {
-      // 제출된 tx가 감사로그에 없으면 재시작 reconciliation이 이를 발견할 수 없음.
-      // 이후 신규 주문을 차단해 중복 체결 가능성을 제거한다.
-      _reconciled = false;
-      console.error(`[LiveTestExecutor] ⚠️ SUBMITTED 감사기록 저장 실패 (txHash=${txHash}) — 신규 주문 차단 (fail-closed)`);
-      return { ok: false, txHash, orderKey: null, simulated: false, error: '[LIVE TEST] 주문은 제출되었으나 감사기록 저장 실패 — 신규 주문 차단', gateResult, executedAt };
-    }
-
-    return { ok: true, txHash, orderKey: null, simulated: false, gateResult, executedAt };
+    sendTokensDataBuilt  = sendTokensData;
+    createOrderDataBuilt = createOrderData;
+    routerAddrBuilt      = routerAddr;
+    execFeeBuilt         = execFee;
   } catch (err: unknown) {
-    const msg = (err as Error).message ?? 'Unknown execution error';
-    console.error('[LiveTestExecutor] 주문 제출 실패:', msg);
-
-    // 실패도 감사로그에 기록
+    // calldata 빌드 실패 — broadcast 이전 확실 구간 (intent 미생성, 온체인 미도달)
+    const msg = (err as Error).message ?? 'Unknown build error';
+    console.error('[LiveTestExecutor] calldata 빌드 실패 (broadcast 이전):', msg);
     await appendAuditLog({
       id: entryId, decisionId: params.decisionId, cycleNumber: params.cycleNumber,
       symbol: params.symbol, orderType: 'MarketIncrease', isLong: params.isLong,
       sizeUsd: params.sizeUsd, collateralUsd: params.collateralUsd,
       txHash: null, orderKey: null, status: 'FAILED', error: msg,
-      simulated: false, gateChecks: gateResult.checks,
-      submittedAt: executedAt, confirmedAt: null,
+      simulated: false, gateChecks: gateResult.checks, submittedAt: executedAt, confirmedAt: null,
     });
-
     return { ok: false, txHash: null, orderKey: null, simulated: false, error: msg, gateResult, executedAt };
   }
+
+  // ── 2) durable execution intent — writeContract 도달 전 PREPARED 커밋 필수 ──
+  const intentId = buildIntentId(params.decisionId, 'open');
+  const intentCreated = await createPreparedIntent({
+    id: intentId, decisionId: params.decisionId, cycleNumber: params.cycleNumber,
+    symbol: params.symbol, orderType: 'open', isLong: params.isLong,
+    sizeUsd: params.sizeUsd, collateralUsd: params.collateralUsd,
+  });
+  if (intentCreated !== 'created') {
+    const msg = intentCreated === 'duplicate'
+      ? '[LIVE TEST] 동일 intent 중복 제출 시도 (idempotency key 충돌) — 주문 차단'
+      : '[LIVE TEST] execution intent 저장 실패 — 온체인 제출 차단 (fail-closed)';
+    console.error(`[LiveTestExecutor] ${msg} (intentId=${intentId})`);
+    await appendAuditLog({
+      id: entryId, decisionId: params.decisionId, cycleNumber: params.cycleNumber,
+      symbol: params.symbol, orderType: 'MarketIncrease', isLong: params.isLong,
+      sizeUsd: params.sizeUsd, collateralUsd: params.collateralUsd,
+      txHash: null, orderKey: null, status: 'FAILED', error: msg,
+      simulated: false, gateChecks: gateResult.checks, submittedAt: executedAt, confirmedAt: null,
+    });
+    return { ok: false, txHash: null, orderKey: null, simulated: false, error: msg, gateResult, executedAt };
+  }
+
+  // ── 3) 서명 클라이언트 생성 (로컬 — broadcast 이전 확실 구간) ──
+  let walletClient: ReturnType<typeof getSignerWalletClient>;
+  try {
+    walletClient = getSignerWalletClient(rpcUrl);
+  } catch (err: unknown) {
+    const msg = (err as Error).message ?? 'Wallet client init failed';
+    await markIntentFailedPreBroadcast(intentId, msg);
+    await appendAuditLog({
+      id: entryId, decisionId: params.decisionId, cycleNumber: params.cycleNumber,
+      symbol: params.symbol, orderType: 'MarketIncrease', isLong: params.isLong,
+      sizeUsd: params.sizeUsd, collateralUsd: params.collateralUsd,
+      txHash: null, orderKey: null, status: 'FAILED', error: msg,
+      simulated: false, gateChecks: gateResult.checks, submittedAt: executedAt, confirmedAt: null,
+    });
+    return { ok: false, txHash: null, orderKey: null, simulated: false, error: msg, gateResult, executedAt };
+  }
+
+  // ── 4) 온체인 제출 — 오류 시 broadcast 여부 불명 → UNRESOLVED (자동 FAILED 금지) ──
+  let txHash: `0x${string}`;
+  try {
+    txHash = await walletClient.writeContract({
+      address:      routerAddrBuilt,
+      abi:          SUBACCOUNT_ROUTER_ABI,
+      functionName: 'multicall',
+      args:         [[sendTokensDataBuilt, createOrderDataBuilt]],
+      value:        execFeeBuilt,
+    });
+  } catch (err: unknown) {
+    const msg = (err as Error).message ?? 'Unknown execution error';
+    console.error('[LiveTestExecutor] 주문 제출 오류 — broadcast 여부 불명, UNRESOLVED 처리:', msg);
+    // 시간 경과·타임아웃·네트워크 오류를 FAILED로 단정하지 않는다.
+    // UNRESOLVED 전환 실패 시에도 PREPARED 행이 남아 차단은 유지된다.
+    await markIntentUnresolved(intentId, msg);
+    _reconciled = false; // 상태불명 intent 존재 → 신규 주문 즉시 차단
+    await appendAuditLog({
+      id: entryId, decisionId: params.decisionId, cycleNumber: params.cycleNumber,
+      symbol: params.symbol, orderType: 'MarketIncrease', isLong: params.isLong,
+      sizeUsd: params.sizeUsd, collateralUsd: params.collateralUsd,
+      txHash: null, orderKey: null, status: 'UNRESOLVED', error: msg,
+      simulated: false, gateChecks: gateResult.checks, submittedAt: executedAt, confirmedAt: null,
+    });
+    return { ok: false, txHash: null, orderKey: null, simulated: false, error: msg, gateResult, executedAt };
+  }
+
+  console.info(`[LiveTestExecutor] ✅ 주문 제출 — symbol=${params.symbol} isLong=${params.isLong} size=$${params.sizeUsd} txHash=${txHash}`);
+
+  // ── 5) intent SUBMITTED 전환 + 감사로그 (실패 시 fail-closed, PREPARED 보존) ──
+  const intentSubmitted = await markIntentSubmitted(intentId, txHash);
+  const entry: AuditLogEntry = {
+    id: entryId, decisionId: params.decisionId, cycleNumber: params.cycleNumber,
+    symbol: params.symbol, orderType: 'MarketIncrease', isLong: params.isLong,
+    sizeUsd: params.sizeUsd, collateralUsd: params.collateralUsd,
+    txHash, orderKey: null, status: 'SUBMITTED', error: null,
+    simulated: false, gateChecks: gateResult.checks,
+    submittedAt: executedAt, confirmedAt: null,
+  };
+  const audited = await appendAuditLog(entry);
+  if (!intentSubmitted || !audited) {
+    // 제출된 tx의 영속 기록(intent SUBMITTED 또는 감사로그)이 불완전하면
+    // 재시작 reconciliation이 PREPARED intent를 UNRESOLVED로 발견하고 차단한다.
+    _reconciled = false;
+    console.error(`[LiveTestExecutor] ⚠️ 제출 후 영속화 실패 (txHash=${txHash}, intent=${intentSubmitted}, audit=${audited}) — 신규 주문 차단 (fail-closed)`);
+    return { ok: false, txHash, orderKey: null, simulated: false, error: '[LIVE TEST] 주문은 제출되었으나 영속 기록 저장 실패 — 신규 주문 차단', gateResult, executedAt };
+  }
+
+  return { ok: true, txHash, orderKey: null, simulated: false, gateResult, executedAt };
 }
 
 // ── 포지션 청산 (MarketDecrease) ───────────────────────────────────────────────
@@ -522,6 +610,7 @@ export async function closeLiveTestPosition(params: ClosePositionParams): Promis
     dbOk:                   params.dbOk,
     rpcOk:                  Boolean(rpcUrl),
     reconciled:             _reconciled,
+    noBlockingIntents:      !(await hasBlockingIntents()),
   });
   if (!central.allowed) {
     await appendAuditLog({
@@ -561,6 +650,10 @@ export async function closeLiveTestPosition(params: ClosePositionParams): Promis
     return { ok: false, txHash: null, orderKey: null, simulated: false, error: gateResult.reason ?? 'Gate failed', gateResult, executedAt };
   }
 
+  // ── 1) calldata 빌드 (broadcast 이전 — 실패 시 intent 없이 FAILED 기록) ──
+  let createOrderDataBuilt: `0x${string}`;
+  let routerAddrBuilt: `0x${string}`;
+  let execFeeBuilt: bigint;
   try {
     const routerAddr  = getSubaccountRouterAddress();
     const execFee     = getExecutionFeeWei();
@@ -604,32 +697,13 @@ export async function closeLiveTestPosition(params: ClosePositionParams): Promis
       ],
     });
 
-    const walletClient = getSignerWalletClient(rpcUrl);
-    const txHash = await walletClient.writeContract({
-      address: routerAddr,
-      abi: SUBACCOUNT_ROUTER_ABI,
-      functionName: 'multicall',
-      args: [[createOrderData]],
-      value: execFee,
-    });
-
-    console.info(`[LiveTestExecutor] ✅ 청산 제출 — symbol=${params.symbol} txHash=${txHash}`);
-    const audited = await appendAuditLog({
-      id: entryId, decisionId: params.decisionId, cycleNumber: params.cycleNumber,
-      symbol: params.symbol, orderType: 'MarketDecrease', isLong: params.isLong,
-      sizeUsd: params.sizeUsd, collateralUsd: 0,
-      txHash, orderKey: null, status: 'SUBMITTED', error: null,
-      simulated: false, gateChecks: gateResult.checks, submittedAt: executedAt, confirmedAt: null,
-    });
-    if (!audited) {
-      _reconciled = false;
-      console.error(`[LiveTestExecutor] ⚠️ SUBMITTED 감사기록 저장 실패 (txHash=${txHash}) — 신규 주문 차단 (fail-closed)`);
-      return { ok: false, txHash, orderKey: null, simulated: false, error: '[LIVE TEST] 청산은 제출되었으나 감사기록 저장 실패 — 신규 주문 차단', gateResult, executedAt };
-    }
-    return { ok: true, txHash, orderKey: null, simulated: false, gateResult, executedAt };
+    createOrderDataBuilt = createOrderData;
+    routerAddrBuilt      = routerAddr;
+    execFeeBuilt         = execFee;
   } catch (err: unknown) {
-    const msg = (err as Error).message ?? 'Unknown error';
-    console.error('[LiveTestExecutor] 청산 실패:', msg);
+    // calldata 빌드 실패 — broadcast 이전 확실 구간 (intent 미생성, 온체인 미도달)
+    const msg = (err as Error).message ?? 'Unknown build error';
+    console.error('[LiveTestExecutor] 청산 calldata 빌드 실패 (broadcast 이전):', msg);
     await appendAuditLog({
       id: entryId, decisionId: params.decisionId, cycleNumber: params.cycleNumber,
       symbol: params.symbol, orderType: 'MarketDecrease', isLong: params.isLong,
@@ -639,6 +713,88 @@ export async function closeLiveTestPosition(params: ClosePositionParams): Promis
     });
     return { ok: false, txHash: null, orderKey: null, simulated: false, error: msg, executedAt };
   }
+
+  // ── 2) durable execution intent — writeContract 도달 전 PREPARED 커밋 필수 ──
+  const intentId = buildIntentId(params.decisionId, 'close');
+  const intentCreated = await createPreparedIntent({
+    id: intentId, decisionId: params.decisionId, cycleNumber: params.cycleNumber,
+    symbol: params.symbol, orderType: 'close', isLong: params.isLong,
+    sizeUsd: params.sizeUsd, collateralUsd: 0,
+  });
+  if (intentCreated !== 'created') {
+    const msg = intentCreated === 'duplicate'
+      ? '[LIVE TEST] 동일 intent 중복 제출 시도 (idempotency key 충돌) — 청산 차단'
+      : '[LIVE TEST] execution intent 저장 실패 — 온체인 제출 차단 (fail-closed)';
+    console.error(`[LiveTestExecutor] ${msg} (intentId=${intentId})`);
+    await appendAuditLog({
+      id: entryId, decisionId: params.decisionId, cycleNumber: params.cycleNumber,
+      symbol: params.symbol, orderType: 'MarketDecrease', isLong: params.isLong,
+      sizeUsd: params.sizeUsd, collateralUsd: 0,
+      txHash: null, orderKey: null, status: 'FAILED', error: msg,
+      simulated: false, gateChecks: gateResult.checks, submittedAt: executedAt, confirmedAt: null,
+    });
+    return { ok: false, txHash: null, orderKey: null, simulated: false, error: msg, gateResult, executedAt };
+  }
+
+  // ── 3) 서명 클라이언트 생성 (로컬 — broadcast 이전 확실 구간) ──
+  let walletClient: ReturnType<typeof getSignerWalletClient>;
+  try {
+    walletClient = getSignerWalletClient(rpcUrl);
+  } catch (err: unknown) {
+    const msg = (err as Error).message ?? 'Wallet client init failed';
+    await markIntentFailedPreBroadcast(intentId, msg);
+    await appendAuditLog({
+      id: entryId, decisionId: params.decisionId, cycleNumber: params.cycleNumber,
+      symbol: params.symbol, orderType: 'MarketDecrease', isLong: params.isLong,
+      sizeUsd: params.sizeUsd, collateralUsd: 0,
+      txHash: null, orderKey: null, status: 'FAILED', error: msg,
+      simulated: false, gateChecks: gateResult.checks, submittedAt: executedAt, confirmedAt: null,
+    });
+    return { ok: false, txHash: null, orderKey: null, simulated: false, error: msg, gateResult, executedAt };
+  }
+
+  // ── 4) 온체인 제출 — 오류 시 broadcast 여부 불명 → UNRESOLVED (자동 FAILED 금지) ──
+  let txHash: `0x${string}`;
+  try {
+    txHash = await walletClient.writeContract({
+      address: routerAddrBuilt,
+      abi: SUBACCOUNT_ROUTER_ABI,
+      functionName: 'multicall',
+      args: [[createOrderDataBuilt]],
+      value: execFeeBuilt,
+    });
+  } catch (err: unknown) {
+    const msg = (err as Error).message ?? 'Unknown error';
+    console.error('[LiveTestExecutor] 청산 제출 오류 — broadcast 여부 불명, UNRESOLVED 처리:', msg);
+    await markIntentUnresolved(intentId, msg);
+    _reconciled = false; // 상태불명 intent 존재 → 신규 주문 즉시 차단
+    await appendAuditLog({
+      id: entryId, decisionId: params.decisionId, cycleNumber: params.cycleNumber,
+      symbol: params.symbol, orderType: 'MarketDecrease', isLong: params.isLong,
+      sizeUsd: params.sizeUsd, collateralUsd: 0,
+      txHash: null, orderKey: null, status: 'UNRESOLVED', error: msg,
+      simulated: false, gateChecks: gateResult.checks, submittedAt: executedAt, confirmedAt: null,
+    });
+    return { ok: false, txHash: null, orderKey: null, simulated: false, error: msg, executedAt };
+  }
+
+  console.info(`[LiveTestExecutor] ✅ 청산 제출 — symbol=${params.symbol} txHash=${txHash}`);
+
+  // ── 5) intent SUBMITTED 전환 + 감사로그 (실패 시 fail-closed, PREPARED 보존) ──
+  const intentSubmitted = await markIntentSubmitted(intentId, txHash);
+  const audited = await appendAuditLog({
+    id: entryId, decisionId: params.decisionId, cycleNumber: params.cycleNumber,
+    symbol: params.symbol, orderType: 'MarketDecrease', isLong: params.isLong,
+    sizeUsd: params.sizeUsd, collateralUsd: 0,
+    txHash, orderKey: null, status: 'SUBMITTED', error: null,
+    simulated: false, gateChecks: gateResult.checks, submittedAt: executedAt, confirmedAt: null,
+  });
+  if (!intentSubmitted || !audited) {
+    _reconciled = false;
+    console.error(`[LiveTestExecutor] ⚠️ 청산 제출 후 영속화 실패 (txHash=${txHash}, intent=${intentSubmitted}, audit=${audited}) — 신규 주문 차단 (fail-closed)`);
+    return { ok: false, txHash, orderKey: null, simulated: false, error: '[LIVE TEST] 청산은 제출되었으나 영속 기록 저장 실패 — 신규 주문 차단', gateResult, executedAt };
+  }
+  return { ok: true, txHash, orderKey: null, simulated: false, gateResult, executedAt };
 }
 
 // ── 서브계정 권한 철회 (서버 사이너가 직접 호출) ──────────────────────────────

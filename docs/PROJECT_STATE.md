@@ -40,8 +40,8 @@
 
 ## 테스트 기준
 
-- api-server 219개 + futures-web 53개 = **총 272개** PASS
-- 이번 PORT 파서 격리 테스트가 여기에 추가됨 (port.test.ts)
+- api-server 289개 + futures-web 53개 = **총 342개** PASS
+- durable execution intent 테스트 추가 (executionIntents.test.ts, durableExecutionIntent.test.ts)
 - CI: `bash scripts/typecheck-ci.sh` → 배포 빌드 → 전체 테스트
 
 ## 남은 작업 순서
@@ -73,6 +73,21 @@
 - 재시작 reconciliation: SUBMITTED 주문은 임의로 FAILED 처리하지 않고
   `UNRESOLVED`로 보존(txHash 유지). 상태불명 주문이 남아 있으면 신규
   LIVE TEST 주문 차단 유지 (시간 경과만으로 FAILED 전환 금지)
+- **Durable execution intent** (`execution_intents` 테이블, migration 0010):
+  `writeContract` 도달 전에 PREPARED intent를 DB에 커밋해야 하며, 저장 실패 시
+  온체인 제출에 절대 도달하지 않음. intent id = idempotency key
+  (`intent:<open|close>:<decisionId>`)로 동일 intent 중복 제출을 PK 충돌로 차단.
+  제출 성공 시 txHash+SUBMITTED 갱신 — 갱신 실패해도 PREPARED 기록이 남아
+  재시작 reconciliation이 반드시 발견. writeContract 오류(타임아웃 포함)는
+  자동 FAILED 금지, UNRESOLVED 처리. 중앙 실행 게이트가 미해소 intent
+  (PREPARED/SUBMITTED/UNRESOLVED) 존재 시 최종 차단. OPEN·CLOSE 동일 경로,
+  PAPER 모드 무영향
+- **남은 reconciliation 작업**: UNRESOLVED intent의 온체인 확인(트랜잭션
+  조회로 CONFIRMED/FAILED 판정) 및 운영자 수동 판정 UI는 미구현 —
+  현재는 UNRESOLVED가 남으면 신규 LIVE 주문이 영구 차단됨 (fail-closed).
+  LIVE 실행은 여전히 잠금·미검증 상태이며 금지 유지.
+- migration 0010은 코드에만 존재 — Production DB에는 다음 Publish 시
+  서버 기동 마이그레이션으로 자동 적용됨 (수동 적용 금지)
 
 ## 절대 금지 사항
 

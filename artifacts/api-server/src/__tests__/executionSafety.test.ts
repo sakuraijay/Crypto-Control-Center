@@ -38,7 +38,41 @@ vi.mock('@workspace/db', () => ({
 
 vi.mock('drizzle-orm', () => ({
   eq: vi.fn((_col, val) => `eq(${String(val)})`),
+  inArray: vi.fn(),
 }));
+
+// ── executionIntents 모킹 (durable intent 상태 주입 가능) ─────────────────────
+const intentState = vi.hoisted(() => ({
+  createResult: 'created' as 'created' | 'duplicate' | 'error',
+  blocking:     false,
+  reconcile:    { ok: true, blockingCount: 0 },
+  markSubmittedOk: true,
+}));
+const intentMocks = vi.hoisted(() => ({
+  createPreparedIntent:        undefined as unknown as ReturnType<typeof vi.fn>,
+  markIntentSubmitted:         undefined as unknown as ReturnType<typeof vi.fn>,
+  markIntentUnresolved:        undefined as unknown as ReturnType<typeof vi.fn>,
+  markIntentFailedPreBroadcast: undefined as unknown as ReturnType<typeof vi.fn>,
+  hasBlockingIntents:          undefined as unknown as ReturnType<typeof vi.fn>,
+  reconcileIntentsOnRestart:   undefined as unknown as ReturnType<typeof vi.fn>,
+}));
+vi.mock('../lib/executionIntents', () => {
+  intentMocks.createPreparedIntent         = vi.fn(async () => intentState.createResult);
+  intentMocks.markIntentSubmitted          = vi.fn(async () => intentState.markSubmittedOk);
+  intentMocks.markIntentUnresolved         = vi.fn(async () => true);
+  intentMocks.markIntentFailedPreBroadcast = vi.fn(async () => true);
+  intentMocks.hasBlockingIntents           = vi.fn(async () => intentState.blocking);
+  intentMocks.reconcileIntentsOnRestart    = vi.fn(async () => intentState.reconcile);
+  return {
+    buildIntentId: (decisionId: string, orderType: string) => `intent:${orderType}:${decisionId}`,
+    createPreparedIntent:         intentMocks.createPreparedIntent,
+    markIntentSubmitted:          intentMocks.markIntentSubmitted,
+    markIntentUnresolved:         intentMocks.markIntentUnresolved,
+    markIntentFailedPreBroadcast: intentMocks.markIntentFailedPreBroadcast,
+    hasBlockingIntents:           intentMocks.hasBlockingIntents,
+    reconcileIntentsOnRestart:    intentMocks.reconcileIntentsOnRestart,
+  };
+});
 
 vi.mock('../lib/delegatedSigner', () => ({
   isDelegatedSignerEnabled: vi.fn(() => process.env.DELEGATED_SIGNER_ENABLED === 'true'),
@@ -88,6 +122,11 @@ beforeEach(() => {
   savedValues.length = 0;
   failAuditInsert = false;
   failAuditSelect = false;
+  intentState.createResult    = 'created';
+  intentState.blocking        = false;
+  intentState.reconcile       = { ok: true, blockingCount: 0 };
+  intentState.markSubmittedOk = true;
+  for (const m of Object.values(intentMocks)) m?.mockClear?.();
 });
 afterAll(() => {
   for (const k of ENV_KEYS) {
@@ -107,6 +146,7 @@ function allowInput() {
     dbOk:                   true,
     rpcOk:                  true,
     reconciled:             true,
+    noBlockingIntents:      true,
   };
 }
 
@@ -249,7 +289,7 @@ describe('executeLiveTestOrder — 중앙 게이트 통합 (writeContract 도달
 
     expect(r.txHash).toBe('0xTxSubmitted');       // 제출 자체는 발생
     expect(r.ok).toBe(false);                      // 성공으로 보고하지 않음
-    expect(r.error).toMatch(/감사기록 저장 실패/);
+    expect(r.error).toMatch(/영속 기록 저장 실패/);
     expect(isReconciled()).toBe(false);            // 이후 신규 주문 차단
 
     // 차단 검증: 다음 주문은 중앙 게이트(reconciled)에서 거부

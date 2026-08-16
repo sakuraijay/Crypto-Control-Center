@@ -54,6 +54,8 @@ export interface CentralGateInput {
   rpcOk:                   boolean;
   /** 재시작 reconciliation 정상 완료 여부 (UNRESOLVED 주문 없음) */
   reconciled:              boolean;
+  /** durable execution intent 중 차단 상태(PREPARED/SUBMITTED/UNRESOLVED) 부재 여부 */
+  noBlockingIntents:       boolean;
 }
 
 /**
@@ -109,6 +111,12 @@ export function checkCentralExecutionGate(input: CentralGateInput): GateResult {
   checks.reconciled = input.reconciled === true;
   if (!checks.reconciled) {
     return { allowed: false, reason: '[CENTRAL GATE] 재시작 reconciliation 미완료 또는 상태불명 주문 존재 — 실제 실행 차단', checks };
+  }
+
+  // 최종 조건: durable execution intent 중 차단 상태가 하나라도 있으면 실행 금지
+  checks.noBlockingIntents = input.noBlockingIntents === true;
+  if (!checks.noBlockingIntents) {
+    return { allowed: false, reason: '[CENTRAL GATE] 미해소 execution intent 존재 (PREPARED/SUBMITTED/UNRESOLVED) — 실제 실행 차단', checks };
   }
 
   return { allowed: true, reason: null, checks };
