@@ -100,6 +100,34 @@
   잠금·미검증 상태이며 금지 유지.
 - migration 0010~0012는 코드에만 존재 — Production DB에는 다음 Publish 시
   서버 기동 마이그레이션으로 자동 적용됨 (수동 적용 금지)
+- **GMX 최신 delegated trading 1단계 (구현 완료, LIVE 미검증)**:
+  - EventEmitter 하드코딩 기본값 제거 — 과거 기본값 0xAf2E…89C2는 공식 문서상
+    Botanix/MegaETH 체인 주소였음(구성 결함). Arbitrum One 공식 주소는
+    0xC8ee91A54287DB53897056e12D9819156D3822Fb (문서화 상수로만 유지, 자동 사용
+    금지). GMX_EVENT_EMITTER_ADDRESS 미설정/형식 오류/타 체인 주소 → fail-closed
+    (LIVE·신규 reconciliation 차단, PAPER 무영향, intent 영속 emitter는
+    historical reconcile 전용)
+  - legacy SubaccountRouter 직접 주문 경로(multicall/sendTokens/createOrder)는
+    DEPRECATED — Production broadcast 가드로 차단, 중앙 게이트에 relayConfigured
+    체크 추가 (legacy env만으로 LIVE 불가)
+  - 신규 구성: GMX_SUBACCOUNT_GELATO_RELAY_ROUTER_ADDRESS / GMX_DATA_STORE_ADDRESS /
+    GMX_EVENT_EMITTER_ADDRESS (전부 필수, 기본값 없음, chainId 42161 고정,
+    Production 값 미설정 상태 유지)
+  - EIP-712 순수 빌더/검증기(gmxEip712): SubaccountApproval(owner 서명,
+    공식 typehash 필드 순서) + RelayParams(abi.encode 해시, signature 제외),
+    domain = GmxBaseGelatoRelayRouter v1. replay(nonce)·만료(deadline)·타 체인·
+    타 라우터·서명자 불일치 전부 거부. 개인키 비보관·비반환
+  - DataStore canonical reader(gmxDataStore): 공식 Keys 스킴으로
+    expiresAt/maxAllowedCount/used/remaining/integrationId + 라우터
+    subaccountApprovalNonces 조회. 클라이언트 주입식 — 테스트는 mock fixture 전용,
+    오류 시 fail-closed(UNVERIFIED)
+  - 인증 상태 모델(subaccountAuthState) + read-only API
+    GET /api/executor/subaccount-auth — 상태 enum·signer 공개 주소·구성 결함
+    사유만 노출(개인키·서명 전문·env 원문 금지). 1단계는 온체인 조회 미연결로
+    항상 UNVERIFIED 이하 → LIVE 차단 유지
+  - 2단계 남은 작업: CreateOrder 등 액션별 EIP-712 struct hash 빌더, DataStore
+    reader의 상태 API 연결, relay 제출 경로(Gelato) 구현·검증 — LIVE 실행은
+    여전히 잠금·미검증·금지 상태
 
 ## 절대 금지 사항
 

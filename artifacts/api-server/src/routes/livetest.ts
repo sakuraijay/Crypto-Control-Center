@@ -10,7 +10,9 @@
  */
 
 import { Router } from 'express';
-import { getSignerAddress, getSignerEthBalance, isSignerInitialized, getSignerCreatedAt } from '../lib/delegatedSigner';
+import { getSignerAddress, getSignerEthBalance, isSignerInitialized, getSignerCreatedAt, isDelegatedSignerEnabled } from '../lib/delegatedSigner';
+import { resolveGmxLiveRelayConfig, ARBITRUM_ONE_CHAIN_ID } from '../lib/gmxLiveConfig';
+import { deriveSubaccountAuthState, isAuthStateLiveEligible } from '../lib/subaccountAuthState';
 import { checkDelegationStatus, buildAddSubaccountTx, buildUsdcApproveTx, buildRemoveSubaccountTx, getUsdcAllowance } from '../lib/gmxSubaccount';
 import { checkLiveTestGate, isLiveTestExecutionLocked, LIVE_TEST_CAPS, delegationTimeRemainingSeconds } from '../lib/liveTestGate';
 import { USDC_ADDRESS } from '../lib/gmxContracts';
@@ -48,6 +50,40 @@ router.get('/executor/signer', async (_req, res) => {
       fundingNote:  initialized && address
         ? `0.02 ETH 이상을 ${address} 주소로 전송하면 주문 실행 가능합니다.`
         : '사이너가 초기화되지 않았습니다.',
+    });
+  } catch (e: unknown) {
+    return res.status(500).json({ ok: false, error: (e as Error).message });
+  }
+});
+
+// ── GET /executor/subaccount-auth ───────────────────────────────────────────────
+// 최신 delegated trading 인증 상태 (read-only).
+// 노출 범위: 상태 enum, signer 공개 주소, chainId, 구성 결함 사유, LIVE 차단 사유.
+// 절대 미노출: 개인키·키 암호문·서명(signature) 전문·환경변수 원문 값.
+// 1단계: 온체인(DataStore) 조회는 수행하지 않음 → 구성이 완비돼도 UNVERIFIED
+// (2단계에서 gmxDataStore reader 연결 예정). fail-closed 원칙상 UNVERIFIED는 LIVE 차단.
+router.get('/executor/subaccount-auth', (_req, res) => {
+  try {
+    const relay = resolveGmxLiveRelayConfig();
+    const state = deriveSubaccountAuthState({
+      relayConfigured:        relay.ok,
+      signerInitialized:      isSignerInitialized(),
+      delegatedSignerEnabled: isDelegatedSignerEnabled(),
+      onchain:                null,   // 1단계: 온체인 조회 미수행
+      onchainError:           null,
+      nowSec:                 BigInt(Math.floor(Date.now() / 1000)),
+    });
+    return res.json({
+      ok: true,
+      state,
+      chainId: ARBITRUM_ONE_CHAIN_ID,
+      signerAddress: getSignerAddress(),           // 공개 주소만
+      relayConfigured: relay.ok,
+      configReasons: relay.ok ? [] : relay.reasons, // 필드명·사유만 (env 원문 미포함)
+      expiresAt: null,                              // 2단계: DataStore 조회 후 채움
+      remainingActions: null,
+      liveEligible: isAuthStateLiveEligible(state),
+      liveBlockedReason: isAuthStateLiveEligible(state) ? null : `인증 상태 ${state} — LIVE 실행 차단`,
     });
   } catch (e: unknown) {
     return res.status(500).json({ ok: false, error: (e as Error).message });
