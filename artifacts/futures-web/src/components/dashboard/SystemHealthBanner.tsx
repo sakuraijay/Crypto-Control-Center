@@ -26,11 +26,7 @@ export function SystemHealthBanner() {
         <div className="flex items-center gap-2 px-3 py-2 rounded-lg border border-border/40 bg-card/50 text-xs text-muted-foreground">
           <Lock className="w-3 h-3 shrink-0 text-muted-foreground/70" />
           <span>
-            LIVE 실행:{' '}
-            {subaccountConfig.status === 'ready'
-              ? <span className="text-amber-400/80">준비 완료 — 서브계정 위임 미실행 (잠김)</span>
-              : <span>준비 단계 — 서브계정 미설정 (잠김)</span>
-            }
+            LIVE 실행: <span>코드 수준 잠금 — 구조적 비활성 (잠김)</span>
           </span>
           <span className="ml-auto font-mono text-[9px] px-1.5 py-0.5 rounded border border-border/30 text-muted-foreground/50 shrink-0">
             LOCKED
