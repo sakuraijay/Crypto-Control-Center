@@ -412,9 +412,10 @@ describe('relayLifecycle — 전이·idempotency·fail-closed', () => {
 // ═════════════════════════════════ revoke 세션 ═══════════════════════════════
 
 describe('revokeSession — prepare·서명·변조 거부', () => {
+  // 4단계: userNonce는 durable allocation 필수 인자 — 테스트에서는 고정값 주입
   const prep = () => prepareRevokeSession({
     mainAccount: OWNER, subaccount: SUBACCOUNT, verifyingContract: ROUTER,
-    feeToken: WETH_ARBITRUM, feeAmount: 1000n, nowSec: 1_800_000_000n,
+    feeToken: WETH_ARBITRUM, feeAmount: 1000n, nowSec: 1_800_000_000n, userNonce: 0n,
   });
 
   it('prepare → PREPARED 저장 + 기존 활성 revoke 세션 무효화(단일성)', async () => {

@@ -179,6 +179,30 @@
     fee 방어·전이표·교차-purpose 회귀), futures-web 78 PASS
   - 다음 단계 남은 작업: 실제 Gelato 제출 경로(별도 승인 후에만),
     UNRESOLVED 수동 복구 UI — LIVE 실행은 여전히 잠금·금지 상태
+- GMX delegated trading 4단계 (실제 Gelato adapter — 구조 완성, 전면 비활성) — 완료:
+  - relay_nonces 테이블(migration 0017) — userNonce durable 단조증가 allocation,
+    충돌 재시도, fail-closed, 재사용 금지
+  - relayTransport: 실제 Gelato HTTP adapter (host allowlist=api.gelato.digital,
+    HTTPS only, redirect 금지, 256KB 응답 제한, 오류 sanitize) + **중앙 네트워크
+    게이트** — GMX_RELAY_NETWORK_ENABLED 미설정이면 transport 자체가 모든 요청
+    차단(호출측 게이트와 이중). API key(GELATO_RELAY_API_KEY)·활성화 env 전부 미설정 유지
+  - relaySubmission.runSubmitFlow: 원자적 제출 흐름 — 게이트→live quote 재검증
+    (mock quote 거부)→receiver 검증→durable task→서명 결속 검증→SUBMITTING
+    조건부 전환 후에만 transport 1회. 어떤 실패에도 재호출 0회.
+    taskId 저장 실패→UNRESOLVED 전환 재시도(3회), 영구 실패 시 SUBMITTING
+    잔존을 조사 대상에 포함
+  - relayTaskReconciler: Gelato 상태만으로 terminal 전이 금지 — CONFIRMED는
+    온체인 OrderExecuted, FAILED는 독립 수집 온체인 receipt(TX_REVERTED)만.
+    ExecReverted 보고는 UNRESOLVED 유지
+  - routes: /executor/relay/unresolved(+recheck)·activation 진단; recheck는
+    증거 재수집만(강제 종결·재제출·삭제 없음), SUBMITTING stale 행도 조사 대상.
+    /executor/execute — revoke 진행 중 409 차단, 세션 조회 실패도 503 fail-closed
+  - futures-web: RelayStatusCard UNRESOLVED 조사 섹션, activeRevoke 시
+    NewOrderDrawer 주문 차단 + AiStateCard 자동실행 토글 차단(확인창 레이스 포함)
+  - 테스트: api-server 538 PASS(신규 stage4 ~80), futures-web 78 PASS.
+    실제 네트워크 호출 0회 — mock transport 전용
+  - 활성화 조건은 전부 미충족이 정상: networkEligible=false 하드코딩 유지,
+    LIVE 실행은 여전히 잠금·금지 상태
 
 ## 절대 금지 사항
 
