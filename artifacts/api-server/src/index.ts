@@ -6,20 +6,10 @@ import { workerManager } from "./workers/aiWorker";
 import { initializeDelegatedSigner } from "./lib/delegatedSigner";
 import { reconcileOnRestart, loadEmergencyStopFromDb } from "./workers/liveTestExecutor";
 import { resolveStaticDir, assertStaticDirReady, attachStaticServing } from "./lib/staticSite";
+import { parsePort } from "./lib/port";
 
-const rawPort = process.env["PORT"];
-
-if (!rawPort) {
-  throw new Error(
-    "PORT environment variable is required but was not provided.",
-  );
-}
-
-const port = Number(rawPort);
-
-if (Number.isNaN(port) || port <= 0) {
-  throw new Error(`Invalid PORT value: "${rawPort}"`);
-}
+// PORT 검증: 1~65535 정수만 허용 (순수 함수 — port.test.ts에서 격리 검증)
+const port = parsePort(process.env["PORT"]);
 
 // 프로덕션(Reserved VM 단일 프로세스): 빌드된 프런트엔드 정적 파일 + SPA fallback 제공.
 // API 라우터는 app.ts에서 이미 마운트되어 있으므로 항상 우선 처리된다.
