@@ -32,6 +32,13 @@ vi.mock('drizzle-orm', () => ({
 beforeAll(() => {
   process.env.SESSION_SECRET = 'test-session-secret-for-delegated-signer-init-test-abc';
   process.env.DELEGATED_SIGNER_ENABLED = 'true';
+  // 6단계 §4 — signer 저장소 접근 게이트 통과용 (테스트 fixture 전용)
+  process.env.GMX_RELAY_READONLY_NETWORK_ENABLED = 'true';
+  process.env.GMX_RELAY_NETWORK_ENABLED = 'true';
+  process.env.GMX_RELAY_SUBMISSION_ENABLED = 'true';
+  process.env.GMX_RELAY_MODE = 'LIVE';
+  process.env.WORKER_ENGINE_MODE = 'LIVE';
+  process.env.LIVE_TEST_EXECUTION_LOCKED = 'false';
 });
 
 // ── 테스트 ──────────────────────────────────────────────────────────────────

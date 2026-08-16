@@ -68,6 +68,18 @@ export interface RelayStatusResponse {
 /** 5단계 §9 — activation 진단 상태 플래그 (표시 전용, 부작용 없음) */
 export interface ActivationStatusFlags {
   codeReady: boolean;
+  /** 6단계 §6 — 네트워크 권한 분리 표시 */
+  readonlyNetworkDisabled: boolean;
+  submitNetworkDisabled: boolean;
+  submissionDisabled: boolean;
+  relayMode: 'DISABLED' | 'DRY_RUN' | 'LIVE';
+  lastReadinessRefresh: {
+    attempted: boolean;
+    atMs: number | null;
+    ok: boolean;
+    basis: string[];
+    failures: string[];
+  };
   networkDisabled: boolean;
   signerDisabled: boolean;
   canonicalUnverified: boolean;

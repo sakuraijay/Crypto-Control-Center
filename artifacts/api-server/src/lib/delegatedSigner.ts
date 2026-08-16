@@ -67,6 +67,28 @@ export function isDelegatedSignerEnabled(): boolean {
   return process.env.DELEGATED_SIGNER_ENABLED === 'true';
 }
 
+/**
+ * 6단계 §4 — signer 저장소 접근(DB 조회·암호문 조회·복호화·개인키 생성) 허용 조건.
+ * 아래 전부가 정확히 충족될 때만 true. read-only 네트워크만 켠 상태(canonical
+ * 조회 목적)에서는 signer 저장소 접근이 구조적으로 0회가 되도록 보장한다.
+ * (signer 초기화 여부·중앙 activation 게이트는 서명 시점에 별도로 검증된다 —
+ * relaySignerBinding·relayActivationGate.)
+ */
+export function isSignerStorageAccessAllowed(env: NodeJS.ProcessEnv = process.env): {
+  allowed: boolean;
+  missing: string[];
+} {
+  const missing: string[] = [];
+  if (env.GMX_RELAY_READONLY_NETWORK_ENABLED !== 'true') missing.push("GMX_RELAY_READONLY_NETWORK_ENABLED !== 'true'");
+  if (env.GMX_RELAY_NETWORK_ENABLED !== 'true') missing.push("GMX_RELAY_NETWORK_ENABLED !== 'true'");
+  if (env.GMX_RELAY_SUBMISSION_ENABLED !== 'true') missing.push("GMX_RELAY_SUBMISSION_ENABLED !== 'true'");
+  if (env.GMX_RELAY_MODE !== 'LIVE') missing.push("GMX_RELAY_MODE !== 'LIVE'");
+  if (env.DELEGATED_SIGNER_ENABLED !== 'true') missing.push("DELEGATED_SIGNER_ENABLED !== 'true'");
+  if (env.WORKER_ENGINE_MODE !== 'LIVE') missing.push('PAPER 모드 (WORKER_ENGINE_MODE ≠ LIVE)');
+  if (env.LIVE_TEST_EXECUTION_LOCKED !== 'false') missing.push('LIVE 잠금 활성 (LIVE_TEST_EXECUTION_LOCKED ≠ false)');
+  return { allowed: missing.length === 0, missing };
+}
+
 // ── 암호화 헬퍼 ───────────────────────────────────────────────────────────────
 
 /** SESSION_SECRET 최소 안전 길이 (문자). 값 자체는 절대 로그 출력하지 않음. */
@@ -221,6 +243,13 @@ export async function initializeDelegatedSigner(): Promise<void> {
     console.info('[DelegatedSigner] disabled — DELEGATED_SIGNER_ENABLED가 true가 아님 (기본값)');
     return;
   }
+  // 6단계 §4 — 저장소 접근 게이트 (내부 최종 방어): read-only 네트워크만 켠
+  // 상태 등에서는 DB 조회·암호문 조회·복호화·키 생성이 전부 0회여야 한다.
+  const storage = isSignerStorageAccessAllowed();
+  if (!storage.allowed) {
+    console.info(`[DelegatedSigner] signer 저장소 접근 차단 (fail-closed): ${storage.missing.join(', ')}`);
+    return;
+  }
   if (_initialized) return;
 
   // SESSION_SECRET 존재·최소 길이 사전 검증 (값은 출력하지 않음)
@@ -322,6 +351,11 @@ export async function getSignerEthBalance(rpcUrl: string): Promise<{ ethWei: big
  */
 export async function signDigestWithDelegatedSigner(digest: `0x${string}`): Promise<`0x${string}`> {
   if (!isDelegatedSignerEnabled()) throw new Error('[DelegatedSigner] disabled — 서명 금지');
+  {
+    // 6단계 §4 — 서명도 저장소 접근과 동일한 env 게이트를 통과해야 한다
+    const storage = isSignerStorageAccessAllowed();
+    if (!storage.allowed) throw new Error(`[DelegatedSigner] 서명 차단 (fail-closed): ${storage.missing.join(', ')}`);
+  }
   if (!_initialized || !_privateKeyHex) throw new Error('[DelegatedSigner] 미초기화 — 서명 금지');
   if (!/^0x[0-9a-fA-F]{64}$/.test(digest)) throw new Error('[DelegatedSigner] digest 형식 오류');
   // 요청 로컬 범위: account 객체는 이 스코프에서만 생성·사용

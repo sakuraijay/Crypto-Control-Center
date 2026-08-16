@@ -234,6 +234,19 @@ export async function countOpenRelayTasksOrNull(): Promise<number | null> {
   }
 }
 
+/** 미종결 task의 id/relayTaskId만 — 읽기 전용 readiness refresh용 (6단계 §7). 실패=null */
+export async function listOpenRelayTaskIdsOrNull(): Promise<{ id: string; relayTaskId: string | null }[] | null> {
+  const nonTerminal = (Object.values(RELAY_TASK_STATUS) as RelayTaskStatus[])
+    .filter((s) => !TERMINAL_STATUSES.includes(s));
+  try {
+    return await db.select({ id: relayTasksTable.id, relayTaskId: relayTasksTable.relayTaskId })
+      .from(relayTasksTable)
+      .where(inArray(relayTasksTable.status, nonTerminal));
+  } catch {
+    return null;
+  }
+}
+
 /** 최근 relay task 조회 (상태 API용) — 민감정보 없는 컬럼만 반환 */
 export async function listRecentRelayTasks(limit = 20): Promise<Array<{
   id: string; kind: string; status: string; relayTaskId: string | null; txHash: string | null;

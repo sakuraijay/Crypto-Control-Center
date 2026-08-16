@@ -190,6 +190,7 @@ function fullEnv(): NodeJS.ProcessEnv {
     DELEGATED_SIGNER_ENABLED: 'true',
     GMX_RELAY_SUBMISSION_ENABLED: 'true',
     GMX_RELAY_NETWORK_ENABLED: 'true',
+    GMX_RELAY_READONLY_NETWORK_ENABLED: 'true',
     GMX_RELAY_MODE: 'LIVE',
   } as NodeJS.ProcessEnv;
 }
@@ -307,6 +308,7 @@ describe('relayActivationGate — 조건 하나라도 빠지면 비활성', () =
     ['DELEGATED_SIGNER_ENABLED', 'false'],
     ['GMX_RELAY_SUBMISSION_ENABLED', 'false'],
     ['GMX_RELAY_NETWORK_ENABLED', 'false'],
+    ['GMX_RELAY_READONLY_NETWORK_ENABLED', 'false'],
     ['GMX_RELAY_MODE', 'DRY_RUN'],
   ];
   for (const [key, badValue] of envCases) {
@@ -751,7 +753,10 @@ describe('relayTransport — 네트워크 안전 규칙 (실호출 0회)', () =>
 
   it('네트워크 게이트 통과해도 API key 미설정 시 submit은 요청 없이 config 실패 (비-ambiguous)', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
-    const transport = createGelatoHttpTransport({ GMX_RELAY_NETWORK_ENABLED: 'true' } as NodeJS.ProcessEnv);
+    const transport = createGelatoHttpTransport({
+      GMX_RELAY_READONLY_NETWORK_ENABLED: 'true', GMX_RELAY_NETWORK_ENABLED: 'true',
+      GMX_RELAY_SUBMISSION_ENABLED: 'true', GMX_RELAY_MODE: 'LIVE',
+    } as NodeJS.ProcessEnv);
     const r = await transport.submitRelayTask({ chainId: 42161, target: '0x1', packedData: '0x' });
     expect(r.ok).toBe(false);
     if (!r.ok) {
@@ -769,9 +774,15 @@ describe('relayTransport — 네트워크 안전 규칙 (실호출 0회)', () =>
     const secretish = 'FAKETOKEN_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error(`boom ${secretish}`));
     const transport = createGelatoHttpTransport({
-      GMX_RELAY_NETWORK_ENABLED: 'true', [GELATO_API_KEY_SECRET_NAME]: 'test-key-not-real',
+      GMX_RELAY_READONLY_NETWORK_ENABLED: 'true', GMX_RELAY_NETWORK_ENABLED: 'true',
+      GMX_RELAY_SUBMISSION_ENABLED: 'true', GMX_RELAY_MODE: 'LIVE',
+      [GELATO_API_KEY_SECRET_NAME]: 'test-key-not-real',
     } as unknown as NodeJS.ProcessEnv);
-    const r = await transport.submitRelayTask({ chainId: 42161, target: '0x1', packedData: '0x' });
+    const r = await transport.submitRelayTask({
+      chainId: 42161,
+      target: '0x1111111111111111111111111111111111111111',
+      packedData: '0x1234567890abcdef',
+    });
     expect(r.ok).toBe(false);
     if (!r.ok) {
       expect(r.message).not.toContain(secretish);

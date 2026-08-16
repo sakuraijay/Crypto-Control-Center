@@ -20,6 +20,43 @@ export function isRelayNetworkStructurallyDisabled(env: NodeJS.ProcessEnv): bool
   return env['GMX_RELAY_NETWORK_ENABLED'] !== 'true';
 }
 
+/**
+ * 6단계 — 읽기 전용 네트워크 플래그. 정확히 문자열 'true'일 때만 활성.
+ * canonical auth eth_call·digest readback·receipt/log 조회·Gelato fee oracle
+ * GET·task status GET 등 **읽기 전용** 요청만 이 플래그로 허용된다.
+ * 어떤 기존 플래그(GMX_RELAY_NETWORK_ENABLED 등)도 이 값을 암묵적으로
+ * true로 만들지 않는다.
+ */
+export function isRelayReadonlyNetworkEnabled(env: NodeJS.ProcessEnv): boolean {
+  return env['GMX_RELAY_READONLY_NETWORK_ENABLED'] === 'true';
+}
+
+// ── 명시적 읽기 전용 readiness refresh 상태 (모듈 메모리, 6단계 §7) ──────────
+
+export interface ReadinessRefreshState {
+  attempted: boolean;
+  atMs: number | null;
+  ok: boolean;                 // 모든 읽기 성공 시에만 true (조회 실패 = fail-closed)
+  basis: string[];             // 수행한 읽기 작업·결과 근거 (민감정보 없음)
+  failures: string[];          // 실패 사유 (sanitize된 것만)
+}
+
+let readinessRefreshState: ReadinessRefreshState = {
+  attempted: false, atMs: null, ok: false, basis: [], failures: ['readiness refresh 미수행'],
+};
+
+export function recordReadinessRefresh(state: Omit<ReadinessRefreshState, 'attempted'>): void {
+  readinessRefreshState = { attempted: true, ...state, basis: [...state.basis], failures: [...state.failures] };
+}
+
+export function getReadinessRefreshState(): ReadinessRefreshState {
+  return { ...readinessRefreshState, basis: [...readinessRefreshState.basis], failures: [...readinessRefreshState.failures] };
+}
+
+export function __resetReadinessRefreshForTests(): void {
+  readinessRefreshState = { attempted: false, atMs: null, ok: false, basis: [], failures: ['readiness refresh 미수행'] };
+}
+
 /** 재조정(reconciliation) 결과가 유효하다고 보는 최대 age */
 export const RECONCILIATION_FRESHNESS_MS = 10 * 60_000; // 10분
 

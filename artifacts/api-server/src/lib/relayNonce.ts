@@ -83,6 +83,16 @@ export async function countUnboundNoncesOrNull(): Promise<number | null> {
   }
 }
 
+/** 할당된 nonce 총수 — 읽기 전용 상태 조회용 (6단계 §7, 신규 할당 없음). 실패=null */
+export async function countAllocatedNoncesOrNull(): Promise<number | null> {
+  try {
+    const rows = await db.select({ id: relayNoncesTable.id }).from(relayNoncesTable);
+    return rows.length;
+  } catch {
+    return null;
+  }
+}
+
 /** allocation을 relay task에 결합 (감사 추적용) — 실패해도 nonce는 이미 소모됨 */
 export async function bindNonceToTask(allocationId: string, taskId: string): Promise<boolean> {
   try {

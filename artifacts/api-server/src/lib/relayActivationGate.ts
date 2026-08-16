@@ -47,6 +47,7 @@ export function evaluateActivationGate(input: ActivationGateInput): ActivationGa
   if (!input.freshLiveFeeQuote) missing.push('fresh live fee quote 없음 (mock 불인정)');
   if (input.currentChainId !== 42161) missing.push(`chainId ${input.currentChainId ?? '미확인'} ≠ 42161`);
   if (!input.gmxConfigOk) missing.push('GMX public config 미해결');
+  if (env.GMX_RELAY_READONLY_NETWORK_ENABLED !== 'true') missing.push("GMX_RELAY_READONLY_NETWORK_ENABLED !== 'true'");
   if (env.GMX_RELAY_SUBMISSION_ENABLED !== 'true') missing.push("GMX_RELAY_SUBMISSION_ENABLED !== 'true'");
   if (env.GMX_RELAY_NETWORK_ENABLED !== 'true') missing.push("GMX_RELAY_NETWORK_ENABLED !== 'true'");
   if ((env.GMX_RELAY_MODE ?? '').toUpperCase() !== 'LIVE') missing.push("GMX_RELAY_MODE !== 'LIVE'");

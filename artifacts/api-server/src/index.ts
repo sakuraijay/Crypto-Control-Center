@@ -3,12 +3,12 @@ import { logger } from "./lib/logger";
 import { runMigrations } from "@workspace/db";
 import { startRpcHealthMonitor } from "./workers/internalExecutor";
 import { workerManager } from "./workers/aiWorker";
-import { initializeDelegatedSigner, isDelegatedSignerEnabled } from "./lib/delegatedSigner";
+import { initializeDelegatedSigner, isDelegatedSignerEnabled, isSignerStorageAccessAllowed } from "./lib/delegatedSigner";
 import { reconcileOnRestart, loadEmergencyStopFromDb, startPeriodicIntentReconciliation } from "./workers/liveTestExecutor";
 import { resolveStaticDir, assertStaticDirReady, attachStaticServing } from "./lib/staticSite";
 import { parsePort } from "./lib/port";
 import { markNotReady, markReady } from "./lib/readiness";
-import { runStartupRelayReconciliation, isRelayNetworkStructurallyDisabled } from "./lib/relayActivationStatus";
+import { runStartupRelayReconciliation, isRelayReadonlyNetworkEnabled } from "./lib/relayActivationStatus";
 import { countBlockingIntentsOrNull } from "./lib/executionIntents";
 import { countOpenRelayTasksOrNull } from "./lib/relayLifecycle";
 import { countUnboundNoncesOrNull } from "./lib/relayNonce";
@@ -67,12 +67,16 @@ httpServer = app.listen(port, (err) => {
       // 추가 구조적 게이트(5단계 리뷰 반영): signer는 relay 제출 전용이므로
       // GMX_RELAY_NETWORK_ENABLED가 꺼진 배포에서는 flag가 켜져 있어도
       // 키 복원·생성(=signer 저장소 접근)을 시작하지 않는다.
-      if (isDelegatedSignerEnabled() && !isRelayNetworkStructurallyDisabled(process.env)) {
+      // 6단계 §4: signer 저장소 접근은 read-only+submit network+submission+
+      // mode LIVE+enabled+PAPER 아님+LIVE 잠금 해제 전부 충족 시에만 시작.
+      // (initializeDelegatedSigner 내부에도 동일 게이트가 있어 이중 방어)
+      const signerStorage = isSignerStorageAccessAllowed(process.env);
+      if (isDelegatedSignerEnabled() && signerStorage.allowed) {
         initializeDelegatedSigner()
           .then(() => logger.info("Delegated signer initialized"))
           .catch((e: Error) => logger.warn({ err: e }, "Delegated signer init failed (fail-closed — signer 비활성 유지)"));
       } else if (isDelegatedSignerEnabled()) {
-        logger.info("Delegated signer init skipped — relay 네트워크 비활성(GMX_RELAY_NETWORK_ENABLED != 'true'), signer 저장소 미접근");
+        logger.info(`Delegated signer init skipped — signer 저장소 접근 조건 미충족: ${signerStorage.missing.join(', ')}`);
       } else {
         logger.info("Delegated signer disabled (DELEGATED_SIGNER_ENABLED != 'true')");
       }
@@ -97,7 +101,9 @@ httpServer = app.listen(port, (err) => {
         },
         canonicalReadback: async () => ({
           performed: false, ok: false,
-          reason: 'canonical authorization readback 미수행 — relay 네트워크 비활성(구조적 차단)',
+          reason: isRelayReadonlyNetworkEnabled(process.env)
+            ? 'canonical authorization readback 미수행 — startup 자동 조회는 수행하지 않음 (명시적 readiness refresh 경로로만 갱신)'
+            : 'canonical authorization readback 미수행 — 읽기 전용 relay 네트워크 비활성(GMX_RELAY_READONLY_NETWORK_ENABLED 미설정, 구조적 차단)',
         }),
         nowMs: () => Date.now(),
       }).then((s) => {

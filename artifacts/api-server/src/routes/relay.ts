@@ -29,8 +29,11 @@ import { evaluateActivationGate } from '../lib/relayActivationGate';
 import {
   computeReconciliationComplete, evaluateFreshLiveQuote,
   getStartupReconciliationState, isReconciliationRunning,
-  isRelayNetworkStructurallyDisabled,
+  isRelayReadonlyNetworkEnabled, getReadinessRefreshState,
 } from '../lib/relayActivationStatus';
+import { performReadinessRefresh } from '../lib/relayReadinessRefresh';
+import { countAllocatedNoncesOrNull } from '../lib/relayNonce';
+import { listOpenRelayTaskIdsOrNull } from '../lib/relayLifecycle';
 import { countBlockingIntentsOrNull } from '../lib/executionIntents';
 import { countOpenRelayTasksOrNull } from '../lib/relayLifecycle';
 import { reconcileVerdict, applyReconcileVerdict } from '../lib/relayTaskReconciler';
@@ -76,13 +79,14 @@ interface CanonicalCheck {
 }
 
 async function checkCanonical(): Promise<CanonicalCheck> {
-  // 최우선 구조적 게이트 (5단계 리뷰 반영): relay 네트워크 비활성이면
-  // RPC client 생성·호출 자체를 금지한다 — 상태 조회 경로에서 어떤 실제
-  // 네트워크 read도 발생하지 않는다 (fail-closed 결과만 반환).
-  if (isRelayNetworkStructurallyDisabled(process.env)) {
+  // 최우선 구조적 게이트 (6단계 §2: 읽기 전용 네트워크 플래그로 분리):
+  // GMX_RELAY_READONLY_NETWORK_ENABLED !== 'true'이면 RPC client 생성·호출
+  // 자체를 금지한다 — 상태 조회 경로에서 어떤 실제 네트워크 read도 발생하지
+  // 않는다 (fail-closed 결과만 반환). 기존 submit 플래그는 read 권한을 주지 않는다.
+  if (!isRelayReadonlyNetworkEnabled(process.env)) {
     return {
       confirmed: false,
-      reason: 'canonical readback 미수행 — relay 네트워크 비활성(GMX_RELAY_NETWORK_ENABLED 미설정, 구조적 차단)',
+      reason: 'canonical readback 미수행 — 읽기 전용 relay 네트워크 비활성(GMX_RELAY_READONLY_NETWORK_ENABLED 미설정, 구조적 차단)',
       approvalNonce: null, isSubaccountListed: null, expiresAt: null, remaining: null,
     };
   }
@@ -562,10 +566,23 @@ router.get('/executor/relay/activation', requireOperatorAuth, async (_req, res) 
       kind: 'OPEN',
     });
 
-    // §9 UI 상태 구분 — 표시 전용 플래그 (어떤 부작용도 없음)
+    // §9 UI 상태 구분 — 표시 전용 플래그 (어떤 부작용도 없음).
+    // 6단계 §6: read-only / submit network / submission feature / mode 분리 표시.
+    const lastRefresh = getReadinessRefreshState();
     const statusFlags = {
       codeReady: true,
+      readonlyNetworkDisabled: env.GMX_RELAY_READONLY_NETWORK_ENABLED !== 'true',
+      submitNetworkDisabled: env.GMX_RELAY_NETWORK_ENABLED !== 'true',
+      submissionDisabled: env.GMX_RELAY_SUBMISSION_ENABLED !== 'true',
+      relayMode: env.GMX_RELAY_MODE === 'LIVE' ? 'LIVE' : env.GMX_RELAY_MODE === 'DRY_RUN' ? 'DRY_RUN' : 'DISABLED',
       networkDisabled: env.GMX_RELAY_NETWORK_ENABLED !== 'true' || env.GMX_RELAY_SUBMISSION_ENABLED !== 'true' || (env.GMX_RELAY_MODE ?? '').toUpperCase() !== 'LIVE',
+      lastReadinessRefresh: {
+        attempted: lastRefresh.attempted,
+        atMs: lastRefresh.atMs,
+        ok: lastRefresh.ok,
+        basis: lastRefresh.basis,
+        failures: lastRefresh.failures,
+      },
       signerDisabled: !signerActive,
       canonicalUnverified: !canonicalAuthorized,
       canonicalReason: canonical.reason,
@@ -581,6 +598,33 @@ router.get('/executor/relay/activation', requireOperatorAuth, async (_req, res) 
     };
 
     return res.json({ ok: true, networkEligible: gate.networkEligible, missing: gate.missing, statusFlags });
+  } catch (e: unknown) {
+    return res.status(500).json({ ok: false, error: sanitizeRpcError(e) });
+  }
+});
+
+// ── POST /executor/relay/readiness/refresh — 명시적 읽기 전용 갱신 (6단계 §7) ──
+// 허용: canonical eth_call·nonce/task DB read·기존 taskId의 Gelato status GET·
+// fee oracle GET. 금지: signer 접근·서명·nonce 신규 할당·task/intent 생성·
+// sponsored-call POST·주문·자동 재제출. 조회 실패는 fail-closed로 기록.
+router.post('/executor/relay/readiness/refresh', requireOperatorAuth, async (_req, res) => {
+  try {
+    const state = await performReadinessRefresh({
+      env: process.env,
+      checkCanonical: async () => {
+        const c = await checkCanonical();
+        return { confirmed: c.confirmed, reason: c.reason };
+      },
+      listOpenTaskIds: listOpenRelayTaskIdsOrNull,
+      countAllocatedNonces: countAllocatedNoncesOrNull,
+      // 읽기 전용 GET 전용 — injectedTransport(테스트) 없으면 GET 생략(fail-closed 기록).
+      // 실제 transport를 여기서 생성하더라도 quote/status GET은 transport 내부
+      // 게이트(GMX_RELAY_READONLY_NETWORK_ENABLED)로만 허용되고 submit POST는
+      // 이 경로에서 호출 자체가 없다.
+      transport: injectedTransport,
+      nowMs: () => Date.now(),
+    });
+    return res.json({ ok: true, refresh: state });
   } catch (e: unknown) {
     return res.status(500).json({ ok: false, error: sanitizeRpcError(e) });
   }

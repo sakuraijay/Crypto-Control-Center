@@ -125,18 +125,33 @@ async function fetchGelato(url: string, init: RequestInit): Promise<{ status: nu
  */
 export function createGelatoHttpTransport(env: NodeJS.ProcessEnv = process.env): RelayTransport {
   const base = 'https://api.gelato.digital';
-  // 중앙 fail-closed 네트워크 게이트 — 호출측 게이트와 별개로 transport 자체가
-  // GMX_RELAY_NETWORK_ENABLED 미설정이면 어떤 HTTP 요청도 발신하지 않는다.
-  // (직접/미래 호출자가 게이트를 우회하는 것을 구조적으로 차단)
-  const networkGate = (): { ok: false; kind: 'config'; message: string } | null => {
-    if (env.GMX_RELAY_NETWORK_ENABLED !== 'true') {
-      return { ok: false, kind: 'config', message: 'GMX_RELAY_NETWORK_ENABLED 미설정 — 네트워크 호출 차단 (fail-closed)' };
+  // 6단계 §2·§3 — 네트워크 권한 분리 (transport 내부 최종 방어, 호출측 게이트와 독립):
+  //  - 읽기 전용 GET(quote/status): GMX_RELAY_READONLY_NETWORK_ENABLED === 'true' 필요.
+  //    기존 submit 플래그들은 GET을 허용하지도, read-only 플래그를 암묵적으로
+  //    켜지도 않는다.
+  //  - sponsored-call POST(submit): read-only + submit network + submission +
+  //    mode LIVE + API key + chainId 42161 + payload/target 검증 전부 통과해야
+  //    fetch가 발신된다. 하나라도 빠지면 fetch 0회.
+  const readonlyGate = (): { ok: false; kind: 'config'; message: string } | null => {
+    if (env.GMX_RELAY_READONLY_NETWORK_ENABLED !== 'true') {
+      return { ok: false, kind: 'config', message: 'GMX_RELAY_READONLY_NETWORK_ENABLED 미설정 — 읽기 전용 네트워크 호출 차단 (fail-closed)' };
+    }
+    return null;
+  };
+  const submitGate = (): { ok: false; kind: 'config'; message: string } | null => {
+    const missing: string[] = [];
+    if (env.GMX_RELAY_READONLY_NETWORK_ENABLED !== 'true') missing.push('GMX_RELAY_READONLY_NETWORK_ENABLED');
+    if (env.GMX_RELAY_NETWORK_ENABLED !== 'true') missing.push('GMX_RELAY_NETWORK_ENABLED');
+    if (env.GMX_RELAY_SUBMISSION_ENABLED !== 'true') missing.push('GMX_RELAY_SUBMISSION_ENABLED');
+    if (env.GMX_RELAY_MODE !== 'LIVE') missing.push("GMX_RELAY_MODE !== 'LIVE'");
+    if (missing.length > 0) {
+      return { ok: false, kind: 'config', message: `submit 차단 (fail-closed): ${missing.join(', ')}` };
     }
     return null;
   };
   return {
     async quoteRelayFee({ chainId, paymentToken, gasLimit }) {
-      const gateBlock = networkGate();
+      const gateBlock = readonlyGate();
       if (gateBlock) return gateBlock;
       try {
         const url = `${base}/oracles/${chainId}/estimate?paymentToken=${encodeURIComponent(paymentToken)}&gasLimit=${gasLimit.toString()}`;
@@ -157,12 +172,22 @@ export function createGelatoHttpTransport(env: NodeJS.ProcessEnv = process.env):
     },
 
     async submitRelayTask({ chainId, target, packedData }) {
-      const gateBlock = networkGate();
+      const gateBlock = submitGate();
       if (gateBlock) return { ...gateBlock, ambiguous: false };
       const apiKey = env[GELATO_API_KEY_SECRET_NAME];
       if (!apiKey) {
         // 요청이 나가기 전 실패 — ambiguous 아님 (재제출 판단은 호출측 게이트가 하되, broadcast 없음 확정)
         return { ok: false, kind: 'config', message: `${GELATO_API_KEY_SECRET_NAME} 미설정`, ambiguous: false };
+      }
+      // payload/target/chain 검증 — 하나라도 실패하면 fetch 0회 (요청 발신 전)
+      if (chainId !== 42161) {
+        return { ok: false, kind: 'config', message: `chainId ${chainId} ≠ 42161 — 제출 차단`, ambiguous: false };
+      }
+      if (!/^0x[0-9a-fA-F]{40}$/.test(target)) {
+        return { ok: false, kind: 'config', message: 'target 주소 형식 오류 — 제출 차단', ambiguous: false };
+      }
+      if (!/^0x[0-9a-fA-F]+$/.test(packedData) || packedData.length < 10) {
+        return { ok: false, kind: 'config', message: 'packedData 형식 오류 — 제출 차단', ambiguous: false };
       }
       try {
         const { status, text } = await fetchGelato(`${base}/relays/v2/sponsored-call`, {
@@ -191,7 +216,7 @@ export function createGelatoHttpTransport(env: NodeJS.ProcessEnv = process.env):
     },
 
     async getRelayTaskStatus({ taskId }) {
-      const gateBlock = networkGate();
+      const gateBlock = readonlyGate();
       if (gateBlock) return gateBlock;
       try {
         const { status, text } = await fetchGelato(`${base}/tasks/status/${encodeURIComponent(taskId)}`, { method: 'GET' });

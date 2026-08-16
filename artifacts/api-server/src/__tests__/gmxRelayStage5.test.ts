@@ -245,7 +245,8 @@ function fullActivation(overrides?: Partial<ActivationGateInput>): ActivationGat
     env: {
       WORKER_ENGINE_MODE: 'LIVE', LIVE_TEST_EXECUTION_LOCKED: 'false',
       DELEGATED_SIGNER_ENABLED: 'true', GMX_RELAY_SUBMISSION_ENABLED: 'true',
-      GMX_RELAY_NETWORK_ENABLED: 'true', GMX_RELAY_MODE: 'LIVE',
+      GMX_RELAY_NETWORK_ENABLED: 'true', GMX_RELAY_READONLY_NETWORK_ENABLED: 'true',
+      GMX_RELAY_MODE: 'LIVE',
     } as NodeJS.ProcessEnv,
     liveTestMode: true, signerInitialized: true, canonicalAuthorized: true,
     emergencyStopActive: false, dbOk: true, rpcOk: true, reconciliationComplete: true,
@@ -587,13 +588,29 @@ describe('구조적 네트워크 게이트 + signer 서명 게이트 (리뷰 반
     await expect(signDigestWithDelegatedSigner(DIGEST)).rejects.toThrow(/disabled/);
   });
 
-  it('signDigestWithDelegatedSigner: enabled여도 미초기화면 서명 거부', async () => {
+  function stubSignerStorageEnv() {
+    // 6단계 §4 저장소/서명 게이트 통과용 (테스트 fixture 전용)
     vi.stubEnv('DELEGATED_SIGNER_ENABLED', 'true');
+    vi.stubEnv('GMX_RELAY_READONLY_NETWORK_ENABLED', 'true');
+    vi.stubEnv('GMX_RELAY_NETWORK_ENABLED', 'true');
+    vi.stubEnv('GMX_RELAY_SUBMISSION_ENABLED', 'true');
+    vi.stubEnv('GMX_RELAY_MODE', 'LIVE');
+    vi.stubEnv('WORKER_ENGINE_MODE', 'LIVE');
+    vi.stubEnv('LIVE_TEST_EXECUTION_LOCKED', 'false');
+  }
+
+  it('signDigestWithDelegatedSigner: enabled여도 read-only만 켠 상태면 서명 거부 (6단계 게이트)', async () => {
+    vi.stubEnv('DELEGATED_SIGNER_ENABLED', 'true');
+    await expect(signDigestWithDelegatedSigner(DIGEST)).rejects.toThrow(/차단/);
+  });
+
+  it('signDigestWithDelegatedSigner: 게이트 통과해도 미초기화면 서명 거부', async () => {
+    stubSignerStorageEnv();
     await expect(signDigestWithDelegatedSigner(DIGEST)).rejects.toThrow(/미초기화/);
   });
 
   it('signDigestWithDelegatedSigner: digest 형식 오류 거부', async () => {
-    vi.stubEnv('DELEGATED_SIGNER_ENABLED', 'true');
+    stubSignerStorageEnv();
     await expect(signDigestWithDelegatedSigner('0x123' as Hex)).rejects.toThrow();
   });
 });

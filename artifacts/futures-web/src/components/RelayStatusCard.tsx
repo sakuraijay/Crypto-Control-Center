@@ -294,7 +294,10 @@ export function RelayStatusCard() {
         const f = activation.statusFlags;
         const rows: Array<{ key: string; label: string; blocked: boolean; detail?: string | null }> = [
           { key: 'code', label: '코드 준비 (Code ready)', blocked: !f.codeReady },
-          { key: 'network', label: 'Relay 네트워크 활성화', blocked: f.networkDisabled, detail: f.networkDisabled ? '환경변수 미설정 — 구조적 차단' : null },
+          { key: 'ro-network', label: 'Read-only 네트워크 (조회 전용)', blocked: f.readonlyNetworkDisabled, detail: f.readonlyNetworkDisabled ? 'GMX_RELAY_READONLY_NETWORK_ENABLED 미설정' : null },
+          { key: 'submit-network', label: 'Submit 네트워크 (제출 transport)', blocked: f.submitNetworkDisabled, detail: f.submitNetworkDisabled ? 'GMX_RELAY_NETWORK_ENABLED 미설정' : null },
+          { key: 'submission', label: 'Submission 기능 승인', blocked: f.submissionDisabled, detail: f.submissionDisabled ? 'GMX_RELAY_SUBMISSION_ENABLED 미설정' : null },
+          { key: 'mode', label: `Relay 모드: ${f.relayMode}`, blocked: f.relayMode !== 'LIVE', detail: f.relayMode !== 'LIVE' ? '실제 제출은 LIVE 모드에서만' : null },
           { key: 'signer', label: 'Delegated signer 활성', blocked: f.signerDisabled },
           { key: 'canonical', label: 'Canonical 승인 검증', blocked: f.canonicalUnverified, detail: f.canonicalReason },
           { key: 'recon', label: 'Reconciliation 완료', blocked: f.reconciliationIncomplete, detail: f.reconciliationReasons[0] ?? null },
@@ -303,9 +306,17 @@ export function RelayStatusCard() {
           { key: 'unresolved', label: 'UNRESOLVED 없음', blocked: f.unresolvedPresent, detail: f.unresolvedPresent ? `${f.unresolvedCount}건 조사 필요` : null },
           { key: 'lock', label: 'LIVE 잠금 해제', blocked: f.liveLocked, detail: f.liveLocked ? 'LIVE_TEST_EXECUTION_LOCKED — 유지 중' : null },
         ];
+        const refresh = f.lastReadinessRefresh;
         return (
           <div className="flex flex-col gap-1.5 p-3 rounded border border-border bg-secondary/30" data-testid="list-activation-checklist">
             <div className="text-[11px] font-semibold text-muted-foreground">Activation 체크리스트 (진단 전용)</div>
+            {refresh && (
+              <div className="text-[10px] text-muted-foreground" data-testid="text-readiness-refresh">
+                Readiness 갱신: {refresh.attempted && refresh.atMs
+                  ? `${new Date(refresh.atMs).toLocaleString()} — ${refresh.ok ? '성공' : `실패(fail-closed): ${refresh.failures[0] ?? ''}`}`
+                  : '미수행 (명시적 refresh 필요)'}
+              </div>
+            )}
             {rows.map((r) => (
               <div key={r.key} className="flex items-center gap-2 text-[10px]">
                 <span className={cn('text-[9px] px-1.5 py-0.5 rounded-full border font-bold shrink-0', r.blocked ? toneCls.muted : toneCls.ok)}>
