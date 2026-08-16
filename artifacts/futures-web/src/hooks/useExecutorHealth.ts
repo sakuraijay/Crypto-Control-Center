@@ -17,11 +17,14 @@ export interface ExecutorOnlineStatus {
   isStale: boolean;
   consecutiveFailures: number;
   lastSuccessAt: Date | null;
+  /** True while a subaccount revoke session is active — all new orders blocked (4단계) */
+  activeRevoke: boolean;
 }
 
 export function useExecutorOnlineStatus(): ExecutorOnlineStatus {
   const [consecutiveFailures, setConsecFails] = useState(0);
   const [lastSuccessAt, setLastSuccessAt]     = useState<Date | null>(null);
+  const [activeRevoke, setActiveRevoke]       = useState(false);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const poll = useCallback(async () => {
@@ -32,6 +35,10 @@ export function useExecutorOnlineStatus(): ExecutorOnlineStatus {
       if (res.ok) {
         setLastSuccessAt(new Date());
         setConsecFails(0);
+        try {
+          const json = await res.json();
+          setActiveRevoke(json?.activeRevoke === true);
+        } catch { /* body 파싱 실패 — 상태 유지 */ }
       } else {
         setConsecFails(c => c + 1);
       }
@@ -53,5 +60,6 @@ export function useExecutorOnlineStatus(): ExecutorOnlineStatus {
     isStale:             consecutiveFailures === 1,
     consecutiveFailures,
     lastSuccessAt,
+    activeRevoke,
   };
 }

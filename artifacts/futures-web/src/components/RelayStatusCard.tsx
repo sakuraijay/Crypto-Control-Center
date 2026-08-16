@@ -15,8 +15,9 @@ import { useWallet } from '@/lib/context';
 import { canRequestOwnerSignature, mapSignError, formatUnixSeconds } from '@/lib/subaccountApproval';
 import {
   fetchRelayStatus, postRevokePrepare, postRevokeSignature, postRevokeCancel, postRevokeDryRun,
+  fetchUnresolvedTasks, postUnresolvedRecheck,
   mapRelayModeToView, mapRelayTaskStatusToView, formatWeiToEth,
-  type RelayStatusResponse, type DryRunView,
+  type RelayStatusResponse, type DryRunView, type UnresolvedTaskView,
 } from '@/lib/relayStatus';
 
 const API_BASE = `${import.meta.env.BASE_URL}api/`;
@@ -38,16 +39,35 @@ export function RelayStatusCard() {
   const [phase, setPhase] = useState<RevokePhase>('idle');
   const [prepared, setPrepared] = useState<{ sessionId: string; typedData: unknown; summary?: Record<string, string> } | null>(null);
   const [dryRun, setDryRun] = useState<DryRunView | null>(null);
+  const [unresolved, setUnresolved] = useState<UnresolvedTaskView[]>([]);
+  const [recheckBusy, setRecheckBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<{ tone: 'ok' | 'warn' | 'error'; text: string } | null>(null);
 
   const refresh = useCallback(async () => {
     // status 엔드포인트도 운영자 인증 필요 — PIN 없이는 조회하지 않음
     const p = pin.trim();
-    if (p.length < 6) { setStatus(null); setLoading(false); return; }
+    if (p.length < 6) { setStatus(null); setUnresolved([]); setLoading(false); return; }
     setLoading(true);
-    setStatus(await fetchRelayStatus(API_BASE, p));
+    const [s, u] = await Promise.all([
+      fetchRelayStatus(API_BASE, p),
+      fetchUnresolvedTasks(API_BASE, p),
+    ]);
+    setStatus(s);
+    setUnresolved(u ?? []);
     setLoading(false);
   }, [pin]);
+
+  const handleRecheck = useCallback(async (taskId: string) => {
+    setRecheckBusy(taskId);
+    const r = await postUnresolvedRecheck({ apiBase: API_BASE, pin: pin.trim(), taskId });
+    setRecheckBusy(null);
+    if (!r.ok) { setMessage({ tone: 'error', text: r.error ?? '재조회 실패' }); return; }
+    setMessage({
+      tone: r.rechecked ? 'ok' : 'warn',
+      text: r.rechecked ? '증거를 재수집했습니다 — 상태는 증거 기반으로만 전이됩니다.' : (r.reason ?? '재수집 불가 — 상태 유지'),
+    });
+    void refresh();
+  }, [pin, refresh]);
 
   useEffect(() => { void refresh(); }, [refresh]);
 
@@ -281,6 +301,47 @@ export function RelayStatusCard() {
               </div>
             );
           })}
+        </div>
+      )}
+
+      {/* UNRESOLVED 조사 (4단계) — 증거 재수집만 가능, 강제 종결·재제출 없음 */}
+      {unresolved.length > 0 && (
+        <div className="flex flex-col gap-2 p-3 rounded border border-[var(--color-short)]/40 bg-[var(--color-short)]/5" data-testid="list-unresolved-tasks">
+          <div className="text-[11px] font-semibold text-[var(--color-short)] flex items-center gap-1">
+            <ShieldAlert className="w-3 h-3" /> UNRESOLVED 조사 필요 ({unresolved.length}건) — 해소 전 신규 제출 차단
+          </div>
+          {unresolved.map((t) => (
+            <div key={t.id} className="flex flex-col gap-1 p-2 rounded border border-border bg-background/50 text-[10px]">
+              <div className="grid grid-cols-2 gap-x-4 gap-y-0.5">
+                <span className="text-muted-foreground">Intent/Task</span>
+                <span className="font-mono truncate">{t.id}{t.relayTaskId ? ` / ${t.relayTaskId}` : ''}</span>
+                <span className="text-muted-foreground">Purpose</span><span>{t.kind}</span>
+                <span className="text-muted-foreground">시각</span>
+                <span>{new Date(t.createdAt).toLocaleString()} → {new Date(t.updatedAt).toLocaleString()}</span>
+                <span className="text-muted-foreground">txHash</span><span className="font-mono truncate">{t.txHash ?? '미확보'}</span>
+                <span className="text-muted-foreground">orderKey</span><span className="font-mono truncate">{t.orderKey ?? '미확보'}</span>
+                <span className="text-muted-foreground">마지막 판정</span><span>{t.resolutionBasis ?? '—'}</span>
+                <span className="text-muted-foreground">오류 분류</span><span>{t.errorClass ?? '—'}</span>
+              </div>
+              <div className="flex items-center gap-2 flex-wrap mt-1">
+                <button
+                  onClick={() => void handleRecheck(t.id)}
+                  disabled={recheckBusy === t.id}
+                  className="h-7 px-2.5 rounded text-[10px] border border-amber-500/40 bg-amber-500/10 text-amber-400 hover:bg-amber-500/20"
+                  data-testid={`button-recheck-${t.id}`}
+                >
+                  {recheckBusy === t.id ? '재조회 중…' : '증거 재수집'}
+                </button>
+                {t.links.arbiscanTx && (
+                  <a href={t.links.arbiscanTx} target="_blank" rel="noreferrer" className="underline text-muted-foreground">Arbiscan</a>
+                )}
+                {t.links.gelatoTask && (
+                  <a href={t.links.gelatoTask} target="_blank" rel="noreferrer" className="underline text-muted-foreground">Gelato Task</a>
+                )}
+                <span className="text-muted-foreground/70">강제 종결·재제출·삭제 불가 — 온체인/Task 증거로만 전이</span>
+              </div>
+            </div>
+          ))}
         </div>
       )}
 

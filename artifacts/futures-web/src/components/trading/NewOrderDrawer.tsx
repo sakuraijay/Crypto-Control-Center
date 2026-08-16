@@ -6,6 +6,7 @@ import { AlertCircle, TrendingUp, TrendingDown, Info } from 'lucide-react';
 import { useTradingContext, useWatchlistContext, useStrategyContext, useAppContext } from '@/lib/context';
 import type { NewOrderParams } from '@/lib/context/AppContext';
 import { useToast } from '@/hooks/use-toast';
+import { useExecutorOnlineStatus } from '@/hooks/useExecutorHealth';
 import { cn } from '@/lib/utils';
 
 interface Props {
@@ -34,6 +35,7 @@ export function NewOrderDrawer({ open, onClose, defaultSymbol }: Props) {
   const { watchlist } = useWatchlistContext();
   const { limits } = useStrategyContext();
   const { engineState, stopNewOrders } = useAppContext();
+  const { activeRevoke } = useExecutorOnlineStatus();
   const { toast } = useToast();
 
   const [symbol, setSymbol]           = useState(defaultSymbol ?? 'BTC');
@@ -60,6 +62,7 @@ export function NewOrderDrawer({ open, onClose, defaultSymbol }: Props) {
     const errs: string[] = [];
     if (engineState === 'EMERGENCY_STOP') errs.push('Emergency stop is active');
     if (stopNewOrders) errs.push('New orders are disabled');
+    if (activeRevoke) errs.push('Subaccount revoke 진행 중 — 신규 주문 차단');
     if (!sym.trim()) errs.push('Symbol is required');
     if (sizeUsdNum <= 0) errs.push('Position size must be > 0');
     if (levNum < 1 || levNum > limits.maxLeverage) errs.push(`Leverage must be 1–${limits.maxLeverage}x`);
@@ -72,7 +75,7 @@ export function NewOrderDrawer({ open, onClose, defaultSymbol }: Props) {
       errs.push(`Total exposure $${totalExposure.toFixed(0)} would exceed limit $${limits.maxTotalExposureUSDT.toLocaleString()}`);
     }
     return errs;
-  }, [engineState, stopNewOrders, sym, sizeUsdNum, levNum, orderType, limitPrice, collateralUsd, limits, account, positions]);
+  }, [engineState, stopNewOrders, activeRevoke, sym, sizeUsdNum, levNum, orderType, limitPrice, collateralUsd, limits, account, positions]);
 
   const handleSubmit = async () => {
     if (validationErrors.length > 0) return;

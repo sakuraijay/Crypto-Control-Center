@@ -116,6 +116,7 @@ export function mapRelayTaskStatusToView(status: string): StatusView {
     case 'CONFIRMED':           return { label: '온체인 확정', tone: 'ok' };
     case 'CANCELLED':           return { label: '취소됨', tone: 'error' };
     case 'FAILED_PRE_BROADCAST':return { label: '제출 전 실패', tone: 'error' };
+    case 'FAILED':              return { label: '온체인 확정 실패', tone: 'error' };
     case 'UNRESOLVED':          return { label: '판정 불가 — 수동 확인 필요', tone: 'error' };
     default:                    return { label: status, tone: 'muted' };
   }
@@ -195,6 +196,56 @@ export async function postRevokeCancel(params: {
     const json = await res.json().catch(() => null);
     if (!res.ok || !json?.ok) return { ok: false, error: json?.error ?? `취소 실패 (HTTP ${res.status})` };
     return { ok: true };
+  } catch (e: unknown) {
+    return { ok: false, error: (e as Error).message || '네트워크 오류' };
+  }
+}
+
+// ── UNRESOLVED 조사 (4단계) ──────────────────────────────────────────────────
+
+export interface UnresolvedTaskView {
+  id: string;
+  kind: string;
+  status: string;
+  relayTaskId: string | null;
+  txHash: string | null;
+  orderKey: string | null;
+  userNonce: string | null;
+  approvalNonce: string | null;
+  errorClass: string | null;
+  resolutionBasis: string | null;
+  createdAt: string;
+  updatedAt: string;
+  links: { arbiscanTx: string | null; gelatoTask: string | null };
+  blocking: boolean;
+}
+
+export async function fetchUnresolvedTasks(apiBase: string, pin: string): Promise<UnresolvedTaskView[] | null> {
+  try {
+    const res = await fetch(`${apiBase}executor/relay/unresolved`, {
+      headers: { 'x-operator-pin': pin },
+    });
+    if (!res.ok) return null;
+    const json = await res.json();
+    return json?.ok ? (json.tasks as UnresolvedTaskView[]) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 증거 재수집만 — 강제 terminal·재제출·삭제는 서버에 존재하지 않는다 */
+export async function postUnresolvedRecheck(params: {
+  apiBase: string; pin: string; taskId: string;
+}): Promise<{ ok: boolean; rechecked?: boolean; reason?: string; error?: string }> {
+  try {
+    const res = await fetch(`${params.apiBase}executor/relay/unresolved/recheck`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-operator-pin': params.pin },
+      body: JSON.stringify({ taskId: params.taskId }),
+    });
+    const json = await res.json().catch(() => null);
+    if (!res.ok || !json?.ok) return { ok: false, error: json?.error ?? `재조회 실패 (HTTP ${res.status})` };
+    return { ok: true, rechecked: json.rechecked === true, reason: json.reason };
   } catch (e: unknown) {
     return { ok: false, error: (e as Error).message || '네트워크 오류' };
   }

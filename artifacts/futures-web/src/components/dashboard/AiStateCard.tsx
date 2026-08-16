@@ -18,6 +18,7 @@ import { Switch } from '@/components/ui/switch';
 import { cn } from '@/lib/utils';
 import { useAiEngine } from '@/lib/context/AiEngineContext';
 import { useAppContext } from '@/lib/context';
+import { useExecutorOnlineStatus } from '@/hooks/useExecutorHealth';
 import type { AiOperatingState, RiskLevel } from '@/lib/ai/types';
 import { formatDistanceToNowStrict } from 'date-fns';
 
@@ -132,6 +133,7 @@ function StateDistribution({ dist }: { dist: Record<AiOperatingState, number> })
 
 export function AiStateCard() {
   const { currentDecision, stats, running, autoExecute, setAutoExecute, triggerCycle, nextCycleMs, systemPaused, pauseReason } = useAiEngine();
+  const { activeRevoke } = useExecutorOnlineStatus();
   const { engineState, triggerEmergencyStop } = useAppContext();
   const [expanded, setExpanded] = useState(true);
   const [confirmAuto, setConfirmAuto] = useState(false);
@@ -144,6 +146,11 @@ export function AiStateCard() {
   const hasDecision = currentDecision != null;
 
   const handleAutoToggle = (v: boolean) => {
+    // revoke 진행 중이면 활성화 경로 전면 차단 (확인창 열림 상태 레이스 포함)
+    if (v && activeRevoke) {
+      setConfirmAuto(false);
+      return;
+    }
     if (v && !confirmAuto) {
       setConfirmAuto(true);
       return;
@@ -341,7 +348,7 @@ export function AiStateCard() {
                 <div className="flex items-center gap-2 text-[10px] text-[var(--color-warning)]">
                   <AlertTriangle className="w-3 h-3" />
                   <span>Auto-execute paper trades?</span>
-                  <button onClick={() => { setAutoExecute(true); setConfirmAuto(false); }} className="text-[var(--color-short)] font-bold underline">Yes</button>
+                  <button onClick={() => { setConfirmAuto(false); if (!activeRevoke) setAutoExecute(true); }} className="text-[var(--color-short)] font-bold underline">Yes</button>
                   <button onClick={() => setConfirmAuto(false)} className="text-muted-foreground underline">No</button>
                 </div>
               )}
@@ -357,9 +364,14 @@ export function AiStateCard() {
                   <Switch
                     checked={autoExecute}
                     onCheckedChange={handleAutoToggle}
-                    disabled={isEmergency}
+                    disabled={isEmergency || activeRevoke}
                     className="scale-75"
                   />
+                  {activeRevoke && (
+                    <span className="text-[10px] text-[var(--color-short)]" data-testid="text-revoke-block">
+                      Revoke 진행 중 — 자동 실행 차단
+                    </span>
+                  )}
                 </>
               )}
             </div>
