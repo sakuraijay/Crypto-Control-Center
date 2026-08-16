@@ -9,7 +9,7 @@
  *   - 개인키·시드문구를 수신하거나 저장하지 않음.
  *
  * 데이터 출처:
- *   - GMX Synthetics Subgraph (Satsuma) — 포지션 목록 (최대 30~60초 지연)
+ *   - Arbitrum RPC (GMX V2 PositionReader) — 포지션 목록 (30초 캐시)
  *   - WalletContext — 지갑 주소·잔고 (EIP-1193 read-only)
  *   PAPER/Mock 대시보드 데이터와 완전히 별개의 실제 온체인 데이터입니다.
  */
@@ -479,6 +479,76 @@ export function GmxOnchainCard() {
                   </Button>
                 </div>
               )}
+
+              {/* ── 리스크 요약 행 (totalExposure · avgLeverage · nearestLiq) ── */}
+              {/* 데이터가 없는 필드는 N/A 표시 — 절대 추정값 사용 안 함 */}
+              {gmx.positions.length > 0 && (() => {
+                // avgLeverage: sizeUsd / collateralUsd where leverage is non-null only
+                const levPosns = gmx.positions.filter(p => p.leverage != null);
+                const avgLeverage = levPosns.length > 0
+                  ? levPosns.reduce((s, p) => s + p.leverage!, 0) / levPosns.length
+                  : null;
+
+                // nearestLiquidation: position with smallest |mark - liq| / mark gap
+                // Only positions where BOTH prices are confirmed non-null
+                let nearestGapPct: number | null = null;
+                let nearestLabel = '';
+                for (const p of gmx.positions) {
+                  if (p.liquidationPrice == null || p.markPriceUsd == null || p.markPriceUsd <= 0) continue;
+                  const gap = Math.abs(p.markPriceUsd - p.liquidationPrice) / p.markPriceUsd;
+                  if (nearestGapPct === null || gap < nearestGapPct) {
+                    nearestGapPct = gap;
+                    nearestLabel  = `${p.symbol} ${p.direction}`;
+                  }
+                }
+
+                const totalExp = gmx.positions.reduce((s, p) => s + p.sizeUsd, 0);
+                return (
+                  <div className="grid grid-cols-3 gap-2 mb-3">
+                    {/* 총 익스포저 */}
+                    <div className="flex flex-col gap-0.5 px-2.5 py-2 rounded-lg border border-border bg-card/60">
+                      <span className="text-[9px] font-semibold text-muted-foreground uppercase tracking-wider">총 익스포저</span>
+                      <span className="font-mono text-xs font-bold text-foreground">
+                        ${totalExp.toLocaleString('en-US', { maximumFractionDigits: 0 })}
+                      </span>
+                    </div>
+                    {/* 평균 레버리지 */}
+                    <div className="flex flex-col gap-0.5 px-2.5 py-2 rounded-lg border border-border bg-card/60">
+                      <span className="text-[9px] font-semibold text-muted-foreground uppercase tracking-wider">평균 레버리지</span>
+                      {avgLeverage != null ? (
+                        <>
+                          <span className="font-mono text-xs font-bold text-foreground">{avgLeverage.toFixed(1)}×</span>
+                          {levPosns.length < gmx.positions.length && (
+                            <span className="text-[9px] text-muted-foreground">{levPosns.length}/{gmx.positions.length}개 유효</span>
+                          )}
+                        </>
+                      ) : (
+                        <span className="font-mono text-xs text-muted-foreground">N/A</span>
+                      )}
+                    </div>
+                    {/* 최근접 청산거리 */}
+                    <div className={`flex flex-col gap-0.5 px-2.5 py-2 rounded-lg border bg-card/60 ${
+                      nearestGapPct !== null && nearestGapPct <= 0.05
+                        ? 'border-[var(--color-short)]/40 bg-[var(--color-short)]/5'
+                        : 'border-border'
+                    }`}>
+                      <span className="text-[9px] font-semibold text-muted-foreground uppercase tracking-wider">최근접 청산거리</span>
+                      {nearestGapPct != null ? (
+                        <>
+                          <span className={`font-mono text-xs font-bold ${
+                            nearestGapPct <= 0.05 ? 'text-[var(--color-short)]' : 'text-foreground'
+                          }`}>
+                            {(nearestGapPct * 100).toFixed(1)}%
+                          </span>
+                          <span className="text-[9px] text-muted-foreground truncate">{nearestLabel}</span>
+                        </>
+                      ) : (
+                        <span className="font-mono text-xs text-muted-foreground">N/A</span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
 
               {/* ── 청산가 위험 근접 경고 배너 ── */}
               {gmx.positions.some(p => p.nearLiquidation) && (

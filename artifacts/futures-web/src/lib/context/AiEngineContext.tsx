@@ -343,13 +343,68 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
     NotificationPermission | 'unsupported'
   >(() => (typeof Notification !== 'undefined' ? Notification.permission : 'unsupported'));
 
+  // ── Web Push / Service Worker registration helper ─────────────────────────
+  // Registers sw.js, subscribes to push, and POSTs subscription to the server.
+  // Fail-closed: any missing piece (no VAPID key, no SW support) → silent return.
+  // Never throws. Call after permission is granted.
+  // MUST be declared before requestNotificationPermission to avoid TDZ error.
+  const tryRegisterPush = useCallback(async (): Promise<void> => {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+    try {
+      // Get VAPID public key — 503 means not configured, skip silently
+      const keyResp = await fetch('/api/notifications/vapid-key');
+      if (!keyResp.ok) return;
+      const { publicKey } = await keyResp.json() as { publicKey: string };
+      if (!publicKey) return;
+
+      // Register (or reuse) the service worker
+      const reg = await navigator.serviceWorker.register('/futures-web/sw.js', {
+        scope: '/futures-web/',
+      });
+      await navigator.serviceWorker.ready;
+
+      // Check for existing subscription first
+      const existing = await reg.pushManager.getSubscription();
+      if (existing) {
+        // Re-POST to ensure server has it (idempotent)
+        await fetch('/api/notifications/subscribe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(existing.toJSON()),
+        }).catch(() => {});
+        return;
+      }
+
+      // Convert VAPID public key (URL-safe base64) → Uint8Array
+      const padding = '='.repeat((4 - publicKey.length % 4) % 4);
+      const b64     = (publicKey + padding).replace(/-/g, '+').replace(/_/g, '/');
+      const raw     = window.atob(b64);
+      const appKey  = Uint8Array.from([...raw].map(c => c.charCodeAt(0)));
+
+      const sub = await reg.pushManager.subscribe({
+        userVisibleOnly:      true,
+        applicationServerKey: appKey,
+      });
+      await fetch('/api/notifications/subscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(sub.toJSON()),
+      }).catch(() => {});
+    } catch (err) {
+      // SW registration can fail in iframe/insecure contexts — log but never crash
+      console.warn('[Push] SW registration failed:', (err as Error).message);
+    }
+  }, []);
+
   // User-driven permission request — must never be called automatically.
   const requestNotificationPermission = useCallback(async () => {
     if (typeof Notification === 'undefined') return;
     if (Notification.permission !== 'default') return;
     const perm = await Notification.requestPermission();
     setNotificationPermission(perm);
-  }, []);
+    // Register push subscription when permission is granted
+    if (perm === 'granted') void tryRegisterPush();
+  }, [tryRegisterPush]);
 
   // Test notification — requests permission if needed, then fires a desktop alert.
   // Always syncs notificationPermission so badges/buttons update immediately.
@@ -373,14 +428,15 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
       body: '알림이 정상 동작합니다. ✅',
       icon: '/favicon.ico',
     });
-    // 서버에 결과 기록 (비동기, non-blocking — 실패해도 UI에 영향 없음)
+    // 서버에 결과 기록 + Web Push 구독 등록 시도 (비동기, non-blocking)
     fetch('/api/notifications/test', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ channel: 'browser', status: 'sent', msg: '테스트 알림 전송됨 ✅' }),
     }).catch(() => {});
+    void tryRegisterPush();
     return 'sent';
-  }, []);
+  }, [tryRegisterPush]);
 
   // ── Toast + browser notification when a new LIVE approval enters the queue ──
   useEffect(() => {

@@ -16,6 +16,7 @@ import { db, liveApprovalsTable } from "@workspace/db";
 import { desc, eq, sql } from "drizzle-orm";
 import { validateDryRunParams } from "./executor";
 import type { ExecuteOrderParams } from "../workers/internalExecutor";
+import { sendPushToOperator } from "./notifications";
 
 const router = Router();
 
@@ -62,6 +63,22 @@ router.post("/ai/approvals", async (req, res) => {
       })
       .onConflictDoNothing()   // 낙관적 중복 방지
       .returning();
+
+    // Push notification to operator — fail-closed, non-blocking
+    try {
+      const d = JSON.parse(decisionJson) as {
+        operatingState?: string; primarySymbol?: string; sizeUsd?: number;
+      };
+      const sym  = d.primarySymbol ?? '';
+      const size = d.sizeUsd ? ` · $${d.sizeUsd.toLocaleString()}` : '';
+      void sendPushToOperator({
+        title:               '⚡ LIVE 승인 필요 — Crypto CTL',
+        body:                `${d.operatingState ?? 'Trade'} ${sym}/USD${size} — 대시보드에서 승인 필요`,
+        tag:                 `live-approval-${id}`,
+        requireInteraction:  true,
+        url:                 '/futures-web/',
+      });
+    } catch { /* never block the response */ }
 
     res.status(201).json(inserted ?? { id, status: "PENDING" });
   } catch (err) {

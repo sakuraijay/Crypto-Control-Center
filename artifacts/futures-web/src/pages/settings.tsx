@@ -200,16 +200,85 @@ export default function Settings() {
   // ── 핵심 리스크 한도 draft 상태 ──────────────────────────────────────────
   const [drawdownDraft,  setDrawdownDraft]  = useState(() => limits.maxDrawdownPercent  ?? 15);
   const [dailyLossDraft, setDailyLossDraft] = useState(() => limits.dailyLossLimitUSDT ?? 500);
-  // ── 알림 서버 로그 ─────────────────────────────────────────────────────────
+  // ── 알림 서버 로그 + VAPID / Web Push 상태 ──────────────────────────────────
   const [notifLog, setNotifLog] = useState<Array<{ ts: string; channel: string; status: string; msg: string }>>([]);
-  useEffect(() => {
+  const [vapidReady,      setVapidReady]      = useState<boolean | null>(null); // null = loading
+  const [pushSubscribed,  setPushSubscribed]  = useState(false);
+  const [pushSubscribing, setPushSubscribing] = useState(false);
+
+  const refreshNotifStatus = useCallback(() => {
     fetch('/api/notifications/status')
       .then(r => r.ok ? r.json() : null)
-      .then((d: { log?: Array<{ ts: string; channel: string; status: string; msg: string }> } | null) => {
-        if (d && Array.isArray(d.log)) setNotifLog(d.log.slice(0, 5));
+      .then((d: {
+        log?: Array<{ ts: string; channel: string; status: string; msg: string }>;
+        vapidConfigured?: boolean;
+        subscribed?: boolean;
+      } | null) => {
+        if (!d) return;
+        if (Array.isArray(d.log)) setNotifLog(d.log.slice(0, 5));
+        if (typeof d.vapidConfigured === 'boolean') setVapidReady(d.vapidConfigured);
+        if (typeof d.subscribed     === 'boolean') setPushSubscribed(d.subscribed);
       })
       .catch(() => {});
-  }, [testNotifState]); // re-fetch after each test to show latest result
+  }, []);
+
+  useEffect(() => { refreshNotifStatus(); }, [testNotifState, refreshNotifStatus]);
+
+  // ── Web Push subscribe / unsubscribe (mirrors AiEngineContext.tryRegisterPush) ──
+  const handlePushSubscribe = useCallback(async () => {
+    if (!vapidReady || !('serviceWorker' in navigator) || !('PushManager' in window)) return;
+    setPushSubscribing(true);
+    try {
+      const keyResp = await fetch('/api/notifications/vapid-key');
+      if (!keyResp.ok) return;
+      const { publicKey } = await keyResp.json() as { publicKey: string };
+      if (!publicKey) return;
+
+      const reg = await navigator.serviceWorker.register('/futures-web/sw.js', { scope: '/futures-web/' });
+      await navigator.serviceWorker.ready;
+
+      const existing = await reg.pushManager.getSubscription();
+      const sub = existing ?? await reg.pushManager.subscribe({
+        userVisibleOnly:      true,
+        applicationServerKey: (() => {
+          const padding = '='.repeat((4 - publicKey.length % 4) % 4);
+          const b64     = (publicKey + padding).replace(/-/g, '+').replace(/_/g, '/');
+          const raw     = window.atob(b64);
+          return Uint8Array.from([...raw].map(c => c.charCodeAt(0)));
+        })(),
+      });
+      await fetch('/api/notifications/subscribe', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(sub.toJSON()),
+      });
+      refreshNotifStatus();
+    } catch (err) {
+      console.warn('[Push] 구독 실패:', (err as Error).message);
+    } finally {
+      setPushSubscribing(false);
+    }
+  }, [vapidReady, refreshNotifStatus]);
+
+  const handlePushUnsubscribe = useCallback(async () => {
+    setPushSubscribing(true);
+    try {
+      // Unsubscribe from PushManager
+      if ('serviceWorker' in navigator) {
+        const reg = await navigator.serviceWorker.getRegistration('/futures-web/');
+        if (reg) {
+          const sub = await reg.pushManager.getSubscription();
+          if (sub) await sub.unsubscribe();
+        }
+      }
+      // Remove from server
+      await fetch('/api/notifications/subscribe', { method: 'DELETE' });
+      refreshNotifStatus();
+    } catch (err) {
+      console.warn('[Push] 구독 해제 실패:', (err as Error).message);
+    } finally {
+      setPushSubscribing(false);
+    }
+  }, [refreshNotifStatus]);
 
   const isEmergency = engineState === 'EMERGENCY_STOP';
   const isOffline   = consecutiveFailures >= OFFLINE_THRESHOLD;
@@ -1762,6 +1831,70 @@ export default function Settings() {
               </span>
             </div>
           )}
+
+          {/* ── Web Push (VAPID) 구독 관리 ── */}
+          <div className="border-t border-border/50 pt-4 flex flex-col gap-3">
+            <div className="flex items-center justify-between">
+              <div className="flex flex-col gap-0.5">
+                <span className="text-sm font-semibold flex items-center gap-1.5">
+                  <Zap className="w-4 h-4 text-primary" /> Web Push (VAPID)
+                </span>
+                <span className="text-[11px] text-muted-foreground">브라우저 닫힌 상태에서도 LIVE 승인 알림 수신</span>
+              </div>
+              {/* VAPID 서버 키 상태 배지 */}
+              {vapidReady === null ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-muted-foreground" />
+              ) : vapidReady ? (
+                <span className="flex items-center gap-1 text-[10px] font-semibold px-2 py-1 rounded-md border border-[var(--color-long)]/30 bg-[var(--color-long)]/5 text-[var(--color-long)]">
+                  <CheckCircle2 className="w-3 h-3" /> 서버 키 설정됨
+                </span>
+              ) : (
+                <span className="flex items-center gap-1 text-[10px] font-semibold px-2 py-1 rounded-md border border-amber-500/30 bg-amber-500/5 text-amber-400">
+                  <AlertCircle className="w-3 h-3" /> VAPID 미설정
+                </span>
+              )}
+            </div>
+
+            {/* 구독 상태 + 버튼 */}
+            {!vapidReady && vapidReady !== null && (
+              <p className="text-[11px] text-muted-foreground bg-amber-500/5 border border-amber-500/20 rounded-lg px-3 py-2">
+                Web Push를 활성화하려면 서버에{' '}
+                <code className="font-mono text-[10px] text-amber-300">VAPID_PUBLIC_KEY</code>·<code className="font-mono text-[10px] text-amber-300">VAPID_PRIVATE_KEY</code>{' '}
+                환경 변수를 설정하세요.{' '}
+                <span className="opacity-70">생성: <code className="font-mono text-[10px]">npx web-push generate-vapid-keys</code></span>
+              </p>
+            )}
+            {vapidReady && (
+              <div className="flex items-center justify-between gap-3">
+                <span className={`text-[11px] font-semibold flex items-center gap-1 ${pushSubscribed ? 'text-[var(--color-long)]' : 'text-muted-foreground'}`}>
+                  {pushSubscribed
+                    ? <><CheckCircle2 className="w-3 h-3" /> 구독 중 — 서버 Push 활성</>
+                    : <><XCircle className="w-3 h-3" /> 미구독</>}
+                </span>
+                {notificationPermission !== 'granted' ? (
+                  <span className="text-[10px] text-amber-400">먼저 브라우저 알림 권한을 허용하세요</span>
+                ) : pushSubscribed ? (
+                  <Button
+                    size="sm" variant="outline"
+                    className="h-7 text-[11px] border-[var(--color-short)]/30 text-[var(--color-short)] hover:bg-[var(--color-short)]/5"
+                    onClick={handlePushUnsubscribe} disabled={pushSubscribing}
+                  >
+                    {pushSubscribing ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : null}
+                    구독 해제
+                  </Button>
+                ) : (
+                  <Button
+                    size="sm" variant="outline"
+                    className="h-7 text-[11px] border-primary/30 text-primary hover:bg-primary/5"
+                    onClick={handlePushSubscribe} disabled={pushSubscribing}
+                  >
+                    {pushSubscribing ? <Loader2 className="w-3 h-3 animate-spin mr-1" /> : null}
+                    Push 구독
+                  </Button>
+                )}
+              </div>
+            )}
+          </div>
 
           {/* ── 서버 알림 이력 ── */}
           {notifLog.length > 0 && (
