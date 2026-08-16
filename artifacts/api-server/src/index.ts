@@ -7,6 +7,7 @@ import { initializeDelegatedSigner, isDelegatedSignerEnabled } from "./lib/deleg
 import { reconcileOnRestart, loadEmergencyStopFromDb } from "./workers/liveTestExecutor";
 import { resolveStaticDir, assertStaticDirReady, attachStaticServing } from "./lib/staticSite";
 import { parsePort } from "./lib/port";
+import { markNotReady, markReady } from "./lib/readiness";
 
 // PORT 검증: 1~65535 정수만 허용 (순수 함수 — port.test.ts에서 격리 검증)
 const port = parsePort(process.env["PORT"]);
@@ -29,16 +30,25 @@ if (process.env["NODE_ENV"] === "production") {
 // Start internal executor RPC health monitor (non-blocking)
 startRpcHealthMonitor();
 
-// Run database migrations before accepting requests.
-// Each migration file uses IF NOT EXISTS guards — safe to run on every start.
-runMigrations()
-  .then(() => {
-    httpServer = app.listen(port, (err) => {
-      if (err) {
-        logger.error({ err }, "Error listening on port");
-        process.exit(1);
-      }
-      logger.info({ port }, "Server listening");
+let httpServer: ReturnType<typeof app.listen> | null = null;
+
+// 포트를 즉시 연다 — 마이그레이션이 끝나기 전에도 헬스체크·업타임 모니터가
+// 연결 거부(다운타임) 대신 응답을 받도록. 준비 전 API 요청은 app.ts의
+// readiness 게이트가 503으로 응답하고, /api/healthz는 항상 200을 반환한다.
+markNotReady();
+httpServer = app.listen(port, (err) => {
+  if (err) {
+    logger.error({ err }, "Error listening on port");
+    process.exit(1);
+  }
+  logger.info({ port }, "Server listening (readiness gate active until migrations finish)");
+
+  // Run database migrations, then open the API and start background services.
+  // Each migration file uses IF NOT EXISTS guards — safe to run on every start.
+  runMigrations()
+    .then(() => {
+      markReady();
+      logger.info("Migrations complete — API ready");
 
       // Delegated signer: DELEGATED_SIGNER_ENABLED=true(정확히 'true')일 때만
       // 키 복원/신규 생성 시도. 기본값(미설정)에서는 DB 접근·키 생성·SESSION_SECRET
@@ -55,21 +65,19 @@ runMigrations()
       loadEmergencyStopFromDb().catch(() => {});
       reconcileOnRestart().catch(() => {});
 
-      // Start the 24/7 AI Worker after the server is up.
-      // Migration must complete first so the worker can read/write DB.
+      // Start the 24/7 AI Worker after migrations complete
+      // so the worker can read/write DB.
       void workerManager.start();
+    })
+    .catch((err2) => {
+      logger.error({ err: err2 }, "Database migration failed — aborting startup");
+      process.exit(1);
     });
-  })
-  .catch((err) => {
-    logger.error({ err }, "Database migration failed — aborting startup");
-    process.exit(1);
-  });
+});
 
 // Graceful shutdown — stop AI worker, close HTTP server, then exit.
 // Must call process.exit() explicitly because installing a SIGTERM handler
 // overrides Node's default exit-on-SIGTERM behaviour.
-let httpServer: ReturnType<typeof app.listen> | null = null;
-
 function shutdown(signal: string) {
   logger.info({ signal }, "Shutdown signal received — stopping services");
   workerManager.stop();

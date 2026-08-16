@@ -3,6 +3,7 @@ import cors from "cors";
 import pinoHttp from "pino-http";
 import router from "./routes";
 import { logger } from "./lib/logger";
+import { isReady } from "./lib/readiness";
 
 const app: Express = express();
 
@@ -34,6 +35,17 @@ app.use(express.urlencoded({ extended: true }));
 // /api·정적 asset·SPA fallback과 충돌하지 않도록 정확히 "/"만 처리.
 app.get("/", (_req, res) => {
   res.redirect(302, "/futures-web/");
+});
+
+// 준비(readiness) 게이트: 마이그레이션 완료 전에는 healthz를 제외한
+// API 요청에 503을 반환한다. 포트는 즉시 열리므로 헬스체크·업타임
+// 모니터는 연결 거부 대신 정상 응답을 받는다.
+app.use("/api", (req, res, next) => {
+  if (!isReady() && req.path !== "/healthz") {
+    res.status(503).json({ error: "Server starting — migrations in progress" });
+    return;
+  }
+  next();
 });
 
 app.use("/api", router);
