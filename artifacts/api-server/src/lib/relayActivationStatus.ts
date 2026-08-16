@@ -55,6 +55,32 @@ export function getReadinessRefreshState(): ReadinessRefreshState {
 
 export function __resetReadinessRefreshForTests(): void {
   readinessRefreshState = { attempted: false, atMs: null, ok: false, basis: [], failures: ['readiness refresh 미수행'] };
+  canonicalSnapshot = null;
+}
+
+// ── canonical readback 저장 스냅샷 (모듈 메모리) ─────────────────────────────
+// 실제 eth_call을 수행한 경로(status/dry-run/readiness refresh)만 기록하고,
+// activation GET 같은 무호출 상태 조회는 이 저장값만 읽는다 — 외부 호출 0회 보장.
+
+export interface CanonicalSnapshot {
+  atMs: number;
+  confirmed: boolean;
+  reason: string | null;
+  approvalNonce: string | null;
+  isSubaccountListed: boolean | null;
+  expiresAt: string | null;
+  remaining: string | null;
+}
+
+let canonicalSnapshot: CanonicalSnapshot | null = null;
+
+export function recordCanonicalSnapshot(s: CanonicalSnapshot): void {
+  canonicalSnapshot = { ...s };
+}
+
+/** 저장된 canonical readback 결과 — 없으면 null (미조회, fail-closed로 취급) */
+export function getCanonicalSnapshot(): CanonicalSnapshot | null {
+  return canonicalSnapshot ? { ...canonicalSnapshot } : null;
 }
 
 /** 재조정(reconciliation) 결과가 유효하다고 보는 최대 age */

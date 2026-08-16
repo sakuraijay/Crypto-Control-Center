@@ -387,6 +387,39 @@ describe('6단계 §7 — 읽기 전용 readiness refresh', () => {
     expect(stored.atMs).toBe(3000);
   });
 
+  it('의존성 예외 throw도 fail-closed로 기록된다 (500으로 새지 않음)', async () => {
+    const transport = {
+      quoteRelayFee: vi.fn().mockRejectedValue(new Error('boom-quote')),
+      getRelayTaskStatus: vi.fn().mockRejectedValue(new Error('boom-status')),
+    };
+    const state = await performReadinessRefresh({
+      env: envOf({ GMX_RELAY_READONLY_NETWORK_ENABLED: 'true' }),
+      checkCanonical: async () => { throw new Error('boom-canonical'); },
+      listOpenTaskIds: async () => { throw new Error('boom-tasks'); },
+      countAllocatedNonces: async () => { throw new Error('boom-nonce'); },
+      transport,
+      nowMs: () => 4000,
+    });
+    expect(state.ok).toBe(false);
+    expect(state.failures.length).toBeGreaterThanOrEqual(3);
+    const stored = getReadinessRefreshState();
+    expect(stored.attempted).toBe(true);
+    expect(stored.ok).toBe(false);
+    expect(stored.atMs).toBe(4000);
+    // 오류 메시지에 원문 예외 노출 없음
+    expect(stored.failures.join(' ')).not.toContain('boom-');
+  });
+
+  it('canonical 스냅샷 record/get 왕복 — activation GET 무호출 상태 조회용', async () => {
+    const { recordCanonicalSnapshot, getCanonicalSnapshot } = await import('../lib/relayActivationStatus');
+    expect(getCanonicalSnapshot()).toBeNull(); // 미조회 = null (fail-closed 취급)
+    recordCanonicalSnapshot({
+      atMs: 7, confirmed: true, reason: null, approvalNonce: '3',
+      isSubaccountListed: true, expiresAt: '100', remaining: '5',
+    });
+    expect(getCanonicalSnapshot()).toMatchObject({ confirmed: true, approvalNonce: '3' });
+  });
+
   it('recordReadinessRefresh/getReadinessRefreshState 왕복', () => {
     recordReadinessRefresh({ atMs: 42, ok: true, basis: ['x'], failures: [] });
     const s = getReadinessRefreshState();

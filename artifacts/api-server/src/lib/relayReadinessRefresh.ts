@@ -54,13 +54,16 @@ export async function performReadinessRefresh(deps: ReadinessRefreshDeps): Promi
     failures.push('canonical readback 예외 (fail-closed)');
   }
 
-  // 2) digest/nonce 상태 조회 (DB read — 신규 할당 없음)
-  const nonces = await deps.countAllocatedNonces();
+  // 2) digest/nonce 상태 조회 (DB read — 신규 할당 없음).
+  // 예외 throw도 fail-closed 기록으로 흡수한다 (상태 저장 없이 500으로 새지 않게).
+  let nonces: number | null = null;
+  try { nonces = await deps.countAllocatedNonces(); } catch { nonces = null; }
   if (nonces === null) failures.push('nonce 상태 조회 실패 (fail-closed)');
   else basis.push(`할당된 userNonce ${nonces}건 (신규 할당 없음)`);
 
   // 3) 기존 task의 Gelato status GET (존재하는 taskId만 — 생성·재제출 없음)
-  const open = await deps.listOpenTaskIds();
+  let open: { id: string; relayTaskId: string | null }[] | null = null;
+  try { open = await deps.listOpenTaskIds(); } catch { open = null; }
   if (open === null) {
     failures.push('relay task 조회 실패 (fail-closed)');
   } else {
@@ -68,9 +71,13 @@ export async function performReadinessRefresh(deps: ReadinessRefreshDeps): Promi
     basis.push(`미종결 relay task ${open.length}건 (taskId 보유 ${withTaskId.length}건)`);
     if (deps.transport) {
       for (const t of withTaskId) {
-        const st = await deps.transport.getRelayTaskStatus({ taskId: t.relayTaskId as string });
-        if (st.ok) basis.push(`task ${t.id}: Gelato ${st.taskState}`);
-        else failures.push(`task ${t.id}: status 조회 실패(${st.kind})`);
+        try {
+          const st = await deps.transport.getRelayTaskStatus({ taskId: t.relayTaskId as string });
+          if (st.ok) basis.push(`task ${t.id}: Gelato ${st.taskState}`);
+          else failures.push(`task ${t.id}: status 조회 실패(${st.kind})`);
+        } catch {
+          failures.push(`task ${t.id}: status 조회 예외 (fail-closed)`);
+        }
       }
     } else if (withTaskId.length > 0) {
       failures.push('transport 비활성 — Gelato status 재수집 불가');
@@ -79,13 +86,17 @@ export async function performReadinessRefresh(deps: ReadinessRefreshDeps): Promi
 
   // 4) Gelato fee oracle GET (읽기 전용 — 어떤 제출 근거로도 사용하지 않음)
   if (deps.transport) {
-    const quote = await deps.transport.quoteRelayFee({
-      chainId: 42161,
-      paymentToken: '0x82aF49447D8a07e3bd95BD0d56f35241523fBab1', // WETH (읽기 전용 조회 파라미터)
-      gasLimit: 3_000_000n,
-    });
-    if (quote.ok) basis.push('Gelato fee oracle 조회 성공');
-    else failures.push(`fee oracle 조회 실패(${quote.kind})`);
+    try {
+      const quote = await deps.transport.quoteRelayFee({
+        chainId: 42161,
+        paymentToken: '0x82aF49447D8a07e3bd95BD0d56f35241523fBab1', // WETH (읽기 전용 조회 파라미터)
+        gasLimit: 3_000_000n,
+      });
+      if (quote.ok) basis.push('Gelato fee oracle 조회 성공');
+      else failures.push(`fee oracle 조회 실패(${quote.kind})`);
+    } catch {
+      failures.push('fee oracle 조회 예외 (fail-closed)');
+    }
   } else {
     failures.push('transport 비활성 — fee oracle 조회 불가');
   }

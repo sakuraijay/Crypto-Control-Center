@@ -30,14 +30,16 @@ import {
   computeReconciliationComplete, evaluateFreshLiveQuote,
   getStartupReconciliationState, isReconciliationRunning,
   isRelayReadonlyNetworkEnabled, getReadinessRefreshState,
+  recordCanonicalSnapshot, getCanonicalSnapshot,
 } from '../lib/relayActivationStatus';
+import { createRelayReadonlyClient } from '../lib/relayReadonlyClient';
 import { performReadinessRefresh } from '../lib/relayReadinessRefresh';
 import { countAllocatedNoncesOrNull } from '../lib/relayNonce';
 import { listOpenRelayTaskIdsOrNull } from '../lib/relayLifecycle';
 import { countBlockingIntentsOrNull } from '../lib/executionIntents';
 import { countOpenRelayTasksOrNull } from '../lib/relayLifecycle';
 import { reconcileVerdict, applyReconcileVerdict } from '../lib/relayTaskReconciler';
-import type { RelayTransport } from '../lib/relayTransport';
+import { createGelatoHttpTransport, type RelayTransport } from '../lib/relayTransport';
 import {
   prepareRevokeSession, submitRevokeSignature, getActiveRevokeSession, cancelRevokeSession,
 } from '../lib/revokeSession';
@@ -46,15 +48,19 @@ import { getSignerAddress, isDelegatedSignerEnabled, isSignerInitialized } from 
 import { resolveGmxLiveRelayConfig } from '../lib/gmxLiveConfig';
 import { isLiveTestExecutionLocked } from '../lib/liveTestGate';
 import { readSubaccountAuthorization, type DataStoreClient } from '../lib/gmxDataStore';
-import { createCanonicalDataStoreClient } from '../lib/gmxCanonicalClient';
 import { sanitizeRpcError } from '../lib/rpcErrorSanitize';
 import { keccak256, toHex } from 'viem';
 
 const router = Router();
 
 // 테스트 주입 지점 (route 테스트에서 canonical mock 사용)
-let canonicalClientFactory: () => DataStoreClient = createCanonicalDataStoreClient;
-export function __setRelayCanonicalClientFactoryForTests(f: () => DataStoreClient): void {
+// 6단계 §5 — relay canonical 읽기는 gated read-only client. 생성 실패 시 null
+// (fail-closed). 기존 gmxCanonicalClient는 시장/PAPER 경로 전용으로 남긴다.
+let canonicalClientFactory: () => DataStoreClient | null = () => {
+  const r = createRelayReadonlyClient(process.env);
+  return r.ok ? r.client : null;
+};
+export function __setRelayCanonicalClientFactoryForTests(f: () => DataStoreClient | null): void {
   canonicalClientFactory = f;
 }
 
@@ -79,6 +85,22 @@ interface CanonicalCheck {
 }
 
 async function checkCanonical(): Promise<CanonicalCheck> {
+  const result = await checkCanonicalInner();
+  // 실제 조회 경로의 결과를 저장 스냅샷으로 기록 — activation GET 등 무호출
+  // 상태 조회는 이 저장값만 읽는다 (외부 호출 0회 보장).
+  recordCanonicalSnapshot({
+    atMs: Date.now(),
+    confirmed: result.confirmed,
+    reason: result.reason,
+    approvalNonce: result.approvalNonce?.toString() ?? null,
+    isSubaccountListed: result.isSubaccountListed,
+    expiresAt: result.expiresAt,
+    remaining: result.remaining,
+  });
+  return result;
+}
+
+async function checkCanonicalInner(): Promise<CanonicalCheck> {
   // 최우선 구조적 게이트 (6단계 §2: 읽기 전용 네트워크 플래그로 분리):
   // GMX_RELAY_READONLY_NETWORK_ENABLED !== 'true'이면 RPC client 생성·호출
   // 자체를 금지한다 — 상태 조회 경로에서 어떤 실제 네트워크 read도 발생하지
@@ -96,9 +118,13 @@ async function checkCanonical(): Promise<CanonicalCheck> {
   if (!cfg.ok) return { confirmed: false, reason: `relay 구성 미해결: ${cfg.reasons.join('; ')}`, approvalNonce: null, isSubaccountListed: null, expiresAt: null, remaining: null };
   if (!mainAccount) return { confirmed: false, reason: 'GMX_WALLET_ADDRESS 미설정', approvalNonce: null, isSubaccountListed: null, expiresAt: null, remaining: null };
   if (!signer) return { confirmed: false, reason: 'delegated signer 미초기화', approvalNonce: null, isSubaccountListed: null, expiresAt: null, remaining: null };
+  // 6단계 §5 — relay canonical 읽기는 분리된 read-only client 경유
+  // (createRelayReadonlyClient: readonly 플래그 게이트, 읽기 메서드만 노출)
+  const client = canonicalClientFactory();
+  if (!client) return { confirmed: false, reason: 'relay 읽기 전용 client 미생성 (fail-closed)', approvalNonce: null, isSubaccountListed: null, expiresAt: null, remaining: null };
   try {
     const result = await readSubaccountAuthorization({
-      client: canonicalClientFactory(),
+      client,
       dataStore: cfg.config.dataStore as Address,
       relayRouter: cfg.config.subaccountGelatoRelayRouter as Address,
       account: mainAccount,
@@ -516,7 +542,21 @@ router.post('/executor/relay/unresolved/recheck', requireOperatorAuth, async (re
 // reconciliationComplete/freshLiveFeeQuote는 하드코딩이 아닌 실제 파생값이다.
 router.get('/executor/relay/activation', requireOperatorAuth, async (_req, res) => {
   try {
-    const canonical = await checkCanonical();
+    // 외부 호출 0회 보장 (6단계 §6): canonical은 저장 스냅샷만 읽는다.
+    // 실제 eth_call은 status/dry-run 또는 명시적 readiness refresh 경로에서만.
+    const snap = getCanonicalSnapshot();
+    const canonical: CanonicalCheck = snap
+      ? {
+          confirmed: snap.confirmed, reason: snap.reason,
+          approvalNonce: snap.approvalNonce !== null ? BigInt(snap.approvalNonce) : null,
+          isSubaccountListed: snap.isSubaccountListed,
+          expiresAt: snap.expiresAt, remaining: snap.remaining,
+        }
+      : {
+          confirmed: false,
+          reason: 'canonical readback 미조회 — 저장 스냅샷 없음 (명시적 readiness refresh 필요, fail-closed)',
+          approvalNonce: null, isSubaccountListed: null, expiresAt: null, remaining: null,
+        };
     const revoke = await getActiveRevokeSession();
     const env = process.env;
 
@@ -617,11 +657,17 @@ router.post('/executor/relay/readiness/refresh', requireOperatorAuth, async (_re
       },
       listOpenTaskIds: listOpenRelayTaskIdsOrNull,
       countAllocatedNonces: countAllocatedNoncesOrNull,
-      // 읽기 전용 GET 전용 — injectedTransport(테스트) 없으면 GET 생략(fail-closed 기록).
-      // 실제 transport를 여기서 생성하더라도 quote/status GET은 transport 내부
-      // 게이트(GMX_RELAY_READONLY_NETWORK_ENABLED)로만 허용되고 submit POST는
-      // 이 경로에서 호출 자체가 없다.
-      transport: injectedTransport,
+      // 읽기 전용 GET 전용 transport — submit 메서드는 노출하지 않는다.
+      // (injectedTransport는 테스트 주입; 프로덕션은 GET 2종만 뽑아 전달.
+      //  quote/status GET은 transport 내부 readonly 게이트가 최종 방어이며,
+      //  이 경로에서 POST 제출은 호출 자체가 존재하지 않는다.)
+      transport: (() => {
+        const t = injectedTransport ?? createGelatoHttpTransport(process.env);
+        return {
+          quoteRelayFee: t.quoteRelayFee.bind(t),
+          getRelayTaskStatus: t.getRelayTaskStatus.bind(t),
+        };
+      })(),
       nowMs: () => Date.now(),
     });
     return res.json({ ok: true, refresh: state });
