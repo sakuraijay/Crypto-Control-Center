@@ -237,6 +237,24 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         WHERE status IN ('PREPARED', 'OWNER_SIGNATURE_READY');
     `,
   },
+  {
+    name: "0017_relay_nonces",
+    sql: `
+      -- GMX delegated trading 4단계 — durable userNonce allocation.
+      -- (main_account, nonce) unique가 다중 프로세스 동시 allocation의 최종 방어.
+      CREATE TABLE IF NOT EXISTS relay_nonces (
+        id           text PRIMARY KEY,
+        main_account text NOT NULL,
+        nonce        text NOT NULL,
+        purpose      text NOT NULL,
+        task_id      text,
+        allocated_at timestamptz NOT NULL DEFAULT now()
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS relay_nonces_account_nonce_idx
+        ON relay_nonces (main_account, nonce);
+      CREATE INDEX IF NOT EXISTS relay_nonces_account_idx ON relay_nonces (main_account);
+    `,
+  },
   // Add future migrations here in chronological order.
 ];
 
