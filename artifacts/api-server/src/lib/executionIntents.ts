@@ -89,7 +89,11 @@ export async function markIntentSubmitted(id: string, txHash: string): Promise<b
   try {
     const updated = await db.update(executionIntentsTable)
       .set({ status: 'SUBMITTED', txHash, updatedAt: new Date() })
-      .where(eq(executionIntentsTable.id, id))
+      // PREPARED에서만 전환 — 지연 호출이 terminal/UNRESOLVED 행을 덮어쓰지 못함
+      .where(and(
+        eq(executionIntentsTable.id, id),
+        eq(executionIntentsTable.status, 'PREPARED'),
+      ))
       .returning({ id: executionIntentsTable.id });
     return updated.length > 0;
   } catch (e) {
@@ -106,7 +110,11 @@ export async function markIntentUnresolved(id: string, error: string): Promise<b
   try {
     const updated = await db.update(executionIntentsTable)
       .set({ status: 'UNRESOLVED', error, updatedAt: new Date() })
-      .where(eq(executionIntentsTable.id, id))
+      // 차단 상태에서만 전환 — terminal 행 역행 금지
+      .where(and(
+        eq(executionIntentsTable.id, id),
+        inArray(executionIntentsTable.status, BLOCKING_INTENT_STATUSES),
+      ))
       .returning({ id: executionIntentsTable.id });
     return updated.length > 0;
   } catch (e) {
@@ -124,7 +132,11 @@ export async function markIntentFailedPreBroadcast(id: string, error: string): P
   try {
     const updated = await db.update(executionIntentsTable)
       .set({ status: 'FAILED', error, updatedAt: new Date() })
-      .where(eq(executionIntentsTable.id, id))
+      // broadcast 이전 실패는 PREPARED에서만 발생 — 다른 상태 덮어쓰기 금지
+      .where(and(
+        eq(executionIntentsTable.id, id),
+        eq(executionIntentsTable.status, 'PREPARED'),
+      ))
       .returning({ id: executionIntentsTable.id });
     return updated.length > 0;
   } catch (e) {

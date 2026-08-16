@@ -117,26 +117,52 @@ async function loadAuditLogStrict(): Promise<AuditLogLoad> {
   }
 }
 
-/** @returns 저장 성공 여부. 실패는 삼키지 않고 호출자에게 알린다. */
-async function appendAuditLog(entry: AuditLogEntry): Promise<boolean> {
-  try {
-    const loaded = await loadAuditLogStrict();
-    // 로드 실패 시 기존 로그를 덮어쓰면 감사기록이 유실되므로 저장하지 않는다.
-    if (!loaded.ok) {
-      console.error('[LiveTestExecutor] 감사로그 로드 실패 — 항목 저장 불가 (기존 기록 보호)');
+// ── 감사로그 직렬화 뮤텍스 ─────────────────────────────────────────────────────
+// 감사로그는 단일 JSON 행에 read-modify-write 되므로, 동시 갱신(append vs
+// intent 판정 동기화)이 겹치면 lost-update로 terminal 감사 상태가 SUBMITTED로
+// 되돌아갈 수 있다. 서버는 단일 Node 프로세스(Reserved VM 단일 프로세스 구조)
+// 이므로 프로세스 내 뮤텍스로 모든 감사로그 read-modify-write를 직렬화한다.
+let _auditLogChain: Promise<unknown> = Promise.resolve();
+
+function withAuditLogLock<T>(fn: () => Promise<T>): Promise<T> {
+  const next = _auditLogChain.then(fn, fn);
+  _auditLogChain = next.catch(() => {});
+  return next;
+}
+
+/**
+ * 감사로그를 락 안에서 load → mutate → save. mutator가 null을 반환하면 저장 없음.
+ * @returns 저장(또는 무변경) 성공 여부. 로드 실패 시 false (기존 기록 보호).
+ */
+async function mutateAuditLog(
+  mutator: (entries: AuditLogEntry[]) => AuditLogEntry[] | null,
+): Promise<boolean> {
+  return withAuditLogLock(async () => {
+    try {
+      const loaded = await loadAuditLogStrict();
+      if (!loaded.ok) {
+        console.error('[LiveTestExecutor] 감사로그 로드 실패 — 갱신 불가 (기존 기록 보호)');
+        return false;
+      }
+      const updated = mutator(loaded.entries);
+      if (updated === null) return true; // 변경 없음
+      const now = new Date();
+      await db.insert(workerStateTable)
+        .values({ key: AUDIT_LOG_KEY, value: JSON.stringify(updated), updatedAt: now })
+        .onConflictDoUpdate({ target: workerStateTable.key, set: { value: JSON.stringify(updated), updatedAt: now } });
+      return true;
+    } catch (e) {
+      console.error('[LiveTestExecutor] 감사로그 저장 실패:', e);
       return false;
     }
-    // 최대 500개 보존 (FIFO)
-    const updated = [...loaded.entries, entry].slice(-500);
-    const now = new Date();
-    await db.insert(workerStateTable)
-      .values({ key: AUDIT_LOG_KEY, value: JSON.stringify(updated), updatedAt: now })
-      .onConflictDoUpdate({ target: workerStateTable.key, set: { value: JSON.stringify(updated), updatedAt: now } });
-    return true;
-  } catch (e) {
-    console.error('[LiveTestExecutor] 감사로그 저장 실패:', e);
-    return false;
-  }
+  });
+}
+
+/** @returns 저장 성공 여부. 실패는 삼키지 않고 호출자에게 알린다. */
+async function appendAuditLog(entry: AuditLogEntry): Promise<boolean> {
+  // 최대 500개 보존 (FIFO). 락 안에서 최신 로그를 다시 읽으므로
+  // intent 판정 동기화가 바꾼 terminal 상태를 되돌리지 않는다.
+  return mutateAuditLog(entries => [...entries, entry].slice(-500));
 }
 
 export async function getAuditLog(limit = 100): Promise<AuditLogEntry[]> {
@@ -168,15 +194,10 @@ export async function getAuditLog(limit = 100): Promise<AuditLogEntry[]> {
  */
 async function applyIntentResolutionsToAuditLog(resolutions: IntentResolution[]): Promise<void> {
   if (resolutions.length === 0) return;
-  try {
-    const loaded = await loadAuditLogStrict();
-    if (!loaded.ok) {
-      console.error('[LiveTestExecutor] 감사로그 로드 실패 — intent 판정 동기화 보류 (차단 유지)');
-      return;
-    }
-    const byTx = new Map(resolutions.filter(r => r.txHash).map(r => [r.txHash as string, r]));
+  const byTx = new Map(resolutions.filter(r => r.txHash).map(r => [r.txHash as string, r]));
+  const ok = await mutateAuditLog(entries => {
     let changed = false;
-    const updated = loaded.entries.map(e => {
+    const updated = entries.map(e => {
       if (!e.txHash) return e;
       const r = byTx.get(e.txHash);
       if (!r) return e;
@@ -189,15 +210,10 @@ async function applyIntentResolutionsToAuditLog(resolutions: IntentResolution[])
         confirmedAt: r.status === 'CONFIRMED' ? new Date().toISOString() : e.confirmedAt,
       };
     });
-    if (!changed) return;
-    const now = new Date();
-    await db.insert(workerStateTable)
-      .values({ key: AUDIT_LOG_KEY, value: JSON.stringify(updated), updatedAt: now })
-      .onConflictDoUpdate({ target: workerStateTable.key, set: { value: JSON.stringify(updated), updatedAt: now } });
-    console.info(`[LiveTestExecutor] 감사로그 ${byTx.size}건 intent 온체인 판정과 동기화`);
-  } catch (e) {
-    console.error('[LiveTestExecutor] 감사로그 동기화 실패 (차단 유지):', e);
-  }
+    return changed ? updated : null;
+  });
+  if (ok) console.info(`[LiveTestExecutor] 감사로그 intent 온체인 판정 동기화 (${byTx.size}건 대상)`);
+  else console.error('[LiveTestExecutor] 감사로그 동기화 실패 (차단 유지)');
 }
 
 export async function reconcileOnRestart(): Promise<void> {
@@ -231,15 +247,11 @@ export async function reconcileOnRestart(): Promise<void> {
         `[LiveTestExecutor] 재시작 reconciliation: ${submitted.length}개 SUBMITTED 주문 발견 — ` +
         `UNRESOLVED로 마킹 (txHash 보존, 온체인 확인 필요)`,
       );
-      const updated = log.map(e =>
+      await mutateAuditLog(entries => entries.map(e =>
         e.status === 'SUBMITTED'
           ? { ...e, status: 'UNRESOLVED' as const, error: '서버 재시작 시 상태 불명 — 온체인 확인 전까지 UNRESOLVED 유지' }
           : e
-      );
-      const now = new Date();
-      await db.insert(workerStateTable)
-        .values({ key: AUDIT_LOG_KEY, value: JSON.stringify(updated), updatedAt: now })
-        .onConflictDoUpdate({ target: workerStateTable.key, set: { value: JSON.stringify(updated), updatedAt: now } });
+      ));
     }
 
     const unresolvedTotal = submitted.length + unresolved.length;

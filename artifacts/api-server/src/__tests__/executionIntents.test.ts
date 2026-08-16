@@ -130,6 +130,24 @@ describe('mark* 전환', () => {
     expect(dbState.lastUpdateSet).toMatchObject({ status: 'SUBMITTED', txHash: '0xTx' });
   });
 
+  it('markIntentSubmitted 0행(이미 terminal — 지연 호출) → false, 역행 없음', async () => {
+    dbState.updateReturning = [];
+    const { markIntentSubmitted } = await import('../lib/executionIntents');
+    expect(await markIntentSubmitted('intent:open:d1', '0xTx')).toBe(false);
+  });
+
+  it('markIntentUnresolved 0행(이미 terminal) → false, 역행 없음', async () => {
+    dbState.updateReturning = [];
+    const { markIntentUnresolved } = await import('../lib/executionIntents');
+    expect(await markIntentUnresolved('intent:open:d1', 'late')).toBe(false);
+  });
+
+  it('markIntentFailedPreBroadcast 0행(PREPARED 아님) → false', async () => {
+    dbState.updateReturning = [];
+    const { markIntentFailedPreBroadcast } = await import('../lib/executionIntents');
+    expect(await markIntentFailedPreBroadcast('intent:open:d1', 'late')).toBe(false);
+  });
+
   it('markIntentSubmitted 예외 → false (PREPARED 잔존)', async () => {
     dbState.updateThrows = true;
     const { markIntentSubmitted } = await import('../lib/executionIntents');

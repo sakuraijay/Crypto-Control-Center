@@ -43,6 +43,7 @@ import {
 } from '../lib/gmxOrderEvents';
 import {
   reconcileBlockingIntentsOnchain,
+  sanitizeRpcError,
   type OnchainClient,
   type ReceiptResult,
 } from '../lib/intentReconciler';
@@ -296,6 +297,49 @@ describe('intentReconciler — 온체인 판정 (fail-closed)', () => {
     });
     const r = await reconcileBlockingIntentsOnchain(() => client);
     expect(r.resolutions[0].status).toBe('CONFIRMED');
+  });
+
+  it('Secret 비노출: RPC 예외 로그가 URL·GMX_RPC_URL 값을 담지 않음 (sanitizeRpcError)', () => {
+    const fakeSecret = 'https://rpc.example/v2/SECRET_TOKEN_xyz789';
+    const prev = process.env.GMX_RPC_URL;
+    process.env.GMX_RPC_URL = fakeSecret;
+    try {
+      // viem HTTP 오류처럼 메시지에 요청 URL이 포함된 예외
+      const e = new Error(`HTTP request failed. URL: ${fakeSecret} Details: timeout`);
+      e.name = 'HttpRequestError';
+      const out = sanitizeRpcError(e);
+      expect(out).toContain('HttpRequestError');
+      expect(out).not.toContain('SECRET_TOKEN_xyz789');
+      expect(out).not.toContain('rpc.example');
+      // URL 없는 일반 오류는 메시지 유지
+      expect(sanitizeRpcError(new Error('plain failure'))).toContain('plain failure');
+    } finally {
+      if (prev === undefined) delete process.env.GMX_RPC_URL; else process.env.GMX_RPC_URL = prev;
+    }
+  });
+
+  it('RPC 예외 발생 시 console.error 출력에 RPC URL이 유출되지 않음', async () => {
+    const fakeSecret = 'https://rpc.example/v2/SECRET_TOKEN_qqq111';
+    const prev = process.env.GMX_RPC_URL;
+    process.env.GMX_RPC_URL = fakeSecret;
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      state.blockingRows = [intent()];
+      const client = mockClient({
+        getTransactionReceipt: async () => {
+          const e = new Error(`HTTP request failed. URL: ${fakeSecret}`);
+          e.name = 'HttpRequestError';
+          throw e;
+        },
+      });
+      await reconcileBlockingIntentsOnchain(() => client);
+      const logged = spy.mock.calls.map(args => args.map(String).join(' ')).join('\n');
+      expect(logged).not.toContain('SECRET_TOKEN_qqq111');
+      expect(logged).not.toContain('rpc.example');
+    } finally {
+      spy.mockRestore();
+      if (prev === undefined) delete process.env.GMX_RPC_URL; else process.env.GMX_RPC_URL = prev;
+    }
   });
 
   it('Secret 비노출: 판정 결과·사유에 RPC URL 값이 포함되지 않음', async () => {
