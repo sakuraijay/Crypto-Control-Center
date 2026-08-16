@@ -204,6 +204,45 @@
   - 활성화 조건은 전부 미충족이 정상: networkEligible=false 하드코딩 유지,
     LIVE 실행은 여전히 잠금·금지 상태
 
+### 5단계 — 활성화 전 통합 완성 및 폐쇄형 검증 (완료, 전면 비활성 유지)
+
+- 공식 소스 조사(§2):
+  - gmx-synthetics `a85ea3491c19c93bb4b5a002d9b358fb769b7849`
+    `BaseGelatoRelayRouter.sol` — replay 방지는 **used-digest 맵**
+    (`digests` public mapping, `InvalidUserDigest` revert). userNonce는
+    해시 입력일 뿐 온체인 단조증가 제약 없음
+  - gmx-interface `c233f85007c59c52ec70c29ee1345908d3a97d8f` —
+    `userNonce=nowInSeconds()`, `@gelatocloud/gasless` sponsor API key로 제출,
+    sponsor 잔액은 1Balance(`relayer.getBalance()`)
+  - §7 비용 결론: Gelato 가스는 sponsor 1Balance가 지불, payload의
+    feeToken/feeAmount는 main account 자금에서 `_handleRelayFee`가 WNT 인출
+    (잔여 환급) — 별도 주체, 이중 청구 아님
+- 신규 모듈 (api-server src/lib/):
+  - `relayDigestReadback.ts` — 제출 직전 `digests(digest)` eth_call readback;
+    조회 실패=차단(PREPARED 유지·transport 0회), used=UNRESOLVED
+    (`DIGEST_ALREADY_USED`) 전환·새 nonce 자동 재제출 금지 (DB 복원 방어)
+  - `relaySignerBinding.ts` — DI 서명 결속: 플래그→main≠signer→digest
+    재계산 결속→무결성(키 접근1)→서명(키 접근2)→recoverAddress 재검증;
+    실패 시 키 접근 0회 보장
+  - `relayReceiptCollector.ts` — 온체인 증거 수집: receipt reverted만
+    TX_REVERTED, OrderExecuted만 CONFIRMED 근거, 복수 orderKey·비허용
+    emitter·chainId 불일치·RPC 오류는 전부 판정 금지 (throw 없음)
+  - `relayActivationStatus.ts` — startup reconciliation(§8: intent·relay
+    task·미결속 nonce·revoke·canonical readback) + 10분 freshness;
+    `evaluateFreshLiveQuote`는 mock 불인정·payload hash 결속 필수
+  - `delegatedSigner.signDigestWithDelegatedSigner` — 로컬 서명(RPC 없음),
+    enabled+initialized 게이트
+- activation 진단 GET: reconciliationComplete/freshLiveFeeQuote 하드코딩 제거,
+  실제 파생값 + UI용 statusFlags(readyForControlledCanary 포함); 조회는
+  네트워크 부작용 없음. index.ts 시작 순서에 startup reconciliation 추가 —
+  canonical readback은 네트워크 비활성으로 "미수행" 기록 →
+  reconciliationComplete=false 유지가 정상(fail-closed)
+- futures-web: RelayStatusCard Activation 체크리스트(9항목+canary 준비 배지,
+  표시 전용)
+- 테스트: api-server 570 PASS(신규 stage5 32), futures-web 78 PASS —
+  실제 RPC·Gelato·signer 저장소 호출 0회, fixture 키만 사용
+- LIVE 제출·네트워크 활성화는 여전히 구조적 차단 상태
+
 ## 절대 금지 사항
 
 - 메인 지갑 개인키·시드 문구·Secret 저장 또는 출력
