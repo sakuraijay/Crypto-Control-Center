@@ -5,29 +5,49 @@ import { defineConfig } from 'vite';
 
 import runtimeErrorOverlay from '@replit/vite-plugin-runtime-error-modal';
 
-const rawPort = process.env.PORT;
+function resolvePort(command: 'build' | 'serve'): number {
+  const rawPort = process.env.PORT;
 
-if (!rawPort) {
-  throw new Error(
-    'PORT environment variable is required but was not provided.',
-  );
+  if (!rawPort) {
+    if (command === 'build') {
+      // 프로덕션 빌드에서는 dev 서버가 실행되지 않으므로
+      // 설정 평가용 기본값만 제공한다.
+      return 5173;
+    }
+    throw new Error(
+      'PORT environment variable is required but was not provided.',
+    );
+  }
+
+  const port = Number(rawPort);
+
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`Invalid PORT value: "${rawPort}"`);
+  }
+
+  return port;
 }
 
-const port = Number(rawPort);
+function resolveBasePath(command: 'build' | 'serve'): string {
+  const basePath = process.env.BASE_PATH;
 
-if (Number.isNaN(port) || port <= 0) {
-  throw new Error(`Invalid PORT value: "${rawPort}"`);
+  if (!basePath) {
+    if (command === 'build') {
+      return '/';
+    }
+    throw new Error(
+      'BASE_PATH environment variable is required but was not provided.',
+    );
+  }
+
+  return basePath;
 }
 
-const basePath = process.env.BASE_PATH;
+export default defineConfig(async ({ command }) => {
+  const port = resolvePort(command);
+  const basePath = resolveBasePath(command);
 
-if (!basePath) {
-  throw new Error(
-    'BASE_PATH environment variable is required but was not provided.',
-  );
-}
-
-export default defineConfig({
+  return {
   base: basePath,
   plugins: [
     react(),
@@ -81,4 +101,5 @@ export default defineConfig({
     host: '0.0.0.0',
     allowedHosts: true,
   },
+  };
 });
