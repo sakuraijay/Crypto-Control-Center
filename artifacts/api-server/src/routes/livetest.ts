@@ -12,7 +12,18 @@
 import { Router } from 'express';
 import { getSignerAddress, getSignerEthBalance, isSignerInitialized, getSignerCreatedAt, isDelegatedSignerEnabled } from '../lib/delegatedSigner';
 import { resolveGmxLiveRelayConfig, ARBITRUM_ONE_CHAIN_ID } from '../lib/gmxLiveConfig';
-import { deriveSubaccountAuthState, isAuthStateLiveEligible } from '../lib/subaccountAuthState';
+import { deriveSubaccountAuthState, isAuthStateLiveEligible, type SubaccountAuthState } from '../lib/subaccountAuthState';
+import { readSubaccountAuthorization, RELAY_ROUTER_NONCE_ABI, type SubaccountAuthOnchain, type DataStoreClient } from '../lib/gmxDataStore';
+import { createCanonicalDataStoreClient } from '../lib/gmxCanonicalClient';
+import { requireOperatorAuth } from '../lib/operatorAuthGuard';
+import {
+  prepareApprovalSession,
+  submitApprovalSignature,
+  getActiveReadySession,
+  getConfiguredMainAccount,
+  APPROVAL_LIMITS,
+} from '../lib/ownerApprovalSession';
+import type { Address, Hex } from 'viem';
 import { checkDelegationStatus, buildAddSubaccountTx, buildUsdcApproveTx, buildRemoveSubaccountTx, getUsdcAllowance } from '../lib/gmxSubaccount';
 import { checkLiveTestGate, isLiveTestExecutionLocked, LIVE_TEST_CAPS, delegationTimeRemainingSeconds } from '../lib/liveTestGate';
 import { USDC_ADDRESS } from '../lib/gmxContracts';
@@ -56,34 +67,235 @@ router.get('/executor/signer', async (_req, res) => {
   }
 });
 
+// ── subaccount-auth 공통 헬퍼 ───────────────────────────────────────────────────
+
+// 테스트 주입 지점 — 실제 RPC 클라이언트 대신 mock 주입 가능
+let _canonicalClientFactory: () => DataStoreClient = createCanonicalDataStoreClient;
+export function __setCanonicalClientFactoryForTests(f: (() => DataStoreClient) | null): void {
+  _canonicalClientFactory = f ?? createCanonicalDataStoreClient;
+}
+
+interface CanonicalReadOutcome {
+  onchain: SubaccountAuthOnchain | null;
+  onchainError: string | null;
+}
+
+async function readCanonicalAuth(params: {
+  relayRouter: Address; dataStore: Address; account: Address; subaccount: Address;
+}): Promise<CanonicalReadOutcome> {
+  let client: DataStoreClient;
+  try {
+    client = _canonicalClientFactory();
+  } catch (e: unknown) {
+    return { onchain: null, onchainError: (e as Error).message };
+  }
+  const result = await readSubaccountAuthorization({
+    client,
+    dataStore: params.dataStore,
+    relayRouter: params.relayRouter,
+    account: params.account,
+    subaccount: params.subaccount,
+  });
+  if (!result.ok) return { onchain: null, onchainError: result.reason };
+  return { onchain: result.data, onchainError: null };
+}
+
+async function readCanonicalNonce(relayRouter: Address, account: Address): Promise<bigint> {
+  const client = _canonicalClientFactory();
+  const nonce = await client.readContract({
+    address: relayRouter, abi: RELAY_ROUTER_NONCE_ABI,
+    functionName: 'subaccountApprovalNonces', args: [account],
+  });
+  if (typeof nonce !== 'bigint') throw new Error('router nonce 디코딩 실패 — fail-closed');
+  return nonce;
+}
+
 // ── GET /executor/subaccount-auth ───────────────────────────────────────────────
-// 최신 delegated trading 인증 상태 (read-only).
-// 노출 범위: 상태 enum, signer 공개 주소, chainId, 구성 결함 사유, LIVE 차단 사유.
-// 절대 미노출: 개인키·키 암호문·서명(signature) 전문·환경변수 원문 값.
-// 1단계: 온체인(DataStore) 조회는 수행하지 않음 → 구성이 완비돼도 UNVERIFIED
-// (2단계에서 gmxDataStore reader 연결 예정). fail-closed 원칙상 UNVERIFIED는 LIVE 차단.
-router.get('/executor/subaccount-auth', (_req, res) => {
+// 최신 delegated trading 인증 상태 (read-only, canonical 온체인 조회 연결 — 2단계).
+// 노출 범위: 상태 enum, signer 공개 주소, chainId, 구성 결함 사유, LIVE 차단 사유,
+// 온체인 요약(expiresAt/max/used/remaining/nonce/integrationId/disabled 플래그),
+// READY 세션 요약. 절대 미노출: 개인키·키 암호문·서명 전문·RPC URL·env 원문.
+// 이 단계에서도 중앙 LIVE 게이트는 이 상태로 통과시키지 않는다.
+router.get('/executor/subaccount-auth', async (_req, res) => {
   try {
     const relay = resolveGmxLiveRelayConfig();
-    const state = deriveSubaccountAuthState({
+    const mainAccount = getConfiguredMainAccount();
+    const signerAddress = getSignerAddress();
+    const nowSec = BigInt(Math.floor(Date.now() / 1000));
+
+    // canonical 조회는 구성·주소가 전부 준비된 경우에만 시도 (그 외 UNVERIFIED)
+    let canonical: CanonicalReadOutcome = { onchain: null, onchainError: null };
+    if (relay.ok && relay.config && mainAccount && signerAddress) {
+      canonical = await readCanonicalAuth({
+        relayRouter: relay.config.subaccountGelatoRelayRouter as Address,
+        dataStore: relay.config.dataStore as Address,
+        account: mainAccount,
+        subaccount: signerAddress as Address,
+      });
+    }
+
+    const state: SubaccountAuthState = deriveSubaccountAuthState({
       relayConfigured:        relay.ok,
       signerInitialized:      isSignerInitialized(),
       delegatedSignerEnabled: isDelegatedSignerEnabled(),
-      onchain:                null,   // 1단계: 온체인 조회 미수행
-      onchainError:           null,
-      nowSec:                 BigInt(Math.floor(Date.now() / 1000)),
+      onchain:                canonical.onchain,
+      onchainError:           canonical.onchainError,
+      nowSec,
     });
+
+    // READY 세션 조회 — canonical nonce와 불일치 시 내부에서 즉시 무효화됨.
+    // canonical 미확인이면 nonce 판단 보류(null).
+    const readySession = await getActiveReadySession({
+      expectedOwner: mainAccount,
+      expectedSubaccount: (signerAddress as Address | null),
+      canonicalNonce: canonical.onchain ? canonical.onchain.approvalNonce : null,
+    });
+
+    // 상태 표시 규칙: 서명만 저장된 경우(canonical 미등록) OWNER_SIGNATURE_READY 노출.
+    // AUTHORIZED는 canonical 확인으로만 도달 — 세션 존재가 상태를 승격시키지 않는다.
+    const displayState =
+      state === 'OWNER_SIGNATURE_REQUIRED' && readySession ? 'OWNER_SIGNATURE_READY' : state;
+
+    const oc = canonical.onchain;
     return res.json({
       ok: true,
-      state,
+      state,                 // 순수 canonical 판정 상태 (LIVE 게이트 판단 기준)
+      displayState,          // UI 표시용 (READY 세션 반영)
       chainId: ARBITRUM_ONE_CHAIN_ID,
-      signerAddress: getSignerAddress(),           // 공개 주소만
+      mainAccount,
+      signerAddress,
+      relayRouter: relay.ok && relay.config ? relay.config.subaccountGelatoRelayRouter : null,
       relayConfigured: relay.ok,
-      configReasons: relay.ok ? [] : relay.reasons, // 필드명·사유만 (env 원문 미포함)
-      expiresAt: null,                              // 2단계: DataStore 조회 후 채움
-      remainingActions: null,
+      configReasons: relay.ok ? [] : relay.reasons,
+      onchain: oc ? {
+        isSubaccountListed: oc.isSubaccountListed,
+        expiresAt: oc.expiresAt.toString(),
+        maxAllowedCount: oc.maxAllowedCount.toString(),
+        usedCount: oc.usedCount.toString(),
+        remaining: oc.remaining.toString(),
+        integrationId: oc.integrationId,
+        approvalNonce: oc.approvalNonce.toString(),
+        featureDisabled: oc.featureDisabled,
+        integrationDisabled: oc.integrationDisabled,
+        blockTimestamp: oc.blockTimestamp !== null ? oc.blockTimestamp.toString() : null,
+      } : null,
+      onchainError: canonical.onchainError,
+      expiresAt: oc ? oc.expiresAt.toString() : null,
+      remainingActions: oc ? oc.remaining.toString() : null,
+      readySession,          // 서명·암호문 절대 미포함 (요약만)
       liveEligible: isAuthStateLiveEligible(state),
       liveBlockedReason: isAuthStateLiveEligible(state) ? null : `인증 상태 ${state} — LIVE 실행 차단`,
+    });
+  } catch (e: unknown) {
+    return res.status(500).json({ ok: false, error: (e as Error).message });
+  }
+});
+
+// ── POST /executor/subaccount-approval/prepare ─────────────────────────────────
+// MetaMask owner approval typed data 준비 (운영자 인증 필수).
+// 서버가 canonical router nonce를 직접 읽어 typed data를 생성한다.
+// actionType·chainId·router·integrationId는 서버 고정 — 사용자 수정 불가.
+// 실패 시 LIVE 관련 상태는 어떤 것도 변경되지 않는다 (fail-closed).
+router.post('/executor/subaccount-approval/prepare', requireOperatorAuth, async (req, res) => {
+  try {
+    const relay = resolveGmxLiveRelayConfig();
+    if (!relay.ok || !relay.config) {
+      return res.status(503).json({ ok: false, error: 'relay 구성 미완비 — prepare 불가', reasons: relay.ok ? [] : relay.reasons });
+    }
+    const mainAccount = getConfiguredMainAccount();
+    if (!mainAccount) {
+      return res.status(503).json({ ok: false, error: 'GMX_WALLET_ADDRESS 미설정 — main account 확인 불가' });
+    }
+    const signerAddress = getSignerAddress();
+    if (!isSignerInitialized() || !signerAddress) {
+      return res.status(503).json({ ok: false, error: 'delegated signer 미초기화 — prepare 불가' });
+    }
+
+    // 요청 지갑 주소는 GMX_WALLET_ADDRESS와 정확히 일치해야 함
+    const requestedWallet = typeof req.body?.walletAddress === 'string' ? req.body.walletAddress : '';
+    if (requestedWallet.toLowerCase() !== mainAccount.toLowerCase()) {
+      return res.status(403).json({ ok: false, error: '연결된 지갑이 구성된 main wallet(GMX_WALLET_ADDRESS)과 일치하지 않습니다' });
+    }
+
+    let canonicalNonce: bigint;
+    try {
+      canonicalNonce = await readCanonicalNonce(relay.config.subaccountGelatoRelayRouter as Address, mainAccount);
+    } catch (e: unknown) {
+      return res.status(502).json({ ok: false, error: `canonical nonce 조회 실패 — prepare 중단: ${(e as Error).message}` });
+    }
+
+    const expiry = typeof req.body?.expirySeconds === 'number' ? req.body.expirySeconds : undefined;
+    const maxCount = typeof req.body?.maxAllowedCount === 'number' ? req.body.maxAllowedCount : undefined;
+
+    const result = await prepareApprovalSession({
+      mainAccount,
+      subaccount: signerAddress as Address,
+      verifyingContract: relay.config.subaccountGelatoRelayRouter as Address,
+      canonicalNonce,
+      nowSec: BigInt(Math.floor(Date.now() / 1000)),
+      requestedExpirySeconds: expiry,
+      requestedMaxAllowedCount: maxCount,
+    });
+    if (!result.ok) return res.status(500).json({ ok: false, error: result.reason });
+
+    return res.json({
+      ok: true,
+      sessionId: result.prepared.sessionId,
+      typedData: JSON.parse(JSON.stringify(result.prepared.typedData, (_k, v) => typeof v === 'bigint' ? v.toString() : v)),
+      summary: result.prepared.summary,
+      limits: {
+        expirySecondsMin: APPROVAL_LIMITS.MIN_EXPIRY_SECONDS,
+        expirySecondsMax: APPROVAL_LIMITS.MAX_EXPIRY_SECONDS,
+        maxAllowedCountMin: APPROVAL_LIMITS.MIN_MAX_ALLOWED_COUNT.toString(),
+        maxAllowedCountMax: APPROVAL_LIMITS.MAX_MAX_ALLOWED_COUNT.toString(),
+      },
+    });
+  } catch (e: unknown) {
+    return res.status(500).json({ ok: false, error: (e as Error).message });
+  }
+});
+
+// ── POST /executor/subaccount-approval/signature ───────────────────────────────
+// MetaMask 서명 제출 (운영자 인증 필수). 서버가 typed data를 재구성해 검증하며
+// 클라이언트 digest는 신뢰하지 않는다. 성공 시 OWNER_SIGNATURE_READY까지만 —
+// LIVE 잠금 해제·Gelato 제출은 절대 하지 않는다. 응답에 서명·암호문 미포함.
+router.post('/executor/subaccount-approval/signature', requireOperatorAuth, async (req, res) => {
+  try {
+    const relay = resolveGmxLiveRelayConfig();
+    if (!relay.ok || !relay.config) {
+      return res.status(503).json({ ok: false, error: 'relay 구성 미완비 — 서명 제출 불가' });
+    }
+    const mainAccount = getConfiguredMainAccount();
+    if (!mainAccount) {
+      return res.status(503).json({ ok: false, error: 'GMX_WALLET_ADDRESS 미설정 — 서명 검증 불가' });
+    }
+    const sessionId = typeof req.body?.sessionId === 'string' ? req.body.sessionId : '';
+    const signature = typeof req.body?.signature === 'string' ? req.body.signature : '';
+    if (!sessionId || !/^0x[0-9a-fA-F]{130}$/.test(signature)) {
+      return res.status(400).json({ ok: false, error: 'sessionId와 65-byte hex signature가 필요합니다' });
+    }
+
+    let canonicalNonce: bigint;
+    try {
+      canonicalNonce = await readCanonicalNonce(relay.config.subaccountGelatoRelayRouter as Address, mainAccount);
+    } catch (e: unknown) {
+      return res.status(502).json({ ok: false, error: `canonical nonce 조회 실패 — 서명 저장 중단: ${(e as Error).message}` });
+    }
+
+    const result = await submitApprovalSignature({
+      sessionId,
+      signature: signature as Hex,
+      canonicalNonce,
+      expectedOwner: mainAccount,
+      nowSec: BigInt(Math.floor(Date.now() / 1000)),
+    });
+    if (!result.ok) return res.status(422).json({ ok: false, error: result.reason });
+
+    return res.json({
+      ok: true,
+      sessionId: result.sessionId,
+      status: result.status,   // OWNER_SIGNATURE_READY — AUTHORIZED 아님
+      note: '서명이 안전하게 저장되었습니다. AUTHORIZED 상태는 온체인 등록 확인 후에만 표시됩니다. LIVE 실행 잠금은 변경되지 않았습니다.',
     });
   } catch (e: unknown) {
     return res.status(500).json({ ok: false, error: (e as Error).message });
