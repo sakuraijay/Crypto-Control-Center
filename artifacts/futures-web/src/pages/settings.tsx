@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo, Fragment } from 'react';
 import { useAppContext, useAuthContext, useTradingContext, useWallet } from '@/lib/context';
 import { SubaccountApprovalCard } from '@/components/SubaccountApprovalCard';
+import { RelayStatusCard } from '@/components/RelayStatusCard';
 import { useAiEngine } from '@/lib/context/AiEngineContext';
 import { useStrategyContext } from '@/lib/context/StrategyContext';
 import { Card } from '@/components/ui/card';
@@ -853,6 +854,7 @@ export default function Settings() {
 
           {/* Step 4b — MetaMask owner approval (2단계) */}
           <SubaccountApprovalCard />
+          <RelayStatusCard />
 
         </div>
 
