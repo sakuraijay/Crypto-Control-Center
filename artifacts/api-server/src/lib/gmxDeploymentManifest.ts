@@ -55,7 +55,8 @@ export const GMX_DEPLOYMENT_MANIFEST = {
 export const GMX_BLOCKED_ADDRESSES: ReadonlyMap<string, string> = new Map(
   (
     [
-      // 이전 개발 기준(현 공식 docs 표기) Arbitrum SubaccountGelatoRelayRouter
+      // 이전 개발 기준 Arbitrum SubaccountGelatoRelayRouter — 일부 docs CDN 엣지의
+      // 응답에서 관찰된 구주소(docsDiscrepancy 참조), artifact 배포 계보에는 없음
       ['0xfD0596f708d9D950E0eF7b5d191e5F8e55b8a67f', '구 Arbitrum SubaccountGelatoRelayRouter (docs-legacy, 교체됨)'],
       // gmx-synthetics main artifact 히스토리의 과거 Arbitrum router 배포들
       ['0xdd78aA661e4e3BD1eCAb7E0D5E25AbBbcb71464F', '과거 artifact router (2025-11-05)'],
