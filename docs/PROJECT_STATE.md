@@ -125,9 +125,37 @@
     GET /api/executor/subaccount-auth — 상태 enum·signer 공개 주소·구성 결함
     사유만 노출(개인키·서명 전문·env 원문 금지). 1단계는 온체인 조회 미연결로
     항상 UNVERIFIED 이하 → LIVE 차단 유지
-  - 2단계 남은 작업: CreateOrder 등 액션별 EIP-712 struct hash 빌더, DataStore
-    reader의 상태 API 연결, relay 제출 경로(Gelato) 구현·검증 — LIVE 실행은
-    여전히 잠금·미검증·금지 상태
+- GMX delegated trading 2단계 완료 — MetaMask owner approval 준비·canonical 연결
+  - 승인 세션 영속 모델: `subaccount_approval_sessions` 테이블(migration 0014),
+    상태 PREPARED→OWNER_SIGNATURE_READY(→INVALIDATED/CONSUMED/REVOKED),
+    서명은 AES-256-GCM(scrypt, SESSION_SECRET) 암호문으로만 저장
+  - Prepare API `POST /api/executor/subaccount-approval/prepare`:
+    운영자 인증(OPERATOR_MASTER_PIN 헤더, 미설정 시 503 fail-closed) + JSON
+    content-type 강제(CSRF 방어). 서버가 canonical router nonce를 직접 읽어
+    typed data 생성 — expiry ≤1h(기본 1h), maxAllowedCount 기본 2(1–10 클램프),
+    deadline 10분, actionType·chainId(42161)·router·integrationId 서버 고정
+  - 서명 제출 API `POST /api/executor/subaccount-approval/signature`:
+    서버가 세션에서 typed data 재구성(digest 재계산으로 변조 검사),
+    recovered owner == GMX_WALLET_ADDRESS 필수, nonce/deadline 재검증,
+    검증 후 암호화 저장 → OWNER_SIGNATURE_READY까지만 (온체인 제출·LIVE 해제 없음)
+  - GET /executor/subaccount-auth에 canonical 온체인 조회 연결:
+    expiresAt/max/used/remaining/nonce/integrationId + feature/integration
+    disabled 플래그(→REVOKED) + 블록 timestamp 기준 만료 판정. RPC 실패 →
+    UNVERIFIED/ERROR 유지. displayState로 READY 세션 표기(AUTHORIZED와 구분).
+    이 단계에서도 중앙 LIVE 게이트는 이 상태로 통과 불가
+  - Settings UI: Owner Approval 카드 — 상태·온체인 요약·권한 설명(주문
+    생성/수정/취소 가능, 출금·claim·이전 불가), PIN → Prepare → 필드 검토 →
+    MetaMask eth_signTypedData_v4(chain 42161·계정 일치 강제), 취소 정상 처리,
+    revoke 비활성. 개인키 입력 UI 없음
+  - CreateOrder 오프라인 빌더(gmxCreateOrder): 공식 RelayUtils typehash
+    (골든 fixture로 고정), subaccountApprovalHash = struct 전체(signature 포함)
+    plain abi.encode, OPEN=MarketIncrease(2)/CLOSE=MarketDecrease(4),
+    receiver/cancellationReceiver=main account 강제, externalCalls 거부,
+    5-인자 createOrder calldata 인코딩까지만 — 제출 0회
+  - 신규 env: OPERATOR_MASTER_PIN(운영자 인증), GMX_WALLET_ADDRESS(owner 검증)
+    — 미설정 시 관련 API fail-closed
+  - 다음 단계 남은 작업: 저장된 서명의 온체인 등록/relay 제출 경로(Gelato)
+    구현·검증, revoke 지원 — LIVE 실행은 여전히 잠금·금지 상태
 
 ## 절대 금지 사항
 
