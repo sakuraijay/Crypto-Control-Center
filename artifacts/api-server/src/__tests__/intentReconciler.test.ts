@@ -11,7 +11,7 @@
  * 실제 RPC 호출 없음 — 전부 mock 클라이언트 + 고정 log fixture.
  */
 
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { describe, expect, it, vi, beforeEach, beforeAll, afterAll } from 'vitest';
 
 // ── executionIntents 모킹 (DB 계층은 executionIntents.test.ts에서 검증) ────────
 const state = vi.hoisted(() => ({
@@ -55,7 +55,14 @@ import {
 // 기본값이 제거됐으므로 reconcile 경로 테스트를 위해 env를 명시 설정한다.
 const ARB_EMITTER   = GMX_EVENT_EMITTER_ARBITRUM_OFFICIAL_DOC;
 const OTHER_EMITTER = KNOWN_NON_ARBITRUM_EVENT_EMITTERS[0].address;
-process.env.GMX_EVENT_EMITTER_ADDRESS = ARB_EMITTER;
+
+// lifecycle에서 설정·복원 — 다른 테스트 파일/process env로의 누출 방지
+const savedEmitterEnv = process.env.GMX_EVENT_EMITTER_ADDRESS;
+beforeAll(() => { process.env.GMX_EVENT_EMITTER_ADDRESS = ARB_EMITTER; });
+afterAll(() => {
+  if (savedEmitterEnv === undefined) delete process.env.GMX_EVENT_EMITTER_ADDRESS;
+  else process.env.GMX_EVENT_EMITTER_ADDRESS = savedEmitterEnv;
+});
 
 // 정확한 EventLog2 signature (공식 ABI 파생) — topic0 검증에 사용
 const SIG      = EVENT_LOG_2_TOPIC0;

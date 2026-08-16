@@ -282,30 +282,45 @@ export function computeRelayDigest(domainSeparator: Hex, structHash: Hex): Hex {
 }
 
 /**
- * Delegated signer(subaccount) digest 서명 검증 (ECDSA).
- * deadline·desChainId 검증 후 서명자 일치 확인 (fail-closed).
+ * Delegated signer(subaccount) relay 서명 검증 (ECDSA).
+ *
+ * 호출자가 준 digest를 신뢰하지 않는다: relayParams + domain(chainId·relay router)
+ * + (2단계) actionStructHash로 기대 digest를 **재계산**하여, 서명이 정확히 이
+ * relayParams에 결속됐는지 확인한다. relayParams를 변조하면 기대 digest가 달라져
+ * 서명자 복구가 불일치 → 거부 (fail-closed).
+ *
+ * 1단계에서는 struct hash = relayParams 해시. 2단계에서 액션(CreateOrder 등)별
+ * struct hash가 추가되면 `actionStructHash`에 keccak256(relayParamsHash ‖ actionHash)
+ * 결합 방식으로 확장한다 (결합 규칙은 공식 GelatoRelayUtils 검증 후 구현).
  */
 export async function verifyRelaySignature(params: {
   relayParams: RelayParamsInput;
-  digest: Hex;
+  chainId: number;              // 42161만 허용
+  verifyingContract: Address;   // SubaccountGelatoRelayRouter
   signature: Hex;
-  expectedSigner: Address;   // delegated signer (subaccount) 공개 주소
+  expectedSigner: Address;      // delegated signer (subaccount) 공개 주소
   nowSec: bigint;
 }): Promise<Eip712VerifyResult> {
+  if (params.chainId !== ARBITRUM_ONE_CHAIN_ID) {
+    return { ok: false, reason: 'chainId가 42161이 아님 — 타 체인 도메인 거부' };
+  }
   if (params.relayParams.desChainId !== BigInt(ARBITRUM_ONE_CHAIN_ID)) {
     return { ok: false, reason: 'desChainId가 42161이 아님 — 타 체인 relay 거부' };
   }
   if (params.relayParams.deadline <= params.nowSec) {
     return { ok: false, reason: 'relay deadline 경과 — 거부' };
   }
+  // 기대 digest를 relayParams에서 직접 재계산 — 서명↔파라미터 결속 보장
+  const domainSeparator = computeGmxRelayDomainSeparator(params.chainId, params.verifyingContract);
+  const expectedDigest = computeRelayDigest(domainSeparator, computeRelayParamsHash(params.relayParams));
   let recovered: Address;
   try {
-    recovered = await recoverAddress({ hash: params.digest, signature: params.signature });
+    recovered = await recoverAddress({ hash: expectedDigest, signature: params.signature });
   } catch {
     return { ok: false, reason: '서명 복구 실패 — 형식 오류 거부' };
   }
   if (recovered.toLowerCase() !== params.expectedSigner.toLowerCase()) {
-    return { ok: false, reason: '서명자가 delegated signer와 불일치 — 거부' };
+    return { ok: false, reason: '서명자가 delegated signer와 불일치 (relayParams 변조 포함) — 거부' };
   }
   return { ok: true, recovered };
 }

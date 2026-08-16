@@ -113,7 +113,7 @@ vi.mock('../lib/gmxContracts', () => ({
 
 // ── env 초기화 ────────────────────────────────────────────────────────────────
 const ENV_KEYS = [
-  'WORKER_ENGINE_MODE', 'LIVE_TEST_EXECUTION_LOCKED', 'DELEGATED_SIGNER_ENABLED',
+  'WORKER_ENGINE_MODE', 'LIVE_TEST_EXECUTION_LOCKED', 'DELEGATED_SIGNER_ENABLED', 'GMX_RPC_URL',
   'GMX_SUBACCOUNT_GELATO_RELAY_ROUTER_ADDRESS', 'GMX_EVENT_EMITTER_ADDRESS', 'GMX_DATA_STORE_ADDRESS',
 ] as const;
 

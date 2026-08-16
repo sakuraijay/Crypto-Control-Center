@@ -198,21 +198,26 @@ describe('EIP-712 RelayParams — 해시·digest·서명 검증', () => {
     expect(computeRelayParamsHash({ ...relayParams, desChainId: 1n })).not.toBe(independent);
   });
 
-  it('delegated signer digest 서명 → 검증 통과, 타 signer/만료/타 체인 거부', async () => {
+  it('delegated signer 서명 → 검증 통과; 변조된 relayParams·타 signer·만료·타 체인·타 router 거부', async () => {
     const ds = computeGmxRelayDomainSeparator(42161, RELAY_ROUTER);
     const digest = computeRelayDigest(ds, computeRelayParamsHash(relayParams));
     const signature = await signer.sign({ hash: digest });
+    const base = { relayParams, chainId: 42161, verifyingContract: RELAY_ROUTER, signature, expectedSigner: signer.address, nowSec: NOW };
 
-    expect((await verifyRelaySignature({ relayParams, digest, signature, expectedSigner: signer.address, nowSec: NOW })).ok).toBe(true);
+    expect((await verifyRelaySignature(base)).ok).toBe(true);
+    // 핵심: 유효 서명 + 변조된 relayParams → 기대 digest 재계산으로 결속 검증 → 거부
+    expect((await verifyRelaySignature({ ...base, relayParams: { ...relayParams, userNonce: 8n } })).ok).toBe(false);
+    expect((await verifyRelaySignature({ ...base, relayParams: { ...relayParams, fee: { ...relayParams.fee, feeAmount: 10n ** 18n } } })).ok).toBe(false);
+    expect((await verifyRelaySignature({ ...base, relayParams: { ...relayParams, deadline: NOW + 999999n } })).ok).toBe(false);
     // 타 서명자
-    expect((await verifyRelaySignature({ relayParams, digest, signature, expectedSigner: owner.address, nowSec: NOW })).ok).toBe(false);
+    expect((await verifyRelaySignature({ ...base, expectedSigner: owner.address })).ok).toBe(false);
     // 만료
-    expect((await verifyRelaySignature({ relayParams, digest, signature, expectedSigner: signer.address, nowSec: relayParams.deadline + 1n })).ok).toBe(false);
-    // 타 체인 relayParams
-    expect((await verifyRelaySignature({ relayParams: { ...relayParams, desChainId: 1n }, digest, signature, expectedSigner: signer.address, nowSec: NOW })).ok).toBe(false);
-    // 타 router 도메인 → digest 불일치
-    const otherDigest = computeRelayDigest(computeGmxRelayDomainSeparator(42161, '0x9c05880A2AaD7530c69e18e342eDC9E06cc757db' as Address), computeRelayParamsHash(relayParams));
-    expect(otherDigest).not.toBe(digest);
+    expect((await verifyRelaySignature({ ...base, nowSec: relayParams.deadline + 1n })).ok).toBe(false);
+    // 타 체인 relayParams / 타 chainId 도메인
+    expect((await verifyRelaySignature({ ...base, relayParams: { ...relayParams, desChainId: 1n } })).ok).toBe(false);
+    expect((await verifyRelaySignature({ ...base, chainId: 1 })).ok).toBe(false);
+    // 타 router 도메인 → 기대 digest 불일치 → 거부
+    expect((await verifyRelaySignature({ ...base, verifyingContract: '0x9c05880A2AaD7530c69e18e342eDC9E06cc757db' as Address })).ok).toBe(false);
   });
 });
 
