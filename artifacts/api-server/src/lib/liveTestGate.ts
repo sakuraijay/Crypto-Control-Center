@@ -58,6 +58,11 @@ export interface CentralGateInput {
   noBlockingIntents:       boolean;
   /** GMX EventEmitter 주소 설정 유효 여부 (resolveGmxEventEmitterAddress().ok) */
   eventEmitterConfigured:  boolean;
+  /**
+   * 최신 delegated trading relay 구성 완비 여부 (resolveGmxLiveRelayConfig().ok).
+   * legacy GMX_SUBACCOUNT_ROUTER_ADDRESS만 설정된 상태로는 절대 true가 되지 않는다.
+   */
+  relayConfigured:         boolean;
 }
 
 /**
@@ -115,6 +120,13 @@ export function checkCentralExecutionGate(input: CentralGateInput): GateResult {
   checks.eventEmitterConfigured = input.eventEmitterConfigured === true;
   if (!checks.eventEmitterConfigured) {
     return { allowed: false, reason: '[CENTRAL GATE] GMX EventEmitter 주소 설정 없음/형식 오류 — 실제 실행 차단 (fail-closed)', checks };
+  }
+
+  // 최신 delegated trading relay 구성(SubaccountGelatoRelayRouter/DataStore/EventEmitter,
+  // chainId 42161)이 완비되지 않으면 LIVE 실행 금지. legacy 라우터 설정만으로는 열리지 않는다.
+  checks.relayConfigured = input.relayConfigured === true;
+  if (!checks.relayConfigured) {
+    return { allowed: false, reason: '[CENTRAL GATE] 최신 GMX relay 구성 미완비 (SubaccountGelatoRelayRouter/DataStore/EventEmitter/chainId) — 실제 실행 차단 (fail-closed)', checks };
   }
 
   checks.reconciled = input.reconciled === true;

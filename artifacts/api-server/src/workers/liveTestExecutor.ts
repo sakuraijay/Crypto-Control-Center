@@ -53,6 +53,21 @@ import {
   type IntentResolution,
 } from '../lib/intentReconciler';
 import { resolveGmxEventEmitterAddress } from '../lib/gmxOrderEvents';
+import { isGmxLiveRelayConfigured } from '../lib/gmxLiveConfig';
+
+/**
+ * DEPRECATED — legacy SubaccountRouter 직접 주문 경로 (multicall/sendTokens/createOrder).
+ * 최신 GMX delegated trading은 SubaccountGelatoRelayRouter(EIP-712 relay)를 사용하며
+ * legacy 라우터는 주문 생성에 사용할 수 없다 (비-express removeSubaccount 전용).
+ * 이 가드는 테스트 환경 밖에서 legacy 경로 broadcast를 원천 차단한다.
+ * 중앙 게이트의 relayConfigured 체크와 별개로 이중 방어선 역할.
+ */
+export function assertLegacyOrderPathAllowed(): void {
+  const isTestEnv = process.env.NODE_ENV === 'test' || process.env.VITEST !== undefined;
+  if (!isTestEnv) {
+    throw new Error('[DEPRECATED] legacy SubaccountRouter 주문 경로는 Production에서 차단됨 — 최신 SubaccountGelatoRelayRouter relay 경로 필요');
+  }
+}
 import {
   SUBACCOUNT_ROUTER_ABI,
   USDC_ADDRESS,
@@ -453,6 +468,7 @@ export async function executeLiveTestOrder(params: LiveOrderParams): Promise<Liv
     reconciled:             _reconciled,
     noBlockingIntents:      !(await hasBlockingIntents()),
     eventEmitterConfigured: resolveGmxEventEmitterAddress().ok,
+    relayConfigured:        isGmxLiveRelayConfigured(),
   });
   if (!central.allowed) {
     await appendAuditLog({
@@ -629,6 +645,7 @@ export async function executeLiveTestOrder(params: LiveOrderParams): Promise<Liv
   // ── 4) 온체인 제출 — 오류 시 broadcast 여부 불명 → UNRESOLVED (자동 FAILED 금지) ──
   let txHash: `0x${string}`;
   try {
+    assertLegacyOrderPathAllowed(); // DEPRECATED legacy 경로 — Production broadcast 차단
     txHash = await walletClient.writeContract({
       address:      routerAddrBuilt,
       abi:          SUBACCOUNT_ROUTER_ABI,
@@ -726,6 +743,7 @@ export async function closeLiveTestPosition(params: ClosePositionParams): Promis
     reconciled:             _reconciled,
     noBlockingIntents:      !(await hasBlockingIntents()),
     eventEmitterConfigured: resolveGmxEventEmitterAddress().ok,
+    relayConfigured:        isGmxLiveRelayConfigured(),
   });
   if (!central.allowed) {
     await appendAuditLog({
@@ -871,6 +889,7 @@ export async function closeLiveTestPosition(params: ClosePositionParams): Promis
   // ── 4) 온체인 제출 — 오류 시 broadcast 여부 불명 → UNRESOLVED (자동 FAILED 금지) ──
   let txHash: `0x${string}`;
   try {
+    assertLegacyOrderPathAllowed(); // DEPRECATED legacy 경로 — Production broadcast 차단
     txHash = await walletClient.writeContract({
       address: routerAddrBuilt,
       abi: SUBACCOUNT_ROUTER_ABI,

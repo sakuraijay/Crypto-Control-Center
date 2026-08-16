@@ -112,7 +112,17 @@ vi.mock('../lib/gmxContracts', () => ({
 }));
 
 // ── env 초기화 ────────────────────────────────────────────────────────────────
-const ENV_KEYS = ['WORKER_ENGINE_MODE', 'LIVE_TEST_EXECUTION_LOCKED', 'DELEGATED_SIGNER_ENABLED'] as const;
+const ENV_KEYS = [
+  'WORKER_ENGINE_MODE', 'LIVE_TEST_EXECUTION_LOCKED', 'DELEGATED_SIGNER_ENABLED',
+  'GMX_SUBACCOUNT_GELATO_RELAY_ROUTER_ADDRESS', 'GMX_EVENT_EMITTER_ADDRESS', 'GMX_DATA_STORE_ADDRESS',
+] as const;
+
+/** 최신 relay 구성 완비 (게이트 통과 시나리오용) — 문서 기준 공식 Arbitrum 주소 */
+function setRelayEnv() {
+  process.env.GMX_SUBACCOUNT_GELATO_RELAY_ROUTER_ADDRESS = '0xfD0596f708d9D950E0eF7b5d191e5F8e55b8a67f';
+  process.env.GMX_EVENT_EMITTER_ADDRESS = '0xC8ee91A54287DB53897056e12D9819156D3822Fb';
+  process.env.GMX_DATA_STORE_ADDRESS = '0xFD70de6b91282D8017aA4E741e9Ae325CAb992d8';
+}
 const savedEnv: Record<string, string | undefined> = {};
 for (const k of ENV_KEYS) savedEnv[k] = process.env[k];
 
@@ -148,6 +158,7 @@ function allowInput() {
     reconciled:             true,
     noBlockingIntents:      true,
     eventEmitterConfigured: true,
+    relayConfigured:        true,
   };
 }
 
@@ -212,6 +223,22 @@ describe('checkCentralExecutionGate — fail-closed 조합', () => {
     expect(checkCentralExecutionGate({ ...allowInput(), dbOk: false }).allowed).toBe(false);
     expect(checkCentralExecutionGate({ ...allowInput(), rpcOk: false }).allowed).toBe(false);
     expect(checkCentralExecutionGate({ ...allowInput(), reconciled: false }).allowed).toBe(false);
+  });
+
+  it('eventEmitterConfigured=false → 차단 (기본값 없음, 미설정 시 fail-closed)', async () => {
+    process.env.LIVE_TEST_EXECUTION_LOCKED = 'false';
+    const { checkCentralExecutionGate } = await import('../lib/liveTestGate');
+    const r = checkCentralExecutionGate({ ...allowInput(), eventEmitterConfigured: false });
+    expect(r.allowed).toBe(false);
+    expect(r.reason).toMatch(/EventEmitter/);
+  });
+
+  it('relayConfigured=false → 차단 (legacy 라우터만 설정된 상태로는 LIVE 불가)', async () => {
+    process.env.LIVE_TEST_EXECUTION_LOCKED = 'false';
+    const { checkCentralExecutionGate } = await import('../lib/liveTestGate');
+    const r = checkCentralExecutionGate({ ...allowInput(), relayConfigured: false });
+    expect(r.allowed).toBe(false);
+    expect(r.reason).toMatch(/relay 구성/);
   });
 });
 
@@ -278,6 +305,7 @@ describe('executeLiveTestOrder — 중앙 게이트 통합 (writeContract 도달
     process.env.WORKER_ENGINE_MODE = 'LIVE';
     process.env.DELEGATED_SIGNER_ENABLED = 'true';
     process.env.GMX_RPC_URL = 'https://rpc';
+    setRelayEnv(); // 최신 relay 구성 없이는 중앙 게이트에서 차단되므로 완비 상태로 설정
     const { executeLiveTestOrder, reconcileOnRestart, isReconciled } =
       await import('../workers/liveTestExecutor');
 

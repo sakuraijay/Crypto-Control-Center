@@ -126,7 +126,10 @@ vi.mock('../lib/intentReconciler', () => ({
 }));
 
 // ── env ──────────────────────────────────────────────────────────────────────
-const ENV_KEYS = ['WORKER_ENGINE_MODE', 'LIVE_TEST_EXECUTION_LOCKED', 'DELEGATED_SIGNER_ENABLED', 'GMX_RPC_URL'] as const;
+const ENV_KEYS = [
+  'WORKER_ENGINE_MODE', 'LIVE_TEST_EXECUTION_LOCKED', 'DELEGATED_SIGNER_ENABLED', 'GMX_RPC_URL',
+  'GMX_SUBACCOUNT_GELATO_RELAY_ROUTER_ADDRESS', 'GMX_EVENT_EMITTER_ADDRESS', 'GMX_DATA_STORE_ADDRESS',
+] as const;
 const savedEnv: Record<string, string | undefined> = {};
 for (const k of ENV_KEYS) savedEnv[k] = process.env[k];
 
@@ -135,6 +138,10 @@ function unlockEnv() {
   process.env.WORKER_ENGINE_MODE = 'LIVE';
   process.env.DELEGATED_SIGNER_ENABLED = 'true';
   process.env.GMX_RPC_URL = 'https://rpc';
+  // 최신 relay 구성 완비 (미완비 시 중앙 게이트에서 차단됨) — 문서 기준 공식 주소
+  process.env.GMX_SUBACCOUNT_GELATO_RELAY_ROUTER_ADDRESS = '0xfD0596f708d9D950E0eF7b5d191e5F8e55b8a67f';
+  process.env.GMX_EVENT_EMITTER_ADDRESS = '0xC8ee91A54287DB53897056e12D9819156D3822Fb';
+  process.env.GMX_DATA_STORE_ADDRESS = '0xFD70de6b91282D8017aA4E741e9Ae325CAb992d8';
 }
 
 beforeEach(async () => {
@@ -244,6 +251,27 @@ describe('OPEN — durable intent 필수 구간', () => {
     expect(r.error).toMatch(/execution intent/);
     expect(writeContractSpy.fn).not.toHaveBeenCalled();
     expect(intentMocks.createPreparedIntent).not.toHaveBeenCalled();
+  });
+
+  it('최신 relay 구성 미완비(라우터/DataStore/emitter 누락) → 중앙 게이트 차단, writeContract 0회', async () => {
+    unlockEnv();
+    delete process.env.GMX_SUBACCOUNT_GELATO_RELAY_ROUTER_ADDRESS; // 하나만 빠져도 차단
+    const { executeLiveTestOrder } = await import('../workers/liveTestExecutor');
+    const r = await executeLiveTestOrder(openParams());
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/relay 구성/);
+    expect(writeContractSpy.fn).not.toHaveBeenCalled();
+    expect(intentMocks.createPreparedIntent).not.toHaveBeenCalled();
+  });
+
+  it('EventEmitter 미설정(기본값 없음) → 중앙 게이트 차단, writeContract 0회', async () => {
+    unlockEnv();
+    delete process.env.GMX_EVENT_EMITTER_ADDRESS;
+    const { executeLiveTestOrder } = await import('../workers/liveTestExecutor');
+    const r = await executeLiveTestOrder(openParams());
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/EventEmitter/);
+    expect(writeContractSpy.fn).not.toHaveBeenCalled();
   });
 });
 
