@@ -11,6 +11,7 @@ export default defineConfig({
   test: {
     environment: 'node', // pure functions only — no DOM needed
     globals:     true,
-    include:     ['src/__tests__/**/*.test.ts'],
+    include:     ['src/**/__tests__/**/*.test.{ts,tsx}', 'src/**/*.spec.{ts,tsx}'],
+    exclude:     ['**/node_modules/**', '**/dist/**', '**/build/**'],
   },
 });

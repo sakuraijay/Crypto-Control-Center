@@ -77,7 +77,11 @@ export function ReadinessRefreshCard() {
               : 'border-border bg-secondary text-muted-foreground cursor-not-allowed')}
           data-testid="button-readiness-refresh"
         >
-          {busy ? <span className="flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" /> 검증 중…</span> : '읽기 전용 상태 검증'}
+          {busy
+            ? <span className="flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" /> 검증 중…</span>
+            : error !== null
+              ? '다시 검증'
+              : '읽기 전용 상태 검증'}
         </button>
         {ranAtMs && !busy && (
           <span className="text-[10px] text-muted-foreground font-mono">
