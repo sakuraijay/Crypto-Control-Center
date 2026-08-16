@@ -29,6 +29,9 @@ secrets.*.json
 *.pfx
 *.cert
 
+# ── Agent instruction uploads — never commit to GitHub ────────────────────────
+attached_assets/
+
 # ── Replit internals ──────────────────────────────────────────────────────────
 .cache/
 .local/
