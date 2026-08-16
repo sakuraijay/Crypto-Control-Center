@@ -145,6 +145,39 @@ const MIGRATIONS: { name: string; sql: string }[] = [
       ALTER TABLE execution_intents ADD COLUMN IF NOT EXISTS order_emitter_address text;
     `,
   },
+  {
+    name: "0014_subaccount_approval_sessions",
+    sql: `
+      -- GMX delegated trading 2단계 — owner approval 세션.
+      -- encrypted_signature: SESSION_SECRET 기반 AES-256-GCM 암호문 (전문·암호문 비노출).
+      -- uint256 정밀도 보존을 위해 숫자 필드는 text(십진 문자열).
+      CREATE TABLE IF NOT EXISTS subaccount_approval_sessions (
+        id                  text PRIMARY KEY,
+        main_account        text NOT NULL,
+        subaccount          text NOT NULL,
+        chain_id            text NOT NULL,
+        verifying_contract  text NOT NULL,
+        action_type         text NOT NULL,
+        should_add          boolean NOT NULL,
+        expires_at          text NOT NULL,
+        max_allowed_count   text NOT NULL,
+        approval_nonce      text NOT NULL,
+        des_chain_id        text NOT NULL,
+        deadline            text NOT NULL,
+        integration_id      text NOT NULL,
+        typed_data_digest   text NOT NULL,
+        encrypted_signature text,
+        status              text NOT NULL,
+        invalid_reason      text,
+        created_at          timestamptz NOT NULL DEFAULT now(),
+        updated_at          timestamptz NOT NULL DEFAULT now(),
+        consumed_at         timestamptz,
+        revoked_at          timestamptz
+      );
+      CREATE INDEX IF NOT EXISTS subaccount_approval_sessions_status_idx
+        ON subaccount_approval_sessions (status);
+    `,
+  },
   // Add future migrations here in chronological order.
 ];
 

@@ -48,8 +48,12 @@ export function deriveSubaccountAuthState(input: SubaccountAuthDeriveInput): Sub
 
   const oc = input.onchain;
   if (!oc.isSubaccountListed) return 'OWNER_SIGNATURE_REQUIRED';
+  // feature/integration disabled — 온체인 등록돼 있어도 실행 불가 → REVOKED류로 차단
+  if (oc.featureDisabled || oc.integrationDisabled) return 'REVOKED';
   if (oc.expiresAt === 0n && oc.maxAllowedCount === 0n) return 'REVOKED';
-  if (oc.expiresAt <= input.nowSec) return 'EXPIRED';
+  // 만료 판정 기준: 온체인 블록 timestamp 우선, 없으면 서버 nowSec (fail-closed 아님 — 둘 다 초 단위)
+  const expiryBasis = oc.blockTimestamp ?? input.nowSec;
+  if (oc.expiresAt <= expiryBasis) return 'EXPIRED';
   if (oc.remaining <= 0n) return 'ACTION_LIMIT_REACHED';
   return 'AUTHORIZED';
 }

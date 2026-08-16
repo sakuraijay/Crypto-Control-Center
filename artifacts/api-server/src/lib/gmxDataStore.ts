@@ -35,6 +35,8 @@ export const KEY_MAX_ALLOWED_SUBACCOUNT_ACTION_COUNT = hashKeyString('MAX_ALLOWE
 export const KEY_SUBACCOUNT_INTEGRATION_ID = hashKeyString('SUBACCOUNT_INTEGRATION_ID');
 /** 주문 actionType — SubaccountApproval.actionType 및 각 키 계산에 사용 */
 export const SUBACCOUNT_ORDER_ACTION = hashKeyString('SUBACCOUNT_ORDER_ACTION');
+export const KEY_SUBACCOUNT_FEATURE_DISABLED = hashKeyString('SUBACCOUNT_FEATURE_DISABLED');
+export const KEY_SUBACCOUNT_INTEGRATION_DISABLED = hashKeyString('SUBACCOUNT_INTEGRATION_DISABLED');
 
 export function subaccountListKey(account: Address): Hex {
   return keccak256(encodeAbiParameters(
@@ -66,12 +68,29 @@ export function subaccountIntegrationIdKey(account: Address, subaccount: Address
   ));
 }
 
+/** Keys.subaccountFeatureDisabledKey(module) — module = subaccount relay router 주소 */
+export function subaccountFeatureDisabledKey(module: Address): Hex {
+  return keccak256(encodeAbiParameters(
+    [{ type: 'bytes32' }, { type: 'address' }],
+    [KEY_SUBACCOUNT_FEATURE_DISABLED, module],
+  ));
+}
+
+/** Keys.subaccountIntegrationDisabledKey(integrationId) */
+export function subaccountIntegrationDisabledKey(integrationId: Hex): Hex {
+  return keccak256(encodeAbiParameters(
+    [{ type: 'bytes32' }, { type: 'bytes32' }],
+    [KEY_SUBACCOUNT_INTEGRATION_DISABLED, integrationId],
+  ));
+}
+
 // ── read-only ABI ─────────────────────────────────────────────────────────────
 
 export const DATA_STORE_READ_ABI = [
   { type: 'function', name: 'getUint', stateMutability: 'view', inputs: [{ name: 'key', type: 'bytes32' }], outputs: [{ type: 'uint256' }] },
   { type: 'function', name: 'getBytes32', stateMutability: 'view', inputs: [{ name: 'key', type: 'bytes32' }], outputs: [{ type: 'bytes32' }] },
   { type: 'function', name: 'containsAddress', stateMutability: 'view', inputs: [{ name: 'setKey', type: 'bytes32' }, { name: 'value', type: 'address' }], outputs: [{ type: 'bool' }] },
+  { type: 'function', name: 'getBool', stateMutability: 'view', inputs: [{ name: 'key', type: 'bytes32' }], outputs: [{ type: 'bool' }] },
 ] as const;
 
 export const RELAY_ROUTER_NONCE_ABI = [
@@ -87,6 +106,8 @@ export interface DataStoreClient {
     functionName: string;
     args: readonly unknown[];
   }): Promise<unknown>;
+  /** 최신 블록 timestamp(초). 만료 판정 기준. 미구현이면 호출측 nowSec 사용. */
+  getBlockTimestamp?(): Promise<bigint>;
 }
 
 export interface SubaccountAuthOnchain {
@@ -97,6 +118,12 @@ export interface SubaccountAuthOnchain {
   remaining: bigint;        // max(0, maxAllowedCount - usedCount)
   integrationId: Hex;
   approvalNonce: bigint;    // router.subaccountApprovalNonces(account)
+  /** Keys.subaccountFeatureDisabledKey(relayRouter) — true면 기능 자체 비활성 */
+  featureDisabled: boolean;
+  /** Keys.subaccountIntegrationDisabledKey(integrationId) — true면 integration 비활성 */
+  integrationDisabled: boolean;
+  /** 온체인 블록 timestamp(초). 조회 불가 시 null (호출측 nowSec 사용). */
+  blockTimestamp: bigint | null;
 }
 
 export type SubaccountAuthReadResult =
@@ -148,6 +175,27 @@ export async function readSubaccountAuthorization(params: {
       || typeof used !== 'bigint' || typeof integrationId !== 'string' || typeof approvalNonce !== 'bigint') {
       return { ok: false, reason: 'DataStore 응답 디코딩 실패 — fail-closed (UNVERIFIED)' };
     }
+
+    // 2차 조회: feature/integration disabled 플래그 + 블록 timestamp
+    // (integrationDisabled 키는 integrationId 조회 결과에 의존하므로 순차 실행)
+    const [featureDisabled, integrationDisabled, blockTimestamp] = await Promise.all([
+      params.client.readContract({
+        address: params.dataStore, abi: DATA_STORE_READ_ABI, functionName: 'getBool',
+        args: [subaccountFeatureDisabledKey(params.relayRouter)],
+      }),
+      params.client.readContract({
+        address: params.dataStore, abi: DATA_STORE_READ_ABI, functionName: 'getBool',
+        args: [subaccountIntegrationDisabledKey(integrationId as Hex)],
+      }),
+      params.client.getBlockTimestamp ? params.client.getBlockTimestamp() : Promise.resolve(null),
+    ]);
+    if (typeof featureDisabled !== 'boolean' || typeof integrationDisabled !== 'boolean') {
+      return { ok: false, reason: 'DataStore disabled-flag 디코딩 실패 — fail-closed (UNVERIFIED)' };
+    }
+    if (blockTimestamp !== null && typeof blockTimestamp !== 'bigint') {
+      return { ok: false, reason: '블록 timestamp 디코딩 실패 — fail-closed (UNVERIFIED)' };
+    }
+
     const remaining = maxAllowed > used ? maxAllowed - used : 0n;
     return {
       ok: true,
@@ -155,6 +203,7 @@ export async function readSubaccountAuthorization(params: {
         isSubaccountListed: listed,
         expiresAt, maxAllowedCount: maxAllowed, usedCount: used, remaining,
         integrationId: integrationId as Hex, approvalNonce,
+        featureDisabled, integrationDisabled, blockTimestamp,
       },
     };
   } catch (err: unknown) {

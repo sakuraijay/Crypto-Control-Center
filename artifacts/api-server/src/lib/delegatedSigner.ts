@@ -83,6 +83,20 @@ function getSessionSecret(): Buffer {
   return Buffer.from(secret, 'utf8');
 }
 
+/**
+ * 범용 민감 hex 데이터 암호화 (owner approval signature 등 capability 저장용).
+ * SESSION_SECRET 기반 scrypt + AES-256-GCM. Format: salt(32)|iv(16)|tag(16)|ciphertext — hex.
+ * 평문·암호문 모두 로그·API에 노출 금지.
+ */
+export function encryptSensitiveHex(plainHex: string): string {
+  return encryptPrivateKey(plainHex.startsWith('0x') ? plainHex.slice(2) : plainHex);
+}
+
+/** encryptSensitiveHex 역연산 — 0x 접두사 붙여 반환 */
+export function decryptSensitiveHex(encoded: string): string {
+  return `0x${decryptPrivateKey(encoded)}`;
+}
+
 function encryptPrivateKey(privateKeyHex: string): string {
   const secret = getSessionSecret();
   const salt   = randomBytes(SALT_LEN);
