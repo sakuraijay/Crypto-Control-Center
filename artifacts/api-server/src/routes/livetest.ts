@@ -16,6 +16,7 @@ import { deriveSubaccountAuthState, isAuthStateLiveEligible, type SubaccountAuth
 import { readSubaccountAuthorization, RELAY_ROUTER_NONCE_ABI, type SubaccountAuthOnchain, type DataStoreClient } from '../lib/gmxDataStore';
 import { createCanonicalDataStoreClient } from '../lib/gmxCanonicalClient';
 import { requireOperatorAuth } from '../lib/operatorAuthGuard';
+import { sanitizeRpcError } from '../lib/rpcErrorSanitize';
 import {
   prepareApprovalSession,
   submitApprovalSignature,
@@ -221,7 +222,8 @@ router.post('/executor/subaccount-approval/prepare', requireOperatorAuth, async 
     try {
       canonicalNonce = await readCanonicalNonce(relay.config.subaccountGelatoRelayRouter as Address, mainAccount);
     } catch (e: unknown) {
-      return res.status(502).json({ ok: false, error: `canonical nonce 조회 실패 — prepare 중단: ${(e as Error).message}` });
+      // RPC 예외에는 endpoint URL(토큰 포함 가능)이 담길 수 있음 — sanitize 필수
+      return res.status(502).json({ ok: false, error: `canonical nonce 조회 실패 — prepare 중단: ${sanitizeRpcError(e)}` });
     }
 
     const expiry = typeof req.body?.expirySeconds === 'number' ? req.body.expirySeconds : undefined;
@@ -279,7 +281,7 @@ router.post('/executor/subaccount-approval/signature', requireOperatorAuth, asyn
     try {
       canonicalNonce = await readCanonicalNonce(relay.config.subaccountGelatoRelayRouter as Address, mainAccount);
     } catch (e: unknown) {
-      return res.status(502).json({ ok: false, error: `canonical nonce 조회 실패 — 서명 저장 중단: ${(e as Error).message}` });
+      return res.status(502).json({ ok: false, error: `canonical nonce 조회 실패 — 서명 저장 중단: ${sanitizeRpcError(e)}` });
     }
 
     const result = await submitApprovalSignature({

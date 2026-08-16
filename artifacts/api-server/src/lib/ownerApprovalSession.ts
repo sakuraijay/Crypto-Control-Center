@@ -155,28 +155,32 @@ export async function prepareApprovalSession(params: {
   const sessionId = randomUUID();
 
   try {
-    // 단일 활성 세션: 기존 PREPARED/READY 무효화
-    await db.update(subaccountApprovalSessionsTable)
-      .set({ status: SESSION_STATUS.INVALIDATED, invalidReason: '새 prepare로 대체됨', updatedAt: new Date() })
-      .where(inArray(subaccountApprovalSessionsTable.status, [SESSION_STATUS.PREPARED, SESSION_STATUS.OWNER_SIGNATURE_READY]));
+    // 단일 활성 세션: invalidate+insert를 단일 트랜잭션으로 묶는다.
+    // DB 수준의 partial unique index(migration 0015: main_account당 활성 1개)가
+    // 동시 prepare 경합의 최종 방어선 — 경합 시 한쪽 insert가 실패해 롤백된다.
+    await db.transaction(async (tx) => {
+      await tx.update(subaccountApprovalSessionsTable)
+        .set({ status: SESSION_STATUS.INVALIDATED, invalidReason: '새 prepare로 대체됨', updatedAt: new Date() })
+        .where(inArray(subaccountApprovalSessionsTable.status, [SESSION_STATUS.PREPARED, SESSION_STATUS.OWNER_SIGNATURE_READY]));
 
-    await db.insert(subaccountApprovalSessionsTable).values({
-      id: sessionId,
-      mainAccount: params.mainAccount.toLowerCase(),
-      subaccount: params.subaccount.toLowerCase(),
-      chainId: String(chainId),
-      verifyingContract: params.verifyingContract.toLowerCase(),
-      actionType: message.actionType,
-      shouldAdd: message.shouldAdd,
-      expiresAt: message.expiresAt.toString(),
-      maxAllowedCount: message.maxAllowedCount.toString(),
-      approvalNonce: message.nonce.toString(),
-      desChainId: message.desChainId.toString(),
-      deadline: message.deadline.toString(),
-      integrationId: message.integrationId,
-      typedDataDigest: digest,
-      encryptedSignature: null,
-      status: SESSION_STATUS.PREPARED,
+      await tx.insert(subaccountApprovalSessionsTable).values({
+        id: sessionId,
+        mainAccount: params.mainAccount.toLowerCase(),
+        subaccount: params.subaccount.toLowerCase(),
+        chainId: String(chainId),
+        verifyingContract: params.verifyingContract.toLowerCase(),
+        actionType: message.actionType,
+        shouldAdd: message.shouldAdd,
+        expiresAt: message.expiresAt.toString(),
+        maxAllowedCount: message.maxAllowedCount.toString(),
+        approvalNonce: message.nonce.toString(),
+        desChainId: message.desChainId.toString(),
+        deadline: message.deadline.toString(),
+        integrationId: message.integrationId,
+        typedDataDigest: digest,
+        encryptedSignature: null,
+        status: SESSION_STATUS.PREPARED,
+      });
     });
   } catch {
     return { ok: false, reason: '승인 세션 저장 실패 — prepare 중단 (fail-closed)' };

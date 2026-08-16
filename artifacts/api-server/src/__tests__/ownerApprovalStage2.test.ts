@@ -20,8 +20,8 @@ import { privateKeyToAccount } from 'viem/accounts';
 // ── in-memory subaccount_approval_sessions store ─────────────────────────────
 
 interface FakeRow { [k: string]: unknown }
-const store: { rows: FakeRow[]; failInsert: boolean; failUpdate: boolean } = {
-  rows: [], failInsert: false, failUpdate: false,
+const store: { rows: FakeRow[]; failInsert: boolean; failUpdate: boolean; txCalls: number } = {
+  rows: [], failInsert: false, failUpdate: false, txCalls: 0,
 };
 
 vi.mock('@workspace/db', () => {
@@ -65,6 +65,12 @@ vi.mock('@workspace/db', () => {
         },
       }),
     }),
+  };
+  // 트랜잭션 mock: 콜백에 동일한 db 체인을 전달 (원자성은 실 DB의
+  // partial unique index(0015)가 보장 — 여기서는 호출 경로만 검증).
+  (db as { transaction?: unknown }).transaction = async (cb: (tx: typeof db) => Promise<void>) => {
+    store.txCalls += 1;
+    return cb(db);
   };
   return {
     db,
@@ -191,6 +197,21 @@ describe('prepareApprovalSession', () => {
     expect(store.rows[0].status).toBe(SESSION_STATUS.PREPARED);
     expect(store.rows[0].encryptedSignature).toBeNull();
     expect(JSON.stringify(r, (_k, v) => (typeof v === 'bigint' ? v.toString() : v))).not.toContain('encryptedSignature');
+  });
+
+  it('invalidate+insert는 db.transaction 안에서 실행 (경합 시 DB unique index가 최종 방어)', async () => {
+    const before = store.txCalls;
+    const r = await prepare();
+    expect(r.ok).toBe(true);
+    expect(store.txCalls).toBe(before + 1);
+  });
+
+  it('트랜잭션 내 insert 실패(활성 세션 unique 충돌 등) → prepare 전체 fail-closed', async () => {
+    store.failInsert = true;
+    const r = await prepare();
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain('fail-closed');
+    expect(store.rows.filter((x) => x.status === SESSION_STATUS.PREPARED)).toHaveLength(0);
   });
 
   it('허용 범위 밖 요청은 클램프 (expiry ≤1h, count 1–10)', async () => {
@@ -525,6 +546,35 @@ describe('gmxCreateOrder — 공식 RelayUtils 골든 대조', () => {
 });
 
 // ── 운영자 인증 가드 ─────────────────────────────────────────────────────────
+
+describe('canonical RPC 오류 비밀 비노출 회귀', () => {
+  it('sanitizeRpcError — viem 스타일 예외의 endpoint URL·GMX_RPC_URL 값 마스킹', async () => {
+    const { sanitizeRpcError } = await import('../lib/rpcErrorSanitize');
+    const prev = process.env.GMX_RPC_URL;
+    process.env.GMX_RPC_URL = 'https://arb.example.com/v2/super-secret-token';
+    try {
+      const e = new Error('HTTP request failed. URL: https://arb.example.com/v2/super-secret-token Details: timeout');
+      const out = sanitizeRpcError(e);
+      expect(out).not.toContain('super-secret-token');
+      expect(out).not.toContain('https://');
+      expect(out).toContain('[URL 제거됨]');
+    } finally {
+      process.env.GMX_RPC_URL = prev;
+    }
+  });
+
+  it('livetest route의 canonical nonce 실패 응답은 sanitizeRpcError를 경유 (raw message 반환 금지)', async () => {
+    // 소스 가드 회귀 테스트: prepare/signature 핸들러의 nonce 조회 catch가
+    // raw (e as Error).message를 응답에 넣는 회귀를 차단한다.
+    const fs = await import('node:fs/promises');
+    const path = await import('node:path');
+    const src = await fs.readFile(path.resolve(__dirname, '../routes/livetest.ts'), 'utf8');
+    const nonceCatches = src.match(/canonical nonce 조회 실패[^`]*\$\{([^}]+)\}/g) ?? [];
+    expect(nonceCatches.length).toBeGreaterThanOrEqual(2);
+    for (const m of nonceCatches) expect(m).toContain('sanitizeRpcError');
+    expect(src).not.toMatch(/canonical nonce 조회 실패[^`]*\$\{\(e as Error\)\.message\}/);
+  });
+});
 
 describe('operatorAuthGuard', () => {
   function run(headers: Record<string, string>, method = 'POST') {

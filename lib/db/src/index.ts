@@ -178,6 +178,16 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         ON subaccount_approval_sessions (status);
     `,
   },
+  {
+    name: "0015_subaccount_approval_single_active",
+    sql: `
+      -- 활성(PREPARED/OWNER_SIGNATURE_READY) 세션은 main_account당 최대 1개 —
+      -- 동시 prepare 경합 시 DB 수준에서 하나만 성공 (fail-closed).
+      CREATE UNIQUE INDEX IF NOT EXISTS subaccount_approval_sessions_single_active_idx
+        ON subaccount_approval_sessions (main_account)
+        WHERE status IN ('PREPARED', 'OWNER_SIGNATURE_READY');
+    `,
+  },
   // Add future migrations here in chronological order.
 ];
 
