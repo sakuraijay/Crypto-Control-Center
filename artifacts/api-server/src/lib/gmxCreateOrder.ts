@@ -347,8 +347,10 @@ export const SUBACCOUNT_CREATE_ORDER_ABI = [
         { name: 'fee', ...RELAY_PARAMS_ABI_COMPONENTS[3] },
         { name: 'userNonce', type: 'uint256' },
         { name: 'deadline', type: 'uint256' },
-        { name: 'desChainId', type: 'uint256' },
+        // 6C 감사 결과: 배포 artifact ABI의 calldata struct 순서는
+        // signature가 desChainId보다 **앞**이다 (EIP-712 hash 순서와 다름 — 그쪽은 signature 미포함)
         { name: 'signature', type: 'bytes' },
+        { name: 'desChainId', type: 'uint256' },
       ]},
       { name: 'subaccountApproval', ...SUBACCOUNT_APPROVAL_STRUCT_ABI[0] },
       { name: 'account', type: 'address' },

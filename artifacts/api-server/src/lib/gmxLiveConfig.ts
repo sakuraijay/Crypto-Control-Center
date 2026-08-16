@@ -8,18 +8,21 @@
  *  - PAPER 모드는 이 구성을 사용하지 않으므로 무영향.
  *  - 오류 메시지에 env 원문 값을 포함하지 않는다 (필드명·사유만).
  *
- * 공식 Arbitrum One(42161) 주소 — 문서화·설정 예시 전용 (2026-08-17,
- * https://docs.gmx.io/docs/api/contracts/addresses/ 기준). 코드가 자동 사용하지 않음:
- *  - SubaccountGelatoRelayRouter: 0xfD0596f708d9D950E0eF7b5d191e5F8e55b8a67f
- *  - DataStore:                   0xFD70de6b91282D8017aA4E741e9Ae325CAb992d8
- *  - EventEmitter:                0xC8ee91A54287DB53897056e12D9819156D3822Fb
+ * 감사된 공식 Arbitrum One(42161) 주소의 단일 기준은 gmxDeploymentManifest.ts
+ * (6C 단계). 이 모듈은 env 필수·형식 검증 + 차단 목록 거부만 담당하고,
+ * manifest 일치 강제는 activation gate/submit transport에서 수행된다.
  */
 
 import { isValidEvmAddress, resolveGmxEventEmitterAddress, ARBITRUM_ONE_CHAIN_ID } from './gmxOrderEvents';
+import { GMX_DEPLOYMENT_MANIFEST, getBlockedAddressReason } from './gmxDeploymentManifest';
 
-// 문서화 전용 상수 (기본값으로 자동 사용 금지)
-export const GMX_SUBACCOUNT_GELATO_RELAY_ROUTER_ARBITRUM_OFFICIAL_DOC = '0xfD0596f708d9D950E0eF7b5d191e5F8e55b8a67f';
-export const GMX_DATA_STORE_ARBITRUM_OFFICIAL_DOC = '0xFD70de6b91282D8017aA4E741e9Ae325CAb992d8';
+// 문서화 전용 상수 (기본값으로 자동 사용 금지) — 6C부터 manifest가 단일 기준
+export const GMX_SUBACCOUNT_GELATO_RELAY_ROUTER_ARBITRUM_OFFICIAL_DOC =
+  GMX_DEPLOYMENT_MANIFEST.addresses.subaccountGelatoRelayRouter;
+export const GMX_DATA_STORE_ARBITRUM_OFFICIAL_DOC = GMX_DEPLOYMENT_MANIFEST.addresses.dataStore;
+/** 구(docs-legacy) router — 차단 목록 소속. 어떤 경로에서도 사용 금지 */
+export const GMX_SUBACCOUNT_GELATO_RELAY_ROUTER_ARBITRUM_LEGACY_BLOCKED =
+  '0xfD0596f708d9D950E0eF7b5d191e5F8e55b8a67f';
 
 export { ARBITRUM_ONE_CHAIN_ID };
 
@@ -43,6 +46,12 @@ function checkAddressEnv(env: NodeJS.ProcessEnv, key: string, reasons: string[])
   const trimmed = raw.trim();
   if (!isValidEvmAddress(trimmed)) {
     reasons.push(`${key} 형식 오류 (0x + 40 hex 필요) — 차단 (fail-closed)`);
+    return null;
+  }
+  // 6C — stale/타 체인 차단 목록: 형식이 유효해도 즉시 거부
+  const blocked = getBlockedAddressReason(trimmed);
+  if (blocked) {
+    reasons.push(`${key} 차단 주소 — ${blocked} (fail-closed)`);
     return null;
   }
   return trimmed;

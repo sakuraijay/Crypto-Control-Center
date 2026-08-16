@@ -6,6 +6,8 @@
  * 실제로 설정하지 않으므로 항상 비활성이다.
  */
 
+import { validateEnvAgainstManifest } from './gmxDeploymentManifest';
+
 export interface ActivationGateInput {
   env: NodeJS.ProcessEnv;
   liveTestMode: boolean;            // server liveTestMode=true
@@ -20,6 +22,8 @@ export interface ActivationGateInput {
   freshLiveFeeQuote: boolean;       // 실제(live) quote가 신선하게 검증됨 — mock 불인정
   currentChainId: number | null;
   gmxConfigOk: boolean;             // 모든 GMX public config 해석 성공
+  /** 6C §7 — 저장된 배포 코드 존재 검증 스냅샷이 ok인가 (읽기 전용 refresh로만 갱신) */
+  deploymentVerified: boolean;
   kind: 'OPEN' | 'CLOSE' | 'REVOKE';
 }
 
@@ -47,6 +51,11 @@ export function evaluateActivationGate(input: ActivationGateInput): ActivationGa
   if (!input.freshLiveFeeQuote) missing.push('fresh live fee quote 없음 (mock 불인정)');
   if (input.currentChainId !== 42161) missing.push(`chainId ${input.currentChainId ?? '미확인'} ≠ 42161`);
   if (!input.gmxConfigOk) missing.push('GMX public config 미해결');
+  // 6C §6 — env 주소가 감사된 manifest와 다르면 LIVE fail-closed (자동 대입 없음)
+  const manifest = validateEnvAgainstManifest(env);
+  if (!manifest.ok) for (const m of manifest.mismatches) missing.push(`manifest 대조 실패: ${m}`);
+  // 6C §7 — 배포 코드 존재 검증(저장 스냅샷)이 ok가 아니면 차단
+  if (!input.deploymentVerified) missing.push('배포 코드 존재 검증 미완료/실패 (readiness refresh 필요)');
   if (env.GMX_RELAY_READONLY_NETWORK_ENABLED !== 'true') missing.push("GMX_RELAY_READONLY_NETWORK_ENABLED !== 'true'");
   if (env.GMX_RELAY_SUBMISSION_ENABLED !== 'true') missing.push("GMX_RELAY_SUBMISSION_ENABLED !== 'true'");
   if (env.GMX_RELAY_NETWORK_ENABLED !== 'true') missing.push("GMX_RELAY_NETWORK_ENABLED !== 'true'");

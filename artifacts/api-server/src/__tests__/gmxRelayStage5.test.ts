@@ -247,11 +247,14 @@ function fullActivation(overrides?: Partial<ActivationGateInput>): ActivationGat
       DELEGATED_SIGNER_ENABLED: 'true', GMX_RELAY_SUBMISSION_ENABLED: 'true',
       GMX_RELAY_NETWORK_ENABLED: 'true', GMX_RELAY_READONLY_NETWORK_ENABLED: 'true',
       GMX_RELAY_MODE: 'LIVE',
+    GMX_SUBACCOUNT_GELATO_RELAY_ROUTER_ADDRESS: '0x517602BaC704B72993997820981603f5E4901273',
+    GMX_DATA_STORE_ADDRESS: '0xFD70de6b91282D8017aA4E741e9Ae325CAb992d8',
+    GMX_EVENT_EMITTER_ADDRESS: '0xC8ee91A54287DB53897056e12D9819156D3822Fb',
     } as NodeJS.ProcessEnv,
     liveTestMode: true, signerInitialized: true, canonicalAuthorized: true,
     emergencyStopActive: false, dbOk: true, rpcOk: true, reconciliationComplete: true,
     blockingIntentCount: 0, activeRevokeInProgress: false, freshLiveFeeQuote: true,
-    currentChainId: 42161, gmxConfigOk: true, kind: 'OPEN',
+    currentChainId: 42161, gmxConfigOk: true, deploymentVerified: true, kind: 'OPEN',
     ...overrides,
   };
 }

@@ -23,6 +23,8 @@
  *  - 실제 transport는 DI로 주입 — 테스트는 mock transport만 사용.
  */
 
+import { GMX_DEPLOYMENT_MANIFEST, getBlockedAddressReason } from './gmxDeploymentManifest';
+
 export const GELATO_HOST_ALLOWLIST = ['api.gelato.digital'] as const;
 export const TRANSPORT_TIMEOUT_MS = 10_000;
 export const MAX_RESPONSE_BYTES = 262_144; // 256KB
@@ -185,6 +187,14 @@ export function createGelatoHttpTransport(env: NodeJS.ProcessEnv = process.env):
       }
       if (!/^0x[0-9a-fA-F]{40}$/.test(target)) {
         return { ok: false, kind: 'config', message: 'target 주소 형식 오류 — 제출 차단', ambiguous: false };
+      }
+      // 6C — target은 감사된 manifest router와 정확히 일치해야 한다 (stale/타 체인 주소 제출 가능성 0)
+      const blockedReason = getBlockedAddressReason(target);
+      if (blockedReason) {
+        return { ok: false, kind: 'config', message: `target 차단 주소 — ${blockedReason} — 제출 차단`, ambiguous: false };
+      }
+      if (target.toLowerCase() !== GMX_DEPLOYMENT_MANIFEST.addresses.subaccountGelatoRelayRouter.toLowerCase()) {
+        return { ok: false, kind: 'config', message: `target이 manifest v${GMX_DEPLOYMENT_MANIFEST.manifestVersion} 감사 router와 불일치 — 제출 차단 (fail-closed)`, ambiguous: false };
       }
       if (!/^0x[0-9a-fA-F]+$/.test(packedData) || packedData.length < 10) {
         return { ok: false, kind: 'config', message: 'packedData 형식 오류 — 제출 차단', ambiguous: false };

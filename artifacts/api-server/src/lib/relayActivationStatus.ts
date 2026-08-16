@@ -83,6 +83,39 @@ export function getCanonicalSnapshot(): CanonicalSnapshot | null {
   return canonicalSnapshot ? { ...canonicalSnapshot } : null;
 }
 
+// ── 6C §7: 배포 코드 존재 검증 스냅샷 (모듈 메모리) ─────────────────────────
+// 읽기 전용 readiness refresh 경로에서만 갱신되고, activation GET·게이트는
+// 저장값만 읽는다. 미수행 = ok:false (fail-closed).
+
+export interface DeploymentVerificationState {
+  attempted: boolean;
+  atMs: number | null;
+  ok: boolean;             // 모든 검증(코드 존재·decode·manifest 일치·chainId) 성공 시에만 true
+  manifestVersion: number | null;
+  basis: string[];
+  failures: string[];
+}
+
+let deploymentVerification: DeploymentVerificationState = {
+  attempted: false, atMs: null, ok: false, manifestVersion: null,
+  basis: [], failures: ['배포 코드 존재 검증 미수행'],
+};
+
+export function recordDeploymentVerification(state: Omit<DeploymentVerificationState, 'attempted'>): void {
+  deploymentVerification = { attempted: true, ...state, basis: [...state.basis], failures: [...state.failures] };
+}
+
+export function getDeploymentVerificationState(): DeploymentVerificationState {
+  return { ...deploymentVerification, basis: [...deploymentVerification.basis], failures: [...deploymentVerification.failures] };
+}
+
+export function __resetDeploymentVerificationForTests(): void {
+  deploymentVerification = {
+    attempted: false, atMs: null, ok: false, manifestVersion: null,
+    basis: [], failures: ['배포 코드 존재 검증 미수행'],
+  };
+}
+
 /** 재조정(reconciliation) 결과가 유효하다고 보는 최대 age */
 export const RECONCILIATION_FRESHNESS_MS = 10 * 60_000; // 10분
 

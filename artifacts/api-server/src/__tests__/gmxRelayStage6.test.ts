@@ -41,7 +41,7 @@ import { createRelayReadonlyClient, __setRelayReadonlyPublicClientFactoryForTest
 import { evaluateActivationGate, type ActivationGateInput } from '../lib/relayActivationGate';
 import { isSignerStorageAccessAllowed } from '../lib/delegatedSigner';
 
-const VALID_TARGET = '0x1111111111111111111111111111111111111111';
+const VALID_TARGET = '0x517602BaC704B72993997820981603f5E4901273'; // 6C: submit target은 manifest router만 허용
 const VALID_DATA = '0x1234567890abcdef';
 
 function envOf(flags: Record<string, string>): NodeJS.ProcessEnv {
@@ -282,7 +282,7 @@ describe('6단계 §5 — relay read-only RPC client 분리', () => {
     expect(r.ok).toBe(true);
     if (r.ok) {
       expect(Object.keys(r.client).sort()).toEqual(
-        ['getBlockTimestamp', 'getLogs', 'getTransactionReceipt', 'readContract'].sort(),
+        ['getBlockTimestamp', 'getChainId', 'getCode', 'getLogs', 'getTransactionReceipt', 'readContract'].sort(),
       );
       expect('sendRawTransaction' in r.client).toBe(false);
       expect('writeContract' in r.client).toBe(false);
@@ -298,7 +298,7 @@ describe('6단계 §6 — activation 게이트에 read-only 플래그 요구', (
       liveTestMode: true, signerInitialized: true, canonicalAuthorized: true,
       emergencyStopActive: false, dbOk: true, rpcOk: true, reconciliationComplete: true,
       blockingIntentCount: 0, activeRevokeInProgress: false, freshLiveFeeQuote: true,
-      currentChainId: 42161, gmxConfigOk: true, kind: 'OPEN',
+      currentChainId: 42161, gmxConfigOk: true, deploymentVerified: true, kind: 'OPEN',
     };
   }
   const FULL_ENV = {
@@ -306,6 +306,9 @@ describe('6단계 §6 — activation 게이트에 read-only 플래그 요구', (
     DELEGATED_SIGNER_ENABLED: 'true', GMX_RELAY_SUBMISSION_ENABLED: 'true',
     GMX_RELAY_NETWORK_ENABLED: 'true', GMX_RELAY_READONLY_NETWORK_ENABLED: 'true',
     GMX_RELAY_MODE: 'LIVE',
+    GMX_SUBACCOUNT_GELATO_RELAY_ROUTER_ADDRESS: '0x517602BaC704B72993997820981603f5E4901273',
+    GMX_DATA_STORE_ADDRESS: '0xFD70de6b91282D8017aA4E741e9Ae325CAb992d8',
+    GMX_EVENT_EMITTER_ADDRESS: '0xC8ee91A54287DB53897056e12D9819156D3822Fb',
   };
 
   it('read-only 플래그 포함 전부 충족 시에만 networkEligible=true', () => {
@@ -341,6 +344,7 @@ describe('6단계 §7 — 읽기 전용 readiness refresh', () => {
       listOpenTaskIds: async () => [],
       countAllocatedNonces: async () => 0,
       transport,
+      readonlyClient: null,
       nowMs: () => 1000,
     });
     expect(state.ok).toBe(false);
@@ -360,6 +364,7 @@ describe('6단계 §7 — 읽기 전용 readiness refresh', () => {
       listOpenTaskIds: async () => [{ id: 't1', relayTaskId: 'gel-1' }, { id: 't2', relayTaskId: null }],
       countAllocatedNonces: async () => 3,
       transport,
+      readonlyClient: null,
       nowMs: () => 2000,
     });
     expect(state.ok).toBe(true);
@@ -378,6 +383,7 @@ describe('6단계 §7 — 읽기 전용 readiness refresh', () => {
       listOpenTaskIds: async () => null,                             // DB 조회 실패
       countAllocatedNonces: async () => null,
       transport,
+      readonlyClient: null,
       nowMs: () => 3000,
     });
     expect(state.ok).toBe(false);
@@ -398,6 +404,7 @@ describe('6단계 §7 — 읽기 전용 readiness refresh', () => {
       listOpenTaskIds: async () => { throw new Error('boom-tasks'); },
       countAllocatedNonces: async () => { throw new Error('boom-nonce'); },
       transport,
+      readonlyClient: null,
       nowMs: () => 4000,
     });
     expect(state.ok).toBe(false);

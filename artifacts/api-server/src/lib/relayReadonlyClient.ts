@@ -23,6 +23,10 @@ import type { DataStoreClient } from './gmxDataStore';
 export interface RelayReadonlyClient extends DataStoreClient {
   getTransactionReceipt(args: { hash: `0x${string}` }): Promise<unknown>;
   getLogs(args: { address?: Address; fromBlock?: bigint; toBlock?: bigint }): Promise<unknown[]>;
+  /** 6C §7 — 배포 코드 존재 검증용 eth_getCode (읽기 전용) */
+  getCode(args: { address: Address }): Promise<`0x${string}` | undefined>;
+  /** 6C §7 — chainId 42161 확인용 eth_chainId (읽기 전용) */
+  getChainId(): Promise<number>;
 }
 
 export type RelayReadonlyClientResult =
@@ -60,6 +64,8 @@ export function createRelayReadonlyClient(env: NodeJS.ProcessEnv = process.env):
       getBlockTimestamp: async () => (await client.getBlock({ blockTag: 'latest' })).timestamp,
       getTransactionReceipt: (args) => client.getTransactionReceipt(args),
       getLogs: (args) => client.getLogs(args as never),
+      getCode: (args) => client.getCode(args),
+      getChainId: () => client.getChainId(),
     },
   };
 }

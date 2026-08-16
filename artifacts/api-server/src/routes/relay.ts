@@ -30,8 +30,9 @@ import {
   computeReconciliationComplete, evaluateFreshLiveQuote,
   getStartupReconciliationState, isReconciliationRunning,
   isRelayReadonlyNetworkEnabled, getReadinessRefreshState,
-  recordCanonicalSnapshot, getCanonicalSnapshot,
+  recordCanonicalSnapshot, getCanonicalSnapshot, getDeploymentVerificationState,
 } from '../lib/relayActivationStatus';
+import { GMX_DEPLOYMENT_MANIFEST } from '../lib/gmxDeploymentManifest';
 import { createRelayReadonlyClient } from '../lib/relayReadonlyClient';
 import { performReadinessRefresh } from '../lib/relayReadinessRefresh';
 import { countAllocatedNoncesOrNull } from '../lib/relayNonce';
@@ -603,6 +604,7 @@ router.get('/executor/relay/activation', requireOperatorAuth, async (_req, res) 
       freshLiveFeeQuote: liveQuote.fresh,
       currentChainId: 42161,
       gmxConfigOk: resolveGmxLiveRelayConfig().ok,
+      deploymentVerified: getDeploymentVerificationState().ok, // 저장 스냅샷만 (외부 호출 0회)
       kind: 'OPEN',
     });
 
@@ -623,6 +625,13 @@ router.get('/executor/relay/activation', requireOperatorAuth, async (_req, res) 
         basis: lastRefresh.basis,
         failures: lastRefresh.failures,
       },
+      // 6C §6·§7 — manifest version + 배포 코드 검증 스냅샷 (주소·version만 공개; Secret·RPC URL 미포함)
+      manifestVersion: GMX_DEPLOYMENT_MANIFEST.manifestVersion,
+      manifestAddresses: GMX_DEPLOYMENT_MANIFEST.addresses,
+      deploymentVerification: (() => {
+        const dv = getDeploymentVerificationState();
+        return { attempted: dv.attempted, atMs: dv.atMs, ok: dv.ok, manifestVersion: dv.manifestVersion, basis: dv.basis, failures: dv.failures };
+      })(),
       signerDisabled: !signerActive,
       canonicalUnverified: !canonicalAuthorized,
       canonicalReason: canonical.reason,
@@ -667,6 +676,11 @@ router.post('/executor/relay/readiness/refresh', requireOperatorAuth, async (_re
           quoteRelayFee: t.quoteRelayFee.bind(t),
           getRelayTaskStatus: t.getRelayTaskStatus.bind(t),
         };
+      })(),
+      // 6C §7 — 배포 코드 존재 검증용 read-only client (미생성 = fail-closed 기록)
+      readonlyClient: (() => {
+        const r = createRelayReadonlyClient(process.env);
+        return r.ok ? { getCode: r.client.getCode, getChainId: r.client.getChainId, readContract: r.client.readContract } : null;
       })(),
       nowMs: () => Date.now(),
     });

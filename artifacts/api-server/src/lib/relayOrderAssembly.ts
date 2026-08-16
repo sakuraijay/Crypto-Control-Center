@@ -93,8 +93,9 @@ export const REMOVE_SUBACCOUNT_ABI = [
         { name: 'fee', ...RELAY_PARAMS_ABI_COMPONENTS[3] },
         { name: 'userNonce', type: 'uint256' },
         { name: 'deadline', type: 'uint256' },
-        { name: 'desChainId', type: 'uint256' },
+        // 6C 감사 결과: 배포 artifact ABI 순서 — signature가 desChainId 앞
         { name: 'signature', type: 'bytes' },
+        { name: 'desChainId', type: 'uint256' },
       ]},
       { name: 'account', type: 'address' },
       { name: 'subaccount', type: 'address' },
