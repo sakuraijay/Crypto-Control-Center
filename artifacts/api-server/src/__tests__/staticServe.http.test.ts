@@ -93,11 +93,10 @@ describe('정적 파일 + SPA fallback', () => {
     expect(res.body).toEqual({ status: 'ok' });
   });
 
-  it('/ 에서 index.html 반환', async () => {
+  it('/ 는 대시보드(/futures-web/)로 302 리다이렉트', async () => {
     const res = await request(app).get('/');
-    expect(res.status).toBe(200);
-    expect(res.headers['content-type']).toContain('text/html');
-    expect(res.text).toBe(INDEX_HTML);
+    expect(res.status).toBe(302);
+    expect(res.headers['location']).toBe('/futures-web/');
   });
 
   it('/dashboard SPA 경로에서 index.html 반환', async () => {

@@ -29,6 +29,13 @@ app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// 기본 주소 → 대시보드 리다이렉트 (Reserved VM 공개 주소의 "/"가
+// Not Found 링크 목록 대신 futures-web 대시보드로 연결되도록).
+// /api·정적 asset·SPA fallback과 충돌하지 않도록 정확히 "/"만 처리.
+app.get("/", (_req, res) => {
+  res.redirect(302, "/futures-web/");
+});
+
 app.use("/api", router);
 
 export default app;
