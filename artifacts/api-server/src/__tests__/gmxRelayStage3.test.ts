@@ -481,6 +481,46 @@ describe('revokeSession — prepare·서명·변조 거부', () => {
     expect(JSON.stringify(s)).not.toContain('encryptedSignature');
   });
 
+  it('교차-purpose 격리: APPROVAL prepare가 REVOKE 세션을 무효화하지 않음', async () => {
+    const p = await prep();
+    if (!p.ok) throw new Error('setup');
+    // getActiveReadySession/submitApprovalSignature 경로가 REVOKE 세션을 건드리지 않는지
+    const { prepareApprovalSession, getActiveReadySession, submitApprovalSignature } =
+      await import('../lib/ownerApprovalSession');
+    vi.stubEnv('GMX_WALLET_ADDRESS', OWNER);
+    const a = await prepareApprovalSession({
+      mainAccount: OWNER, subaccount: SUBACCOUNT, verifyingContract: ROUTER,
+      canonicalNonce: 0n, nowSec: 1_800_000_000n,
+      requestedExpirySec: 3600, requestedMaxAllowedCount: 5,
+    });
+    expect(a.ok).toBe(true);
+    // REVOKE 세션은 여전히 활성 (PREPARED)
+    const revokeRow = store.sessions.find((s) => s.id === p.sessionId)!;
+    expect(revokeRow.status).toBe('PREPARED');
+    // REVOKE READY를 APPROVAL 조회가 선택하지 않음
+    const sig = await ownerAccount.sign({ hash: p.digest });
+    await submitRevokeSignature({ sessionId: p.sessionId, signature: sig, expectedOwner: OWNER, nowSec: 1_800_000_100n });
+    const ready = await getActiveReadySession({ expectedOwner: OWNER, expectedSubaccount: SUBACCOUNT, canonicalNonce: 99n });
+    expect(ready?.sessionId).not.toBe(p.sessionId);
+    expect(revokeRow.status).toBe('OWNER_SIGNATURE_READY'); // markInvalid 안 됨
+    // APPROVAL 서명 제출 경로가 REVOKE 세션을 받지 않음
+    const wrong = await submitApprovalSignature({
+      sessionId: p.sessionId, signature: sig, canonicalNonce: 0n, expectedOwner: OWNER, nowSec: 1_800_000_100n,
+    });
+    expect(wrong.ok).toBe(false);
+    if (!wrong.ok) expect(wrong.reason).toContain('APPROVAL');
+  });
+
+  it('교차-purpose 격리: REVOKE prepare가 APPROVAL 세션을 무효화하지 않음', async () => {
+    store.sessions.push({
+      id: 'appr-1', purpose: 'APPROVAL', status: 'OWNER_SIGNATURE_READY',
+      mainAccount: OWNER.toLowerCase(), subaccount: SUBACCOUNT.toLowerCase(),
+    });
+    const p = await prep();
+    expect(p.ok).toBe(true);
+    expect(store.sessions.find((s) => s.id === 'appr-1')!.status).toBe('OWNER_SIGNATURE_READY');
+  });
+
   it('cancelRevokeSession — 활성 세션만 취소', async () => {
     const p = await prep();
     if (!p.ok) throw new Error('setup');

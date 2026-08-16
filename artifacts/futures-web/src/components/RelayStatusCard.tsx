@@ -41,10 +41,13 @@ export function RelayStatusCard() {
   const [message, setMessage] = useState<{ tone: 'ok' | 'warn' | 'error'; text: string } | null>(null);
 
   const refresh = useCallback(async () => {
+    // status 엔드포인트도 운영자 인증 필요 — PIN 없이는 조회하지 않음
+    const p = pin.trim();
+    if (p.length < 6) { setStatus(null); setLoading(false); return; }
     setLoading(true);
-    setStatus(await fetchRelayStatus(API_BASE));
+    setStatus(await fetchRelayStatus(API_BASE, p));
     setLoading(false);
-  }, []);
+  }, [pin]);
 
   useEffect(() => { void refresh(); }, [refresh]);
 

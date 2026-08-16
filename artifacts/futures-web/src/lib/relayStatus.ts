@@ -136,9 +136,11 @@ export function formatWeiToEth(wei: string | null | undefined): string {
 
 // ── fetch 래퍼 ───────────────────────────────────────────────────────────────
 
-export async function fetchRelayStatus(apiBase: string): Promise<RelayStatusResponse | null> {
+export async function fetchRelayStatus(apiBase: string, pin: string): Promise<RelayStatusResponse | null> {
   try {
-    const res = await fetch(`${apiBase}executor/relay/status`);
+    const res = await fetch(`${apiBase}executor/relay/status`, {
+      headers: { 'x-operator-pin': pin },
+    });
     if (!res.ok) return null;
     const json = await res.json();
     return json?.ok ? (json as RelayStatusResponse) : null;

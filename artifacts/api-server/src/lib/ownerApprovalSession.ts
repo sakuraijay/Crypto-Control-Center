@@ -161,7 +161,10 @@ export async function prepareApprovalSession(params: {
     await db.transaction(async (tx) => {
       await tx.update(subaccountApprovalSessionsTable)
         .set({ status: SESSION_STATUS.INVALIDATED, invalidReason: '새 prepare로 대체됨', updatedAt: new Date() })
-        .where(inArray(subaccountApprovalSessionsTable.status, [SESSION_STATUS.PREPARED, SESSION_STATUS.OWNER_SIGNATURE_READY]));
+        .where(and(
+          eq(subaccountApprovalSessionsTable.purpose, APPROVAL_PURPOSE),
+          inArray(subaccountApprovalSessionsTable.status, [SESSION_STATUS.PREPARED, SESSION_STATUS.OWNER_SIGNATURE_READY]),
+        ));
 
       await tx.insert(subaccountApprovalSessionsTable).values({
         id: sessionId,
@@ -180,6 +183,7 @@ export async function prepareApprovalSession(params: {
         typedDataDigest: digest,
         encryptedSignature: null,
         status: SESSION_STATUS.PREPARED,
+        purpose: APPROVAL_PURPOSE,   // REVOKE 세션과 격리 (DB default와 동일하지만 명시)
       });
     });
   } catch {
@@ -210,6 +214,9 @@ export async function prepareApprovalSession(params: {
   };
 }
 
+/** APPROVAL 세션 purpose — REVOKE 세션(revokeSession.ts)과 격리 */
+export const APPROVAL_PURPOSE = 'APPROVAL';
+
 export type SubmitResult =
   | { ok: true; sessionId: string; status: typeof SESSION_STATUS.OWNER_SIGNATURE_READY }
   | { ok: false; reason: string };
@@ -234,6 +241,9 @@ export async function submitApprovalSignature(params: {
     return { ok: false, reason: '세션 조회 실패 — 서명 저장 중단 (fail-closed)' };
   }
   if (!row) return { ok: false, reason: '세션을 찾을 수 없습니다' };
+  if (row.purpose !== APPROVAL_PURPOSE) {
+    return { ok: false, reason: 'APPROVAL 세션이 아닙니다 — revoke 세션은 별도 경로 사용' };
+  }
   if (row.status !== SESSION_STATUS.PREPARED) {
     return { ok: false, reason: `세션 상태 ${row.status} — PREPARED 세션에만 서명을 제출할 수 있습니다` };
   }
@@ -333,7 +343,10 @@ export async function getActiveReadySession(params: {
   let rows: SubaccountApprovalSessionRow[];
   try {
     rows = await db.select().from(subaccountApprovalSessionsTable)
-      .where(eq(subaccountApprovalSessionsTable.status, SESSION_STATUS.OWNER_SIGNATURE_READY))
+      .where(and(
+        eq(subaccountApprovalSessionsTable.purpose, APPROVAL_PURPOSE),
+        eq(subaccountApprovalSessionsTable.status, SESSION_STATUS.OWNER_SIGNATURE_READY),
+      ))
       .orderBy(desc(subaccountApprovalSessionsTable.createdAt)).limit(1);
   } catch {
     return null;

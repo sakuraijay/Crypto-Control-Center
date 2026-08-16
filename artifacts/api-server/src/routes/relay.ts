@@ -96,7 +96,7 @@ function baseGateInput(kind: 'OPEN' | 'CLOSE' | 'REVOKE', canonicalConfirmed: bo
 }
 
 // ── GET /executor/relay/status ───────────────────────────────────────────────
-router.get('/executor/relay/status', async (_req, res) => {
+router.get('/executor/relay/status', requireOperatorAuth, async (_req, res) => {
   try {
     const { mode, requestedLive, reasons } = resolveRelayMode();
     const canonical = await checkCanonical();
@@ -345,9 +345,45 @@ router.post('/executor/relay/revoke/dry-run', requireOperatorAuth, async (_req, 
       mode, kind: 'REVOKE', gate, modeReasons: reasons, assembled, assembleError,
       quote, nowMs, orderNotionalUsd: null, ethPriceUsd: null,
     });
-    if (!revoke) result.blockReasons.push('활성 revoke 세션 없음 — prepare 먼저 수행');
+    // owner 서명 READY 세션이 필수 게이트 — 서명 없는 dry-run은 유효하지 않음
+    if (!revoke) {
+      result.ok = false;
+      result.blockReasons.push('활성 revoke 세션 없음 — prepare 먼저 수행');
+    } else if (revoke.status !== 'OWNER_SIGNATURE_READY') {
+      result.ok = false;
+      result.blockReasons.push(`revoke 세션 상태 ${revoke.status} — owner 서명(OWNER_SIGNATURE_READY) 필요`);
+    }
 
-    return res.json({ ok: true, dryRun: result, revokeSession: revoke });
+    // durable 기록 — OPEN/CLOSE와 동일하게 relay_tasks에 남긴다 (제출은 없음)
+    let taskRecord: { id: string; recorded: boolean } | null = null;
+    if (assembled) {
+      const created = await createRelayTask({
+        idempotencyKey: `dryrun:REVOKE:${assembled.packedPayloadHash}`,
+        kind: 'REVOKE',
+        payloadHash: assembled.packedPayloadHash,
+        calldataHash: assembled.calldataHash,
+        feeToken: assembled.feeToken,
+        feeAmount: assembled.feeAmount.toString(),
+        userNonce: assembled.userNonce.toString(),
+        approvalNonce: null,
+      });
+      if (created.ok) {
+        if (result.ok) {
+          await safeTransition({ taskId: created.taskId, to: RELAY_TASK_STATUS.DRY_RUN_VALIDATED });
+        } else {
+          await safeTransition({
+            taskId: created.taskId, to: RELAY_TASK_STATUS.FAILED_PRE_BROADCAST,
+            patch: { errorClass: 'DRY_RUN_BLOCKED', resolutionBasis: result.blockReasons.slice(0, 3).join('; ') },
+          });
+        }
+        taskRecord = { id: created.taskId, recorded: true };
+      } else {
+        taskRecord = { id: '', recorded: false };
+        result.blockReasons.push(`durable 기록 실패(${created.reason}) — 어떤 제출도 불가`);
+      }
+    }
+
+    return res.json({ ok: true, dryRun: result, revokeSession: revoke, task: taskRecord });
   } catch (e: unknown) {
     return res.status(500).json({ ok: false, error: sanitizeRpcError(e) });
   }
