@@ -38,7 +38,9 @@ import {
   type DataStoreClient,
 } from '../lib/gmxDataStore';
 import { deriveSubaccountAuthState, isAuthStateLiveEligible } from '../lib/subaccountAuthState';
-import { assertLegacyOrderPathAllowed } from '../workers/liveTestExecutor';
+// NOTE: liveTestExecutor는 여기서 import하지 않는다 — lib/db(DATABASE_URL 필수)를 끌어와
+// CI(DB 없음)에서 스위트가 깨진다. assertLegacyOrderPathAllowed 테스트는
+// executionSafety.test.ts(전체 mock 하네스)에 있다.
 
 // ── 공통 fixture ─────────────────────────────────────────────────────────────
 
@@ -310,25 +312,6 @@ describe('subaccountAuthState — 상태 판정 (fail-closed)', () => {
     expect(isAuthStateLiveEligible('AUTHORIZED')).toBe(true);
     for (const s of ['NOT_CONFIGURED', 'SIGNER_DISABLED', 'SIGNER_READY', 'OWNER_SIGNATURE_REQUIRED', 'EXPIRED', 'ACTION_LIMIT_REACHED', 'REVOKED', 'UNVERIFIED', 'ERROR'] as const) {
       expect(isAuthStateLiveEligible(s)).toBe(false);
-    }
-  });
-});
-
-// ── legacy 주문 경로 차단 ────────────────────────────────────────────────────
-
-describe('legacy SubaccountRouter 주문 경로 — Production 차단', () => {
-  it('테스트 환경에서는 통과, 비테스트 환경에서는 throw', () => {
-    expect(() => assertLegacyOrderPathAllowed()).not.toThrow(); // vitest 환경
-
-    const prevNodeEnv = process.env.NODE_ENV;
-    const prevVitest  = process.env.VITEST;
-    try {
-      process.env.NODE_ENV = 'production';
-      delete process.env.VITEST;
-      expect(() => assertLegacyOrderPathAllowed()).toThrow(/DEPRECATED/);
-    } finally {
-      if (prevNodeEnv === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = prevNodeEnv;
-      if (prevVitest === undefined) delete process.env.VITEST; else process.env.VITEST = prevVitest;
     }
   });
 });

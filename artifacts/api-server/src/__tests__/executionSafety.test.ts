@@ -117,6 +117,26 @@ const ENV_KEYS = [
   'GMX_SUBACCOUNT_GELATO_RELAY_ROUTER_ADDRESS', 'GMX_EVENT_EMITTER_ADDRESS', 'GMX_DATA_STORE_ADDRESS',
 ] as const;
 
+// legacy 주문 경로 Production 차단 가드 (gmxDelegatedTrading.test.ts에서 이동 —
+// liveTestExecutor는 lib/db를 끌어와 mock 하네스가 필요)
+describe('legacy SubaccountRouter 주문 경로 — Production 차단', () => {
+  it('테스트 환경에서는 통과, 비테스트 환경에서는 throw', async () => {
+    const { assertLegacyOrderPathAllowed } = await import('../workers/liveTestExecutor');
+    expect(() => assertLegacyOrderPathAllowed()).not.toThrow(); // vitest 환경
+
+    const prevNodeEnv = process.env.NODE_ENV;
+    const prevVitest  = process.env.VITEST;
+    try {
+      process.env.NODE_ENV = 'production';
+      delete process.env.VITEST;
+      expect(() => assertLegacyOrderPathAllowed()).toThrow(/DEPRECATED/);
+    } finally {
+      if (prevNodeEnv === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = prevNodeEnv;
+      if (prevVitest === undefined) delete process.env.VITEST; else process.env.VITEST = prevVitest;
+    }
+  });
+});
+
 /** 최신 relay 구성 완비 (게이트 통과 시나리오용) — 문서 기준 공식 Arbitrum 주소 */
 function setRelayEnv() {
   process.env.GMX_SUBACCOUNT_GELATO_RELAY_ROUTER_ADDRESS = '0xfD0596f708d9D950E0eF7b5d191e5F8e55b8a67f';

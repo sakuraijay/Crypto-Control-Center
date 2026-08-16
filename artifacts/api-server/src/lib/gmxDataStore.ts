@@ -19,7 +19,7 @@
  */
 
 import { keccak256, encodeAbiParameters, type Hex, type Address } from 'viem';
-import { sanitizeRpcError } from './intentReconciler';
+import { sanitizeRpcError } from './rpcErrorSanitize';
 
 // ── 키 계산 (순수) ────────────────────────────────────────────────────────────
 
