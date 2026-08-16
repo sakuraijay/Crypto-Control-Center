@@ -159,6 +159,12 @@ export async function getAuditLog(limit = 100): Promise<AuditLogEntry[]> {
  */
 export async function reconcileOnRestart(): Promise<void> {
   try {
+    // durable execution intents를 감사로그보다 먼저 reconcile —
+    // 감사로그에 상태불명 항목이 있어 조기 반환하더라도 PREPARED intent가
+    // PREPARED로 남지 않고 반드시 UNRESOLVED로 전환되도록 보장한다.
+    const intentResult = await reconcileIntentsOnRestart();
+    const intentsBlocked = !intentResult.ok || intentResult.blockingCount > 0;
+
     const loaded = await loadAuditLogStrict();
     if (!loaded.ok) {
       // 감사로그를 읽을 수 없으면 상태불명 주문 존재 여부를 알 수 없음 → fail-closed
@@ -198,9 +204,8 @@ export async function reconcileOnRestart(): Promise<void> {
       return;
     }
 
-    // durable execution intents 검사 — PREPARED/SUBMITTED → UNRESOLVED 전환 (txHash 보존)
-    const intentResult = await reconcileIntentsOnRestart();
-    if (!intentResult.ok || intentResult.blockingCount > 0) {
+    // durable execution intents 차단 검사 (전환은 함수 서두에서 이미 수행됨)
+    if (intentsBlocked) {
       _reconciled = false;
       const nowI = new Date();
       await db.insert(workerStateTable)

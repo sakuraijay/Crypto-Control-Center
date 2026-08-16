@@ -45,7 +45,11 @@ export function buildIntentId(decisionId: string, orderType: 'open' | 'close'): 
 
 /**
  * PREPARED intent 저장. 성공('created')일 때만 온체인 제출이 허용된다.
- * PK 충돌은 'duplicate' (같은 intent의 두 번째 제출 시도 → 차단),
+ *
+ * 충돌 → 'duplicate' (0행 반환): 두 경우 모두 차단 대상이다.
+ *  - PK 충돌: 같은 idempotency key의 두 번째 제출 시도
+ *  - 단일 활성 intent 부분 유니크 인덱스 충돌 (migration 0011):
+ *    다른 차단 상태 intent가 이미 존재 — check-then-insert 경합도 DB가 차단
  * 그 외 모든 실패는 'error' (fail-closed).
  */
 export async function createPreparedIntent(intent: NewIntent): Promise<CreateIntentResult> {
@@ -64,7 +68,7 @@ export async function createPreparedIntent(intent: NewIntent): Promise<CreateInt
         status:        'PREPARED',
         error:         null,
       })
-      .onConflictDoNothing({ target: executionIntentsTable.id })
+      .onConflictDoNothing() // 대상 미지정: PK 충돌 + 단일 활성 intent 인덱스 충돌 모두 0행 처리
       .returning({ id: executionIntentsTable.id });
     return inserted.length > 0 ? 'created' : 'duplicate';
   } catch (e) {

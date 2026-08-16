@@ -372,6 +372,22 @@ describe('reconcileOnRestart — fail-closed (UNRESOLVED)', () => {
     expect(await hasUnresolvedOrders()).toBe(true);
   });
 
+  it('감사로그에 SUBMITTED가 있어도 durable intent reconciliation은 먼저 수행된다', async () => {
+    auditLogRows = [{ value: JSON.stringify([submittedEntry()]) }];
+    const { reconcileOnRestart, isReconciled } = await import('../workers/liveTestExecutor');
+    await reconcileOnRestart();
+    // 조기 반환(SUBMITTED 존재)과 무관하게 PREPARED→UNRESOLVED 전환이 호출됨
+    expect(intentMocks.reconcileIntentsOnRestart).toHaveBeenCalledTimes(1);
+    expect(isReconciled()).toBe(false);
+  });
+
+  it('감사로그는 깨끗해도 durable intent가 차단 상태면 reconciled=false', async () => {
+    intentState.reconcile = { ok: true, blockingCount: 1 };
+    const { reconcileOnRestart, isReconciled } = await import('../workers/liveTestExecutor');
+    await reconcileOnRestart();
+    expect(isReconciled()).toBe(false);
+  });
+
   it('PAPER 모드 감사로그(SIMULATED)는 영향받지 않는다', async () => {
     auditLogRows = [{ value: JSON.stringify([submittedEntry({ status: 'SIMULATED', simulated: true, txHash: null })]) }];
     const { reconcileOnRestart, isReconciled } = await import('../workers/liveTestExecutor');

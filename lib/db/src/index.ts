@@ -114,6 +114,16 @@ const MIGRATIONS: { name: string; sql: string }[] = [
       CREATE INDEX IF NOT EXISTS execution_intents_status_idx ON execution_intents (status);
     `,
   },
+  {
+    name: "0011_execution_intents_single_active",
+    sql: `
+      -- 전역 단일 활성 intent 강제: 차단 상태(PREPARED/SUBMITTED/UNRESOLVED)의
+      -- intent는 동시에 1개만 존재 가능. check-then-insert 경합을 DB 제약으로 차단.
+      CREATE UNIQUE INDEX IF NOT EXISTS execution_intents_single_active_idx
+        ON execution_intents ((1))
+        WHERE status IN ('PREPARED', 'SUBMITTED', 'UNRESOLVED');
+    `,
+  },
   // Add future migrations here in chronological order.
 ];
 
