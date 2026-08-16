@@ -67,7 +67,7 @@ export default function Positions() {
         <div>
           <h2 className="font-bold text-lg flex items-center gap-2">
             {positions.length} Open Position{positions.length !== 1 ? 's' : ''}
-            <span className="text-[10px] px-1.5 py-0.5 rounded border border-blue-500/30 bg-blue-500/10 text-blue-400 font-bold">MOCK</span>
+            <span className="text-[10px] px-1.5 py-0.5 rounded border border-blue-500/30 bg-blue-500/10 text-blue-400 font-bold">PAPER</span>
           </h2>
           <p className="text-xs text-muted-foreground mt-0.5">모의거래 — 실제 주문 없음</p>
         </div>

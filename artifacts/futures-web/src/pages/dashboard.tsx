@@ -64,12 +64,16 @@ function ChartTooltip({ active, payload }: any) {
 // ── Dashboard ─────────────────────────────────────────────────────────────────
 
 export default function Dashboard() {
-  const { account, positions, logs, todayStats, equityHistory } = useTradingContext();
+  const { account, positions, logs, todayStats, equityHistory, dataStatus } = useTradingContext();
   const { watchlist } = useWatchlistContext();
   const { stopNewOrders, toggleStopNewOrders, triggerEmergencyStop } = useAppContext();
   const { indicators, limits } = useStrategyContext();
 
   const [orderOpen, setOrderOpen] = useState(false);
+
+  // PAPER 계좌 데이터 상태 — 'ok'가 아니면 금융 숫자 대신 Unavailable 표시
+  const paperDataOk      = dataStatus === 'ok';
+  const paperDataLoading = dataStatus === 'loading';
 
   const minScore  = (indicators.find(i => i.id === 'combined')?.params.minScore as number) ?? 60;
   const signals   = watchlist.filter(w => Math.abs(w.combinedScore) >= minScore / 2);
@@ -106,24 +110,30 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* ── Account KPI bar ───────────────────────────────────────────────── */}
+      {/* ── Account KPI bar — 실제 PAPER DB 데이터만 표시 (mock 금지) ─────── */}
       <div className="grid grid-cols-4 gap-3">
         <KpiCard
-          label="Total Balance"
-          value={`$${account.balance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
-          sub="MOCK · 실제 잔고 아님"
+          label="Paper Equity"
+          value={paperDataOk
+            ? `$${account.balance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+            : paperDataLoading ? '…' : 'Unavailable'}
+          sub={paperDataOk ? 'PAPER · tradingCapital + realized + unrealized' : paperDataLoading ? 'Loading…' : '데이터 조회 실패'}
         />
         <KpiCard
           label="Unrealized PnL"
-          value={`${account.unrealizedPnl >= 0 ? '+' : ''}$${account.unrealizedPnl.toFixed(2)}`}
-          color={account.unrealizedPnl >= 0 ? 'text-[var(--color-long)]' : 'text-[var(--color-short)]'}
-          sub="MOCK · 모의 PnL"
+          value={paperDataOk
+            ? `${account.unrealizedPnl >= 0 ? '+' : ''}$${account.unrealizedPnl.toFixed(2)}`
+            : paperDataLoading ? '…' : 'Unavailable'}
+          color={paperDataOk ? (account.unrealizedPnl >= 0 ? 'text-[var(--color-long)]' : 'text-[var(--color-short)]') : undefined}
+          sub={paperDataOk ? `PAPER · ${positions.length} open position${positions.length === 1 ? '' : 's'}` : undefined}
         />
         <KpiCard
           label="Margin Ratio"
-          value={`${(account.marginRatio * 100).toFixed(1)}%`}
-          color={account.marginRatio > 0.7 ? 'text-[var(--color-short)]' : account.marginRatio > 0.5 ? 'text-[var(--color-warning)]' : undefined}
-          sub={`$${account.availableBalance.toFixed(0)} avail · MOCK`}
+          value={!paperDataOk
+            ? (paperDataLoading ? '…' : 'Unavailable')
+            : positions.length === 0 ? 'N/A' : `${(account.marginRatio * 100).toFixed(1)}%`}
+          color={paperDataOk && account.marginRatio > 0.7 ? 'text-[var(--color-short)]' : paperDataOk && account.marginRatio > 0.5 ? 'text-[var(--color-warning)]' : undefined}
+          sub={paperDataOk ? `$${account.availableBalance.toFixed(0)} avail · PAPER cash` : undefined}
         />
         {/* Quick Controls — emergency actions always visible */}
         <Card className="p-4 flex flex-col justify-between border-border bg-card/50">
@@ -151,8 +161,10 @@ export default function Dashboard() {
       <div className="grid grid-cols-4 gap-3">
         <KpiCard
           label="Today Realized"
-          value={`${todayStats.realized >= 0 ? '+' : ''}$${todayStats.realized.toFixed(2)}`}
-          color={todayStats.realized >= 0 ? 'text-[var(--color-long)]' : 'text-[var(--color-short)]'}
+          value={paperDataOk
+            ? `${todayStats.realized >= 0 ? '+' : ''}$${todayStats.realized.toFixed(2)}`
+            : paperDataLoading ? '…' : 'Unavailable'}
+          color={paperDataOk ? (todayStats.realized >= 0 ? 'text-[var(--color-long)]' : 'text-[var(--color-short)]') : undefined}
         />
         <KpiCard
           label="Win Rate"
@@ -167,8 +179,10 @@ export default function Dashboard() {
         />
         <KpiCard
           label="Weekly PnL"
-          value={`${account.weeklyPnl >= 0 ? '+' : ''}$${account.weeklyPnl.toFixed(2)}`}
-          color={account.weeklyPnl >= 0 ? 'text-[var(--color-long)]' : 'text-[var(--color-short)]'}
+          value={paperDataOk
+            ? `${account.weeklyPnl >= 0 ? '+' : ''}$${account.weeklyPnl.toFixed(2)}`
+            : paperDataLoading ? '…' : 'Unavailable'}
+          color={paperDataOk ? (account.weeklyPnl >= 0 ? 'text-[var(--color-long)]' : 'text-[var(--color-short)]') : undefined}
         />
       </div>
 

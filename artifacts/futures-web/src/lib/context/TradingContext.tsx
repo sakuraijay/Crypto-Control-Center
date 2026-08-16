@@ -1,17 +1,24 @@
-import { createContext, useContext, useState, useEffect, ReactNode, useCallback, useRef } from 'react';
-import { MOCK_ACCOUNT, MOCK_POSITIONS, MOCK_TRADES, MOCK_LOGS } from '../../../../futures-terminal/constants/mockData';
+import { createContext, useContext, useState, useEffect, ReactNode, useCallback, useRef, useMemo } from 'react';
 import {
   Account, Position, Trade, StrategyLog,
   NewOrderParams, EquityPoint, TodayStats,
 } from './AppContext';
 import { useAppContext } from './AppContext';
 import { GmxPriceStream } from '../gmx/priceStream';
-import { FALLBACK_PRICES, displaySymbol, MARKET_BY_SYMBOL } from '../gmx/markets';
+import { displaySymbol, MARKET_BY_SYMBOL } from '../gmx/markets';
 
 export interface PlaceOrderResult {
   success: boolean;
   error?: string;
 }
+
+/**
+ * PAPER 데이터 로드 상태.
+ *  - loading: tradingCapital(전략 설정) 또는 거래 이력 로드 중
+ *  - ok:      실제 DB 데이터 기준으로 계좌 지표 계산 가능
+ *  - error:   API/DB 조회 실패 — mock 대체값 표시 금지, UI는 'Unavailable' 표기
+ */
+export type PaperDataStatus = 'loading' | 'ok' | 'error';
 
 interface TradingContextType {
   account: Account;
@@ -20,6 +27,8 @@ interface TradingContextType {
   logs: StrategyLog[];
   equityHistory: EquityPoint[];
   todayStats: TodayStats;
+  /** PAPER 계좌 데이터 로드 상태 — 'ok'가 아니면 금융 숫자를 표시하지 말 것 */
+  dataStatus: PaperDataStatus;
   placeOrder: (params: NewOrderParams) => PlaceOrderResult;
   closePosition: (id: string) => void;
   clearAllPositions: () => void;
@@ -51,20 +60,6 @@ function calcLiqPrice(side: 'LONG' | 'SHORT', entry: number, leverage: number): 
     : entry * (1 + (1 / leverage - mm));
 }
 
-function generateInitialEquity(balance: number): EquityPoint[] {
-  const pts: EquityPoint[] = [];
-  const now = Date.now();
-  const start = balance * 0.91;
-  for (let i = 47; i >= 1; i--) {
-    const t = now - i * 30 * 60_000;
-    const prog = (47 - i) / 46;
-    const noise = (Math.random() - 0.42) * 120;
-    pts.push({ time: t, equity: Math.max(balance * 0.7, start + (balance - start) * prog + noise) });
-  }
-  pts.push({ time: now, equity: balance + (MOCK_ACCOUNT as Account).unrealizedPnl });
-  return pts;
-}
-
 function persistTrade(trade: Trade) {
   fetch('/api/data/trades', {
     method: 'POST',
@@ -78,36 +73,65 @@ function persistTrade(trade: Trade) {
   }).catch(() => {});
 }
 
+/** 이번 주 월요일 00:00 UTC (서버 aiWorker의 weekly 창과 동일 기준) */
+function weekStartUtc(): number {
+  const now = new Date();
+  const day = now.getUTCDay(); // 0=Sun
+  const diff = day === 0 ? 6 : day - 1;
+  const monday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - diff));
+  return monday.getTime();
+}
+
 export function TradingProvider({ children }: { children: ReactNode }) {
   const { engineState, stopNewOrders } = useAppContext();
   const consecutiveLossesRef = useRef(0);
 
-  const [positions, setPositions] = useState<Position[]>(MOCK_POSITIONS as Position[]);
-  const [closedTrades, setClosedTrades] = useState<Trade[]>(MOCK_TRADES as Trade[]);
-  const [logs, setLogs] = useState<StrategyLog[]>(MOCK_LOGS as StrategyLog[]);
-  const [account, setAccount] = useState<Account>(MOCK_ACCOUNT as Account);
-  const [equityHistory, setEquityHistory] = useState<EquityPoint[]>(() =>
-    generateInitialEquity((MOCK_ACCOUNT as Account).balance)
-  );
+  // ── 실제 데이터만 사용 — mock/demo 초기값 없음 ─────────────────────────────
+  const [positions, setPositions] = useState<Position[]>([]);
+  const [closedTrades, setClosedTrades] = useState<Trade[]>([]);
+  const [logs, setLogs] = useState<StrategyLog[]>([]);
+  const [equityHistory, setEquityHistory] = useState<EquityPoint[]>([]);
 
-  const syncedIds = useRef<Set<string>>(new Set((MOCK_TRADES as Array<{ id: string }>).map(t => t.id)));
+  // tradingCapital — 서버 전략 설정(/api/data/strategy)이 유일한 출처.
+  // null = 미로드/로드 실패 → 계좌 지표 표시 불가 (mock 대체 금지)
+  const [tradingCapital, setTradingCapital] = useState<number | null>(null);
+  const [capitalStatus, setCapitalStatus] = useState<PaperDataStatus>('loading');
+  const [tradesStatus, setTradesStatus] = useState<PaperDataStatus>('loading');
+
+  const syncedIds = useRef<Set<string>>(new Set());
 
   // GMX oracle prices from polling stream
   const livePrices = useRef<Map<string, number>>(new Map());
   const streamRef  = useRef<GmxPriceStream | null>(null);
 
+  // ── Load tradingCapital from server strategy config ────────────
+  useEffect(() => {
+    fetch('/api/data/strategy', { signal: AbortSignal.timeout(8_000) })
+      .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+      .then((data: { limits?: { tradingCapital?: unknown } } | null) => {
+        const cap = Number(data?.limits?.tradingCapital);
+        if (Number.isFinite(cap) && cap > 0) {
+          setTradingCapital(cap);
+          setCapitalStatus('ok');
+        } else {
+          // 설정 행이 없거나 값이 비정상 — 추정값 대신 오류 상태 유지
+          setCapitalStatus('error');
+        }
+      })
+      .catch(() => setCapitalStatus('error'));
+  }, []);
+
   // ── Load persisted trades from server on mount ─────────────────
   useEffect(() => {
-    fetch('/api/data/trades', { signal: AbortSignal.timeout(5_000) })
-      .then(r => r.ok ? r.json() : null)
+    fetch('/api/data/trades', { signal: AbortSignal.timeout(8_000) })
+      .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
       .then((rows: Array<{
         id: string; symbol: string; side: string; action?: string;
         sizeInUsd?: string; size?: string; price: string; pnl: string;
         strategy: string; timestamp: string; closeTime?: number;
         gmxMarketAddress?: string | null; collateralToken?: string | null;
       }> | null) => {
-        if (!rows || rows.length === 0) return;
-        const loaded: Trade[] = rows.map(r => ({
+        const loaded: Trade[] = (rows ?? []).map(r => ({
           id:               r.id,
           symbol:           r.symbol,
           displaySymbol:    displaySymbol(r.symbol),
@@ -122,11 +146,18 @@ export function TradingProvider({ children }: { children: ReactNode }) {
           gmxMarketAddress: r.gmxMarketAddress ?? undefined,
           collateralToken:  r.collateralToken ?? undefined,
         }));
+        // 0건도 유효한 실제 상태 (신규 계정) — mock으로 대체하지 않음
         setClosedTrades(loaded);
         syncedIds.current = new Set(loaded.map(t => t.id));
+        setTradesStatus('ok');
       })
-      .catch(() => {});
+      .catch(() => setTradesStatus('error'));
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const dataStatus: PaperDataStatus =
+    capitalStatus === 'error' || tradesStatus === 'error' ? 'error'
+    : capitalStatus === 'ok' && tradesStatus === 'ok' ? 'ok'
+    : 'loading';
 
   // ── Sync newly added trades to server ─────────────────────────
   useEffect(() => {
@@ -168,29 +199,16 @@ export function TradingProvider({ children }: { children: ReactNode }) {
     return () => { streamRef.current?.disconnect(); streamRef.current = null; };
   }, []);
 
-  // ── Equity snapshot every 30 s ─────────────────────────────────
-  useEffect(() => {
-    const id = setInterval(() => {
-      setEquityHistory(prev => {
-        const pt: EquityPoint = { time: Date.now(), equity: account.balance + account.unrealizedPnl };
-        return [...(prev.length > 96 ? prev.slice(1) : prev), pt];
-      });
-    }, 30_000);
-    return () => clearInterval(id);
-  }, [account.balance, account.unrealizedPnl]);
-
-  // ── Price tick every 1 s (live GMX price preferred) ────────────
+  // ── Price tick every 1 s — 실제 GMX oracle 가격만 사용, 임의 노이즈 없음 ──
   useEffect(() => {
     const id = setInterval(() => {
       setPositions(prev => {
-        let totalUnrealized = 0;
-        let totalPosValue   = 0;
+        if (prev.length === 0) return prev;
 
         const next = prev.map(pos => {
           const live = livePrices.current.get(pos.symbol);
-          const newMark = live !== undefined
-            ? live + live * (Math.random() * 0.0001 - 0.00005)
-            : pos.markPrice + pos.markPrice * (Math.random() * 0.002 - 0.001);
+          // 실시간 가격이 없으면 mark를 변경하지 않는다 (random walk 금지)
+          const newMark = live !== undefined ? live : pos.markPrice;
 
           // GMX PnL: price delta relative to sizeInUsd
           const priceDeltaRatio = pos.side === 'LONG'
@@ -199,12 +217,9 @@ export function TradingProvider({ children }: { children: ReactNode }) {
           const newPnl = priceDeltaRatio * pos.sizeInUsd;
           const newRoe = pos.collateralUsd > 0 ? (newPnl / pos.collateralUsd) * 100 : 0;
 
-          // Accrue fee simulation (tiny per-tick)
+          // Accrue borrowing fee (deterministic per-tick approximation of GMX hourly rate)
           const newBorrow  = pos.pendingBorrowingFeeUsd + pos.sizeInUsd * 0.00003 / 3600;
           const newFunding = pos.pendingFundingFeeUsd;
-
-          totalUnrealized += newPnl;
-          totalPosValue   += pos.sizeInUsd + newPnl;
 
           // ── Trailing stop ratchet ─────────────────────────────────────
           let updatedSlPrice = pos.slPrice;
@@ -267,32 +282,65 @@ export function TradingProvider({ children }: { children: ReactNode }) {
           };
         }).filter(Boolean) as Position[];
 
-        setAccount(a => ({
-          ...a,
-          unrealizedPnl: totalUnrealized,
-          totalPositionValue: totalPosValue,
-          marginRatio: a.collateralBalanceUsd > 0
-            ? (a.collateralBalanceUsd - a.availableBalance) / a.collateralBalanceUsd
-            : 0,
-        }));
-
         return next;
       });
     }, 1_000);
     return () => clearInterval(id);
   }, []);
 
-  // ── Today stats ────────────────────────────────────────────────
-  const todayStats: TodayStats = (() => {
+  // ── Today stats — 실제 CLOSE 거래(오늘 00:00 로컬~)만 근거 ─────────────────
+  const todayStats: TodayStats = useMemo(() => {
     const midnight = new Date(); midnight.setHours(0, 0, 0, 0);
-    const today = closedTrades.filter(t => new Date(t.timestamp) >= midnight);
+    const today = closedTrades.filter(t => t.action !== 'OPEN' && new Date(t.timestamp) >= midnight);
     return {
       realized: today.reduce((s, t) => s + t.pnl, 0),
       wins:     today.filter(t => t.pnl > 0).length,
       losses:   today.filter(t => t.pnl <= 0).length,
       count:    today.length,
     };
-  })();
+  }, [closedTrades]);
+
+  // ── Account — 전부 실제 데이터에서 파생 (mock 기반 상태 없음) ─────────────
+  //  Paper Equity  = tradingCapital + 전체 실현 PnL + 미실현 PnL
+  //  Paper Cash    = tradingCapital + 전체 실현 PnL
+  //  Available     = Paper Cash − 사용 중 담보
+  //  Margin Ratio  = 담보 사용 / Paper Cash (포지션 없으면 0)
+  const account: Account = useMemo(() => {
+    const realizedAll = closedTrades.reduce((s, t) => t.action !== 'OPEN' ? s + t.pnl : s, 0);
+    const wkStart = weekStartUtc();
+    const weeklyPnl = closedTrades.reduce(
+      (s, t) => t.action !== 'OPEN' && new Date(t.timestamp).getTime() >= wkStart ? s + t.pnl : s, 0);
+    const unrealized      = positions.reduce((s, p) => s + p.unrealizedPnl, 0);
+    const collateralUsed  = positions.reduce((s, p) => s + p.collateralUsd, 0);
+    const totalPosValue   = positions.reduce((s, p) => s + p.sizeInUsd + p.unrealizedPnl, 0);
+    const capital         = tradingCapital ?? 0;
+    const paperCash       = capital + realizedAll;
+    return {
+      balance:              paperCash + unrealized,
+      collateralBalanceUsd: paperCash,
+      availableBalance:     paperCash - collateralUsed,
+      unrealizedPnl:        unrealized,
+      realizedPnlToday:     todayStats.realized,
+      weeklyPnl,
+      marginRatio:          positions.length > 0 && paperCash > 0 ? collateralUsed / paperCash : 0,
+      totalPositionValue:   totalPosValue,
+    };
+  }, [positions, closedTrades, tradingCapital, todayStats.realized]);
+
+  // ── Equity snapshot every 30 s (실데이터 로드 완료 후에만 기록) ────────────
+  useEffect(() => {
+    if (dataStatus !== 'ok') return;
+    const snap = () => {
+      setEquityHistory(prev => {
+        const pt: EquityPoint = { time: Date.now(), equity: account.balance };
+        return [...(prev.length > 96 ? prev.slice(1) : prev), pt];
+      });
+    };
+    snap(); // 첫 스냅샷 즉시
+    const id = setInterval(snap, 30_000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dataStatus, account.balance]);
 
   // ── placeOrder ─────────────────────────────────────────────────
   const placeOrder = useCallback((params: NewOrderParams): PlaceOrderResult => {
@@ -304,10 +352,18 @@ export function TradingProvider({ children }: { children: ReactNode }) {
       return { success: false, error: 'Engine is offline. Set to PAPER TRADING to trade.' };
 
     const isMarket = params.orderType === 'MarketIncrease';
+    // 시장가: 실시간 GMX oracle 가격만 허용 — 고정 fallback 가격 금지
     const entryPrice = isMarket
-      ? (livePrices.current.get(params.symbol) ?? FALLBACK_PRICES[params.symbol] ?? 100)
+      ? (livePrices.current.get(params.symbol) ?? 0)
       : (params.limitPrice ?? 0);
-    if (entryPrice <= 0) return { success: false, error: 'Invalid price. Set a valid limit price.' };
+    if (entryPrice <= 0) {
+      return {
+        success: false,
+        error: isMarket
+          ? 'Market price unavailable — GMX price feed not connected. Try again shortly.'
+          : 'Invalid price. Set a valid limit price.',
+      };
+    }
 
     const collateralUsd = params.sizeInUsd / params.leverage;
     const liqPrice      = calcLiqPrice(params.side, entryPrice, params.leverage);
@@ -339,11 +395,6 @@ export function TradingProvider({ children }: { children: ReactNode }) {
     };
 
     setPositions(prev => [...prev, newPos]);
-    setAccount(a => ({
-      ...a,
-      availableBalance:   a.availableBalance   - collateralUsd,
-      totalPositionValue: a.totalPositionValue + params.sizeInUsd,
-    }));
 
     // Record OPEN trade (matches mobile behaviour; persisted via the sync effect)
     // leverage + collateralUsd are included so the server-side AI Worker can do
@@ -391,14 +442,6 @@ export function TradingProvider({ children }: { children: ReactNode }) {
       const pos = prev.find(p => p.id === id);
       if (!pos) return prev;
       const remaining = prev.filter(p => p.id !== id);
-      setAccount(a => ({
-        ...a,
-        unrealizedPnl:      remaining.reduce((s, p) => s + p.unrealizedPnl, 0),
-        totalPositionValue: remaining.reduce((s, p) => s + p.sizeInUsd + p.unrealizedPnl, 0),
-        realizedPnlToday:   a.realizedPnlToday + pos.unrealizedPnl,
-        availableBalance:   a.availableBalance  + pos.collateralUsd + pos.unrealizedPnl
-                                                - pos.pendingBorrowingFeeUsd,
-      }));
       const trade: Trade = {
         id: `closed-${Date.now()}`, symbol: pos.symbol, displaySymbol: pos.displaySymbol,
         side: pos.side, action: 'CLOSE', sizeInUsd: pos.sizeInUsd,
@@ -432,7 +475,6 @@ export function TradingProvider({ children }: { children: ReactNode }) {
         timestamp: new Date(), closeTime: now,
       }));
       setClosedTrades(ts => [...newTrades, ...ts]);
-      setAccount(a => ({ ...a, unrealizedPnl: 0, totalPositionValue: 0 }));
       setLogs(l => [{
         id: `log-${now}`, level: 'WARN' as const,
         message: '[PAPER] All positions cleared',
@@ -474,7 +516,7 @@ export function TradingProvider({ children }: { children: ReactNode }) {
 
   return (
     <TradingContext.Provider value={{
-      account, positions, closedTrades, logs, equityHistory, todayStats,
+      account, positions, closedTrades, logs, equityHistory, todayStats, dataStatus,
       placeOrder, closePosition, clearAllPositions, updatePositionRisk, consecutiveLosses,
     }}>
       {children}

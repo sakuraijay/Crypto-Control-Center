@@ -2,7 +2,6 @@ import {
   createContext, useContext, useState, useEffect,
   ReactNode, useCallback, useRef,
 } from 'react';
-import { MOCK_WATCHLIST } from '../../../../futures-terminal/constants/mockData';
 import { WatchlistSymbol } from './AppContext';
 import { GmxPriceStream, StreamStatus, fetchGmxPrices } from '../gmx/priceStream';
 import { displaySymbol, DEFAULT_WATCHLIST_SYMBOLS } from '../gmx/markets';
@@ -21,22 +20,33 @@ const WatchlistContext = createContext<WatchlistContextType | undefined>(undefin
 const LS_SYMBOLS   = 'futures_watchlist_symbols_v2';
 const LS_WATCHLIST = 'futures_watchlist_v2';
 
-function loadInitialWatchlist(): WatchlistSymbol[] {
-  try {
-    const raw = localStorage.getItem(LS_WATCHLIST);
-    if (raw) {
-      const parsed = JSON.parse(raw) as WatchlistSymbol[];
-      if (parsed.every(w => !w.symbol.includes('USDT'))) return parsed;
-    }
-  } catch {}
-  return (MOCK_WATCHLIST as WatchlistSymbol[]).map(w => ({
-    ...w,
-    displaySymbol: w.displaySymbol ?? displaySymbol(w.symbol),
-  }));
+/** 심볼 → 0으로 초기화된 watchlist 행. 가격·24h 변동은 실데이터 로드 후에만 채워진다. */
+function emptyRow(symbol: string): WatchlistSymbol {
+  return {
+    symbol, displaySymbol: displaySymbol(symbol),
+    price: 0, change24h: 0, volume24h: 0,
+    score1h: 0, score4h: 0, score1d: 0, combinedScore: 0,
+    borrowingRatePerHour: 0,
+  };
 }
 
-function clamp(v: number, min = -100, max = 100) {
-  return Math.max(min, Math.min(max, v));
+/**
+ * 초기 watchlist — localStorage에서는 **심볼 목록만** 복원한다.
+ * 과거에 저장된 mock 가격·랜덤 점수는 무시 (모든 수치는 0에서 시작해
+ * 실제 GMX 가격/24h 변동 데이터로만 갱신됨).
+ */
+function loadInitialWatchlist(): WatchlistSymbol[] {
+  let symbols: string[] = [...DEFAULT_WATCHLIST_SYMBOLS];
+  try {
+    const raw = localStorage.getItem(LS_SYMBOLS);
+    if (raw) {
+      const parsed = JSON.parse(raw) as string[];
+      if (Array.isArray(parsed) && parsed.length > 0 && parsed.every(s => typeof s === 'string' && !s.includes('USDT'))) {
+        symbols = parsed;
+      }
+    }
+  } catch {}
+  return symbols.map(emptyRow);
 }
 
 export function WatchlistProvider({ children }: { children: ReactNode }) {
@@ -49,13 +59,13 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
 
   const streamRef = useRef<GmxPriceStream | null>(null);
 
-  // ── Persist to localStorage ────────────────────────────────────
+  // ── Persist to localStorage — 심볼 목록만 저장 (수치 캐시 금지) ──
   useEffect(() => {
     try {
-      localStorage.setItem(LS_WATCHLIST, JSON.stringify(watchlist));
+      localStorage.removeItem(LS_WATCHLIST); // 과거 mock 수치 캐시 제거
       localStorage.setItem(LS_SYMBOLS, JSON.stringify(symbolsList));
     } catch {}
-  }, [watchlist, symbolsList]);
+  }, [symbolsList]);
 
   // ── GMX price stream ───────────────────────────────────────────
   useEffect(() => {
@@ -124,20 +134,8 @@ export function WatchlistProvider({ children }: { children: ReactNode }) {
     return () => clearInterval(id);
   }, []);
 
-  // ── Strategy score simulation (independent of price feed) ──────
-  useEffect(() => {
-    const id = setInterval(() => {
-      setWatchlist(prev =>
-        prev.map(w => {
-          const s1 = clamp(w.score1h + (Math.random() * 6 - 3));
-          const s4 = clamp(w.score4h + (Math.random() * 3 - 1.5));
-          const sd = clamp(w.score1d + (Math.random() * 1.5 - 0.75));
-          return { ...w, score1h: s1, score4h: s4, score1d: sd, combinedScore: clamp(s1 * 0.5 + s4 * 0.3 + sd * 0.2) };
-        })
-      );
-    }, 3_000);
-    return () => clearInterval(id);
-  }, []);
+  // NOTE: 과거의 "strategy score simulation"(랜덤 점수 드리프트)은 제거됨 —
+  // 점수는 실제 산출 소스가 연결되기 전까지 0으로 유지된다.
 
   // ── Add symbol ─────────────────────────────────────────────────
   const addSymbol = useCallback((sym: string) => {

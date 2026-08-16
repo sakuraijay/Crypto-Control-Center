@@ -3,7 +3,7 @@
  *
  * 실제 주문·서명·자금이동이 발생하지 않음을 확인합니다.
  */
-import { vi, describe, it, expect } from 'vitest';
+import { vi, describe, it, expect, afterEach } from 'vitest';
 
 // ── 의존성 모킹 (vi.mock은 Vitest에 의해 파일 최상단으로 호이스팅됨) ────────
 
@@ -61,7 +61,7 @@ vi.mock('drizzle-orm', () => ({
 }));
 
 // 모킹 이후 실제 모듈 import
-import { LIVE_EXECUTION_LOCKED, executeOrder } from '../workers/internalExecutor';
+import { LIVE_EXECUTION_LOCKED, executeOrder, getExecutorStatus } from '../workers/internalExecutor';
 
 // ── 테스트 ─────────────────────────────────────────────────────────────────────
 
@@ -118,5 +118,53 @@ describe('executeOrder — LIVE_EXECUTION_LOCKED 시 dry-run 반환', () => {
   it('실행 결과 note에 LIVE_EXECUTION_LOCKED 언급이 있다', async () => {
     const result = await executeOrder(baseParams);
     expect(result.note).toContain('LIVE_EXECUTION_LOCKED');
+  });
+});
+
+// ── ExecutorStatus 활성 모드 필드 (UI 배지 근거) ──────────────────────────────
+
+describe('getExecutorStatus — engineMode / liveExecutionLocked', () => {
+  const savedMode = process.env.WORKER_ENGINE_MODE;
+  const savedLock = process.env.LIVE_TEST_EXECUTION_LOCKED;
+  afterEach(() => {
+    if (savedMode === undefined) delete process.env.WORKER_ENGINE_MODE;
+    else process.env.WORKER_ENGINE_MODE = savedMode;
+    if (savedLock === undefined) delete process.env.LIVE_TEST_EXECUTION_LOCKED;
+    else process.env.LIVE_TEST_EXECUTION_LOCKED = savedLock;
+  });
+
+  it("WORKER_ENGINE_MODE 미설정 → engineMode='PAPER' (fail-closed)", () => {
+    delete process.env.WORKER_ENGINE_MODE;
+    expect(getExecutorStatus().engineMode).toBe('PAPER');
+  });
+
+  it("WORKER_ENGINE_MODE='PAPER' → engineMode='PAPER'", () => {
+    process.env.WORKER_ENGINE_MODE = 'PAPER';
+    expect(getExecutorStatus().engineMode).toBe('PAPER');
+  });
+
+  it("WORKER_ENGINE_MODE='LIVE' → engineMode='LIVE'", () => {
+    process.env.WORKER_ENGINE_MODE = 'LIVE';
+    expect(getExecutorStatus().engineMode).toBe('LIVE');
+  });
+
+  it("WORKER_ENGINE_MODE 오타/기타 값 → engineMode='PAPER' (정확 일치만 LIVE)", () => {
+    process.env.WORKER_ENGINE_MODE = 'live';
+    expect(getExecutorStatus().engineMode).toBe('PAPER');
+  });
+
+  it('LIVE_TEST_EXECUTION_LOCKED 미설정 → liveExecutionLocked=true (기본 잠금)', () => {
+    delete process.env.LIVE_TEST_EXECUTION_LOCKED;
+    expect(getExecutorStatus().liveExecutionLocked).toBe(true);
+  });
+
+  it("LIVE_TEST_EXECUTION_LOCKED='true' → liveExecutionLocked=true", () => {
+    process.env.LIVE_TEST_EXECUTION_LOCKED = 'true';
+    expect(getExecutorStatus().liveExecutionLocked).toBe(true);
+  });
+
+  it("LIVE_TEST_EXECUTION_LOCKED='false' 명시 시에만 잠금 해제로 보고된다", () => {
+    process.env.LIVE_TEST_EXECUTION_LOCKED = 'false';
+    expect(getExecutorStatus().liveExecutionLocked).toBe(false);
   });
 });

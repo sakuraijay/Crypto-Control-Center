@@ -101,6 +101,11 @@ export interface ExecutorStatus {
   liveTestAccumLossUsd: number;
   /** true = DB query succeeded; false = DB failed → LIVE TEST fail-closed */
   liveTestDbOk: boolean;
+  // ── 활성 모드 (UI 배지 근거 — 클라이언트 설정값이 아닌 서버 상태) ─────────────
+  /** WORKER_ENGINE_MODE 기준 실제 엔진 모드 ('LIVE'가 아니면 항상 PAPER) */
+  engineMode: 'PAPER' | 'LIVE';
+  /** LIVE_TEST_EXECUTION_LOCKED 잠금 여부 (기본 true = 잠금) */
+  liveExecutionLocked: boolean;
 }
 
 export interface ExecuteOrderParams {
@@ -184,6 +189,10 @@ export function getExecutorStatus(): ExecutorStatus {
 
   return {
     mode:              'internal',
+    // 활성 모드 배지 근거 — 서버 env 기준 (fail-closed: 'LIVE' 정확 일치 외 전부 PAPER)
+    engineMode:          process.env.WORKER_ENGINE_MODE === 'LIVE' ? 'LIVE' : 'PAPER',
+    // 잠금 해제는 'false' 명시 설정 시에만 (기본 잠금)
+    liveExecutionLocked: process.env.LIVE_TEST_EXECUTION_LOCKED !== 'false',
     ready:             rpcConfigured && gmxRpcHealthy,
     rpcConfigured,
     gmxConnected:      gmxRpcHealthy,
