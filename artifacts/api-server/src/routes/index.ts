@@ -7,6 +7,7 @@ import approvalsRouter from "./approvals";
 import executorRouter from "./executor";
 import walletDiagnosticRouter from "./wallet-diagnostic";
 import notificationsRouter from "./notifications";
+import livetestRouter from "./livetest";
 
 const router: IRouter = Router();
 
@@ -18,5 +19,6 @@ router.use(approvalsRouter);
 router.use(executorRouter);
 router.use(walletDiagnosticRouter);
 router.use(notificationsRouter);
+router.use(livetestRouter);
 
 export default router;

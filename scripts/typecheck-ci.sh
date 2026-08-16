@@ -1,18 +1,19 @@
 #!/bin/bash
-# CI typecheck — pre-existing 오류(React 19 ref 타입 불일치) 제외
-# calendar.tsx, spinner.tsx 는 기존 오류이므로 무시
+# CI typecheck — 모든 파일 포함 (pre-existing 오류 없음)
+# calendar.tsx / spinner.tsx 의 React 19 ref 오류는 기존 workaround로 해결됨
 set -euo pipefail
 
 OUTPUT=$(pnpm run typecheck 2>&1 || true)
 echo "$OUTPUT"
 
-NEW_ERRORS=$(echo "$OUTPUT" | grep "error TS" | grep -v "calendar\.tsx\|spinner\.tsx" || true)
+# mockup-sandbox는 별도 vite 환경으로 CI 검사 대상 제외
+NEW_ERRORS=$(echo "$OUTPUT" | grep "error TS" | grep -v "mockup-sandbox" || true)
 if [ -n "$NEW_ERRORS" ]; then
   echo ""
-  echo "❌ 신규 TypeScript 오류 발견:"
+  echo "❌ TypeScript 오류 발견:"
   echo "$NEW_ERRORS"
   exit 1
 fi
 
-echo "✅ 신규 TypeScript 오류 없음 (calendar.tsx/spinner.tsx는 기존 pre-existing 오류)"
+echo "✅ TypeScript 오류 없음"
 exit 0

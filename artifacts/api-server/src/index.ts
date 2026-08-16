@@ -3,6 +3,8 @@ import { logger } from "./lib/logger";
 import { runMigrations } from "@workspace/db";
 import { startRpcHealthMonitor } from "./workers/internalExecutor";
 import { workerManager } from "./workers/aiWorker";
+import { initializeDelegatedSigner } from "./lib/delegatedSigner";
+import { reconcileOnRestart, loadEmergencyStopFromDb } from "./workers/liveTestExecutor";
 
 const rawPort = process.env["PORT"];
 
@@ -31,6 +33,16 @@ runMigrations()
         process.exit(1);
       }
       logger.info({ port }, "Server listening");
+
+      // Delegated signer: 키 복원(재시작) 또는 신규 생성. SESSION_SECRET 필요.
+      // LIVE TEST 모드가 아니어도 주소를 미리 생성해두면 배포 후 즉시 확인 가능.
+      initializeDelegatedSigner()
+        .then(() => logger.info("Delegated signer initialized"))
+        .catch((e: Error) => logger.warn({ err: e }, "Delegated signer init failed (non-fatal)"));
+
+      // Emergency Stop 상태 복원 + SUBMITTED 주문 reconciliation
+      loadEmergencyStopFromDb().catch(() => {});
+      reconcileOnRestart().catch(() => {});
 
       // Start the 24/7 AI Worker after the server is up.
       // Migration must complete first so the worker can read/write DB.

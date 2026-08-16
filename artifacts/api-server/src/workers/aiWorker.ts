@@ -23,6 +23,9 @@ import { runAiEngine } from "./stateEngine";
 import { getCachedPrices, getCachedChange24h, ensureGmxPoller } from "../routes/gmx";
 import { fetchServerLiveTestData } from "../routes/gmx";
 import type { AiOperatingState, RiskLimits, SymbolAnalysis, ServerAiDecision } from "./serverTypes";
+import { executeLiveTestOrder, closeLiveTestPosition } from "./liveTestExecutor";
+import { LIVE_TEST_CAPS } from "../lib/liveTestGate";
+import { MARKET_BY_SYMBOL_SERVER } from "../lib/gmxMarkets";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -779,8 +782,13 @@ class WorkerManager {
       // DB 저장
       await this.persistDecision(decision);
 
-      // LIVE 모드: 승인 큐 추가
+      // LIVE 모드: 승인 큐 추가 (PAPER 승인 흐름)
       const approvalCreated = await this.maybeCreateApproval(decision);
+
+      // LIVE TEST 자율 실행 (운영자 반복 승인 없음 — 별도 실행 경로)
+      if (testModeActive && isLiveMode) {
+        void this.tryLiveTestExecution(decision, analyses, liveTestData, paperState, limits, cycleNum);
+      }
 
       this.lastCycleAt = new Date();
       this.lastCycleResult = {
@@ -819,6 +827,98 @@ class WorkerManager {
       if (this.active) {
         this.cycleTimer = setTimeout(() => void this.runCycle(), CYCLE_INTERVAL_MS);
       }
+    }
+  }
+
+  // ── LIVE TEST 자율 실행 ────────────────────────────────────────────────────────
+
+  /**
+   * AI 결정이 LONG/SHORT일 때 LIVE TEST 실행 경로를 시도한다.
+   * - 내부에서 liveTestGate를 모두 검증한 후 SubaccountRouter 주문 제출
+   * - 잠금(LIVE_TEST_EXECUTION_LOCKED=true) 상태면 simulated=true 로그만 남김
+   * - 오류는 삼켜서 워커 사이클 전체에 영향을 주지 않는다
+   */
+  private async tryLiveTestExecution(
+    decision:     ServerAiDecision,
+    analyses:     SymbolAnalysis[],
+    liveTestData: { positionCount: number },
+    paperState:   { liveTestAccumLossUsd: number; liveTestDbOk: boolean },
+    limits:       RiskLimits,
+    cycleNum:     number,
+  ): Promise<void> {
+    try {
+      const { operatingState, primarySymbol } = decision;
+      if (!primarySymbol) return;
+
+      const market = MARKET_BY_SYMBOL_SERVER.get(primarySymbol);
+      if (!market) return;
+
+      const currentAnalysis = analyses.find(a => a.symbol === primarySymbol);
+      const currentPrice    = currentAnalysis?.price ?? 0;
+      if (currentPrice <= 0) return;
+
+      const mainAddress = process.env.GMX_WALLET_ADDRESS ?? '';
+
+      if (operatingState === 'LONG' || operatingState === 'SHORT') {
+        // 레버리지: stateEngine 값 존재 시 사용, 없으면 1x (LIVE TEST 하드캡 2x 적용)
+        const rawLeverage   = decision.leverage ?? 1;
+        const leverage      = Math.max(1, Math.min(rawLeverage, LIVE_TEST_CAPS.maxLeverage));
+        // 담보: tradingCapital을 레버리지로 나눈 값, $15 하드캡 이내
+        const collateralUsd = Math.min(limits.tradingCapital, LIVE_TEST_CAPS.maxCapitalUsd / leverage);
+        const sizeUsd       = Math.min(collateralUsd * leverage, LIVE_TEST_CAPS.maxCapitalUsd);
+
+        const result = await executeLiveTestOrder({
+          decisionId:        decision.id,
+          cycleNumber:       cycleNum,
+          symbol:            primarySymbol,
+          marketAddress:     market.marketToken,
+          isLong:            operatingState === 'LONG',
+          sizeUsd,
+          collateralUsd,
+          leverage,
+          currentPriceUsd:   currentPrice,
+          mainAddress,
+          accumLossUsd:      paperState.liveTestAccumLossUsd,
+          dbOk:              paperState.liveTestDbOk,
+          openPositionCount: liveTestData.positionCount,
+        });
+
+        if (result.simulated) {
+          console.info(`[AIWorker] LIVE TEST 시뮬레이션 (잠금) — ${operatingState} ${primarySymbol}`);
+        } else {
+          console.info(
+            `[AIWorker] LIVE TEST 주문 제출 — ${operatingState} ${primarySymbol} ` +
+            `size=$${sizeUsd.toFixed(2)} txHash=${result.txHash}`,
+          );
+        }
+      } else if (operatingState === 'CASH' && liveTestData.positionCount > 0) {
+        // CASH 신호 + 열린 포지션 존재 → 직전 방향 기준으로 청산 시도
+        const prevIsLong = this.prevState === 'LONG';
+
+        const result = await closeLiveTestPosition({
+          decisionId:      decision.id,
+          cycleNumber:     cycleNum,
+          symbol:          primarySymbol,
+          marketAddress:   market.marketToken,
+          isLong:          prevIsLong,
+          sizeUsd:         LIVE_TEST_CAPS.maxCapitalUsd, // GMX가 포지션 크기로 자동 조정
+          currentPriceUsd: currentPrice,
+          mainAddress,
+          accumLossUsd:    paperState.liveTestAccumLossUsd,
+          dbOk:            paperState.liveTestDbOk,
+        });
+
+        if (result.simulated) {
+          console.info(`[AIWorker] LIVE TEST 청산 시뮬레이션 (잠금) — ${primarySymbol}`);
+        } else {
+          console.info(
+            `[AIWorker] LIVE TEST 청산 제출 — ${primarySymbol} txHash=${result.txHash}`,
+          );
+        }
+      }
+    } catch (err: unknown) {
+      // LIVE TEST 실행 오류는 워커 사이클 전체에 전파하지 않는다 (fail-silent)
+      console.error(`[AIWorker] LIVE TEST 실행 오류 (cycle #${cycleNum}):`, err);
     }
   }
 }
