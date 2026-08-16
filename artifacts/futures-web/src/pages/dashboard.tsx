@@ -168,14 +168,14 @@ export default function Dashboard() {
         />
         <KpiCard
           label="Win Rate"
-          value={winRate === '—' ? '—' : `${winRate}%`}
-          sub={todayStats.count > 0 ? `${todayStats.wins}W / ${todayStats.losses}L` : 'No trades today'}
-          color={Number(winRate) >= 50 ? 'text-[var(--color-long)]' : winRate === '—' ? undefined : 'text-[var(--color-short)]'}
+          value={!paperDataOk ? (paperDataLoading ? '…' : 'Unavailable') : winRate === '—' ? '—' : `${winRate}%`}
+          sub={paperDataOk ? (todayStats.count > 0 ? `${todayStats.wins}W / ${todayStats.losses}L` : 'No trades today') : undefined}
+          color={paperDataOk && winRate !== '—' ? (Number(winRate) >= 50 ? 'text-[var(--color-long)]' : 'text-[var(--color-short)]') : undefined}
         />
         <KpiCard
           label="Positions Open"
-          value={String(positions.length)}
-          sub={`${todayStats.count} trades today`}
+          value={paperDataOk ? String(positions.length) : paperDataLoading ? '…' : 'Unavailable'}
+          sub={paperDataOk ? `${todayStats.count} trades today` : undefined}
         />
         <KpiCard
           label="Weekly PnL"

@@ -27,7 +27,10 @@ function useServerMode(): ServerMode {
           liveTestMode?: boolean;
         };
         if (cancelled) return;
-        if (s.engineMode !== 'LIVE') setMode('PAPER');
+        // engineMode가 인식 가능한 값이 아니면 PAPER로 추정하지 않는다
+        // (executor 라우트의 예외 fallback은 engineMode 없이 200을 반환할 수 있음)
+        if (s.engineMode !== 'PAPER' && s.engineMode !== 'LIVE') setMode('UNKNOWN');
+        else if (s.engineMode === 'PAPER') setMode('PAPER');
         else if (s.liveExecutionLocked !== false) setMode('LIVE_LOCKED');
         else if (s.liveTestMode) setMode('LIVE_TEST');
         else setMode('LIVE');

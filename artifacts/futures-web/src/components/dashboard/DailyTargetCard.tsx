@@ -65,7 +65,7 @@ function StatItem({ label, value, cls }: { label: string; value: string; cls?: s
 // ── Main component ────────────────────────────────────────────────────────────
 
 export function DailyTargetCard({ className }: { className?: string }) {
-  const { todayStats, account } = useTradingContext();
+  const { todayStats, account, dataStatus } = useTradingContext();
   const { limits } = useStrategyContext();
   const { engineState } = useAppContext();
   const { profitLockStage, cooldownEndsAt, tradesThisHour, weeklyRealizedPnl } = useAiEngine();
@@ -85,6 +85,20 @@ export function DailyTargetCard({ className }: { className?: string }) {
   const realized    = todayStats?.realized    ?? 0;
   const unrealized  = account?.unrealizedPnl  ?? 0;
   const totalPnL    = realized + unrealized;
+
+  // PAPER 데이터 미로드/실패 시 $0로 표시하지 않는다 (mock/추정치 금지)
+  if (dataStatus !== 'ok') {
+    return (
+      <div className={cn('rounded-xl border border-border bg-card p-5 flex flex-col gap-2', className)}>
+        <span className="text-xs font-bold tracking-widest text-muted-foreground uppercase">Daily PnL</span>
+        <p className="text-sm text-muted-foreground">
+          {dataStatus === 'loading'
+            ? '로드 중 — PAPER 거래 데이터 조회 중…'
+            : 'Unavailable — PAPER 거래 데이터 조회 실패 (mock 대체값 표시 안 함)'}
+        </p>
+      </div>
+    );
+  }
 
   const dailyTarget    = limits.dailyTargetUSDT  ?? 500;
   const tradingCap     = limits.tradingCapital    ?? 10_000;

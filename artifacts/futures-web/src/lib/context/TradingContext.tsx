@@ -73,6 +73,59 @@ function persistTrade(trade: Trade) {
   }).catch(() => {});
 }
 
+/**
+ * DB 거래 이력에서 미청산 OPEN 포지션을 복원한다.
+ * CLOSE 레코드를 symbol+side FIFO로 OPEN에 매칭시키고, 남은 OPEN이 곧
+ * 현재 열려 있는 페이퍼 포지션이다 (새로고침 후에도 담보·미실현 PnL 유지).
+ */
+function hydrateOpenPositions(trades: Trade[]): Position[] {
+  const sorted = [...trades].sort(
+    (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+  const openQueues = new Map<string, Trade[]>(); // key: symbol|side
+  for (const t of sorted) {
+    const key = `${t.symbol}|${t.side}`;
+    if (t.action === 'OPEN') {
+      const q = openQueues.get(key) ?? [];
+      q.push(t);
+      openQueues.set(key, q);
+    } else {
+      openQueues.get(key)?.shift(); // FIFO 매칭
+    }
+  }
+  const positions: Position[] = [];
+  for (const q of openQueues.values()) {
+    for (const t of q) {
+      const leverage = t.leverage && t.leverage > 0 ? t.leverage : 1;
+      const collateralUsd = t.collateralUsd && t.collateralUsd > 0
+        ? t.collateralUsd
+        : t.sizeInUsd / leverage;
+      positions.push({
+        id:                     `pos-db-${t.id}`,
+        symbol:                 t.symbol,
+        displaySymbol:          t.displaySymbol ?? displaySymbol(t.symbol),
+        side:                   t.side,
+        isLong:                 t.side === 'LONG',
+        sizeInUsd:              t.sizeInUsd,
+        collateralUsd,
+        collateralToken:        t.collateralToken ?? 'USDC',
+        leverage,
+        entryPrice:             t.price,
+        markPrice:              t.price, // 실시간 가격 수신 전까지 entry 유지 (임의값 금지)
+        liquidationPrice:       calcLiqPrice(t.side, t.price, leverage),
+        unrealizedPnl:          0,
+        roe:                    0,
+        pendingBorrowingFeeUsd: 0,
+        pendingFundingFeeUsd:   0,
+        openTime:               new Date(t.timestamp),
+        tpPrice:                undefined,
+        slPrice:                undefined,
+        trailingStopPct:        undefined,
+      });
+    }
+  }
+  return positions;
+}
+
 /** 이번 주 월요일 00:00 UTC (서버 aiWorker의 weekly 창과 동일 기준) */
 function weekStartUtc(): number {
   const now = new Date();
@@ -84,7 +137,6 @@ function weekStartUtc(): number {
 
 export function TradingProvider({ children }: { children: ReactNode }) {
   const { engineState, stopNewOrders } = useAppContext();
-  const consecutiveLossesRef = useRef(0);
 
   // ── 실제 데이터만 사용 — mock/demo 초기값 없음 ─────────────────────────────
   const [positions, setPositions] = useState<Position[]>([]);
@@ -149,6 +201,8 @@ export function TradingProvider({ children }: { children: ReactNode }) {
         // 0건도 유효한 실제 상태 (신규 계정) — mock으로 대체하지 않음
         setClosedTrades(loaded);
         syncedIds.current = new Set(loaded.map(t => t.id));
+        // DB의 미청산 OPEN 레코드에서 열린 포지션 복원 (새로고침 내구성)
+        setPositions(prev => prev.length === 0 ? hydrateOpenPositions(loaded) : prev);
         setTradesStatus('ok');
       })
       .catch(() => setTradesStatus('error'));
@@ -248,12 +302,6 @@ export function TradingProvider({ children }: { children: ReactNode }) {
           }
 
           if (shouldClose) {
-            // Update consecutive loss counter
-            if (newPnl < 0) {
-              consecutiveLossesRef.current += 1;
-            } else {
-              consecutiveLossesRef.current = 0;
-            }
             const closedTrade: Trade = {
               id: `closed-${Date.now()}-${pos.id}`,
               symbol: pos.symbol, displaySymbol: pos.displaySymbol, side: pos.side,
@@ -328,19 +376,21 @@ export function TradingProvider({ children }: { children: ReactNode }) {
   }, [positions, closedTrades, tradingCapital, todayStats.realized]);
 
   // ── Equity snapshot every 30 s (실데이터 로드 완료 후에만 기록) ────────────
+  // balance는 ref로 읽어 interval이 가격 틱마다 재생성되지 않도록 고정한다.
+  const balanceRef = useRef(account.balance);
+  balanceRef.current = account.balance;
   useEffect(() => {
     if (dataStatus !== 'ok') return;
     const snap = () => {
       setEquityHistory(prev => {
-        const pt: EquityPoint = { time: Date.now(), equity: account.balance };
+        const pt: EquityPoint = { time: Date.now(), equity: balanceRef.current };
         return [...(prev.length > 96 ? prev.slice(1) : prev), pt];
       });
     };
     snap(); // 첫 스냅샷 즉시
     const id = setInterval(snap, 30_000);
     return () => clearInterval(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dataStatus, account.balance]);
+  }, [dataStatus]);
 
   // ── placeOrder ─────────────────────────────────────────────────
   const placeOrder = useCallback((params: NewOrderParams): PlaceOrderResult => {
@@ -427,13 +477,18 @@ export function TradingProvider({ children }: { children: ReactNode }) {
     return { success: true };
   }, [engineState, stopNewOrders]);
 
-  // Expose consecutive losses as reactive state (derived from ref via a state mirror)
-  const [consecutiveLosses, setConsecutiveLosses] = useState(0);
-
-  // Mirror ref → state so consumers can react to changes
-  // (updated in closedTrades effect below)
-  useEffect(() => {
-    setConsecutiveLosses(consecutiveLossesRef.current);
+  // ── Consecutive losses — DB에 로드된 이력 포함, 모든 CLOSE 경로(수동/자동)에서
+  //    일관되게 파생: 최신 CLOSE부터 연속 손실(pnl<0) 스트릭을 센다.
+  const consecutiveLosses = useMemo(() => {
+    const closes = closedTrades
+      .filter(t => t.action !== 'OPEN')
+      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    let streak = 0;
+    for (const t of closes) {
+      if (t.pnl < 0) streak += 1;
+      else break;
+    }
+    return streak;
   }, [closedTrades]);
 
   // ── closePosition ──────────────────────────────────────────────
