@@ -82,20 +82,22 @@ const DEFAULT_INDICATORS: IndicatorConfig[] = [
   { id: 'combined', name: 'Combined Scoring',     enabled: true,  params: { minScore: 60 } },
 ];
 
+// 6H-1 $1,000 최종 운용 정책 기본값 — 서버 clampRiskLimits와 정합.
+// 구형 $10,000/$500/$1,500/10x 기본값은 제거됨.
 const DEFAULT_LIMITS: RiskLimits = {
   // Capital
-  tradingCapital:           10_000,   // seed money (must not exceed wallet equity)
+  tradingCapital:            1_000,   // 최종 운용 자본 $1,000 (초과분은 위험 산정 제외)
   reserveCashPct:               20,   // keep 20 % as reserve — deploys 80 %
-  dailyTargetUSDT:             500,   // soft KPI only — NOT enforced by AI engine
+  dailyTargetUSDT:              50,   // +5% 일일 목표 (soft KPI — RiskEngine이 별도 강제)
   // Hard risk controls
-  maxTotalExposureUSDT:      5_000,
-  maxMarginPerTrade:           200,
-  maxLeverage:                  10,
-  maxSimultaneousPositions:      5,
-  dailyLossLimitUSDT:          500,
-  weeklyLossLimitUSDT:       1_500,
-  maxDrawdownPercent:           15,
-  consecutiveLossLimit:          5,
+  maxTotalExposureUSDT:      3_000,   // $1,000 × 3x
+  maxMarginPerTrade:           334,   // ≈ capital/3 — 1포지션 담보 상한
+  maxLeverage:                   3,   // 기본 3x — 조건부 5x 비활성
+  maxSimultaneousPositions:      1,   // 동시 포지션 1개
+  dailyLossLimitUSDT:           30,   // -3% 일일 손실 한도
+  weeklyLossLimitUSDT:          80,   // -8% 주간 손실 한도
+  maxDrawdownPercent:           15,   // hard stop equity $850 (-15%)
+  consecutiveLossLimit:          3,   // 연속 손실 3회 중단
   cooldownMinutes:              30,
   maxTradesPerHour:              6,
   maxRiskPerSymbolPct:           2,   // 2 % of tradingCapital per symbol

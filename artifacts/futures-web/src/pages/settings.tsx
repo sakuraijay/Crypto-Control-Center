@@ -20,6 +20,7 @@ import {
   WifiOff, Send, Activity, Database, Eye, Zap,
 } from 'lucide-react';
 import { useGmxAccount } from '@/lib/context/GmxAccountContext';
+import { RiskPolicyCard } from '@/components/RiskPolicyCard';
 import { cn } from '@/lib/utils';
 import { format } from 'date-fns';
 // sendTestNotification is handled by AiEngineContext to keep permission state in sync.
@@ -1195,6 +1196,11 @@ export default function Settings() {
 
       </section>
 
+      {/* ── $1,000 최종 운용 정책 (6H-1) ── */}
+      <section className="flex flex-col gap-4">
+        <RiskPolicyCard />
+      </section>
+
       {/* ── 핵심 리스크 한도 ── */}
       <section className="flex flex-col gap-4">
         <h2 className="font-semibold flex items-center gap-2 border-b border-border pb-2 text-lg">
@@ -1235,19 +1241,19 @@ export default function Settings() {
             <div>
               <label className="text-xs font-medium text-foreground mb-1.5 block">
                 일일 최대 손실 한도
-                <span className="text-muted-foreground font-normal ml-1">(USDT)</span>
+                <span className="text-muted-foreground font-normal ml-1">(USDT · 정책 상한 $30 = -3%)</span>
               </label>
               <div className="flex items-center gap-2">
                 <input
                   type="number"
-                  min={10} max={100000} step={10}
+                  min={10} max={30} step={1}
                   value={dailyLossDraft}
-                  onChange={e => setDailyLossDraft(Math.min(100_000, Math.max(10, Number(e.target.value))))}
+                  onChange={e => setDailyLossDraft(Math.min(30, Math.max(10, Number(e.target.value))))}
                   onBlur={() => updateLimit('dailyLossLimitUSDT', dailyLossDraft)}
                   className="w-28 h-8 px-2.5 rounded border border-border bg-card text-foreground text-xs font-mono focus:outline-none focus:ring-1 focus:ring-primary/40"
                 />
                 <span className="text-[10px] text-muted-foreground">
-                  DB: {limits.dailyLossLimitUSDT != null ? `$${limits.dailyLossLimitUSDT.toLocaleString()}` : '(기본 $500)'}
+                  DB: {limits.dailyLossLimitUSDT != null ? `$${limits.dailyLossLimitUSDT.toLocaleString()}` : '(기본 $30)'}
                 </span>
               </div>
               <p className="text-[10px] text-muted-foreground mt-1">

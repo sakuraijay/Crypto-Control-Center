@@ -29,6 +29,7 @@ import { SystemHealthBanner } from '@/components/dashboard/SystemHealthBanner';
 import { AiMarketRankingCard } from '@/components/dashboard/AiMarketRankingCard';
 import { ExecutorStatusWidget } from '@/components/dashboard/ExecutorStatusWidget';
 import { GmxOnchainCard } from '@/components/dashboard/GmxOnchainCard';
+import { RiskPolicyCard } from '@/components/RiskPolicyCard';
 import { cn } from '@/lib/utils';
 
 // ── KPI card ─────────────────────────────────────────────────────────────────
@@ -193,6 +194,9 @@ export default function Dashboard() {
 
       {/* ── GMX 온체인 계정 (Read-only) ──────────────────────────────────── */}
       <GmxOnchainCard />
+
+      {/* ── $1,000 최종 운용 정책 (6H-1) ── */}
+      <RiskPolicyCard />
 
       {/* ── Data grid: charts/tables left, signals/logs right ────────────── */}
       <div className="grid grid-cols-3 gap-5">
