@@ -264,6 +264,28 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         ADD COLUMN IF NOT EXISTS transport_gen text NOT NULL DEFAULT 'legacy-digital';
     `,
   },
+  {
+    name: "0019_relay_tasks_gmx_api_v2",
+    sql: `
+      -- 6G-1 §9 — 공식 GMX API v2 경로(transport_gen='GMX_API_V2') 전용 additive 컬럼.
+      -- 기존 Gelato 직접 세대(legacy-digital / jsonrpc-gasless-0.0.10) 행은 보존,
+      -- fail-closed 조회 전용(LEGACY_DISABLED)으로만 취급한다.
+      ALTER TABLE relay_tasks
+        ADD COLUMN IF NOT EXISTS gmx_request_id        text,
+        ADD COLUMN IF NOT EXISTS gmx_idempotency_key   text,
+        ADD COLUMN IF NOT EXISTS gmx_api_status        text,
+        ADD COLUMN IF NOT EXISTS gmx_execution_tx_hash text,
+        ADD COLUMN IF NOT EXISTS gmx_order_keys        text,
+        ADD COLUMN IF NOT EXISTS gmx_api_peer          text,
+        ADD COLUMN IF NOT EXISTS prepared_payload_hash text;
+      CREATE UNIQUE INDEX IF NOT EXISTS relay_tasks_gmx_request_id_idx
+        ON relay_tasks (gmx_request_id) WHERE gmx_request_id IS NOT NULL;
+      CREATE UNIQUE INDEX IF NOT EXISTS relay_tasks_gmx_idempotency_key_idx
+        ON relay_tasks (gmx_idempotency_key) WHERE gmx_idempotency_key IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS relay_tasks_gmx_api_status_idx
+        ON relay_tasks (gmx_api_status) WHERE gmx_api_status IS NOT NULL;
+    `,
+  },
   // Add future migrations here in chronological order.
 ];
 
