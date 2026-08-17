@@ -163,7 +163,7 @@ describe('6단계 §3 — transport 플래그 매트릭스 (fetch 발신 여부)
     }));
     const s = await t.submitRelayTask({ chainId: 42161, target: VALID_TARGET, packedData: VALID_DATA });
     expect(s.ok).toBe(false);
-    if (!s.ok) expect(s.message).toContain('GMX_RELAY_SUBMISSION_ENABLED');
+    if (!s.ok) expect(s.message).toContain('LEGACY_DISABLED');
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
@@ -174,16 +174,16 @@ describe('6단계 §3 — transport 플래그 매트릭스 (fetch 발신 여부)
     }));
     const s = await t.submitRelayTask({ chainId: 42161, target: VALID_TARGET, packedData: VALID_DATA });
     expect(s.ok).toBe(false);
-    if (!s.ok) expect(s.message).toContain('GMX_RELAY_NETWORK_ENABLED');
+    if (!s.ok) expect(s.message).toContain('LEGACY_DISABLED');
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it('네 플래그 전부 true + key + 유효 payload일 때만 submit fetch 정확히 1회 (POST)', async () => {
+  it('6G-1: 네 플래그 전부 true + key여도 legacy submit은 LEGACY_DISABLED — fetch 0회', async () => {
     const t = createGelatoHttpTransport(envOf(ALL_SUBMIT_FLAGS));
     const s = await t.submitRelayTask({ chainId: 42161, target: VALID_TARGET, packedData: VALID_DATA });
-    expect(s.ok).toBe(true);
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
-    expect((fetchSpy.mock.calls[0][1] as RequestInit).method).toBe('POST');
+    expect(s.ok).toBe(false);
+    if (!s.ok) { expect(s.kind).toBe('config'); expect(s.ambiguous).toBe(false); expect(s.message).toContain('LEGACY_DISABLED'); }
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it('전부 활성이라도 chainId ≠ 42161 → fetch 0회', async () => {
@@ -320,6 +320,7 @@ describe('6단계 §6 — activation 게이트에 read-only 플래그 요구', (
     DELEGATED_SIGNER_ENABLED: 'true', GMX_RELAY_SUBMISSION_ENABLED: 'true',
     GMX_RELAY_NETWORK_ENABLED: 'true', GMX_RELAY_READONLY_NETWORK_ENABLED: 'true',
     GMX_RELAY_MODE: 'LIVE',
+    GMX_API_READONLY_ENABLED: 'true', GMX_API_ORDER_SUBMISSION_ENABLED: 'true',
     GMX_SUBACCOUNT_GELATO_RELAY_ROUTER_ADDRESS: '0x517602BaC704B72993997820981603f5E4901273',
     GMX_DATA_STORE_ADDRESS: '0xFD70de6b91282D8017aA4E741e9Ae325CAb992d8',
     GMX_EVENT_EMITTER_ADDRESS: '0xC8ee91A54287DB53897056e12D9819156D3822Fb',
@@ -339,18 +340,18 @@ describe('6단계 §6 — activation 게이트에 read-only 플래그 요구', (
 
 // ═════════════════════════════════════════════════════════════════════════════
 describe('6단계 §7 — 읽기 전용 readiness refresh', () => {
-  function makeTransport() {
+  function makeGmxApiDeps() {
     const submitSpy = vi.fn();
-    const transport = {
-      getRelayTaskStatus: vi.fn().mockResolvedValue({ ok: true, statusCode: 200, transactionHash: `0x${'ab'.repeat(32)}`, blockNumber: 1 }),
-      getSponsorBalance: vi.fn().mockResolvedValue({ ok: true, balance: 10n ** 18n, decimals: 18, unit: 'wei' }),
-      submitRelayTask: submitSpy,
-    };
-    return { transport, submitSpy };
+    const statusSpy = vi.fn().mockResolvedValue({ ok: true, status: 'executed' });
+    const peersSpy = vi.fn().mockResolvedValue([
+      { peerHost: 'arbitrum.gmxapi.io', ok: true },
+      { peerHost: 'arbitrum.gmxapi.ai', ok: true },
+    ]);
+    return { statusSpy, peersSpy, submitSpy };
   }
 
   it('read-only 비활성 → 외부 읽기 0회, fail-closed 기록', async () => {
-    const { transport, submitSpy } = makeTransport();
+    const { statusSpy, peersSpy, submitSpy } = makeGmxApiDeps();
     const canonicalSpy = vi.fn();
     const state = await performReadinessRefresh({
       env: envOf({}),
@@ -358,52 +359,55 @@ describe('6단계 §7 — 읽기 전용 readiness refresh', () => {
       listOpenTaskIds: async () => [],
       countAllocatedNonces: async () => 0,
       markLegacyUnresolved: async () => true,
-      transport,
+      fetchGmxOrderStatus: statusSpy,
+      checkGmxPeers: peersSpy,
       readonlyClient: null,
       nowMs: () => 1000,
     });
     expect(state.ok).toBe(false);
     expect(state.failures[0]).toContain('GMX_RELAY_READONLY_NETWORK_ENABLED');
     expect(canonicalSpy).not.toHaveBeenCalled();
-    expect(transport.getSponsorBalance).not.toHaveBeenCalled();
-    expect(transport.getRelayTaskStatus).not.toHaveBeenCalled();
+    expect(statusSpy).not.toHaveBeenCalled();
+    expect(peersSpy).not.toHaveBeenCalled();
     expect(submitSpy).not.toHaveBeenCalled();
     expect(getReadinessRefreshState().attempted).toBe(true);
   });
 
   it('read-only 활성 → canonical·nonce·task status·balance 조회만 수행, submit 0회', async () => {
-    const { transport, submitSpy } = makeTransport();
+    const { statusSpy, peersSpy, submitSpy } = makeGmxApiDeps();
     const state = await performReadinessRefresh({
       env: envOf({ GMX_RELAY_READONLY_NETWORK_ENABLED: 'true' }),
       checkCanonical: async () => ({ confirmed: true, reason: null }),
       listOpenTaskIds: async () => [
-        { id: 't1', relayTaskId: `0x${'11'.repeat(32)}`, transportGen: 'jsonrpc-gasless-0.0.10' },
-        { id: 't2', relayTaskId: null, transportGen: 'jsonrpc-gasless-0.0.10' },
+        { id: 't1', relayTaskId: 'req-1', transportGen: 'GMX_API_V2' },
+        { id: 't2', relayTaskId: null, transportGen: 'GMX_API_V2' },
       ],
       countAllocatedNonces: async () => 3,
       markLegacyUnresolved: async () => true,
-      transport,
+      fetchGmxOrderStatus: statusSpy,
+      checkGmxPeers: peersSpy,
       readonlyClient: null,
       nowMs: () => 2000,
     });
     // readonlyClient 미주입 → fee estimate 입력은 fail-closed (ok=false 예상)
     expect(state.ok).toBe(false);
     expect(state.atMs).toBe(2000);
-    expect(transport.getRelayTaskStatus).toHaveBeenCalledTimes(1);   // 신형 세대 + taskId 있는 것만
-    expect(transport.getSponsorBalance).toHaveBeenCalledTimes(1);
+    expect(statusSpy).toHaveBeenCalledTimes(1);   // GMX_API_V2 세대 + requestId 있는 것만
+    expect(peersSpy).toHaveBeenCalledTimes(1);
     expect(submitSpy).not.toHaveBeenCalled();                        // submit 0회
     expect(state.basis.join(' ')).toContain('신규 할당 없음');
   });
 
   it('조회 실패는 fail-closed로 기록 (ok=false, 상태 저장)', async () => {
-    const { transport } = makeTransport();
+    const { statusSpy, peersSpy } = makeGmxApiDeps();
     const state = await performReadinessRefresh({
       env: envOf({ GMX_RELAY_READONLY_NETWORK_ENABLED: 'true' }),
       checkCanonical: async () => ({ confirmed: false, reason: 'nonce 불일치' }),
       listOpenTaskIds: async () => null,                             // DB 조회 실패
       countAllocatedNonces: async () => null,
       markLegacyUnresolved: async () => true,
-      transport,
+      fetchGmxOrderStatus: statusSpy,
+      checkGmxPeers: peersSpy,
       readonlyClient: null,
       nowMs: () => 3000,
     });
@@ -415,17 +419,14 @@ describe('6단계 §7 — 읽기 전용 readiness refresh', () => {
   });
 
   it('의존성 예외 throw도 fail-closed로 기록된다 (500으로 새지 않음)', async () => {
-    const transport = {
-      getRelayTaskStatus: vi.fn().mockRejectedValue(new Error('boom-status')),
-      getSponsorBalance: vi.fn().mockRejectedValue(new Error('boom-balance')),
-    };
     const state = await performReadinessRefresh({
       env: envOf({ GMX_RELAY_READONLY_NETWORK_ENABLED: 'true' }),
       checkCanonical: async () => { throw new Error('boom-canonical'); },
       listOpenTaskIds: async () => { throw new Error('boom-tasks'); },
       countAllocatedNonces: async () => { throw new Error('boom-nonce'); },
       markLegacyUnresolved: async () => true,
-      transport,
+      fetchGmxOrderStatus: vi.fn().mockRejectedValue(new Error('boom-status')),
+      checkGmxPeers: vi.fn().mockRejectedValue(new Error('boom-peers')),
       readonlyClient: null,
       nowMs: () => 4000,
     });

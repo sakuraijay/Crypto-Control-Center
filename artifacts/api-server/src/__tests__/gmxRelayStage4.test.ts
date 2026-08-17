@@ -194,6 +194,8 @@ function fullEnv(): NodeJS.ProcessEnv {
     GMX_RELAY_NETWORK_ENABLED: 'true',
     GMX_RELAY_READONLY_NETWORK_ENABLED: 'true',
     GMX_RELAY_MODE: 'LIVE',
+    GMX_API_READONLY_ENABLED: 'true',
+    GMX_API_ORDER_SUBMISSION_ENABLED: 'true',
     GMX_SUBACCOUNT_GELATO_RELAY_ROUTER_ADDRESS: '0x517602BaC704B72993997820981603f5E4901273',
     GMX_DATA_STORE_ADDRESS: '0xFD70de6b91282D8017aA4E741e9Ae325CAb992d8',
     GMX_EVENT_EMITTER_ADDRESS: '0xC8ee91A54287DB53897056e12D9819156D3822Fb',
@@ -790,8 +792,7 @@ describe('relayTransport — 네트워크 안전 규칙 (실호출 0회)', () =>
     if (!r.ok) {
       expect(r.kind).toBe('config');
       expect(r.ambiguous).toBe(false);
-      expect(r.message).toContain(GELATO_API_KEY_SECRET_NAME);
-      // 메시지에 key 값 노출 없음 (미설정이므로 이름만)
+      expect(r.message).toContain('LEGACY_DISABLED'); // 6G-1: legacy submit 경로 폐기
     }
     expect(fetchSpy).not.toHaveBeenCalled();
   });

@@ -206,7 +206,8 @@ describe('6C — activation gate manifest·deploymentVerified 조건', () => {
     WORKER_ENGINE_MODE: 'LIVE', LIVE_TEST_EXECUTION_LOCKED: 'false',
     DELEGATED_SIGNER_ENABLED: 'true', GMX_RELAY_SUBMISSION_ENABLED: 'true',
     GMX_RELAY_NETWORK_ENABLED: 'true', GMX_RELAY_READONLY_NETWORK_ENABLED: 'true',
-    GMX_RELAY_MODE: 'LIVE', ...MANIFEST_ENV,
+    GMX_RELAY_MODE: 'LIVE', GMX_API_READONLY_ENABLED: 'true', GMX_API_ORDER_SUBMISSION_ENABLED: 'true',
+    ...MANIFEST_ENV,
   } as NodeJS.ProcessEnv;
   function input(overrides?: Partial<ActivationGateInput>): ActivationGateInput {
     return {
@@ -270,10 +271,11 @@ describe('6C — verifyDeployment: 코드 존재·decode·chainId (읽기 전용
       listOpenTaskIds: async () => [] as { id: string; relayTaskId: string | null; transportGen: string }[],
       countAllocatedNonces: async () => 0,
       markLegacyUnresolved: async () => true,
-      transport: {
-        getRelayTaskStatus: async () => ({ ok: true as const, statusCode: 200 as const, transactionHash: null, blockNumber: null }),
-        getSponsorBalance: async () => ({ ok: true as const, balance: 10n ** 18n, decimals: 18, unit: 'wei' }),
-      },
+      fetchGmxOrderStatus: async () => ({ ok: true as const, status: 'executed' }),
+      checkGmxPeers: async () => [
+        { peerHost: 'arbitrum.gmxapi.io', ok: true },
+        { peerHost: 'arbitrum.gmxapi.ai', ok: true },
+      ],
       readonlyClient: client,
       nowMs: () => 9000,
     };

@@ -139,12 +139,14 @@ describe('readiness refresh 응답 snapshot (6E-10)', () => {
     expect(snap.lastReadinessRefresh.ok).toBe(false);
   });
 
-  it('sponsor balance 조회 실패(HTTP)가 snapshot failures에 kind로 보존된다', async () => {
+  it('6G-1: GMX API peer 점검 비활성(플래그 off)이 snapshot failures에 보존된다 (조회 0회)', async () => {
     const res = await callRefresh();
     const failures: string[] = res.body.snapshot.lastReadinessRefresh.failures;
-    expect(failures.some((f) => f.includes('sponsor balance 조회 실패(http)'))).toBe(true);
+    expect(failures.some((f) => f.includes('GMX API peer'))).toBe(true);
     // 실패를 성공으로 오표시하지 않음
     expect(res.body.snapshot.lastReadinessRefresh.ok).toBe(false);
+    // legacy sponsor balance 조회는 0회
+    expect(sponsorSpy).not.toHaveBeenCalled();
   });
 
   it('snapshot 조립은 추가 외부 호출을 유발하지 않는다 (refresh 수행분 그대로)', async () => {
@@ -154,7 +156,7 @@ describe('readiness refresh 응답 snapshot (6E-10)', () => {
     expect(getChainIdSpy).toHaveBeenCalledTimes(1);
     expect(readContractSpy).toHaveBeenCalledTimes(3);
     expect(getGasPriceSpy).toHaveBeenCalledTimes(1);
-    expect(sponsorSpy).toHaveBeenCalledTimes(1);
+    expect(sponsorSpy).not.toHaveBeenCalled(); // 6G-1: legacy sponsor 조회 0회
     expect(taskStatusSpy).not.toHaveBeenCalled();
     // signer 부재 → canonical client 생성 0회 (eth_call 0회)
     expect(canonicalFactorySpy).not.toHaveBeenCalled();

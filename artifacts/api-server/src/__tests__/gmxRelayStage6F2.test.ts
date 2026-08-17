@@ -142,23 +142,22 @@ describe('6F-2 §13-A — transport JSON-RPC 계약', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
-  it('submit 성공이라도 result taskId가 32-byte hex 아니면 ambiguous 오류', async () => {
-    rpcOk('not-a-task-id');
-    const s = await createGelatoHttpTransport(SUBMIT_ENV)
-      .submitRelayTask({ chainId: 42161, target: VALID_TARGET, packedData: VALID_DATA });
-    expect(s.ok).toBe(false);
-    if (!s.ok) { expect(s.kind).toBe('decode'); expect(s.ambiguous).toBe(true); }
-    expect(fetchSpy).toHaveBeenCalledTimes(1); // 재제출 없음
-  });
-
-  it('submit 성공 경로 — relayer_sendTransaction 1회, taskId 반환', async () => {
+  it('6G-1: legacy submit은 전 플래그 충족이어도 LEGACY_DISABLED — fetch 0회', async () => {
     rpcOk(VALID_TASK_ID);
     const s = await createGelatoHttpTransport(SUBMIT_ENV)
       .submitRelayTask({ chainId: 42161, target: VALID_TARGET, packedData: VALID_DATA });
-    expect(s.ok).toBe(true);
-    if (s.ok) expect(s.taskId).toBe(VALID_TASK_ID);
-    const body = JSON.parse(String((fetchSpy.mock.calls[0][1] as RequestInit).body)) as { method: string };
-    expect(body.method).toBe('relayer_sendTransaction');
+    expect(s.ok).toBe(false);
+    if (!s.ok) { expect(s.kind).toBe('config'); expect(s.ambiguous).toBe(false); expect(s.message).toContain('LEGACY_DISABLED'); }
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('6G-1: legacy submit은 relayer_sendTransaction을 절대 발신하지 않는다', async () => {
+    rpcOk(VALID_TASK_ID);
+    await createGelatoHttpTransport(SUBMIT_ENV)
+      .submitRelayTask({ chainId: 42161, target: VALID_TARGET, packedData: VALID_DATA });
+    const methods = fetchSpy.mock.calls.map((c: unknown[]) =>
+      { try { return (JSON.parse(String((c[1] as RequestInit).body)) as { method: string }).method; } catch { return null; } });
+    expect(methods).not.toContain('relayer_sendTransaction');
   });
 });
 

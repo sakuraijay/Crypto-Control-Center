@@ -104,10 +104,11 @@ describe('6F-2 §6·§10·§4 — readiness fee estimate + sponsor balance + sig
       listOpenTaskIds: async () => [] as { id: string; relayTaskId: string | null; transportGen: string }[],
       countAllocatedNonces: async () => 0,
       markLegacyUnresolved: async () => true,
-      transport: {
-        getRelayTaskStatus: vi.fn().mockResolvedValue({ ok: true, statusCode: 100, transactionHash: null, blockNumber: null }),
-        getSponsorBalance: vi.fn().mockResolvedValue({ ok: true, balance: 10n ** 18n, decimals: 18, unit: 'wei' }),
-      },
+      fetchGmxOrderStatus: vi.fn().mockResolvedValue({ ok: true, status: 'executed' }),
+      checkGmxPeers: vi.fn().mockResolvedValue([
+        { peerHost: 'arbitrum.gmxapi.io', ok: true },
+        { peerHost: 'arbitrum.gmxapi.ai', ok: true },
+      ]),
       readonlyClient: null,
       nowMs: () => 1000,
       ...overrides,
@@ -155,45 +156,50 @@ describe('6F-2 §6·§10·§4 — readiness fee estimate + sponsor balance + sig
     expect(getFeeEstimateState().failures.join(' ')).toContain('Multiplier');
   });
 
-  it('sponsor balance > 0 → verified 기록', async () => {
+  it('6G-1 — sponsor balance는 legacy 표기(조회 0회, unverified 고정)', async () => {
     await performReadinessRefresh(deps());
-    expect(getSponsorBalanceState().status).toBe('verified');
+    const sb = getSponsorBalanceState();
+    expect(sb.status).toBe('unverified');
+    expect(sb.basis.join(' ')).toContain('LEGACY');
   });
 
-  it('sponsor balance 0 → insufficient + refresh 실패 근거', async () => {
-    const state = await performReadinessRefresh(deps({
-      transport: {
-        getRelayTaskStatus: vi.fn(),
-        getSponsorBalance: vi.fn().mockResolvedValue({ ok: true, balance: 0n, decimals: 18, unit: 'wei' }),
-      },
-    }));
-    expect(getSponsorBalanceState().status).toBe('insufficient');
-    expect(state.failures.join(' ')).toContain('insufficient');
+  it('6G-1 — 두 peer 도달 → basis에 peer 확인 기록, 실패 근거 없음', async () => {
+    const state = await performReadinessRefresh(deps());
+    expect(state.basis.join(' ')).toContain('arbitrum.gmxapi.io 도달 확인');
+    expect(state.basis.join(' ')).toContain('arbitrum.gmxapi.ai 도달 확인');
+    expect(state.failures.join(' ')).not.toContain('peer');
   });
 
-  it('sponsor balance 조회 실패 → unverified (fail-closed, 자동 retry 없음)', async () => {
-    const spy = vi.fn().mockResolvedValue({ ok: false, kind: 'http', httpStatus: 500, message: 'HTTP 500' });
-    const state = await performReadinessRefresh(deps({
-      transport: { getRelayTaskStatus: vi.fn(), getSponsorBalance: spy },
+  it('6G-1 — 한 peer 실패는 기록만, 전 peer 실패 시 fail-closed', async () => {
+    const oneDown = await performReadinessRefresh(deps({
+      checkGmxPeers: vi.fn().mockResolvedValue([
+        { peerHost: 'arbitrum.gmxapi.io', ok: true },
+        { peerHost: 'arbitrum.gmxapi.ai', ok: false, kind: 'timeout' },
+      ]),
     }));
-    expect(getSponsorBalanceState().status).toBe('unverified');
+    expect(oneDown.failures.join(' ')).toContain('arbitrum.gmxapi.ai 도달 실패');
+    expect(oneDown.failures.join(' ')).not.toContain('도달 가능한 GMX API peer 없음');
+    __resetReadinessRefreshForTests();
+    const allDown = await performReadinessRefresh(deps({
+      checkGmxPeers: vi.fn().mockResolvedValue([
+        { peerHost: 'arbitrum.gmxapi.io', ok: false, kind: 'network' },
+        { peerHost: 'arbitrum.gmxapi.ai', ok: false, kind: 'http_5xx' },
+      ]),
+    }));
+    expect(allDown.ok).toBe(false);
+    expect(allDown.failures.join(' ')).toContain('도달 가능한 GMX API peer 없음');
+  });
+
+  it('6G-1 — peer 점검 비활성(null) → fail-closed', async () => {
+    const state = await performReadinessRefresh(deps({ checkGmxPeers: null }));
     expect(state.ok).toBe(false);
-    expect(spy).toHaveBeenCalledTimes(1); // 자동 retry 없음
-  });
-
-  it('transport 비활성 → sponsor unverified + fail-closed', async () => {
-    const state = await performReadinessRefresh(deps({ transport: null }));
-    expect(getSponsorBalanceState().status).toBe('unverified');
-    expect(state.failures.join(' ')).toContain('sponsor balance');
+    expect(state.failures.join(' ')).toContain('GMX API peer 점검 비활성');
   });
 
   it('legacy transport 세대 task → 신형 조회 0회 + UNRESOLVED_LEGACY_TRANSPORT 분류', async () => {
     const statusSpy = vi.fn();
     const state = await performReadinessRefresh(deps({
-      transport: {
-        getRelayTaskStatus: statusSpy,
-        getSponsorBalance: vi.fn().mockResolvedValue({ ok: true, balance: 1n, decimals: 18, unit: 'wei' }),
-      },
+      fetchGmxOrderStatus: statusSpy,
       listOpenTaskIds: async () => [
         { id: 't-legacy', relayTaskId: 'legacy-task-uuid', transportGen: 'legacy-digital' },
       ],
@@ -206,10 +212,7 @@ describe('6F-2 §6·§10·§4 — readiness fee estimate + sponsor balance + sig
     const markSpy = vi.fn().mockResolvedValue(true);
     const statusSpy = vi.fn();
     const state = await performReadinessRefresh(deps({
-      transport: {
-        getRelayTaskStatus: statusSpy,
-        getSponsorBalance: vi.fn().mockResolvedValue({ ok: true, balance: 1n, decimals: 18, unit: 'wei' }),
-      },
+      fetchGmxOrderStatus: statusSpy,
       listOpenTaskIds: async () => [
         { id: 't-legacy', relayTaskId: 'legacy-task-uuid', transportGen: 'legacy-digital' },
       ],
@@ -223,10 +226,6 @@ describe('6F-2 §6·§10·§4 — readiness fee estimate + sponsor balance + sig
 
   it('legacy UNRESOLVED 영속 전이 실패 → failures에 기록 (fail-closed)', async () => {
     const state = await performReadinessRefresh(deps({
-      transport: {
-        getRelayTaskStatus: vi.fn(),
-        getSponsorBalance: vi.fn().mockResolvedValue({ ok: true, balance: 1n, decimals: 18, unit: 'wei' }),
-      },
       listOpenTaskIds: async () => [
         { id: 't-legacy', relayTaskId: 'legacy-task-uuid', transportGen: 'legacy-digital' },
       ],
