@@ -9,9 +9,14 @@
  *  - 판정은 단일 전이 규칙으로만 — relayLifecycle의 전이 테이블·조건부
  *    UPDATE를 그대로 사용해 기존 intent reconciler와 상충하지 않는다.
  *
- * Gelato taskState 원문 (공식 status API):
- *  CheckPending | ExecPending | WaitingForConfirmation | ExecSuccess |
- *  ExecReverted | Cancelled | Blacklisted | NotFound
+ * Gelato 상태 원문 (6F-2 — 신형 JSON-RPC relayer_getStatus, gasless v0.0.10):
+ *  StatusCode 숫자만 사용한다 — Pending=100, Submitted=110(+hash),
+ *  Success=200(+receipt), Rejected=400(+message), Reverted=500.
+ *  알 수 없는 코드·schema 불일치 = 증거 불충분 → UNRESOLVED.
+ *
+ * legacy transport 세대 (§3): transport_gen='legacy-digital' task는 신형
+ *  endpoint로 조회 금지 — 조회 없이 UNRESOLVED_LEGACY_TRANSPORT 분류
+ *  (자동 재제출 금지, 운영자 조사).
  */
 
 import {
@@ -31,8 +36,18 @@ export interface OnchainOrderEvidence {
 }
 
 export interface GelatoTaskEvidence {
-  taskState: string | null;      // null = 조회 실패/불명
+  /** gasless v0.0.10 StatusCode(100/110/200/400/500) — null = 조회 실패/불명 */
+  statusCode: number | null;
   transactionHash: string | null;
+}
+
+/** §3 — legacy 세대 task의 조회 없는 분류 판정 */
+export function legacyTransportVerdict(): ReconcileVerdict {
+  return {
+    to: RELAY_TASK_STATUS.UNRESOLVED,
+    basis: 'UNRESOLVED_LEGACY_TRANSPORT — legacy REST(api.gelato.digital) 세대 taskId, 신형 JSON-RPC 조회 금지 · 자동 재제출 금지 · 운영자 조사 필요',
+    patch: {},
+  };
 }
 
 export interface ReconcileVerdict {
@@ -72,36 +87,30 @@ export function reconcileVerdict(params: {
     return { to: RELAY_TASK_STATUS.FAILED, basis: `온체인 receipt revert 확인 (tx=${onchain.txHash ?? '?'})`, patch };
   }
 
-  // 2) 온체인 미확인 — Gelato 증거로 중간 상태만 전진 (성공 확정 금지)
-  switch (gelato.taskState) {
-    case 'ExecReverted':
-      // Gelato 보고만으로 FAILED 금지 — FAILED는 독립 수집한 온체인 receipt
-      // (onchain.event='TX_REVERTED')로만. 여기서는 UNRESOLVED 유지.
+  // 2) 온체인 미확인 — Gelato 증거로 중간 상태만 전진 (성공 확정 금지, §9)
+  switch (gelato.statusCode) {
+    case 500: // Reverted — Gelato 보고만으로 FAILED 금지, 온체인 receipt 검증 필요
       return {
         to: RELAY_TASK_STATUS.UNRESOLVED,
         basis: gelato.transactionHash
-          ? 'Gelato ExecReverted + txHash — 온체인 receipt 검증 필요 (Gelato 보고만으로 FAILED 금지)'
-          : 'ExecReverted이나 txHash 없음 — 증거 불충분',
+          ? 'Gelato Reverted(500) + txHash — 온체인 receipt 검증 필요 (Gelato 보고만으로 FAILED 금지)'
+          : 'Gelato Reverted(500)이나 txHash 없음 — 증거 불충분',
         patch,
       };
-    case 'ExecSuccess':
-    case 'WaitingForConfirmation':
-      // Gelato 성공/브로드캐스트만으로 CONFIRMED 금지 — TX_SUBMITTED까지만
+    case 200: // Success — Gelato 성공만으로 CONFIRMED 금지, TX_SUBMITTED까지만
+    case 110: // Submitted — 브로드캐스트됨
       if (gelato.transactionHash) {
-        return { to: RELAY_TASK_STATUS.TX_SUBMITTED, basis: `Gelato ${gelato.taskState} — txHash 확보, 온체인 판정 대기`, patch };
+        return { to: RELAY_TASK_STATUS.TX_SUBMITTED, basis: `Gelato StatusCode ${gelato.statusCode} — txHash 확보, 온체인 판정 대기 (Gelato Success만으로 CONFIRMED 금지)`, patch };
       }
-      return { to: RELAY_TASK_STATUS.UNRESOLVED, basis: `Gelato ${gelato.taskState}이나 txHash 없음`, patch };
-    case 'Cancelled':
-    case 'Blacklisted':
-      // Gelato가 실행 전 취소 — 온체인 broadcast 없음이 명시된 경우에만 pre-broadcast 실패
-      return { to: RELAY_TASK_STATUS.UNRESOLVED, basis: `Gelato ${gelato.taskState} — broadcast 여부 온체인 재확인 필요`, patch };
-    case 'CheckPending':
-    case 'ExecPending':
-      return { to: null, basis: `Gelato ${gelato.taskState} — 대기`, patch };
-    case 'NotFound':
-      return { to: RELAY_TASK_STATUS.UNRESOLVED, basis: 'Gelato task NotFound — 제출 여부 불명', patch };
-    default:
+      return { to: RELAY_TASK_STATUS.UNRESOLVED, basis: `Gelato StatusCode ${gelato.statusCode}이나 txHash 없음 — 증거 불충분`, patch };
+    case 400: // Rejected — pre-broadcast 거부 보고이나 broadcast 부재는 온체인 재확인 필요
+      return { to: RELAY_TASK_STATUS.UNRESOLVED, basis: 'Gelato Rejected(400) — broadcast 여부 온체인 재확인 필요 (자동 FAILED 금지)', patch };
+    case 100: // Pending — 대기
+      return { to: null, basis: 'Gelato Pending(100) — 대기', patch };
+    case null:
       return { to: RELAY_TASK_STATUS.UNRESOLVED, basis: 'task 상태 불명(timeout/조회 실패) — UNRESOLVED', patch };
+    default:
+      return { to: RELAY_TASK_STATUS.UNRESOLVED, basis: `알 수 없는 Gelato StatusCode(${gelato.statusCode}) — gasless v0.0.10 계약 밖, UNRESOLVED`, patch };
   }
 }
 

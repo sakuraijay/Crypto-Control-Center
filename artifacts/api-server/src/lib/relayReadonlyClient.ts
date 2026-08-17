@@ -27,6 +27,8 @@ export interface RelayReadonlyClient extends DataStoreClient {
   getCode(args: { address: Address }): Promise<`0x${string}` | undefined>;
   /** 6C §7 — chainId 42161 확인용 eth_chainId (읽기 전용) */
   getChainId(): Promise<number>;
+  /** 6F-2 §6 — GMX 공식 fee 산정 입력용 eth_gasPrice (읽기 전용) */
+  getGasPrice(): Promise<bigint>;
 }
 
 export type RelayReadonlyClientResult =
@@ -66,6 +68,7 @@ export function createRelayReadonlyClient(env: NodeJS.ProcessEnv = process.env):
       getLogs: (args) => client.getLogs(args as never),
       getCode: (args) => client.getCode(args),
       getChainId: () => client.getChainId(),
+      getGasPrice: () => client.getGasPrice(),
     },
   };
 }

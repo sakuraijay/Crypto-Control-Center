@@ -27,7 +27,7 @@
  *  - action count 부족·expiry 임박 시 차단.
  */
 
-import type { RelayTransport } from './relayTransport';
+import { TRANSPORT_GENERATION, type RelayTransport } from './relayTransport';
 import { evaluateActivationGate, type ActivationGateInput } from './relayActivationGate';
 import { validateFeeQuote, type RelayFeeQuote } from './relayFeeQuote';
 import { createRelayTask, transitionRelayTask, RELAY_TASK_STATUS } from './relayLifecycle';
@@ -131,14 +131,15 @@ export async function runSubmitFlow(input: SubmitFlowInput): Promise<SubmitFlowR
     return result;
   }
 
-  // 2·3. fee quote 재검증 (live만)
+  // 2·3. fee quote 재검증 — gmx_official_estimate만 + payload/chainId/router 결속 (§6)
   const feeCheck = validateFeeQuote({
     quote: input.quote, nowMs: input.nowMs,
     orderNotionalUsd: input.orderNotionalUsd, ethPriceUsd: input.ethPriceUsd,
+    expectedBinding: { chainId: input.chainId, relayRouter: input.relayRouter, payloadHash: input.payloadHash },
   });
   if (!feeCheck.ok) { blockReasons.push(`fee 재검증 실패: ${feeCheck.reason}`); return result; }
-  if (input.quote && input.quote.source === 'mock') {
-    blockReasons.push('mock quote로는 제출 불가 — live quote 필수'); return result;
+  if (input.quote && input.quote.source !== 'gmx_official_estimate') {
+    blockReasons.push('gmx_official_estimate quote만 제출 가능 — mock/기타 source 불인정'); return result;
   }
 
   // 4. receiver 재검증
@@ -155,6 +156,7 @@ export async function runSubmitFlow(input: SubmitFlowInput): Promise<SubmitFlowR
     feeToken: input.quote!.feeToken,
     feeAmount: input.quote!.feeAmount.toString(),
     userNonce: input.userNonce.toString(),
+    transportGen: TRANSPORT_GENERATION,   // §3 — 신형 JSON-RPC 세대 명시
   });
   if (!created.ok) {
     blockReasons.push(`durable task 저장 실패(${created.reason}) — 제출 불가`);

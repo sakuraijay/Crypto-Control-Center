@@ -154,6 +154,52 @@ export function __resetDeploymentVerificationForTests(): void {
   };
 }
 
+// ── 6F-2 §6·§10 — GMX fee estimate 입력·sponsor balance 스냅샷 (모듈 메모리) ──
+// readiness refresh(읽기 전용 경로)에서만 갱신; GET은 저장값만 읽는다.
+
+export interface FeeEstimateState {
+  attempted: boolean;
+  atMs: number | null;
+  ok: boolean;                  // gasPrice + multiplierFactor 둘 다 확보 시에만 true
+  basis: string[];
+  failures: string[];
+}
+
+let feeEstimateState: FeeEstimateState = {
+  attempted: false, atMs: null, ok: false, basis: [], failures: ['GMX fee estimate 입력 미조회'],
+};
+
+export function recordFeeEstimateState(state: Omit<FeeEstimateState, 'attempted'>): void {
+  feeEstimateState = { attempted: true, ...state, basis: [...state.basis], failures: [...state.failures] };
+}
+export function getFeeEstimateState(): FeeEstimateState {
+  return { ...feeEstimateState, basis: [...feeEstimateState.basis], failures: [...feeEstimateState.failures] };
+}
+
+/** §10 — 범주형만: verified/unverified/insufficient. 원시 잔액·key는 절대 미노출 */
+export interface SponsorBalanceState {
+  attempted: boolean;
+  atMs: number | null;
+  status: 'verified' | 'unverified' | 'insufficient';
+  basis: string[];
+}
+
+let sponsorBalanceState: SponsorBalanceState = {
+  attempted: false, atMs: null, status: 'unverified', basis: ['sponsor balance 미조회'],
+};
+
+export function recordSponsorBalanceState(state: Omit<SponsorBalanceState, 'attempted'>): void {
+  sponsorBalanceState = { attempted: true, ...state, basis: [...state.basis] };
+}
+export function getSponsorBalanceState(): SponsorBalanceState {
+  return { ...sponsorBalanceState, basis: [...sponsorBalanceState.basis] };
+}
+
+export function __resetFeeAndSponsorStateForTests(): void {
+  feeEstimateState = { attempted: false, atMs: null, ok: false, basis: [], failures: ['GMX fee estimate 입력 미조회'] };
+  sponsorBalanceState = { attempted: false, atMs: null, status: 'unverified', basis: ['sponsor balance 미조회'] };
+}
+
 /** 재조정(reconciliation) 결과가 유효하다고 보는 최대 age */
 export const RECONCILIATION_FRESHNESS_MS = 10 * 60_000; // 10분
 
@@ -303,7 +349,7 @@ export function evaluateFreshLiveQuote(input: FreshLiveQuoteInput): { fresh: boo
   if (!input.quote) {
     return { fresh: false, reasons: ['live quote 저장 없음'] };
   }
-  if (input.quote.source !== 'gelato') reasons.push(`quote source '${input.quote.source}' — mock 불인정`);
+  if (input.quote.source !== 'gmx_official_estimate') reasons.push(`quote source '${input.quote.source}' — gmx_official_estimate만 인정`);
   if (input.chainId !== 42161) reasons.push(`quote chainId ${input.chainId ?? '미확인'} ≠ 42161`);
   const check = validateFeeQuote({
     quote: input.quote, nowMs: input.nowMs,

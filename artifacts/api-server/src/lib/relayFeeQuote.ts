@@ -38,25 +38,15 @@ export interface RelayFeeQuote {
   gasPrice: bigint;         // wei
   feeSwapPath: Address[];   // 이번 단계: 반드시 []
   quotedAtMs: number;
-  source: 'mock' | 'gelato'; // 'gelato' = 실제 transport quote (4단계 — 이번 단계 미사용)
-}
-
-/**
- * transport quote → RelayFeeQuote 변환 (4단계).
- * transport가 실패했으면 null — fallback 숫자 생성 금지.
- */
-export function buildLiveFeeQuote(params: {
-  estimatedFeeWei: bigint; gasLimit: bigint; gasPrice: bigint; quotedAtMs: number;
-}): RelayFeeQuote {
-  return {
-    feeToken: WETH_ARBITRUM,
-    feeAmount: params.estimatedFeeWei,
-    gasLimit: params.gasLimit,
-    gasPrice: params.gasPrice,
-    feeSwapPath: [],
-    quotedAtMs: params.quotedAtMs,
-    source: 'gelato',
-  };
+  /**
+   * 'gmx_official_estimate' = GMX 공식 산정(gmxFeeEstimate — 6F-2 §6).
+   * legacy 'gelato'(fee oracle) source는 제거됐다 — oracle fallback 금지.
+   */
+  source: 'mock' | 'gmx_official_estimate';
+  /** §6 결속 — gmx_official_estimate quote는 반드시 결속 필드를 가진다 */
+  boundChainId?: number;
+  boundRelayRouter?: Address;
+  boundPayloadHash?: string;
 }
 
 /**
@@ -87,9 +77,26 @@ export function validateFeeQuote(params: {
   nowMs: number;
   orderNotionalUsd: number | null; // REVOKE 등 주문 없음 → null이면 비율 검사 생략
   ethPriceUsd: number | null;
+  /** §6 결속 검증 — 지정 시 gmx_official_estimate quote의 결속 필드와 정확 일치 필수 */
+  expectedBinding?: { chainId: number; relayRouter: string; payloadHash: string };
 }): FeeQuoteValidation {
   const { quote, nowMs } = params;
   if (!quote) return { ok: false, reason: 'fee quote 없음 — fallback 금지, 제출 불가 (fail-closed)' };
+
+  if (params.expectedBinding) {
+    if (quote.source !== 'gmx_official_estimate') {
+      return { ok: false, reason: `quote source '${quote.source}' — 제출에는 gmx_official_estimate만 허용` };
+    }
+    if (quote.boundChainId !== params.expectedBinding.chainId) {
+      return { ok: false, reason: 'quote-chainId 결속 불일치 — 거부' };
+    }
+    if ((quote.boundRelayRouter ?? '').toLowerCase() !== params.expectedBinding.relayRouter.toLowerCase()) {
+      return { ok: false, reason: 'quote-relayRouter 결속 불일치 — 거부' };
+    }
+    if ((quote.boundPayloadHash ?? '').toLowerCase() !== params.expectedBinding.payloadHash.toLowerCase()) {
+      return { ok: false, reason: 'quote-payload 결속 불일치 — 거부' };
+    }
+  }
 
   if (!FEE_TOKEN_ALLOWLIST.some((t) => t.toLowerCase() === quote.feeToken.toLowerCase())) {
     return { ok: false, reason: `feeToken 비허용: ${quote.feeToken} — WNT(WETH)만 허용` };

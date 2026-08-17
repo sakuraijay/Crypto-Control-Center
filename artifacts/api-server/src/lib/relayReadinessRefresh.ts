@@ -16,11 +16,13 @@
  */
 
 import { decodeAbiParameters } from 'viem';
-import type { RelayTransport } from './relayTransport';
+import type { RelayReadonlyTransport } from './relayTransport';
 import {
   isRelayReadonlyNetworkEnabled, recordReadinessRefresh, recordDeploymentVerification,
+  recordFeeEstimateState, recordSponsorBalanceState,
   type ReadinessRefreshState,
 } from './relayActivationStatus';
+import { fetchGmxFeeEstimateInputs } from './gmxFeeEstimate';
 import { GMX_DEPLOYMENT_MANIFEST, validateEnvAgainstManifest } from './gmxDeploymentManifest';
 import { DIGESTS_GETTER_SELECTOR } from './relayDigestReadback';
 import type { RelayReadonlyClient } from './relayReadonlyClient';
@@ -29,14 +31,14 @@ export interface ReadinessRefreshDeps {
   env: NodeJS.ProcessEnv;
   /** canonical authorization 읽기 (read-only eth_call). 게이트는 호출측 checkCanonical이 이미 포함 */
   checkCanonical(): Promise<{ confirmed: boolean; reason: string | null }>;
-  /** DB read — 미종결 task 중 Gelato taskId가 있는 것들 */
-  listOpenTaskIds(): Promise<{ id: string; relayTaskId: string | null }[] | null>;
+  /** DB read — 미종결 task 중 Gelato taskId가 있는 것들 (transport 세대 포함) */
+  listOpenTaskIds(): Promise<{ id: string; relayTaskId: string | null; transportGen: string }[] | null>;
   /** DB read — nonce 상태 요약 (신규 할당 없음) */
   countAllocatedNonces(): Promise<number | null>;
-  /** 읽기 전용 GET 전용 transport (없으면 GET 생략) — POST submit은 호출하지 않는다 */
-  transport: Pick<RelayTransport, 'quoteRelayFee' | 'getRelayTaskStatus'> | null;
-  /** 6C §7 — 배포 코드 존재 검증용 read-only RPC client (없으면 검증 fail-closed 기록) */
-  readonlyClient: Pick<RelayReadonlyClient, 'getCode' | 'getChainId' | 'readContract'> | null;
+  /** 읽기 전용 transport (없으면 조회 생략) — submit 능력은 구조적으로 없다 (§4) */
+  transport: Pick<RelayReadonlyTransport, 'getRelayTaskStatus' | 'getSponsorBalance'> | null;
+  /** 6C §7 — 배포 코드 존재 검증 + §6 fee estimate 입력용 read-only RPC client */
+  readonlyClient: Pick<RelayReadonlyClient, 'getCode' | 'getChainId' | 'readContract' | 'getGasPrice'> | null;
   nowMs(): number;
 }
 
@@ -168,51 +170,84 @@ export async function performReadinessRefresh(deps: ReadinessRefreshDeps): Promi
   if (nonces === null) failures.push('nonce 상태 조회 실패 (fail-closed)');
   else basis.push(`할당된 userNonce ${nonces}건 (신규 할당 없음)`);
 
-  // 3) 기존 task의 Gelato status GET (존재하는 taskId만 — 생성·재제출 없음)
-  let open: { id: string; relayTaskId: string | null }[] | null = null;
+  // 3) 기존 task의 Gelato status 조회 — 신형(jsonrpc) 세대만. legacy 세대는
+  //    신형 endpoint 조회 금지(§3) → UNRESOLVED_LEGACY_TRANSPORT 분류만 기록.
+  let open: { id: string; relayTaskId: string | null; transportGen: string }[] | null = null;
   try { open = await deps.listOpenTaskIds(); } catch { open = null; }
   if (open === null) {
     failures.push('relay task 조회 실패 (fail-closed)');
   } else {
     const withTaskId = open.filter((t) => t.relayTaskId);
+    const legacy = withTaskId.filter((t) => t.transportGen !== 'jsonrpc-gasless-0.0.10');
+    const modern = withTaskId.filter((t) => t.transportGen === 'jsonrpc-gasless-0.0.10');
     basis.push(`미종결 relay task ${open.length}건 (taskId 보유 ${withTaskId.length}건)`);
+    for (const t of legacy) {
+      failures.push(`task ${t.id}: legacy transport 세대(${t.transportGen}) — 신형 조회 금지, UNRESOLVED_LEGACY_TRANSPORT (운영자 조사·자동 재제출 금지)`);
+    }
     if (deps.transport) {
-      for (const t of withTaskId) {
+      for (const t of modern) {
         try {
           const st = await deps.transport.getRelayTaskStatus({ taskId: t.relayTaskId as string });
-          if (st.ok) basis.push(`task ${t.id}: Gelato ${st.taskState}`);
+          if (st.ok) basis.push(`task ${t.id}: Gelato StatusCode ${st.statusCode}`);
           else failures.push(`task ${t.id}: status 조회 실패(${st.kind})`);
         } catch {
           failures.push(`task ${t.id}: status 조회 예외 (fail-closed)`);
         }
       }
-    } else if (withTaskId.length > 0) {
+    } else if (modern.length > 0) {
       failures.push('transport 비활성 — Gelato status 재수집 불가');
     }
   }
 
-  // 4) Gelato fee oracle GET (읽기 전용 — 어떤 제출 근거로도 사용하지 않음)
-  if (deps.transport) {
-    try {
-      const quote = await deps.transport.quoteRelayFee({
-        chainId: 42161,
-        paymentToken: '0x82aF49447D8a07e3bd95BD0d56f35241523fBab1', // WETH (읽기 전용 조회 파라미터)
-        gasLimit: 3_000_000n,
-      });
-      if (quote.ok) basis.push('Gelato fee oracle 조회 성공');
-      else {
-        // 6E-8 §3·§6 — httpStatus는 정수일 때만 표시; upstream 본문·문자열 미노출.
-        // 5xx는 외부 서비스 일시 장애로 분류하되 activation 차단(fail-closed)은 동일 유지.
-        const status = 'httpStatus' in quote && Number.isInteger(quote.httpStatus) ? (quote.httpStatus as number) : null;
-        if (status !== null && status >= 500 && status < 600) failures.push(`fee oracle 조회 실패 (외부 fee oracle 일시 장애 — HTTP ${status})`);
-        else if (status !== null) failures.push(`fee oracle 조회 실패 (http: HTTP ${status})`);
-        else failures.push(`fee oracle 조회 실패(${quote.kind})`);
+  // 4) 6F-2 §6 — GMX 공식 fee estimate 입력 (eth_gasPrice + DataStore multiplier;
+  //    읽기 전용, Gelato fee oracle 사용 안 함)
+  {
+    const feeBasis: string[] = [];
+    const feeFailures: string[] = [];
+    const ds = (deps.env.GMX_DATA_STORE_ADDRESS ?? '').trim();
+    if (!deps.readonlyClient) {
+      feeFailures.push('read-only RPC client 미생성 — fee estimate 입력 조회 불가 (fail-closed)');
+    } else if (!/^0x[0-9a-fA-F]{40}$/.test(ds)) {
+      feeFailures.push('GMX_DATA_STORE_ADDRESS 미설정/형식 오류 — multiplier 조회 불가 (fail-closed)');
+    } else {
+      try {
+        const inputs = await fetchGmxFeeEstimateInputs({ client: deps.readonlyClient, dataStore: ds as `0x${string}` });
+        if (inputs.ok) feeBasis.push('GMX fee estimate 입력 확보 (eth_gasPrice + gelatoRelayFeeMultiplierFactor)');
+        else feeFailures.push(inputs.reason);
+      } catch {
+        feeFailures.push('fee estimate 입력 조회 예외 (fail-closed)');
       }
-    } catch {
-      failures.push('fee oracle 조회 예외 (fail-closed)');
     }
-  } else {
-    failures.push('transport 비활성 — fee oracle 조회 불가');
+    recordFeeEstimateState({ atMs: deps.nowMs(), ok: feeFailures.length === 0, basis: feeBasis, failures: feeFailures });
+    basis.push(...feeBasis);
+    failures.push(...feeFailures);
+  }
+
+  // 5) 6F-2 §10 — sponsor balance (gelato_getBalance, 읽기 전용; key 없으면 fetch 0회)
+  {
+    const sbBasis: string[] = [];
+    let sbStatus: 'verified' | 'unverified' | 'insufficient' = 'unverified';
+    if (!deps.transport) {
+      sbBasis.push('transport 비활성 — sponsor balance 조회 불가 (unverified)');
+      failures.push('transport 비활성 — sponsor balance 조회 불가');
+    } else {
+      try {
+        const bal = await deps.transport.getSponsorBalance();
+        if (bal.ok) {
+          sbStatus = bal.balance > 0n ? 'verified' : 'insufficient';
+          sbBasis.push(`sponsor balance 조회 성공 — ${sbStatus} (unit ${bal.unit})`);
+          if (sbStatus === 'insufficient') failures.push('sponsor balance 0 — insufficient');
+        } else {
+          sbBasis.push(`sponsor balance 조회 실패(${bal.kind}) — unverified`);
+          failures.push(`sponsor balance 조회 실패(${bal.kind})`);
+        }
+      } catch {
+        sbBasis.push('sponsor balance 조회 예외 — unverified');
+        failures.push('sponsor balance 조회 예외 (fail-closed)');
+      }
+    }
+    recordSponsorBalanceState({ atMs: deps.nowMs(), status: sbStatus, basis: sbBasis });
+    basis.push(...sbBasis.filter((b) => b.includes('성공')));
   }
 
   const state = { atMs: deps.nowMs(), ok: failures.length === 0, basis, failures };

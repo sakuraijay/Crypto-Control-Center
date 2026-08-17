@@ -91,6 +91,8 @@ export async function createRelayTask(params: {
   userNonce?: string | null;
   approvalNonce?: string | null;
   calldataHash?: string | null;
+  /** 6F-2 §3 — 신규 제출은 반드시 'jsonrpc-gasless-0.0.10'을 명시 */
+  transportGen?: string;
 }): Promise<CreateRelayTaskResult> {
   try {
     const existing = await db.select({ id: relayTasksTable.id }).from(relayTasksTable)
@@ -115,6 +117,7 @@ export async function createRelayTask(params: {
       feeAmount: params.feeAmount ?? null,
       userNonce: params.userNonce ?? null,
       approvalNonce: params.approvalNonce ?? null,
+      ...(params.transportGen ? { transportGen: params.transportGen } : {}),
     });
   } catch {
     // unique index 충돌(동시 중복) 포함 — 전부 fail-closed
@@ -235,11 +238,11 @@ export async function countOpenRelayTasksOrNull(): Promise<number | null> {
 }
 
 /** 미종결 task의 id/relayTaskId만 — 읽기 전용 readiness refresh용 (6단계 §7). 실패=null */
-export async function listOpenRelayTaskIdsOrNull(): Promise<{ id: string; relayTaskId: string | null }[] | null> {
+export async function listOpenRelayTaskIdsOrNull(): Promise<{ id: string; relayTaskId: string | null; transportGen: string }[] | null> {
   const nonTerminal = (Object.values(RELAY_TASK_STATUS) as RelayTaskStatus[])
     .filter((s) => !TERMINAL_STATUSES.includes(s));
   try {
-    return await db.select({ id: relayTasksTable.id, relayTaskId: relayTasksTable.relayTaskId })
+    return await db.select({ id: relayTasksTable.id, relayTaskId: relayTasksTable.relayTaskId, transportGen: relayTasksTable.transportGen })
       .from(relayTasksTable)
       .where(inArray(relayTasksTable.status, nonTerminal));
   } catch {

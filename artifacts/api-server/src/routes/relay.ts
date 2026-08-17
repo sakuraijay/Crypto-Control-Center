@@ -31,6 +31,7 @@ import {
   getStartupReconciliationState, isReconciliationRunning,
   isRelayReadonlyNetworkEnabled, getReadinessRefreshState,
   recordCanonicalSnapshot, getCanonicalSnapshot, getDeploymentVerificationState,
+  getFeeEstimateState, getSponsorBalanceState,
 } from '../lib/relayActivationStatus';
 import { GMX_DEPLOYMENT_MANIFEST } from '../lib/gmxDeploymentManifest';
 import { createRelayReadonlyClient } from '../lib/relayReadonlyClient';
@@ -39,7 +40,7 @@ import { countAllocatedNoncesOrNull } from '../lib/relayNonce';
 import { listOpenRelayTaskIdsOrNull } from '../lib/relayLifecycle';
 import { countBlockingIntentsOrNull } from '../lib/executionIntents';
 import { countOpenRelayTasksOrNull } from '../lib/relayLifecycle';
-import { reconcileVerdict, applyReconcileVerdict } from '../lib/relayTaskReconciler';
+import { reconcileVerdict, applyReconcileVerdict, legacyTransportVerdict } from '../lib/relayTaskReconciler';
 import { createGelatoHttpTransport, type RelayTransport } from '../lib/relayTransport';
 import {
   prepareRevokeSession, submitRevokeSignature, getActiveRevokeSession, cancelRevokeSession,
@@ -470,9 +471,10 @@ function investigationView(row: NonNullable<Awaited<ReturnType<typeof getRelayTa
     resolutionBasis: row.resolutionBasis,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
+    transportGen: row.transportGen,
     links: {
       arbiscanTx: row.txHash ? `https://arbiscan.io/tx/${row.txHash}` : null,
-      gelatoTask: row.relayTaskId ? `https://api.gelato.digital/tasks/status/${row.relayTaskId}` : null,
+      // legacy REST status URL은 §3에 따라 완전 제거됨 — taskId 원문만 표시
     },
     // UNRESOLVED가 있는 동안 신규 제출이 차단되는 사유 표시용
     blocking: row.status === RELAY_TASK_STATUS.UNRESOLVED,
@@ -519,12 +521,23 @@ router.post('/executor/relay/unresolved/recheck', requireOperatorAuth, async (re
         task: investigationView(row),
       });
     }
+    // 6F-2 §3 — legacy 세대 taskId는 신형 JSON-RPC endpoint로 조회 금지.
+    if (row.transportGen !== 'jsonrpc-gasless-0.0.10') {
+      const verdict = legacyTransportVerdict();
+      await applyReconcileVerdict(row.id, verdict);
+      const updatedLegacy = await getRelayTaskById(row.id);
+      return res.json({
+        ok: true, rechecked: false, verdictBasis: verdict.basis,
+        reason: 'legacy transport 세대 — 신형 endpoint 조회 금지 (UNRESOLVED_LEGACY_TRANSPORT)',
+        task: updatedLegacy ? investigationView(updatedLegacy) : investigationView(row),
+      });
+    }
 
     const status = await injectedTransport.getRelayTaskStatus({ taskId: row.relayTaskId });
     const verdict = reconcileVerdict({
       gelato: status.ok
-        ? { taskState: status.taskState, transactionHash: status.transactionHash }
-        : { taskState: null, transactionHash: null },
+        ? { statusCode: status.statusCode, transactionHash: status.transactionHash }
+        : { statusCode: null, transactionHash: null },
       onchain: { event: null, txHash: null, orderKey: null, blockNumber: null },
     });
     await applyReconcileVerdict(row.id, verdict);
@@ -639,6 +652,18 @@ router.get('/executor/relay/activation', requireOperatorAuth, async (_req, res) 
       reconciliationReasons: recon.reasons,
       liveQuoteMissing: !liveQuote.fresh,
       liveQuoteReasons: liveQuote.reasons,
+      // 6F-2 §11 — fee oracle 항목 대체: GMX 공식 fee estimate + transport + sponsor
+      gelatoApiConfigured: (env.GELATO_API_KEY ?? '').length > 0,   // boolean만 — 값 미노출
+      transportContract: 'JSON-RPC v0.0.10',
+      feeEstimate: (() => {
+        const fe = getFeeEstimateState();
+        const status = !fe.attempted ? 'unavailable' : fe.ok ? 'fresh' : 'unavailable';
+        return { status, atMs: fe.atMs, basis: fe.basis, failures: fe.failures };
+      })(),
+      sponsorBalance: (() => {
+        const sb = getSponsorBalanceState();
+        return { status: sb.status, atMs: sb.atMs, basis: sb.basis };
+      })(),
       revokeActive: !!revoke,
       unresolvedPresent: unresolvedCount > 0,
       unresolvedCount,
@@ -665,12 +690,18 @@ export function buildReadinessSnapshot(env: NodeJS.ProcessEnv): {
     readonlyNetworkDisabled: boolean; submitNetworkDisabled: boolean; submissionDisabled: boolean;
     relayMode: 'DISABLED' | 'DRY_RUN' | 'LIVE';
     signerDisabled: boolean; liveLocked: boolean; manifestVersion: number;
+    gelatoApiConfigured: boolean;
+    transportContract: string;
+    feeEstimate: { status: 'fresh' | 'stale' | 'unavailable'; atMs: number | null };
+    sponsorBalance: { status: 'verified' | 'unverified' | 'insufficient'; atMs: number | null };
     readyForControlledCanary: false;
   };
 } {
   const dv = getDeploymentVerificationState();
   const canonical = getCanonicalSnapshot();
   const lastRefresh = getReadinessRefreshState();
+  const fe = getFeeEstimateState();
+  const sb = getSponsorBalanceState();
   return {
     atMs: Date.now(),
     deploymentVerification: {
@@ -690,6 +721,11 @@ export function buildReadinessSnapshot(env: NodeJS.ProcessEnv): {
       signerDisabled: !(isDelegatedSignerEnabled() && isSignerInitialized()),
       liveLocked: isLiveTestExecutionLocked(),
       manifestVersion: GMX_DEPLOYMENT_MANIFEST.manifestVersion,
+      // 6F-2 §11 — 메모리 getter/env boolean만 (외부 호출 0회, Secret 값 미노출)
+      gelatoApiConfigured: (env.GELATO_API_KEY ?? '').length > 0,
+      transportContract: 'JSON-RPC v0.0.10',
+      feeEstimate: { status: !fe.attempted ? 'unavailable' : fe.ok ? 'fresh' : 'unavailable', atMs: fe.atMs },
+      sponsorBalance: { status: sb.status, atMs: sb.atMs },
       // 이 스냅샷은 DB 파생 게이트(reconciliation·blocking intent·unresolved)를
       // 포함하지 않으므로 canary 적격을 절대 true로 보고하지 않는다 (fail-closed).
       readyForControlledCanary: false,
@@ -718,14 +754,16 @@ router.post('/executor/relay/readiness/refresh', requireOperatorAuth, async (_re
       transport: (() => {
         const t = injectedTransport ?? createGelatoHttpTransport(process.env);
         return {
-          quoteRelayFee: t.quoteRelayFee.bind(t),
           getRelayTaskStatus: t.getRelayTaskStatus.bind(t),
+          getSponsorBalance: t.getSponsorBalance.bind(t),
         };
       })(),
-      // 6C §7 — 배포 코드 존재 검증용 read-only client (미생성 = fail-closed 기록)
+      // 6C §7 — 배포 코드 존재 검증 + §6 fee estimate 입력용 read-only client
       readonlyClient: (() => {
         const r = createRelayReadonlyClient(process.env);
-        return r.ok ? { getCode: r.client.getCode, getChainId: r.client.getChainId, readContract: r.client.readContract } : null;
+        return r.ok
+          ? { getCode: r.client.getCode, getChainId: r.client.getChainId, readContract: r.client.readContract, getGasPrice: r.client.getGasPrice }
+          : null;
       })(),
       nowMs: () => Date.now(),
     });
