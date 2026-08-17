@@ -315,48 +315,14 @@ export function createGelatoReadonlyTransport(env: NodeJS.ProcessEnv = process.e
 export function createGelatoSubmitTransport(env: NodeJS.ProcessEnv = process.env): RelaySubmitTransport {
   return {
     async submitRelayTask({ chainId, target, packedData }) {
-      const gateBlock = submitGate(env);
-      if (gateBlock) return { ...gateBlock, ambiguous: false };
-      if (!env[GELATO_API_KEY_SECRET_NAME]) {
-        return { ok: false, kind: 'config', message: `${GELATO_API_KEY_SECRET_NAME} 미설정`, ambiguous: false };
-      }
-      // payload/target/chain 검증 — 하나라도 실패하면 fetch 0회 (요청 발신 전)
-      if (chainId !== 42161) {
-        return { ok: false, kind: 'config', message: `chainId ${chainId} ≠ 42161 — 제출 차단`, ambiguous: false };
-      }
-      if (!/^0x[0-9a-fA-F]{40}$/.test(target)) {
-        return { ok: false, kind: 'config', message: 'target 주소 형식 오류 — 제출 차단', ambiguous: false };
-      }
-      const blockedReason = getBlockedAddressReason(target);
-      if (blockedReason) {
-        return { ok: false, kind: 'config', message: `target 차단 주소 — ${blockedReason} — 제출 차단`, ambiguous: false };
-      }
-      if (target.toLowerCase() !== GMX_DEPLOYMENT_MANIFEST.addresses.subaccountGelatoRelayRouter.toLowerCase()) {
-        return { ok: false, kind: 'config', message: `target이 manifest v${GMX_DEPLOYMENT_MANIFEST.manifestVersion} 감사 router와 불일치 — 제출 차단 (fail-closed)`, ambiguous: false };
-      }
-      if (!/^0x[0-9a-fA-F]+$/.test(packedData) || packedData.length < 10) {
-        return { ok: false, kind: 'config', message: 'packedData 형식 오류 — 제출 차단', ambiguous: false };
-      }
-
-      const r = await rpcCall(env, SUBMIT_RPC_METHODS, 'relayer_sendTransaction', {
-        chainId: String(chainId), to: target, data: packedData,
-      });
-      if (!r.ok) {
-        // 분류 (§8): 명시적 4xx·JSON-RPC error = pre-broadcast rejection 확정(비-ambiguous).
-        // timeout/network/5xx/decode = 수락 여부 불명(ambiguous) → UNRESOLVED, 재시도 금지.
-        if (r.kind === 'rpc') return { ok: false, kind: 'rpc', message: r.message, ambiguous: false };
-        if (r.kind === 'config') return { ok: false, kind: 'config', message: r.message, ambiguous: false };
-        if (r.kind === 'http') {
-          const s = r.httpStatus ?? 0;
-          return { ok: false, kind: 'http', message: r.message, ambiguous: !(s >= 400 && s < 500) };
-        }
-        return { ok: false, kind: r.kind, message: r.message, ambiguous: true };
-      }
-      const taskId = r.result;
-      if (typeof taskId !== 'string' || !isValidGelatoTaskId(taskId)) {
-        return { ok: false, kind: 'decode', message: 'taskId가 32-byte hex가 아님 — 수락 여부 불명', ambiguous: true };
-      }
-      return { ok: true, taskId };
+      // 6G-1 §11 — LEGACY_DISABLED: Gelato JSON-RPC 직접 제출 경로는 실행 자격에서
+      // 구조적으로 제거되었다. 신규 주문 제출은 공식 GMX API v2(gmxApiSubmitFlow)
+      // 경로만 사용한다. 이 transport는 이전 task 조사(읽기 전용) 전용으로만 남는다.
+      void chainId; void target; void packedData; void env;
+      return {
+        ok: false, kind: 'config', ambiguous: false,
+        message: 'LEGACY_DISABLED — Gelato 직접 제출 경로 폐기 (6G-1 §11): 신규 제출은 GMX API v2 경로만 허용',
+      };
     },
   };
 }

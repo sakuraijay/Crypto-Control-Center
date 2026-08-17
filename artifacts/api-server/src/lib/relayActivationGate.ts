@@ -60,6 +60,9 @@ export function evaluateActivationGate(input: ActivationGateInput): ActivationGa
   if (env.GMX_RELAY_SUBMISSION_ENABLED !== 'true') missing.push("GMX_RELAY_SUBMISSION_ENABLED !== 'true'");
   if (env.GMX_RELAY_NETWORK_ENABLED !== 'true') missing.push("GMX_RELAY_NETWORK_ENABLED !== 'true'");
   if ((env.GMX_RELAY_MODE ?? '').toUpperCase() !== 'LIVE') missing.push("GMX_RELAY_MODE !== 'LIVE'");
+  // 6G-1 §4 — 공식 GMX API v2 플래그 (정확히 "true"만 인정)
+  if (env.GMX_API_READONLY_ENABLED !== 'true') missing.push("GMX_API_READONLY_ENABLED !== 'true'");
+  if (env.GMX_API_ORDER_SUBMISSION_ENABLED !== 'true') missing.push("GMX_API_ORDER_SUBMISSION_ENABLED !== 'true'");
 
   return { networkEligible: missing.length === 0, missing };
 }

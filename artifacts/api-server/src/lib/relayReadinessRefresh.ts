@@ -16,7 +16,6 @@
  */
 
 import { decodeAbiParameters } from 'viem';
-import type { RelayReadonlyTransport } from './relayTransport';
 import {
   isRelayReadonlyNetworkEnabled, recordReadinessRefresh, recordDeploymentVerification,
   recordFeeEstimateState, recordSponsorBalanceState,
@@ -41,8 +40,13 @@ export interface ReadinessRefreshDeps {
    * 실패 시 false — failures에 기록 (fail-closed).
    */
   markLegacyUnresolved(taskRowId: string): Promise<boolean>;
-  /** 읽기 전용 transport (없으면 조회 생략) — submit 능력은 구조적으로 없다 (§4) */
-  transport: Pick<RelayReadonlyTransport, 'getRelayTaskStatus' | 'getSponsorBalance'> | null;
+  /**
+   * 6G-1 — 공식 GMX API v2 주문 status 조회 (readonly, requestId 기반).
+   * GMX_API_V2 세대 task에만 사용. null이면 조회 생략(fail-closed 기록).
+   */
+  fetchGmxOrderStatus: ((requestId: string) => Promise<{ ok: true; status: string } | { ok: false; kind: string }>) | null;
+  /** 6G-1 §12 — peer A/B 도달성 점검 (readonly GET, 없으면 생략) */
+  checkGmxPeers: (() => Promise<{ peerHost: string; ok: boolean; kind?: string }[]>) | null;
   /** 6C §7 — 배포 코드 존재 검증 + §6 fee estimate 입력용 read-only RPC client */
   readonlyClient: Pick<RelayReadonlyClient, 'getCode' | 'getChainId' | 'readContract' | 'getGasPrice'> | null;
   nowMs(): number;
@@ -176,36 +180,37 @@ export async function performReadinessRefresh(deps: ReadinessRefreshDeps): Promi
   if (nonces === null) failures.push('nonce 상태 조회 실패 (fail-closed)');
   else basis.push(`할당된 userNonce ${nonces}건 (신규 할당 없음)`);
 
-  // 3) 기존 task의 Gelato status 조회 — 신형(jsonrpc) 세대만. legacy 세대는
-  //    신형 endpoint 조회 금지(§3) → UNRESOLVED_LEGACY_TRANSPORT 분류만 기록.
+  // 3) 기존 task status 조회 — 6G-1: 신형 세대는 GMX_API_V2뿐. legacy 세대
+  //    (legacy-digital·jsonrpc-gasless-0.0.10 포함)는 어떤 endpoint로도 조회하지
+  //    않고 UNRESOLVED_LEGACY_TRANSPORT로 영속 고정한다 (조사 전용 §11).
   let open: { id: string; relayTaskId: string | null; transportGen: string }[] | null = null;
   try { open = await deps.listOpenTaskIds(); } catch { open = null; }
   if (open === null) {
     failures.push('relay task 조회 실패 (fail-closed)');
   } else {
     const withTaskId = open.filter((t) => t.relayTaskId);
-    const legacy = withTaskId.filter((t) => t.transportGen !== 'jsonrpc-gasless-0.0.10');
-    const modern = withTaskId.filter((t) => t.transportGen === 'jsonrpc-gasless-0.0.10');
+    const legacy = withTaskId.filter((t) => t.transportGen !== 'GMX_API_V2');
+    const modern = withTaskId.filter((t) => t.transportGen === 'GMX_API_V2');
     basis.push(`미종결 relay task ${open.length}건 (taskId 보유 ${withTaskId.length}건)`);
     for (const t of legacy) {
-      failures.push(`task ${t.id}: legacy transport 세대(${t.transportGen}) — 신형 조회 금지, UNRESOLVED_LEGACY_TRANSPORT (운영자 조사·자동 재제출 금지)`);
+      failures.push(`task ${t.id}: legacy transport 세대(${t.transportGen}) — 조회 금지, UNRESOLVED_LEGACY_TRANSPORT (운영자 조사·자동 재제출 금지)`);
       // 기록만이 아니라 DB 상태를 UNRESOLVED로 고정한다 (조회·재제출 0회).
       let persisted = false;
       try { persisted = await deps.markLegacyUnresolved(t.id); } catch { persisted = false; }
       if (!persisted) failures.push(`task ${t.id}: legacy UNRESOLVED 영속 전이 실패 (fail-closed — 조사 필요)`);
     }
-    if (deps.transport) {
+    if (deps.fetchGmxOrderStatus) {
       for (const t of modern) {
         try {
-          const st = await deps.transport.getRelayTaskStatus({ taskId: t.relayTaskId as string });
-          if (st.ok) basis.push(`task ${t.id}: Gelato StatusCode ${st.statusCode}`);
-          else failures.push(`task ${t.id}: status 조회 실패(${st.kind})`);
+          const st = await deps.fetchGmxOrderStatus(t.relayTaskId as string);
+          if (st.ok) basis.push(`task ${t.id}: GMX API status ${st.status}`);
+          else failures.push(`task ${t.id}: GMX API status 조회 실패(${st.kind})`);
         } catch {
-          failures.push(`task ${t.id}: status 조회 예외 (fail-closed)`);
+          failures.push(`task ${t.id}: GMX API status 조회 예외 (fail-closed)`);
         }
       }
     } else if (modern.length > 0) {
-      failures.push('transport 비활성 — Gelato status 재수집 불가');
+      failures.push('GMX API 조회 비활성 — status 재수집 불가 (fail-closed)');
     }
   }
 
@@ -233,31 +238,28 @@ export async function performReadinessRefresh(deps: ReadinessRefreshDeps): Promi
     failures.push(...feeFailures);
   }
 
-  // 5) 6F-2 §10 — sponsor balance (gelato_getBalance, 읽기 전용; key 없으면 fetch 0회)
+  // 5) 6G-1 §11·§12 — Gelato sponsor balance(Gas Tank)는 실행 자격에서 제거됨.
+  //    (legacy 표기 전용 — 조회 0회.) 대신 공식 GMX API peer 도달성을 점검한다.
+  recordSponsorBalanceState({
+    atMs: deps.nowMs(), status: 'unverified',
+    basis: ['LEGACY — Gelato Gas Tank는 실행 자격에서 제거됨 (조회 0회, GMX API v2 relay가 fee 처리)'],
+  });
   {
-    const sbBasis: string[] = [];
-    let sbStatus: 'verified' | 'unverified' | 'insufficient' = 'unverified';
-    if (!deps.transport) {
-      sbBasis.push('transport 비활성 — sponsor balance 조회 불가 (unverified)');
-      failures.push('transport 비활성 — sponsor balance 조회 불가');
+    if (!deps.checkGmxPeers) {
+      failures.push('GMX API peer 점검 비활성 — peer 상태 불명 (fail-closed)');
     } else {
       try {
-        const bal = await deps.transport.getSponsorBalance();
-        if (bal.ok) {
-          sbStatus = bal.balance > 0n ? 'verified' : 'insufficient';
-          sbBasis.push(`sponsor balance 조회 성공 — ${sbStatus} (unit ${bal.unit})`);
-          if (sbStatus === 'insufficient') failures.push('sponsor balance 0 — insufficient');
-        } else {
-          sbBasis.push(`sponsor balance 조회 실패(${bal.kind}) — unverified`);
-          failures.push(`sponsor balance 조회 실패(${bal.kind})`);
+        const peers = await deps.checkGmxPeers();
+        let anyOk = false;
+        for (const p of peers) {
+          if (p.ok) { basis.push(`GMX API peer ${p.peerHost} 도달 확인`); anyOk = true; }
+          else failures.push(`GMX API peer ${p.peerHost} 도달 실패(${p.kind ?? '불명'})`);
         }
+        if (!anyOk) failures.push('도달 가능한 GMX API peer 없음 (fail-closed)');
       } catch {
-        sbBasis.push('sponsor balance 조회 예외 — unverified');
-        failures.push('sponsor balance 조회 예외 (fail-closed)');
+        failures.push('GMX API peer 점검 예외 (fail-closed)');
       }
     }
-    recordSponsorBalanceState({ atMs: deps.nowMs(), status: sbStatus, basis: sbBasis });
-    basis.push(...sbBasis.filter((b) => b.includes('성공')));
   }
 
   const state = { atMs: deps.nowMs(), ok: failures.length === 0, basis, failures };

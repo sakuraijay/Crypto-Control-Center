@@ -125,6 +125,12 @@ export async function prepareApprovalSession(params: {
   nowSec: bigint;
   requestedExpirySeconds?: number;
   requestedMaxAllowedCount?: number;
+  /**
+   * 6G-1 §5 — 공식 GMX API prepareSubaccountApproval이 권위 원천인 경우,
+   * 검증(gmxApiApproval.validateGmxPreparedApproval)을 통과한 message를 그대로
+   * 저장한다. 호출측이 chainId·nonce·기간·count 전부 검증 완료했을 때만 전달.
+   */
+  externalMessage?: SubaccountApprovalMessage;
 }): Promise<PrepareResult> {
   const chainId = ARBITRUM_ONE_CHAIN_ID;
 
@@ -139,7 +145,7 @@ export async function prepareApprovalSession(params: {
     APPROVAL_LIMITS.MAX_MAX_ALLOWED_COUNT,
   );
 
-  const message: SubaccountApprovalMessage = {
+  const message: SubaccountApprovalMessage = params.externalMessage ?? {
     subaccount: params.subaccount,
     shouldAdd: true,
     expiresAt: params.nowSec + BigInt(expirySec),
@@ -150,6 +156,12 @@ export async function prepareApprovalSession(params: {
     deadline: params.nowSec + BigInt(APPROVAL_LIMITS.SIGNATURE_DEADLINE_SECONDS),
     integrationId: DEFAULT_INTEGRATION_ID,
   };
+  // externalMessage도 canonical nonce·subaccount 결속은 여기서 이중 확인 (fail-closed)
+  if (params.externalMessage) {
+    if (message.nonce !== params.canonicalNonce) return { ok: false, reason: 'external message nonce ≠ canonical nonce — prepare 중단' };
+    if (message.subaccount.toLowerCase() !== params.subaccount.toLowerCase()) return { ok: false, reason: 'external message subaccount 불일치 — prepare 중단' };
+    if (!message.shouldAdd) return { ok: false, reason: 'external message shouldAdd=false — prepare 중단' };
+  }
 
   const digest = computeSessionDigest(chainId, params.verifyingContract, message);
   const sessionId = randomUUID();

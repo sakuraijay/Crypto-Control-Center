@@ -34,8 +34,19 @@ import {
   isEmergencyStopActive,
   isReconciled,
 } from '../workers/liveTestExecutor';
+import { createGmxApiTransport, type GmxApiTransport } from '../lib/gmxApiTransport';
+import { validateGmxPreparedApproval } from '../lib/gmxApiApproval';
 
 const router = Router();
+
+// 6G-1 §5 — 공식 GMX API transport (approval prepare 전용, readonly). 테스트 주입 지원.
+let injectedGmxApiTransport: GmxApiTransport | null = null;
+export function __setGmxApiTransportForTests(t: GmxApiTransport | null): void {
+  injectedGmxApiTransport = t;
+}
+function getGmxApiTransportForApproval(): GmxApiTransport {
+  return injectedGmxApiTransport ?? createGmxApiTransport(process.env);
+}
 
 // ── GET /executor/signer ────────────────────────────────────────────────────────
 // 서버 사이너 주소 + 잔고 정보. 개인키 절대 미포함.
@@ -228,15 +239,45 @@ router.post('/executor/subaccount-approval/prepare', requireOperatorAuth, async 
 
     const expiry = typeof req.body?.expirySeconds === 'number' ? req.body.expirySeconds : undefined;
     const maxCount = typeof req.body?.maxAllowedCount === 'number' ? req.body.maxAllowedCount : undefined;
+    const nowSec = BigInt(Math.floor(Date.now() / 1000));
+
+    // 6G-1 §5 — 공식 GMX API prepareSubaccountApproval이 권위 원천.
+    // readonly transport 비활성/호출 실패/검증 실패 = prepare 0회 (fail-closed).
+    const gmxApi = getGmxApiTransportForApproval();
+    if (!gmxApi.readonlyEnabled) {
+      return res.status(503).json({ ok: false, error: "GMX_API_READONLY_ENABLED !== 'true' — GMX API prepare 불가 (fail-closed)" });
+    }
+    const apiRes = await gmxApi.postJson('/subaccounts/approval/prepare', {
+      chainId: ARBITRUM_ONE_CHAIN_ID,
+      account: mainAccount,
+      subaccount: signerAddress,
+      ...(expiry !== undefined ? { expirySeconds: expiry } : {}),
+      ...(maxCount !== undefined ? { maxAllowedCount: maxCount } : {}),
+    }, 'readonly');
+    if (!apiRes.ok) {
+      return res.status(502).json({ ok: false, error: `GMX API approval prepare 실패(${apiRes.kind}) — 세션 생성 0회` });
+    }
+    const validated = validateGmxPreparedApproval({
+      raw: apiRes.data,
+      expected: {
+        mainAccount,
+        subaccount: signerAddress as Address,
+        verifyingContract: relay.config.subaccountGelatoRelayRouter as Address,
+        canonicalNonce,
+        nowSec,
+      },
+    });
+    if (!validated.ok) {
+      return res.status(422).json({ ok: false, error: 'GMX API approval 검증 실패 — 세션 생성 0회', reasons: validated.reasons });
+    }
 
     const result = await prepareApprovalSession({
       mainAccount,
       subaccount: signerAddress as Address,
       verifyingContract: relay.config.subaccountGelatoRelayRouter as Address,
       canonicalNonce,
-      nowSec: BigInt(Math.floor(Date.now() / 1000)),
-      requestedExpirySeconds: expiry,
-      requestedMaxAllowedCount: maxCount,
+      nowSec,
+      externalMessage: validated.message,
     });
     if (!result.ok) return res.status(500).json({ ok: false, error: result.reason });
 

@@ -42,6 +42,7 @@ import { countBlockingIntentsOrNull } from '../lib/executionIntents';
 import { countOpenRelayTasksOrNull } from '../lib/relayLifecycle';
 import { reconcileVerdict, applyReconcileVerdict, legacyTransportVerdict } from '../lib/relayTaskReconciler';
 import { createGelatoHttpTransport, type RelayTransport } from '../lib/relayTransport';
+import { createGmxApiTransport, GMX_API_PEERS, type GmxApiTransport } from '../lib/gmxApiTransport';
 import {
   prepareRevokeSession, submitRevokeSignature, getActiveRevokeSession, cancelRevokeSession,
 } from '../lib/revokeSession';
@@ -71,6 +72,12 @@ export function __setRelayCanonicalClientFactoryForTests(f: () => DataStoreClien
 let injectedTransport: RelayTransport | null = null;
 export function __setRelayTransportForTests(t: RelayTransport | null): void {
   injectedTransport = t;
+}
+
+// 6G-1 — 공식 GMX API v2 transport 테스트 주입 (readiness readonly 조회 전용)
+let injectedGmxApiTransport: GmxApiTransport | null = null;
+export function __setGmxApiTransportForTests(t: GmxApiTransport | null): void {
+  injectedGmxApiTransport = t;
 }
 
 /** mock quote 기본 파라미터 — 실제 Gelato quote 아님 (LIVE 근거 사용 금지) */
@@ -652,9 +659,15 @@ router.get('/executor/relay/activation', requireOperatorAuth, async (_req, res) 
       reconciliationReasons: recon.reasons,
       liveQuoteMissing: !liveQuote.fresh,
       liveQuoteReasons: liveQuote.reasons,
-      // 6F-2 §11 — fee oracle 항목 대체: GMX 공식 fee estimate + transport + sponsor
-      gelatoApiConfigured: (env.GELATO_API_KEY ?? '').length > 0,   // boolean만 — 값 미노출
-      transportContract: 'JSON-RPC v0.0.10',
+      // 6G-1 §12 — 공식 GMX API v2 기준. Gelato API key/Gas Tank는 실행 자격에서
+      // 제거됨(legacy 표기). GELATO_API_KEY는 더 이상 필요 조건이 아니다.
+      transportContract: 'GMX API v2 (official public relay)',
+      legacyGelatoDisabled: true,
+      gmxApi: {
+        readonlyEnabled: env.GMX_API_READONLY_ENABLED === 'true',
+        submissionEnabled: env.GMX_API_ORDER_SUBMISSION_ENABLED === 'true',
+        peers: GMX_API_PEERS.map((p) => new URL(p).host),
+      },
       feeEstimate: (() => {
         const fe = getFeeEstimateState();
         const status = !fe.attempted ? 'unavailable' : fe.ok ? 'fresh' : 'unavailable';
@@ -690,8 +703,9 @@ export function buildReadinessSnapshot(env: NodeJS.ProcessEnv): {
     readonlyNetworkDisabled: boolean; submitNetworkDisabled: boolean; submissionDisabled: boolean;
     relayMode: 'DISABLED' | 'DRY_RUN' | 'LIVE';
     signerDisabled: boolean; liveLocked: boolean; manifestVersion: number;
-    gelatoApiConfigured: boolean;
     transportContract: string;
+    legacyGelatoDisabled: true;
+    gmxApi: { readonlyEnabled: boolean; submissionEnabled: boolean; peers: string[] };
     feeEstimate: { status: 'fresh' | 'stale' | 'unavailable'; atMs: number | null };
     sponsorBalance: { status: 'verified' | 'unverified' | 'insufficient'; atMs: number | null };
     readyForControlledCanary: false;
@@ -721,9 +735,14 @@ export function buildReadinessSnapshot(env: NodeJS.ProcessEnv): {
       signerDisabled: !(isDelegatedSignerEnabled() && isSignerInitialized()),
       liveLocked: isLiveTestExecutionLocked(),
       manifestVersion: GMX_DEPLOYMENT_MANIFEST.manifestVersion,
-      // 6F-2 §11 — 메모리 getter/env boolean만 (외부 호출 0회, Secret 값 미노출)
-      gelatoApiConfigured: (env.GELATO_API_KEY ?? '').length > 0,
-      transportContract: 'JSON-RPC v0.0.10',
+      // 6G-1 §12 — 메모리 getter/env boolean만 (외부 호출 0회, Secret 값 미노출)
+      transportContract: 'GMX API v2 (official public relay)',
+      legacyGelatoDisabled: true,
+      gmxApi: {
+        readonlyEnabled: env.GMX_API_READONLY_ENABLED === 'true',
+        submissionEnabled: env.GMX_API_ORDER_SUBMISSION_ENABLED === 'true',
+        peers: GMX_API_PEERS.map((p) => new URL(p).host),
+      },
       feeEstimate: { status: !fe.attempted ? 'unavailable' : fe.ok ? 'fresh' : 'unavailable', atMs: fe.atMs },
       sponsorBalance: { status: sb.status, atMs: sb.atMs },
       // 이 스냅샷은 DB 파생 게이트(reconciliation·blocking intent·unresolved)를
@@ -752,15 +771,28 @@ router.post('/executor/relay/readiness/refresh', requireOperatorAuth, async (_re
         const r = await applyReconcileVerdict(taskRowId, legacyTransportVerdict());
         return r.ok;
       },
-      // 읽기 전용 GET 전용 transport — submit 메서드는 노출하지 않는다.
-      // (injectedTransport는 테스트 주입; 프로덕션은 GET 2종만 뽑아 전달.
-      //  quote/status GET은 transport 내부 readonly 게이트가 최종 방어이며,
-      //  이 경로에서 POST 제출은 호출 자체가 존재하지 않는다.)
-      transport: (() => {
-        const t = injectedTransport ?? createGelatoHttpTransport(process.env);
-        return {
-          getRelayTaskStatus: t.getRelayTaskStatus.bind(t),
-          getSponsorBalance: t.getSponsorBalance.bind(t),
+      // 6G-1 — 공식 GMX API v2 readonly 조회 (Gelato transport 사용 안 함)
+      fetchGmxOrderStatus: (() => {
+        const t = injectedGmxApiTransport ?? createGmxApiTransport(process.env);
+        if (!t.readonlyEnabled) return null;
+        return async (requestId: string) => {
+          const r = await t.postJson<{ status?: unknown }>('/orders/txns/status', { requestId }, 'readonly');
+          if (!r.ok) return { ok: false as const, kind: r.kind };
+          const status = String(r.data?.status ?? '');
+          return status ? { ok: true as const, status } : { ok: false as const, kind: 'decode' };
+        };
+      })(),
+      checkGmxPeers: (() => {
+        const t = injectedGmxApiTransport ?? createGmxApiTransport(process.env);
+        if (!t.readonlyEnabled) return null;
+        return async () => {
+          const out: { peerHost: string; ok: boolean; kind?: string }[] = [];
+          for (const base of t.peers) {
+            const single = createGmxApiTransport(process.env, { peers: [base] });
+            const r = await single.getJson('/markets/tickers');
+            out.push(r.ok ? { peerHost: r.peerHost, ok: true } : { peerHost: new URL(base).host, ok: false, kind: r.kind });
+          }
+          return out;
         };
       })(),
       // 6C §7 — 배포 코드 존재 검증 + §6 fee estimate 입력용 read-only client
