@@ -60,9 +60,10 @@ const SNAPSHOT_FIXTURE: ReadinessSnapshotView = {
   statusFlags: {
     readonlyNetworkDisabled: false, submitNetworkDisabled: true, submissionDisabled: true,
     relayMode: 'DISABLED', signerDisabled: true, liveLocked: true, manifestVersion: 1,
-    // 6F-2 §11 — transport/fee estimate/sponsor balance
-    gelatoApiConfigured: false,
-    transportContract: 'JSON-RPC v0.0.10',
+    // 6G-1 §12 — GMX API v2 전환: legacy Gelato 직접 경로 폐기
+    legacyGelatoDisabled: true,
+    gmxApi: { readonlyEnabled: false, submissionEnabled: false, peers: ['arbitrum.gmxapi.io', 'arbitrum.gmxapi.ai'] },
+    transportContract: 'GMX API v2 (official public relay)',
     feeEstimate: { status: 'unavailable', atMs: null },
     sponsorBalance: { status: 'unverified', atMs: null },
     readyForControlledCanary: false,
@@ -71,7 +72,7 @@ const SNAPSHOT_FIXTURE: ReadinessSnapshotView = {
 
 const ROUTE_FIXTURE = {
   ok: true,
-  refresh: { attempted: true, ...SNAPSHOT_FIXTURE.lastReadinessRefresh },
+  refresh: { ...SNAPSHOT_FIXTURE.lastReadinessRefresh, attempted: true },
   snapshot: SNAPSHOT_FIXTURE,
 };
 
@@ -126,10 +127,24 @@ describe('RelayStatusCard — snapshot runtime 렌더', () => {
     // readiness 갱신 시각 표시
     expect(html).toContain('Readiness 갱신:');
     expect(html).toContain('실패 (fail-closed)');
-    // 6F-2 §11 — transport·API key·fee estimate·sponsor balance fail-closed 표시
-    expect(html).toContain('JSON-RPC v0.0.10');
-    expect(html).toContain('미설정 — 외부 호출 0회 (fail-closed)');
+    // 6G-1 §12 — transport·GMX API 플래그·legacy 폐기·fee estimate 표시
+    expect(html).toContain('GMX API v2 (official public relay)');
+    expect(html).toContain('GMX API readonly');
+    expect(html).toContain('GMX API 주문 제출');
+    expect(html).toContain('arbitrum.gmxapi.io');
+    expect(html).toContain('arbitrum.gmxapi.ai');
+    expect(html).toContain('직접 실행 경로 폐기됨 (조사 전용)');
     expect(html).toContain('미확보 (fail-closed — 제출 불가)');
+  });
+
+  it('6G-1 §12 — Gelato Enterprise/Gas Tank/API key 요구 문구 0건', () => {
+    const html = renderToStaticMarkup(<RelayStatusCard snapshot={SNAPSHOT_FIXTURE} />);
+    expect(html).not.toContain('Gelato Enterprise');
+    expect(html).not.toContain('Gas Tank');
+    expect(html).not.toContain('GELATO_API_KEY');
+    expect(html).not.toContain('API key 미설정');
+    expect(html).not.toContain('미설정 — 외부 호출 0회');
+    // snapshot의 sponsor balance는 확인 불가(fail-closed) 표기 유지 (조회 0회)
     expect(html).toContain('미확인 (fail-closed)');
   });
 

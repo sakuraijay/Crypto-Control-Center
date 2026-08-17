@@ -272,13 +272,21 @@ export function RelayStatusCard({ snapshot = null }: RelayStatusCardProps = {}) 
             <span>{snapshot.statusFlags.signerDisabled ? '비활성 (예상된 fail-closed — 시스템 고장 아님)' : '활성'}</span>
             <span className="text-muted-foreground">LIVE 잠금</span>
             <span>{snapshot.statusFlags.liveLocked ? '유지 중 (LIVE_TEST_EXECUTION_LOCKED)' : '해제됨'}</span>
-            {snapshot.statusFlags.gelatoApiConfigured !== undefined && (<>
-              <span className="text-muted-foreground">Gelato API key</span>
-              <span data-testid="text-snapshot-gelato-key">{snapshot.statusFlags.gelatoApiConfigured ? '설정됨 (값 미노출)' : '미설정 — 외부 호출 0회 (fail-closed)'}</span>
-            </>)}
             {snapshot.statusFlags.transportContract && (<>
               <span className="text-muted-foreground">Transport</span>
               <span data-testid="text-snapshot-transport">{snapshot.statusFlags.transportContract}</span>
+            </>)}
+            {snapshot.statusFlags.gmxApi && (<>
+              <span className="text-muted-foreground">GMX API readonly</span>
+              <span data-testid="text-snapshot-gmxapi-readonly">{snapshot.statusFlags.gmxApi.readonlyEnabled ? '활성' : '비활성 (fail-closed)'}</span>
+              <span className="text-muted-foreground">GMX API 주문 제출</span>
+              <span data-testid="text-snapshot-gmxapi-submit">{snapshot.statusFlags.gmxApi.submissionEnabled ? '활성' : '비활성 (fail-closed)'}</span>
+              <span className="text-muted-foreground">GMX API peers</span>
+              <span data-testid="text-snapshot-gmxapi-peers">{snapshot.statusFlags.gmxApi.peers.join(' · ')}</span>
+            </>)}
+            {snapshot.statusFlags.legacyGelatoDisabled && (<>
+              <span className="text-muted-foreground">Legacy 경로</span>
+              <span data-testid="text-snapshot-legacy-disabled">직접 실행 경로 폐기됨 (조사 전용)</span>
             </>)}
             {snapshot.statusFlags.feeEstimate && (<>
               <span className="text-muted-foreground">GMX fee estimate</span>
@@ -455,7 +463,14 @@ export function RelayStatusCard({ snapshot = null }: RelayStatusCardProps = {}) 
             {f.transportContract && (
               <div className="text-[10px] text-muted-foreground" data-testid="text-transport-status">
                 Transport: {f.transportContract}
-                {f.gelatoApiConfigured !== undefined && ` · Gelato API key ${f.gelatoApiConfigured ? '설정됨 (값 미노출)' : '미설정 (외부 호출 0회)'}`}
+                {f.legacyGelatoDisabled && ' · Legacy 직접 실행 경로 폐기됨 (조사 전용)'}
+              </div>
+            )}
+            {f.gmxApi && (
+              <div className="text-[10px] text-muted-foreground" data-testid="text-gmxapi-status">
+                GMX API v2: readonly {f.gmxApi.readonlyEnabled ? '활성' : '비활성 (fail-closed)'}
+                {' · '}주문 제출 {f.gmxApi.submissionEnabled ? '활성' : '비활성 (fail-closed)'}
+                {' · '}peers: {f.gmxApi.peers.join(', ')}
               </div>
             )}
             {f.feeEstimate && (
@@ -470,9 +485,7 @@ export function RelayStatusCard({ snapshot = null }: RelayStatusCardProps = {}) 
             )}
             {f.sponsorBalance && (
               <div className="text-[10px] text-muted-foreground" data-testid="text-sponsor-balance">
-                Sponsor balance: {f.sponsorBalance.status === 'verified' ? '확인됨 (> 0)'
-                  : f.sponsorBalance.status === 'insufficient' ? '잔액 0 — 1Balance 충전 필요 (fail-closed)'
-                  : '미확인 (fail-closed)'}
+                Sponsor balance (legacy): 실행 자격에서 제거됨 — GMX API v2 relay가 수수료 처리 (조회 0회)
               </div>
             )}
             {rows.map((r) => (

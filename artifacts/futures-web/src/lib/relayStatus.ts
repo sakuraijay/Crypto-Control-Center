@@ -104,11 +104,14 @@ export interface ActivationStatusFlags {
     basis: string[];
     failures: string[];
   };
-  /** 6F-2 §11 — GMX 공식 fee estimate + JSON-RPC transport + sponsor balance (구 fee oracle 대체) */
-  gelatoApiConfigured?: boolean;
+  /** 6F-2 §11 — GMX 공식 fee estimate (유지) */
   transportContract?: string;
   feeEstimate?: { status: 'fresh' | 'stale' | 'unavailable'; atMs: number | null; basis: string[]; failures: string[] };
+  /** 6G-1 §12 — sponsor balance는 legacy 표기 전용 (실행 자격 아님) */
   sponsorBalance?: { status: 'verified' | 'unverified' | 'insufficient'; atMs: number | null; basis: string[] };
+  /** 6G-1 §12 — 공식 GMX API v2 상태 */
+  legacyGelatoDisabled?: boolean;
+  gmxApi?: { readonlyEnabled: boolean; submissionEnabled: boolean; peers: string[] };
 }
 
 export interface ActivationStatusResponse {
@@ -183,10 +186,12 @@ export interface ReadinessSnapshotView {
     relayMode: 'DISABLED' | 'DRY_RUN' | 'LIVE';
     signerDisabled: boolean; liveLocked: boolean; manifestVersion: number;
     /** 6F-2 §11 — 구서버 호환 optional */
-    gelatoApiConfigured?: boolean;
     transportContract?: string;
     feeEstimate?: { status: 'fresh' | 'stale' | 'unavailable'; atMs: number | null };
     sponsorBalance?: { status: 'verified' | 'unverified' | 'insufficient'; atMs: number | null };
+    /** 6G-1 §12 */
+    legacyGelatoDisabled?: boolean;
+    gmxApi?: { readonlyEnabled: boolean; submissionEnabled: boolean; peers: string[] };
     readyForControlledCanary: false;
   };
 }
