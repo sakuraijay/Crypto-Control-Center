@@ -1,0 +1,208 @@
+/**
+ * GmxApiStatusCard — 공식 GMX API v2 실행 경로 상태 카드 (6G-2 §11).
+ *
+ * 계약:
+ *  - 모든 값은 서버 파생 스냅샷 기준(브라우저에서 상태를 지어내지 않음).
+ *  - 조회 실패를 "미설정"으로 표시하지 않음 — 401/403/503/network/error 구분.
+ *  - submission flag false = "구조적으로 비활성" 표시.
+ *  - readyForControlledCanary는 서버 값 그대로 (전 조건 미확인 = false).
+ *  - main wallet private key 관련 UI 0건. legacy relay 벤더 문구 0건.
+ *  - PIN은 요청에만 사용, 저장·전달·표시 금지.
+ */
+
+import { useCallback, useState } from 'react';
+import { Radio, RefreshCw, Loader2, ShieldAlert, Lock, Ban, CheckCircle2 } from 'lucide-react';
+import { cn } from '@/lib/utils';
+import {
+  fetchGmxApiStatus, postGmxApiReadinessRefresh,
+  type GmxApiStatusView, type GmxApiFetchResult,
+} from '@/lib/gmxApiStatus';
+
+const toneCls = {
+  ok:    'border-[var(--color-long)]/40 bg-[var(--color-long)]/10 text-[var(--color-long)]',
+  warn:  'border-amber-500/40 bg-amber-500/10 text-amber-400',
+  error: 'border-[var(--color-short)]/40 bg-[var(--color-short)]/10 text-[var(--color-short)]',
+  muted: 'border-border bg-secondary text-muted-foreground',
+} as const;
+
+type Tone = keyof typeof toneCls;
+
+function Badge({ tone, children }: { tone: Tone; children: React.ReactNode }) {
+  return (
+    <span className={cn('inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-[10px] font-medium', toneCls[tone])}>
+      {children}
+    </span>
+  );
+}
+
+function Row({ label, tone, value }: { label: string; tone: Tone; value: React.ReactNode }) {
+  return (
+    <div className="flex items-center justify-between gap-2 py-1 border-b border-border/40 last:border-b-0">
+      <span className="text-[11px] text-muted-foreground">{label}</span>
+      <Badge tone={tone}>{value}</Badge>
+    </div>
+  );
+}
+
+/** boolean|null → 표시 (null = 조회 실패 — "미설정"으로 위장 금지) */
+function triState(v: boolean | null, okWhen: boolean, okLabel: string, badLabel: string): { tone: Tone; text: string } {
+  if (v === null) return { tone: 'warn', text: '조회 실패' };
+  return v === okWhen ? { tone: 'ok', text: okLabel } : { tone: 'error', text: badLabel };
+}
+
+function fmtEpochMs(atMs: number | null): string {
+  if (!atMs) return '—';
+  try { return new Date(atMs).toLocaleString(); } catch { return '—'; }
+}
+
+function fmtExpires(expiresAt: string | number | null): string {
+  if (expiresAt == null) return '—';
+  const n = Number(expiresAt);
+  if (!Number.isFinite(n) || n <= 0) return '—';
+  try { return new Date(n * 1000).toLocaleString(); } catch { return '—'; }
+}
+
+export function GmxApiStatusCard() {
+  const [pin, setPin] = useState('');
+  const [status, setStatus] = useState<GmxApiStatusView | null>(null);
+  const [loading, setLoading] = useState<'idle' | 'status' | 'refresh'>('idle');
+  const [message, setMessage] = useState<{ tone: Tone; text: string } | null>(null);
+
+  const applyResult = useCallback((r: GmxApiFetchResult) => {
+    if (r.kind === 'ok') {
+      setStatus(r.data);
+      setMessage(null);
+    } else {
+      // 조회 실패 ≠ 미설정 — 기존 스냅샷은 유지하고 실패 사유를 구분 표시
+      setMessage({ tone: r.kind === 'OPERATOR_AUTH_REQUIRED' || r.kind === 'FORBIDDEN' ? 'error' : 'warn', text: r.message });
+    }
+  }, []);
+
+  const load = useCallback(async () => {
+    if (pin.trim().length < 6) {
+      setMessage({ tone: 'warn', text: '조회에는 운영자 PIN(6자 이상)이 필요합니다.' });
+      return;
+    }
+    setLoading('status');
+    applyResult(await fetchGmxApiStatus(pin.trim()));
+    setLoading('idle');
+  }, [pin, applyResult]);
+
+  const refresh = useCallback(async () => {
+    if (pin.trim().length < 6) {
+      setMessage({ tone: 'warn', text: 'Readiness 갱신에는 운영자 PIN(6자 이상)이 필요합니다.' });
+      return;
+    }
+    setLoading('refresh');
+    applyResult(await postGmxApiReadinessRefresh(pin.trim()));
+    setLoading('idle');
+  }, [pin, applyResult]);
+
+  const s = status;
+  const signerReady = s ? s.signerEnabled && s.signerInitialized : null;
+
+  return (
+    <div className="rounded-lg border border-border bg-card p-4 space-y-3" data-testid="gmx-api-status-card">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Radio className="w-4 h-4 text-primary" />
+          <div>
+            <h3 className="text-sm font-semibold">GMX API v2 Official</h3>
+            <p className="text-[11px] text-muted-foreground">공식 GMX API 주문 실행 경로 상태 (서버 기준)</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <input
+            type="password"
+            inputMode="numeric"
+            autoComplete="off"
+            value={pin}
+            onChange={(e) => setPin(e.target.value)}
+            placeholder="운영자 PIN"
+            className="w-28 h-7 px-2 rounded border border-border bg-background text-xs"
+            data-testid="gmx-api-pin-input"
+          />
+          <button
+            onClick={load}
+            disabled={loading !== 'idle' || pin.trim().length < 6}
+            className="inline-flex items-center gap-1 h-7 px-2 rounded border border-border bg-secondary text-xs disabled:opacity-50"
+            data-testid="gmx-api-load-button"
+          >
+            {loading === 'status' ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+            조회
+          </button>
+          <button
+            onClick={refresh}
+            disabled={loading !== 'idle' || pin.trim().length < 6}
+            className="inline-flex items-center gap-1 h-7 px-2 rounded border border-border bg-secondary text-xs disabled:opacity-50"
+            data-testid="gmx-api-refresh-button"
+          >
+            {loading === 'refresh' ? <Loader2 className="w-3 h-3 animate-spin" /> : <CheckCircle2 className="w-3 h-3" />}
+            Readiness 갱신
+          </button>
+        </div>
+      </div>
+
+      {message && (
+        <div className={cn('px-2.5 py-1.5 rounded border text-[11px]', toneCls[message.tone])} data-testid="gmx-api-message">
+          {message.text}
+        </div>
+      )}
+
+      {!s ? (
+        <p className="text-[11px] text-muted-foreground" data-testid="gmx-api-empty">
+          아직 조회 전입니다 — PIN 입력 후 조회하세요. (조회 전 값은 표시하지 않습니다)
+        </p>
+      ) : (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6" data-testid="gmx-api-rows">
+          <Row label="Transport" tone="muted" value={s.transportGen} />
+          <Row label="Legacy 직접 제출" tone={s.legacyDisabled ? 'ok' : 'error'} value={s.legacyDisabled ? 'LEGACY_DISABLED' : '활성(비정상)'} />
+          <Row label="Read-only flag" tone={s.readonlyEnabled ? 'ok' : 'muted'} value={s.readonlyEnabled ? '활성' : '비활성'} />
+          <Row label="Order submission flag" tone={s.submissionEnabled ? 'warn' : 'muted'}
+            value={s.submissionEnabled ? '활성' : '구조적으로 비활성'} />
+          <Row label="Peer A / Peer B" tone="muted" value={s.peers.length > 0 ? s.peers.join(' · ') : '—'} />
+          <Row label="운영 모드 / LIVE 잠금" tone={s.liveTestExecutionLocked ? 'ok' : 'warn'}
+            value={s.liveTestExecutionLocked ? <><Lock className="w-3 h-3" /> LOCKED</> : 'UNLOCKED'} />
+          <Row label="Emergency Stop" tone={s.emergencyStopActive ? 'error' : 'ok'}
+            value={s.emergencyStopActive ? <><Ban className="w-3 h-3" /> 활성</> : '비활성'} />
+          <Row label="Delegated signer" tone={signerReady ? 'warn' : 'muted'}
+            value={s.signerEnabled ? (s.signerInitialized ? 'initialized' : 'enabled·미초기화') : '비활성'} />
+          <Row label="Owner Approval 세션" tone={triState(s.approvalSessionReady, true, 'OWNER_SIGNATURE_READY', '없음').tone}
+            value={triState(s.approvalSessionReady, true, 'OWNER_SIGNATURE_READY', '없음').text} />
+          <Row label="Canonical verified" tone={s.canonical.authorized ? 'ok' : 'error'}
+            value={s.canonical.authorized ? '검증됨' : '미검증'} />
+          <Row label="Remaining actions" tone={s.canonical.approvalRemainingOk ? 'ok' : 'warn'}
+            value={s.canonical.remaining ?? '—'} />
+          <Row label="Approval expiresAt" tone="muted" value={fmtExpires(s.canonical.expiresAt)} />
+          <Row label="Active revoke" tone={triState(s.activeRevokeInProgress, false, '없음', '진행 중').tone}
+            value={triState(s.activeRevokeInProgress, false, '없음', '진행 중').text} />
+          <Row label="Blocking intents" tone={s.blockingIntentCount === null ? 'warn' : s.blockingIntentCount === 0 ? 'ok' : 'error'}
+            value={s.blockingIntentCount === null ? '조회 실패' : String(s.blockingIntentCount)} />
+          <Row label="Open tasks / Unresolved" tone={s.unresolvedTaskCount === null ? 'warn' : s.unresolvedTaskCount === 0 ? 'ok' : 'error'}
+            value={`${s.openRelayTaskCount ?? '조회 실패'} / ${s.unresolvedTaskCount ?? '조회 실패'}`} />
+          <Row label="Reconciliation" tone={s.reconciled ? 'ok' : 'error'} value={s.reconciled ? '완료' : '미완료 — 신규 주문 차단'} />
+          <Row label="GMX 실행 구성" tone={s.gmxConfigOk ? 'ok' : 'error'} value={s.gmxConfigOk ? 'OK' : '미완비'} />
+          <Row label="Deployment 검증" tone={s.deploymentVerification.ok ? 'ok' : s.deploymentVerification.attempted ? 'error' : 'muted'}
+            value={s.deploymentVerification.ok ? `OK (${s.manifestVersion})` : s.deploymentVerification.attempted ? '실패' : '미시도'} />
+          <Row label="Fee estimate" tone={s.feeEstimate.fresh ? 'ok' : 'muted'}
+            value={s.feeEstimate.fresh ? '최근 10분 내 OK' : s.feeEstimate.attempted ? '오래됨/실패' : '미시도'} />
+          <Row label="마지막 Readiness 갱신" tone="muted" value={fmtEpochMs(s.lastReadinessRefresh.atMs)} />
+          <Row label="최근 requestId/status" tone="muted"
+            value={s.recentGmxTasks && s.recentGmxTasks.length > 0
+              ? `${s.recentGmxTasks[0].hasRequestId ? 'requestId 확보' : 'requestId 없음'} · ${s.recentGmxTasks[0].gmxApiStatus ?? s.recentGmxTasks[0].status}`
+              : '기록 없음'} />
+          <Row label="readyForControlledCanary" tone={s.readyForControlledCanary ? 'warn' : 'muted'}
+            value={String(s.readyForControlledCanary)} />
+        </div>
+      )}
+
+      <div className="flex items-start gap-2 text-[10px] text-muted-foreground">
+        <ShieldAlert className="w-3 h-3 shrink-0 mt-0.5" />
+        <span>
+          이 카드는 조회 전용입니다 — 주문 생성·서명·제출을 유발하지 않습니다.
+          메인 지갑 개인키는 어떤 경우에도 서버·앱에 입력하지 않습니다.
+        </span>
+      </div>
+    </div>
+  );
+}

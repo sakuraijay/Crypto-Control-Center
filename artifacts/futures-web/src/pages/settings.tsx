@@ -3,6 +3,7 @@ import { useAppContext, useAuthContext, useTradingContext, useWallet } from '@/l
 import { SubaccountApprovalCard } from '@/components/SubaccountApprovalCard';
 import { RelayStatusCard } from '@/components/RelayStatusCard';
 import { ReadinessRefreshCard } from '@/components/ReadinessRefreshCard';
+import { GmxApiStatusCard } from '@/components/GmxApiStatusCard';
 import type { ReadinessSnapshotView } from '@/lib/relayStatus';
 import { formatConfidencePct } from '@/lib/formatConfidence';
 import { deriveLiveTestDisplay } from '@/lib/liveTestDisplay';
@@ -806,6 +807,8 @@ export default function Settings() {
               페이지 새로고침 시 snapshot은 사라지고 "검증 필요" 표시로 복귀. */}
           <ReadinessRefreshCard onSnapshot={setRelaySnapshot} />
           <RelayStatusCard snapshot={relaySnapshot} />
+          {/* 6G-2 §11 — 공식 GMX API v2 실행 경로 상태 (조회 전용) */}
+          <GmxApiStatusCard />
 
         </div>
 
