@@ -151,6 +151,40 @@ SELECT value FROM worker_state WHERE key = 'stopCoverageV1';
 - settlementStatus가 전무한(전부 NULL/legacy) 상태에서는 이익이 목표 산정에
   반영되지 않는다 — 이는 fail-closed 설계이며 오류가 아니다.
 
+## 6H-2B 추가 — 보호 주문(protection_orders) 사전 조회 (읽기 전용, 실행 금지)
+
+reset 실행 전, durable 보호 주문 상태를 아래 읽기 전용 조회로 확인한다.
+**현 Production은 open position 0건이므로 보호 주문도 0건이어야 한다 —
+0건이 아니면 reset 진행 전 운영자 확인 필수. 이 섹션의 어떤 항목도 자동
+실행하지 않는다.**
+
+```sql
+-- 1) 보호 주문 전체 count (Production 기대값: 0)
+SELECT count(*) FROM protection_orders;
+
+-- 2) 상태별 분해 — ACTIVE/PENDING(PLANNED~SUBMITTED)/UNRESOLVED/FROZEN
+SELECT status, count(*) FROM protection_orders GROUP BY status;
+
+-- 3) purpose별 분해 (INITIAL_STOP / PROFIT_FLOOR_STOP / EMERGENCY_CLOSE)
+SELECT purpose, status, count(*) FROM protection_orders GROUP BY purpose, status;
+
+-- 4) uncovered 판정 참고 — position 존재 여부는 온체인 authoritative readback
+--   기준이며 SQL만으로 확정하지 않는다. 여기서는 ACTIVE stop이 아닌
+--   non-terminal 행 존재 여부만 본다 (있으면 신규 OPEN 차단 상태).
+SELECT count(*) FROM protection_orders
+ WHERE status IN ('PLANNED','PREPARED','SUBMITTING','SUBMITTED','UNRESOLVED','FROZEN');
+
+-- 5) stale stop — SUBMITTING/SUBMITTED가 10분 이상 정체 (자동 전환 금지, 조사 대상)
+SELECT id, status, updated_at FROM protection_orders
+ WHERE status IN ('SUBMITTING','SUBMITTED')
+   AND updated_at < now() - interval '10 minutes';
+
+-- 6) action 예산 / fee snapshot — DB가 아니라 /api/executor/gmx-api/status의
+--   actionBudget·feeEstimate 필드로 확인한다 (canonical snapshot remaining 기준).
+--   기대값: remaining 조회 가능 + expiresAt 미래. remaining < 4(최소 안전 예산)면
+--   OPEN 구조적 차단 상태가 정상이다 (owner 재서명 전 확대 금지).
+```
+
 ### reset 이후 NO_TRADE가 정상임을 명시
 
 reset 직후 Worker는 PAPER 진입 전 `PAPER_GMX_ESTIMATE` 비용 스냅샷 확보를

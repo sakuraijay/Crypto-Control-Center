@@ -54,19 +54,47 @@ import { evaluateActivationGate, type ActivationGateInput } from './relayActivat
 // ── 주문 요청 (worker 수치 → GMX 1e30/1e6 문자열 변환은 여기서 단일 규칙) ──────
 
 export interface GmxOrderRequest {
-  kind: 'OPEN' | 'CLOSE';
+  kind: 'OPEN' | 'CLOSE' | 'STOP_LOSS';
   symbol: string;
   marketAddress: string;
   isLong: boolean;
   sizeUsd: number;
-  /** OPEN에서만 사용 — CLOSE는 0 */
+  /** OPEN에서만 사용 — CLOSE/STOP_LOSS는 0 */
   collateralUsd: number;
   mainWallet: string;
   subaccountAddress: string;
+  /**
+   * STOP_LOSS 전용 — GMX 가격 정밀도(10^(30-indexTokenDecimals))로 이미 변환된
+   * 십진 문자열. 호출측(usdPriceToGmxString)이 단일 규칙으로 변환한다.
+   * STOP_LOSS인데 부재/0 = 즉시 차단 (fail-closed).
+   */
+  triggerPriceGmx?: string;
+  /** STOP_LOSS 전용 — acceptablePrice (동일 정밀도 문자열) */
+  acceptablePriceGmx?: string;
 }
 
 export function orderKindOf(req: Pick<GmxOrderRequest, 'kind'>): string {
-  return req.kind === 'OPEN' ? 'MarketIncrease' : 'MarketDecrease';
+  if (req.kind === 'OPEN') return 'MarketIncrease';
+  if (req.kind === 'STOP_LOSS') return 'StopLossDecrease';
+  return 'MarketDecrease';
+}
+
+/**
+ * 6H-2B §2 — USD 가격 → GMX 가격 정밀도(10^(30-tokenDecimals)) 십진 문자열.
+ * 공식 SDK convertToContractPrice 규칙과 동일. 부동소수 오차 방지를 위해
+ * 소수 12자리 고정 후 BigInt 스케일링.
+ */
+export function usdPriceToGmxString(priceUsd: number, indexTokenDecimals: number): string {
+  if (!Number.isFinite(priceUsd) || priceUsd <= 0) throw new Error('가격 비정상 — 변환 거부');
+  if (!Number.isInteger(indexTokenDecimals) || indexTokenDecimals < 0 || indexTokenDecimals > 30) {
+    throw new Error('indexTokenDecimals 비정상 — 변환 거부');
+  }
+  const fixed = priceUsd.toFixed(12); // "1234.000000000000"
+  const [intPart, fracPart] = fixed.split('.');
+  const scaled = BigInt(intPart + fracPart); // ×1e12
+  const exp = 30 - indexTokenDecimals - 12;
+  if (exp < 0) throw new Error('가격 정밀도 변환 불가 (tokenDecimals > 18) — 거부');
+  return (scaled * 10n ** BigInt(exp)).toString();
 }
 
 /** worker USD 수치 → 1e30 십진 문자열 (요청·검증 양쪽 동일 규칙) */
@@ -95,7 +123,11 @@ export function buildOrderPrepareBody(req: GmxOrderRequest): Record<string, unkn
     collateralToken: USDC_ADDRESS,
     // 출력·수취는 main wallet으로만 (§5) — subaccount/제3자 수취 금지
     receiver: req.mainWallet,
-    ...(req.kind === 'CLOSE' ? { receiveToken: USDC_ADDRESS } : {}),
+    ...(req.kind !== 'OPEN' ? { receiveToken: USDC_ADDRESS } : {}),
+    // STOP_LOSS — trigger 가격 필수 동봉 (부재 시 executeViaGmxApi가 사전 차단)
+    ...(req.kind === 'STOP_LOSS'
+      ? { triggerPrice: req.triggerPriceGmx ?? '0', acceptablePrice: req.acceptablePriceGmx ?? '0' }
+      : {}),
   };
 }
 
@@ -147,8 +179,8 @@ function collectFieldValues(v: unknown, key: string, out: unknown[]): void {
   }
 }
 
-/** GMX OrderType enum — MarketIncrease=2, MarketDecrease=4 */
-const ORDER_TYPE_ENUM: Record<string, number> = { MarketIncrease: 2, MarketDecrease: 4 };
+/** GMX OrderType enum — MarketIncrease=2, MarketDecrease=4, StopLossDecrease=6 (SDK 1.7.0) */
+const ORDER_TYPE_ENUM: Record<string, number> = { MarketIncrease: 2, MarketDecrease: 4, StopLossDecrease: 6 };
 
 /**
  * 6G-2 리뷰(Critical) 반영 — typed data message의 의미 필드를 canonical 요청과
@@ -202,6 +234,26 @@ export function verifyOrderSemanticBinding(
     const okStr = typeof t === 'string' && t === expectKind;
     if (!okNum && !okStr) {
       return { ok: false, reason: `typed data orderType(${String(t)})이 요청(${expectKind})과 불일치 — 서명 금지` };
+    }
+  }
+
+  // triggerPrice — STOP_LOSS는 필수·전 출현이 요청값과 일치, market 주문은 0만 허용
+  const triggers: unknown[] = [];
+  collectFieldValues(message, 'triggerPrice', triggers);
+  if (req.kind === 'STOP_LOSS') {
+    const expectTrigger = req.triggerPriceGmx ?? '';
+    if (!/^[1-9][0-9]*$/.test(expectTrigger)) {
+      return { ok: false, reason: 'STOP_LOSS 요청에 triggerPrice 부재/0 — 서명 금지' };
+    }
+    if (triggers.length === 0) return { ok: false, reason: 'typed data에 triggerPrice 부재 — stop 결속 불가, 서명 금지' };
+    for (const t of triggers) {
+      if (String(t) !== expectTrigger) {
+        return { ok: false, reason: `typed data triggerPrice(${String(t)}) ≠ 요청(${expectTrigger}) — 서명 금지` };
+      }
+    }
+  } else {
+    for (const t of triggers) {
+      if (String(t) !== '0') return { ok: false, reason: 'market 주문 typed data에 triggerPrice≠0 — 서명 금지' };
     }
   }
 
@@ -524,13 +576,18 @@ export async function executeViaGmxApi(input: ExecuteViaGmxApiInput): Promise<Ex
     return blocked(['subaccount가 delegated signer 주소와 불일치 — 차단 (fail-closed)']);
   }
 
-  // CLOSE — 포지션 증거 필수 (§5): 없거나 초과 청산이면 prepare 0회
-  if (req.kind === 'CLOSE') {
+  // CLOSE/STOP_LOSS — 포지션 증거 필수 (§5): 없거나 초과 청산이면 prepare 0회
+  if (req.kind === 'CLOSE' || req.kind === 'STOP_LOSS') {
     const pos = input.openPosition ?? null;
-    if (!pos) return blocked(['열린 포지션 확인 실패/없음 — CLOSE prepare·submit 0회 (fail-closed)']);
-    if (pos.marketAddress.toLowerCase() !== req.marketAddress.toLowerCase()) return blocked(['CLOSE market 불일치 — 차단']);
-    if (pos.isLong !== req.isLong) return blocked(['CLOSE 방향(isLong) 불일치 — 차단']);
-    if (req.sizeUsd > pos.sizeUsd + 1e-9) return blocked([`CLOSE size $${req.sizeUsd} > 열린 포지션 $${pos.sizeUsd} — 초과 청산 금지`]);
+    if (!pos) return blocked([`열린 포지션 확인 실패/없음 — ${req.kind} prepare·submit 0회 (fail-closed)`]);
+    if (pos.marketAddress.toLowerCase() !== req.marketAddress.toLowerCase()) return blocked([`${req.kind} market 불일치 — 차단`]);
+    if (pos.isLong !== req.isLong) return blocked([`${req.kind} 방향(isLong) 불일치 — 차단`]);
+    if (req.sizeUsd > pos.sizeUsd + 1e-9) return blocked([`${req.kind} size $${req.sizeUsd} > 열린 포지션 $${pos.sizeUsd} — 초과 청산 금지`]);
+  }
+  // STOP_LOSS — trigger 가격 사전 검증 (양의 정수 문자열 아니면 prepare 0회)
+  if (req.kind === 'STOP_LOSS') {
+    if (!/^[1-9][0-9]*$/.test(req.triggerPriceGmx ?? '')) return blocked(['STOP_LOSS triggerPrice 부재/0 — prepare 0회 (fail-closed)']);
+    if (!/^[0-9]+$/.test(req.acceptablePriceGmx ?? '')) return blocked(['STOP_LOSS acceptablePrice 부재 — prepare 0회 (fail-closed)']);
   }
 
   // §7 allowance/잔액 게이트 (readonly) — gate 통과가 먼저다: 플래그 꺼져 있으면
@@ -587,7 +644,8 @@ function makeFlowInput(input: ExecuteViaGmxApiInput, approval: StoredApprovalFor
   return {
     transport,
     activation: input.activation,
-    kind: req.kind,
+    // STOP_LOSS는 위험감소 주문 — durable flow/activation gate에는 CLOSE 계열로 취급
+    kind: req.kind === 'OPEN' ? 'OPEN' as const : 'CLOSE' as const,
     intentId: input.intentId,
     approvalSessionId: null,
     // 6G-3 §3 — 외부 prepare 호출 전에 결정되는 flow idempotency key.

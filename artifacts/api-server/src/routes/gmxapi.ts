@@ -29,7 +29,10 @@ import { getActiveRevokeSession } from '../lib/revokeSession';
 import { resolveGmxLiveRelayConfig } from '../lib/gmxLiveConfig';
 import { isDelegatedSignerEnabled, isSignerInitialized } from '../lib/delegatedSigner';
 import { isLiveTestExecutionLocked } from '../lib/liveTestGate';
-import { isEmergencyStopActive, isReconciled, isStopExecutionAvailable, STOP_EXECUTION_UNAVAILABLE } from '../workers/liveTestExecutor';
+import { isEmergencyStopActive, isReconciled, isStopExecutionAvailable, getStopExecutionCapability, STOP_EXECUTION_UNAVAILABLE } from '../workers/liveTestExecutor';
+import { listActiveProtections, PROTECTION_BLOCKING_SET } from '../lib/protectionOrders';
+import { evaluateActionBudget } from '../lib/actionBudget';
+import { EXECUTION_ELIGIBLE_MAX_AGE_MS } from '../lib/costSnapshot';
 import { listUncovered } from '../lib/stopLossPlan';
 import { loadStopCoverage } from '../workers/liveTestExecutor';
 import { getWorkerStatus } from '../workers/aiWorker';
@@ -201,6 +204,41 @@ async function buildGmxApiStatusSnapshot() {
   // 비용 스냅샷 능력 — readonly 조회 경로 활성 필수 (§3; zero-fee/고정 모델 경로는 코드에서 제거됨)
   if (!readonlyEnabled) blockedReasons.push('COST_DATA_UNAVAILABLE — readonly 비용 조회 경로 비활성');
 
+  // ── 6H-2B §12 — 보호 주문(durable protection) 관측값 (조회 전용) ────────────
+  const stopCapability = getStopExecutionCapability();
+  let protectionCounts: Record<string, number> | null = null;
+  let blockingProtectionCount: number | null = null;
+  let staleStopCount: number | null = null;
+  let emergencyCloseInProgressCount: number | null = null;
+  try {
+    const listed = await listActiveProtections();
+    if (listed.ok) {
+      protectionCounts = {};
+      let blocking = 0; let stale = 0; let emergency = 0;
+      const nowMs = Date.now();
+      for (const r of listed.rows) {
+        protectionCounts[r.status] = (protectionCounts[r.status] ?? 0) + 1;
+        if ((PROTECTION_BLOCKING_SET as readonly string[]).includes(r.status)) blocking += 1;
+        // stale: SUBMITTING/SUBMITTED가 10분 이상 정체 = 조사 대상 (자동 전환 없음)
+        const updated = r.updatedAt ? new Date(r.updatedAt).getTime() : nowMs;
+        if ((r.status === 'SUBMITTING' || r.status === 'SUBMITTED') && nowMs - updated > 10 * 60_000) stale += 1;
+        if (r.purpose === 'EMERGENCY_CLOSE') emergency += 1;
+      }
+      blockingProtectionCount = blocking;
+      staleStopCount = stale;
+      emergencyCloseInProgressCount = emergency;
+    }
+  } catch { /* null 유지 (fail-closed 표시) */ }
+  if (blockingProtectionCount === null) blockedReasons.push('보호 주문 상태 조회 실패 (fail-closed)');
+  else if (blockingProtectionCount > 0) blockedReasons.push(`차단 상태 보호 주문 ${blockingProtectionCount}건 — 해소 전 신규 OPEN 금지`);
+  // §7 — action 예산 (canonical remaining 기준, 표시 전용)
+  const actionBudget = evaluateActionBudget({
+    remaining: snap?.remaining ?? null,
+    expiresAt: snap?.expiresAt ?? null,
+    nowMs: Date.now(),
+  });
+  if (!actionBudget.sufficient) blockedReasons.push(`action 예산 부족/조회불가 — ${actionBudget.reasons[0] ?? ''}`);
+
   // readyForControlledCanary — 전 항목 파생값의 논리곱 (fail-closed; 어느 하나
   // null/false면 false). 현 단계는 submissionEnabled=false라 항상 false.
   const readyForControlledCanary =
@@ -210,7 +248,8 @@ async function buildGmxApiStatusSnapshot() {
     blockingIntents === 0 && (unresolvedCount ?? 1) === 0 && revoke === false &&
     gmxConfigOk && dv.ok && feeEstimateFresh &&
     stopExecutionAvailable && uncoveredStopCount === 0 && settlementComplete &&
-    legacyZeroFeeCount === 0 && unsettledLiveTradeCount === 0;
+    legacyZeroFeeCount === 0 && unsettledLiveTradeCount === 0 &&
+    blockingProtectionCount === 0 && (staleStopCount ?? 1) === 0 && actionBudget.sufficient;
 
   return {
     transportGen: GMX_API_TRANSPORT_GEN,
@@ -248,6 +287,24 @@ async function buildGmxApiStatusSnapshot() {
     recentGmxTasks,
     // ── 6H-2A §10 — canary 적격 조건 확장 관측값 ─────────────────────────────
     stopExecutionAvailable,
+    // ── 6H-2B §12 — stop capability·보호 주문·action 예산 관측값 ─────────────
+    stopCapability: {
+      available: stopCapability.available,
+      reasons: stopCapability.reasons,
+      evaluatedAt: stopCapability.evaluatedAt,
+      schemaPin: { sdk: '@gmx-io/sdk@1.7.0', stopLossDecrease: 6 },
+    },
+    protectionCounts,
+    blockingProtectionCount,
+    staleStopCount,
+    emergencyCloseInProgressCount,
+    actionBudget: {
+      sufficient: actionBudget.sufficient,
+      remainingActions: actionBudget.remainingActions,
+      requiredActions: actionBudget.requiredActions,
+      reasons: actionBudget.reasons,
+    },
+    executionEligibleCostMaxAgeMs: EXECUTION_ELIGIBLE_MAX_AGE_MS,
     uncoveredStopCount,
     settlementReconcile,
     legacyZeroFeeCount,

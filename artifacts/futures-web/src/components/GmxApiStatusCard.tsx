@@ -207,6 +207,38 @@ export function GmxApiStatusCard() {
                 ? `완료 (stale ${s.prepareStartupReconciliation.stalePreparedFailed} · 불명 ${s.prepareStartupReconciliation.requestedToUnresolved} · 보류 ${s.prepareStartupReconciliation.apiPreparedHeld})`
                 : '실패 — LIVE 차단')
               : '미시도 — LIVE 차단'} />
+          {/* ── 6H-2B §12 — stop 실행 능력·보호 주문·action 예산 (조회 전용) ── */}
+          <Row label="Stop 실행 능력"
+            tone={s.stopCapability?.available ? 'ok' : 'muted'}
+            value={s.stopCapability
+              ? `${s.stopCapability.available ? '가능' : '불가'}${s.stopCapability.available ? '' : ` — ${s.stopCapability.reasons[0] ?? ''}`}`
+              : String(s.stopExecutionAvailable ?? false)} />
+          {s.stopCapability && (
+            <Row label="Stop 스키마 pin" tone="muted"
+              value={`${s.stopCapability.schemaPin.sdk} · StopLossDecrease=${s.stopCapability.schemaPin.stopLossDecrease}`} />
+          )}
+          <Row label="보호 주문 (차단/전체)"
+            tone={s.blockingProtectionCount === null || s.blockingProtectionCount === undefined ? 'warn'
+              : s.blockingProtectionCount > 0 ? 'error' : 'ok'}
+            value={s.blockingProtectionCount === null || s.blockingProtectionCount === undefined
+              ? '조회 실패'
+              : `${s.blockingProtectionCount} / ${Object.values(s.protectionCounts ?? {}).reduce((a, b) => a + b, 0)}`} />
+          <Row label="Stale stop / 비상종료 진행"
+            tone={(s.staleStopCount ?? 1) > 0 || (s.emergencyCloseInProgressCount ?? 0) > 0 ? 'warn' : 'ok'}
+            value={`${s.staleStopCount ?? '조회 실패'} / ${s.emergencyCloseInProgressCount ?? '조회 실패'}`} />
+          {s.actionBudget && (
+            <Row label="Action 예산 (잔여/필요)"
+              tone={s.actionBudget.sufficient ? 'ok' : 'error'}
+              value={s.actionBudget.remainingActions === null
+                ? `조회 실패 — ${s.actionBudget.reasons[0] ?? ''}`
+                : `${s.actionBudget.remainingActions} / ${s.actionBudget.requiredActions}${s.actionBudget.sufficient ? '' : ' — 부족 (자동 확대 금지)'}`} />
+          )}
+          <Row label="Stop 미확보 포지션"
+            tone={(s.uncoveredStopCount ?? 1) > 0 ? 'error' : 'ok'}
+            value={s.uncoveredStopCount === null || s.uncoveredStopCount === undefined ? '조회 실패' : String(s.uncoveredStopCount)} />
+          {s.executionEligibleCostMaxAgeMs !== undefined && (
+            <Row label="실행 적격 비용 창" tone="muted" value={`${Math.round(s.executionEligibleCostMaxAgeMs / 1000)}초 (표시 cache와 별도)`} />
+          )}
         </div>
       )}
 

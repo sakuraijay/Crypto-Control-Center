@@ -56,6 +56,10 @@ export const ORDER_TYPE = {
   LimitIncrease: 3n,
   MarketDecrease: 4n,
   LimitDecrease: 5n,
+  // 6H-2B §2 — 공식 @gmx-io/sdk@1.7.0 OrderType enum과 동일 (골든 테스트로 고정)
+  StopLossDecrease: 6n,
+  Liquidation: 7n,
+  StopIncrease: 8n,
 } as const;
 
 export const DECREASE_POSITION_SWAP_TYPE = {
@@ -289,6 +293,49 @@ export function buildCloseOrderParams(input: BuildOrderInput): CreateOrderParams
     isLong: input.isLong,
     shouldUnwrapNativeToken: false,
     autoCancel: false,
+    referralCode: ZERO_BYTES32,
+    dataList: [],
+  };
+}
+
+/**
+ * STOP-LOSS — StopLossDecrease (6H-2B §2). reduce-only 감소 주문:
+ *  - triggerPrice > 0 필수 (0이면 즉시 거부 — market 주문으로 오인 금지)
+ *  - initialCollateralDeltaAmount는 감소 주문 담보 인출량 (0 허용)
+ *  - receiver/cancellationReceiver = main account 강제, swapPath 금지
+ *  - autoCancel=true: 포지션 전체 청산 시 GMX가 잔여 stop 자동 취소 (공식 SDK Order 필드)
+ */
+export function buildStopLossOrderParams(
+  input: BuildOrderInput & { triggerPrice: bigint },
+): CreateOrderParams {
+  assertCommon(input);
+  if (input.triggerPrice <= 0n) throw new Error('StopLossDecrease는 triggerPrice > 0 필수');
+  if (input.initialCollateralDeltaAmount < 0n) throw new Error('담보 인출량 음수 불가');
+  return {
+    addresses: {
+      receiver: input.mainAccount,
+      cancellationReceiver: input.mainAccount,
+      callbackContract: ZERO_ADDRESS,
+      uiFeeReceiver: ZERO_ADDRESS,
+      market: input.market,
+      initialCollateralToken: input.collateralToken,
+      swapPath: [],
+    },
+    numbers: {
+      sizeDeltaUsd: input.sizeDeltaUsd,
+      initialCollateralDeltaAmount: input.initialCollateralDeltaAmount,
+      triggerPrice: input.triggerPrice,
+      acceptablePrice: input.acceptablePrice,
+      executionFee: input.executionFee,
+      callbackGasLimit: 0n,
+      minOutputAmount: 0n,
+      validFromTime: 0n,
+    },
+    orderType: ORDER_TYPE.StopLossDecrease,
+    decreasePositionSwapType: DECREASE_POSITION_SWAP_TYPE.NoSwap,
+    isLong: input.isLong,
+    shouldUnwrapNativeToken: false,
+    autoCancel: true,
     referralCode: ZERO_BYTES32,
     dataList: [],
   };

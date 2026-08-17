@@ -348,6 +348,42 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         ADD COLUMN IF NOT EXISTS net_pnl_estimated_usd   numeric(18,8);
     `,
   },
+  {
+    name: "0023_protection_orders",
+    sql: `
+      -- 6H-2B §3 — durable 보호 주문 모델 (additive).
+      CREATE TABLE IF NOT EXISTS protection_orders (
+        id                    text PRIMARY KEY,
+        parent_open_intent_id text NOT NULL,
+        position_key          text NOT NULL,
+        purpose               text NOT NULL,
+        symbol                text NOT NULL,
+        market_address        text NOT NULL,
+        is_long               boolean NOT NULL,
+        size_delta_usd        numeric(18,4) NOT NULL,
+        trigger_price_usd     numeric(18,8),
+        acceptable_price_usd  numeric(18,8),
+        day_key               text NOT NULL,
+        status                text NOT NULL,
+        request_id            text,
+        order_key             text,
+        typed_data_digest     text,
+        evidence              text,
+        error                 text,
+        submit_attempts       integer NOT NULL DEFAULT 0,
+        created_at            timestamptz NOT NULL DEFAULT now(),
+        updated_at            timestamptz NOT NULL DEFAULT now()
+      );
+      -- position/purpose당 활성(non-terminal) 보호 주문 정확히 1개 (DB 강제)
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_protection_active
+        ON protection_orders (position_key, purpose)
+        WHERE status IN ('PLANNED','PREPARED','SUBMITTING','SUBMITTED','ACTIVE','UNRESOLVED','FROZEN');
+      CREATE INDEX IF NOT EXISTS idx_protection_parent
+        ON protection_orders (parent_open_intent_id);
+      CREATE INDEX IF NOT EXISTS idx_protection_status
+        ON protection_orders (status);
+    `,
+  },
   // Add future migrations here in chronological order.
 ];
 

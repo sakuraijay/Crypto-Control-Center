@@ -1,0 +1,52 @@
+import { pgTable, text, integer, boolean, numeric, timestamp } from "drizzle-orm/pg-core";
+
+/**
+ * protection_orders — 6H-2B §3 durable 보호 주문(stop/emergency close) 모델.
+ *
+ * 상태 모델 (terminal 역행 금지, 조건부 UPDATE로만 전이):
+ *   PLANNED    — OPEN 확정 후 보호 주문 계획 저장됨 (prepare 이전).
+ *   PREPARED   — GMX API prepare 응답·결속 검증 통과, digest 확보.
+ *   SUBMITTING — 제출 시도 직전 커밋 (재시작 시 UNRESOLVED 취급).
+ *   SUBMITTED  — relay 제출 수락 (requestId 확보). 아직 ACTIVE 아님.
+ *   ACTIVE     — 온체인 OrderCreated/GMX 공식 증거로 orderKey 확인 후에만.
+ *   EXECUTED   — stop 체결 확인 (terminal).
+ *   CANCELLED  — 취소 온체인 확인 (terminal).
+ *   UNRESOLVED — 상태 불명 (자동 재제출 금지, 운영자/증거 해소 전 신규 OPEN 차단).
+ *   FROZEN     — GMX OrderFrozen 관측 (체결 여부 불확실 — 차단).
+ *
+ * position/purpose당 활성(non-terminal) 보호 주문은 정확히 1개 —
+ * 부분 unique index(uq_protection_active)로 DB에서 강제한다.
+ */
+export const protectionOrdersTable = pgTable("protection_orders", {
+  /** protectionId — 결정적 idempotency key (예: prot:<intentId>:INITIAL_STOP) */
+  id:                 text("id").primaryKey(),
+  /** 이 보호 주문이 지키는 OPEN intent id */
+  parentOpenIntentId: text("parent_open_intent_id").notNull(),
+  /** GMX position key 참조 (market:isLong:collateral 파생 또는 intent 기반 ref) */
+  positionKey:        text("position_key").notNull(),
+  purpose:            text("purpose").notNull(), // INITIAL_STOP | PROFIT_FLOOR_STOP | EMERGENCY_CLOSE
+  symbol:             text("symbol").notNull(),
+  marketAddress:      text("market_address").notNull(),
+  isLong:             boolean("is_long").notNull(),
+  sizeDeltaUsd:       numeric("size_delta_usd", { precision: 18, scale: 4 }).notNull(),
+  triggerPriceUsd:    numeric("trigger_price_usd", { precision: 18, scale: 8 }),
+  acceptablePriceUsd: numeric("acceptable_price_usd", { precision: 18, scale: 8 }),
+  /** Manila 운영일 키 (UTC 날짜부) */
+  dayKey:             text("day_key").notNull(),
+  status:             text("status").notNull(),
+  /** GMX API requestId (제출 수락 증거) */
+  requestId:          text("request_id"),
+  /** 온체인 OrderCreated orderKey (ACTIVE 증거) */
+  orderKey:           text("order_key"),
+  /** 서버 재계산 typed data digest */
+  typedDataDigest:    text("typed_data_digest"),
+  /** 판정 근거 요약 (sanitized) */
+  evidence:           text("evidence"),
+  error:              text("error"),
+  submitAttempts:     integer("submit_attempts").notNull().default(0),
+  createdAt:          timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt:          timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type ProtectionOrderRow = typeof protectionOrdersTable.$inferSelect;
+export type NewProtectionOrderRow = typeof protectionOrdersTable.$inferInsert;

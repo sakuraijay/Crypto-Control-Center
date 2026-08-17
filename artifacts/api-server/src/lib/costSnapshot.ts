@@ -65,6 +65,35 @@ export const MAX_POSITIVE_IMPACT_OFFSET_FRACTION = 0.2;
 /** 스냅샷 유효기간 기본값 (ms) */
 export const COST_SNAPSHOT_TTL_MS = 60_000;
 
+/**
+ * 6H-2B §10 — 실행 적격(execution-eligible) 최대 age.
+ * 표시/분석용 cache(10분)는 주문 적격성 판단에 절대 사용 금지 —
+ * OPEN prepare 직전에 이 창(30초) 안의 스냅샷만 인정한다.
+ */
+export const EXECUTION_ELIGIBLE_MAX_AGE_MS = 30_000;
+
+/** §10 — 위험감소(reduce/close) 주문이 비용 확보 실패로 나아갈 때의 상태 태그 */
+export const UNRESOLVED_SAFETY_EXIT = 'UNRESOLVED_SAFETY_EXIT';
+
+/**
+ * §10 — 실행 적격성 검증: 일반 validateCostSnapshot 전체 + fetchedAt 30초 창.
+ * 재조회 실패·초과 = OPEN 차단 (fail-closed). 위험감소 주문은 호출측에서
+ * UNRESOLVED_SAFETY_EXIT로 계속 진행하되 상태를 남긴다.
+ */
+export function validateExecutionEligibleSnapshot(
+  snap: CostSnapshot | null | undefined,
+  expected: CostSnapshotExpectation,
+  nowMs: number,
+): CostValidation {
+  const base = validateCostSnapshot(snap, expected, nowMs);
+  if (!base.ok) return base;
+  const fetched = Date.parse((snap as CostSnapshot).fetchedAt);
+  if (nowMs - fetched > EXECUTION_ELIGIBLE_MAX_AGE_MS) {
+    return { ok: false, reason: `실행 적격 초과: 스냅샷 age ${(nowMs - fetched) / 1000}s > ${EXECUTION_ELIGIBLE_MAX_AGE_MS / 1000}s — 재조회 필요 (fail-closed)` };
+  }
+  return base;
+}
+
 /** 오류 메시지 새니타이즈 — URL/토큰 패턴 제거 (§13.14) */
 export function sanitizeCostError(msg: string): string {
   return msg

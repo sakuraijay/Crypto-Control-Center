@@ -45,6 +45,26 @@ export interface GmxApiStatusView {
     txHash: string | null; updatedAt: string | null;
   }> | null;
   readyForControlledCanary: boolean;
+  // 6H-2B §12 — stop capability·보호 주문·action 예산 (조회 전용; null = 조회 실패)
+  stopExecutionAvailable?: boolean;
+  stopCapability?: {
+    available: boolean;
+    reasons: string[];
+    evaluatedAt: string | null;
+    schemaPin: { sdk: string; stopLossDecrease: number };
+  };
+  protectionCounts?: Record<string, number> | null;
+  blockingProtectionCount?: number | null;
+  staleStopCount?: number | null;
+  emergencyCloseInProgressCount?: number | null;
+  actionBudget?: {
+    sufficient: boolean;
+    remainingActions: number | null;
+    requiredActions: number;
+    reasons: string[];
+  };
+  uncoveredStopCount?: number | null;
+  executionEligibleCostMaxAgeMs?: number;
   // 6G-3 §7 — prepare 단계 관측 (조회 전용; null = 조회 실패, "미설정" 위장 금지)
   prepareStageCounts: Record<string, number> | null;
   oldestBlockingTaskAt: string | null;

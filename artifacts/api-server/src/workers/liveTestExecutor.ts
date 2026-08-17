@@ -52,7 +52,7 @@ import {
 } from '../lib/intentReconciler';
 import { resolveGmxEventEmitterAddress } from '../lib/gmxOrderEvents';
 import { enforceOrderSizing } from '../lib/orderSizingEnforcement';
-import type { CostSnapshot } from '../lib/costSnapshot';
+import { validateExecutionEligibleSnapshot, type CostSnapshot } from '../lib/costSnapshot';
 import { listUncovered, type StopCoverageMap, type StopCoverageRecord } from '../lib/stopLossPlan';
 import { isGmxLiveRelayConfigured, resolveGmxLiveRelayConfig } from '../lib/gmxLiveConfig';
 // ── 6G-2 §5 — 공식 GMX API v2 실행 경로 (legacy writeContract 경로 대체) ──────
@@ -72,6 +72,10 @@ import { getActiveRevokeSession } from '../lib/revokeSession';
 import { getGmxPrepareStartupState } from '../lib/gmxApiPrepareStartup';
 import { countBlockingIntentsOrNull } from '../lib/executionIntents';
 import { fetchServerOpenPositions } from '../routes/gmx';
+// ── 6H-2B §11 — stop 실행 능력 파생 게이트 ──────────────────────────────────
+import { deriveStopExecutionCapability, type StopCapabilityResult } from '../lib/stopExecutionCapability';
+import { evaluateActionBudget } from '../lib/actionBudget';
+import { listBlockingProtections } from '../lib/protectionOrders';
 
 /**
  * DEPRECATED — legacy SubaccountRouter 직접 주문 경로 (multicall/sendTokens/createOrder).
@@ -396,16 +400,77 @@ export async function fetchAuthoritativeOpenPositions(): Promise<OpenPositionEvi
 export const STOP_EXECUTION_UNAVAILABLE = 'STOP_EXECUTION_UNAVAILABLE';
 
 /**
- * stop(trigger) 주문 제출 경로 구현 여부.
- * 현재 GMX API 실행 경로는 MarketIncrease/MarketDecrease만 지원하며
- * StopLossDecrease trigger 주문 스키마는 미구현 → 구조적으로 false.
- * "포지션 오픈 후 stop 심기"를 가정한 낙관 처리 금지 — 실제(비시뮬) OPEN은
- * 이 능력이 확보되기 전까지 fail-closed로 차단된다.
+ * 6H-2B §11 — stop 실행 능력은 상수가 아니라 실제 조건에서 파생한다.
+ * deriveStopExecutionCapability(순수 함수)에 서버 상태를 공급해 캐시하며,
+ * 어떤 조건도 낙관 기본값을 갖지 않는다 (초기값 = 미평가 → false).
+ * 현 Production(서명·제출 잠금)에서는 available=false가 정상.
  */
-let _stopExecutionAvailable = false;
-export function isStopExecutionAvailable(): boolean { return _stopExecutionAvailable; }
-export function __setStopExecutionAvailabilityForTests(v: boolean): void {
-  _stopExecutionAvailable = v;
+let _stopCapability: StopCapabilityResult & { evaluatedAt: string | null } = {
+  available: false,
+  reasons: ['stop 실행 능력 미평가 — refreshStopExecutionCapability 필요 (fail-closed)'],
+  evaluatedAt: null,
+};
+/** 테스트 전용 강제 override (null = 파생값 사용) */
+let _stopCapabilityTestOverride: boolean | null = null;
+
+export function isStopExecutionAvailable(): boolean {
+  if (_stopCapabilityTestOverride !== null) return _stopCapabilityTestOverride;
+  return _stopCapability.available;
+}
+export function getStopExecutionCapability(): StopCapabilityResult & { evaluatedAt: string | null } {
+  return _stopCapability;
+}
+export function __setStopExecutionAvailabilityForTests(v: boolean | null): void {
+  _stopCapabilityTestOverride = v;
+}
+
+/**
+ * §11 — 실제 조건에서 stop 실행 능력 재평가. 조회 실패 = 해당 조건 false.
+ * 어느 경로에서도 상수 true를 주입하지 않는다.
+ */
+export async function refreshStopExecutionCapability(): Promise<StopCapabilityResult> {
+  // durable 저장소 + 차단 보호 주문
+  let blockingProtectionCount: number | null = null;
+  let durableStoreOk = false;
+  try {
+    const listed = await listBlockingProtections();
+    if (listed.ok) { durableStoreOk = true; blockingProtectionCount = listed.rows.length; }
+  } catch { /* fail-closed */ }
+  // coverage (기존 worker_state 상태 머신)
+  let uncoveredCount: number | null = null;
+  try {
+    const cov = await loadStopCoverage();
+    if (cov.ok) uncoveredCount = listUncovered(cov.map).length;
+  } catch { /* fail-closed */ }
+  // action 예산 — canonical snapshot remaining (§7)
+  const snap = getCanonicalSnapshot();
+  const budget = evaluateActionBudget({
+    remaining: snap?.remaining ?? null,
+    expiresAt: snap?.expiresAt ?? null,
+    nowMs: Date.now(),
+  });
+  // fee freshness — 저장 스냅샷 (10분 활성 게이트와 동일 소스; 실행 직전 30초
+  // 재확인은 executeLiveTestOrder의 validateExecutionEligibleSnapshot이 담당)
+  const fe = getFeeEstimateState();
+  const freshFeeQuote = fe.attempted && fe.ok && fe.atMs !== null && Date.now() - fe.atMs < 10 * 60_000;
+  let noBlockingIntents = false;
+  try { noBlockingIntents = !(await hasBlockingIntents()); } catch { /* fail-closed */ }
+
+  const derived = deriveStopExecutionCapability({
+    schemaVerified: true, // §2 골든 테스트로 고정된 StopLossDecrease=6 빌더 존재
+    transportConfigured: isGmxLiveRelayConfigured() && resolveGmxEventEmitterAddress().ok,
+    signerReady: isDelegatedSignerEnabled() && isSignerInitialized(),
+    durableStoreOk,
+    reconciliationOk: _reconciled && noBlockingIntents,
+    actionBudgetSufficient: budget.sufficient,
+    actionBudgetRemaining: budget.remainingActions,
+    freshFeeQuote,
+    uncoveredCount,
+    blockingProtectionCount,
+    executionUnlocked: !isLiveTestExecutionLocked() && !_emergencyStop,
+  });
+  _stopCapability = { ...derived, evaluatedAt: new Date().toISOString() };
+  return derived;
 }
 
 /**
@@ -567,6 +632,8 @@ let _intentReconcileTimer: ReturnType<typeof setInterval> | null = null;
  * - 오류는 전부 흡수 (Worker 중단 금지). 차단 해소는 온체인 증거로만.
  */
 export async function runPeriodicIntentReconciliation(): Promise<void> {
+  // §11 — stop 실행 능력 주기 재평가 (실패해도 Worker 계속, 능력은 fail-closed 유지)
+  try { await refreshStopExecutionCapability(); } catch { /* fail-closed 유지 */ }
   try {
     if (!(await hasBlockingIntents())) return;
     const summary = await reconcileBlockingIntentsOnchain();
@@ -901,6 +968,23 @@ export async function executeLiveTestOrder(params: LiveOrderParams): Promise<Liv
   // 이후 모든 단계(intent·prepare 요청·expected echo 결속)는 서버 최종값 사용
   const finalSizeUsd = enf.finalNotionalUsd;
   const finalCollateralUsd = enf.finalCollateralUsd;
+
+  // ── 6H-2B §10 — OPEN prepare 직전 실행 적격(30초) 비용 스냅샷 재확인 ──────
+  // 표시용 cache(10분)는 여기서 절대 사용 금지 — sizingContext의 스냅샷이
+  // 30초 창을 벗어났으면 OPEN 차단 (재조회는 aiWorker 다음 사이클 몫, fail-closed).
+  {
+    const eligible = validateExecutionEligibleSnapshot(
+      params.sizingContext.costSnapshot,
+      {
+        market: params.marketAddress, isLong: params.isLong,
+        orderType: 'MarketIncrease', notionalUsd: finalSizeUsd,
+      },
+      Date.now(),
+    );
+    if (!eligible.ok) {
+      return sizingFail(`[LIVE TEST] 실행 적격 비용 스냅샷 확인 실패 — ${eligible.reason} — OPEN 차단 (fail-closed)`);
+    }
+  }
 
   // legacy calldata 빌드 제거됨 (6G-2 §5) — 주문 payload는 GMX API prepare가 생성한다.
 
