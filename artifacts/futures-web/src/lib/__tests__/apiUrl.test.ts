@@ -4,10 +4,10 @@
  *  - absolute URL·protocol-relative·path traversal 거부.
  *  - `/futures-web/api/...` 생성 0건 정적 가드 (소스 스캔).
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { apiUrl, apiUrlWithQuery, readApiJson, API_ROUTE_MISMATCH_MESSAGE } from '../apiUrl';
+import { apiUrl, apiUrlWithQuery, readApiJson, API_ROUTE_MISMATCH_MESSAGE, postApiJson } from '../apiUrl';
 
 describe('apiUrl', () => {
   it('선행 슬래시 유무와 무관하게 /api/... 를 만든다', () => {
@@ -86,5 +86,48 @@ describe('정적 가드 — `${BASE_URL}api/` 패턴 0건', () => {
     };
     walk(root);
     expect(offenders).toEqual([]);
+  });
+});
+
+describe('postApiJson — JSON 계약 강제 (6E-6)', () => {
+  const fetchMock = vi.fn();
+  beforeEach(() => { fetchMock.mockReset(); vi.stubGlobal('fetch', fetchMock.mockResolvedValue({ ok: true })); });
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it('기본: POST /api/..., content-type/accept JSON, body {}', async () => {
+    await postApiJson('executor/relay/readiness/refresh', { headers: { 'x-operator-pin': '123456' } });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('/api/executor/relay/readiness/refresh');
+    expect(init.method).toBe('POST');
+    expect(init.headers['content-type']).toBe('application/json');
+    expect(init.headers['accept']).toBe('application/json');
+    expect(init.headers['x-operator-pin']).toBe('123456');
+    expect(init.body).toBe('{}');
+  });
+
+  it('caller가 Content-Type/Accept(대소문자 불문)를 덮어쓸 수 없다', async () => {
+    await postApiJson('x/y', { headers: { 'Content-Type': 'text/plain', ACCEPT: 'text/html', 'content-type': 'multipart/form-data' } });
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init.headers['content-type']).toBe('application/json');
+    expect(init.headers['accept']).toBe('application/json');
+    expect(Object.keys(init.headers).filter((k: string) => k.toLowerCase() === 'content-type')).toHaveLength(1);
+    expect(Object.keys(init.headers).filter((k: string) => k.toLowerCase() === 'accept')).toHaveLength(1);
+  });
+
+  it('body는 정확히 JSON.stringify 결과 — payload 필드 보존, PIN 미포함', async () => {
+    await postApiJson('executor/relay/revoke/signature', {
+      headers: { 'x-operator-pin': '654321' },
+      body: { sessionId: 's-1', signature: '0xabc' },
+    });
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init.body).toBe(JSON.stringify({ sessionId: 's-1', signature: '0xabc' }));
+    expect(init.body).not.toContain('654321');
+  });
+
+  it('method PUT/PATCH 지원, 자동 retry 없음(fetch 1회)', async () => {
+    await postApiJson('a/b', { method: 'PATCH', body: { v: 1 } });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][1].method).toBe('PATCH');
   });
 });

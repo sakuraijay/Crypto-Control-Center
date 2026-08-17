@@ -88,13 +88,17 @@ export async function postApiJson(
     headers?: Record<string, string>;
   },
 ): Promise<Response> {
+  // caller header를 먼저 정규화(lowercase)하고, JSON 계약 헤더는 마지막에 강제 설정 —
+  // 'Content-Type' 등 대소문자 변형으로도 caller가 JSON 계약을 덮어쓸 수 없다.
+  const headers: Record<string, string> = {};
+  for (const [k, v] of Object.entries(options?.headers ?? {})) {
+    headers[k.toLowerCase()] = v;
+  }
+  headers['content-type'] = 'application/json';
+  headers['accept'] = 'application/json';
   return fetch(apiUrl(path), {
     method: options?.method ?? 'POST',
-    headers: {
-      'content-type': 'application/json',
-      accept: 'application/json',
-      ...(options?.headers ?? {}),
-    },
+    headers,
     body: JSON.stringify(options?.body ?? {}),
   });
 }
