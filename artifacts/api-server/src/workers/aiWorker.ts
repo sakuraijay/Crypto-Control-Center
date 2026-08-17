@@ -1054,6 +1054,17 @@ class WorkerManager {
       });
 
       // ── RiskEngine 강제 (6H-1) — LONG/SHORT 결정 veto + 레버리지 클램프 ────
+      // CLOSE_ALL_POSITIONS 액션 시 결정 유형과 무관하게 CASH로 강제 —
+      // CASH는 하위 실행 경로(LIVE TEST 청산·자동 실행)에서 전량 청산을 트리거한다.
+      if (riskEval?.actions.includes('CLOSE_ALL_POSITIONS') && engineResult.operatingState !== 'CASH') {
+        const reasons = riskEval.blockReasons.join('; ') || 'RiskEngine 강제 청산';
+        engineResult.operatingState = 'CASH';
+        engineResult.riskApproved = false;
+        engineResult.riskVetoReason = `[RISK_ENGINE] 강제 청산 — ${reasons}`;
+        engineResult.sizeUsd = undefined;
+        engineResult.leverage = undefined;
+        console.warn(`[AIWorker] 사이클 #${cycleNum} RiskEngine CLOSE_ALL — ${reasons}`);
+      }
       if (engineResult.operatingState === 'LONG' || engineResult.operatingState === 'SHORT') {
         if (!riskEntryAllowed) {
           const reasons = riskEval?.blockReasons.join('; ') ?? 'RiskEngine 상태 미수립 (fail-closed)';
@@ -1087,7 +1098,8 @@ class WorkerManager {
         this.lastLiveTestVetoReason = null;
       }
 
-      // 상태 업데이트
+      // 상태 업데이트 — 청산 방향 판정을 위해 갱신 전 상태를 먼저 캡처
+      const stateBeforeCycle = this.prevState;
       this.prevState = engineResult.operatingState;
 
       // 전체 결정 객체 조립
@@ -1109,7 +1121,7 @@ class WorkerManager {
 
       // LIVE TEST 자율 실행 (운영자 반복 승인 없음 — 별도 실행 경로)
       if (testModeActive && isLiveMode) {
-        void this.tryLiveTestExecution(decision, analyses, liveTestData, paperState, limits, cycleNum);
+        void this.tryLiveTestExecution(decision, analyses, liveTestData, paperState, limits, cycleNum, stateBeforeCycle);
       }
 
       this.lastCycleAt = new Date();
@@ -1167,6 +1179,9 @@ class WorkerManager {
     paperState:   { liveTestAccumLossUsd: number; liveTestDbOk: boolean },
     limits:       RiskLimits,
     cycleNum:     number,
+    /** 이번 사이클 결정이 반영되기 전의 운영 상태 — CASH 청산 방향 판정용.
+     *  this.prevState는 이 시점에 이미 이번 결정으로 덮여 있어 사용 금지. */
+    stateBeforeCycle: AiOperatingState = 'CASH',
   ): Promise<void> {
     try {
       const { operatingState, primarySymbol } = decision;
@@ -1215,8 +1230,8 @@ class WorkerManager {
           );
         }
       } else if (operatingState === 'CASH' && liveTestData.positionCount > 0) {
-        // CASH 신호 + 열린 포지션 존재 → 직전 방향 기준으로 청산 시도
-        const prevIsLong = this.prevState === 'LONG';
+        // CASH 신호 + 열린 포지션 존재 → 직전(이번 결정 반영 전) 방향 기준으로 청산 시도
+        const prevIsLong = stateBeforeCycle === 'LONG';
 
         const result = await closeLiveTestPosition({
           decisionId:      decision.id,

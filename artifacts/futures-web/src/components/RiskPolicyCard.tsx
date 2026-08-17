@@ -19,7 +19,7 @@ interface RiskPolicyResponse {
     absoluteProfitCapPercent: number;
     protectedProfitFloorPercent: number;
     baseRiskPerTradePercent: number;
-    absoluteMaxRiskPerTradePercent: number;
+    maxRiskPerTradePercent: number;
     defensiveModeLossPercent: number;
     dailyMaxLossPercent: number;
     weeklyMaxLossPercent: number;
@@ -30,9 +30,13 @@ interface RiskPolicyResponse {
     maxConcurrentPositions: number;
     maxDailyEntries: number;
     maxConsecutiveLosses: number;
-    timezone: string;
+    tradingTimezone: string;
   };
-  canary: { maxNotionalUsd: number; maxLossUsd: number; maxLeverage: number };
+  canary: {
+    canaryMaxCapitalAtRiskUsd: number;
+    canaryMaxCumulativeLossUsd: number;
+    canaryMaxLeverage: number;
+  };
   autoPromotionAllowed: boolean;
   derived: {
     primaryProfitTargetUsd: number;
@@ -137,7 +141,7 @@ export function RiskPolicyCard() {
     ['일일 목표 (+5%)', `$${d.primaryProfitTargetUsd.toFixed(0)} — 달성 시 신규 진입 금지`],
     ['일일 절대 상한 (+10%)', `$${d.absoluteProfitCapUsd.toFixed(0)} — 전량 청산 + 당일 잠금`],
     ['이익 보호 floor (+3.5%)', `$${d.protectedProfitFloorUsd.toFixed(0)} — 후퇴 시 전량 종료`],
-    ['거래당 위험', `$${d.baseRiskPerTradeUsd.toFixed(2)} 기본 · $${d.absoluteMaxRiskPerTradeUsd.toFixed(2)} 최대 (${p.baseRiskPerTradePercent}%/${p.absoluteMaxRiskPerTradePercent}%)`],
+    ['거래당 위험', `$${d.baseRiskPerTradeUsd.toFixed(2)} 기본 · $${d.absoluteMaxRiskPerTradeUsd.toFixed(2)} 최대 (${p.baseRiskPerTradePercent}%/${p.maxRiskPerTradePercent}%)`],
     ['Defensive Mode (-2%)', `-$${d.defensiveModeLossUsd.toFixed(0)} — size 50% · 2x · 잔여 1회`],
     ['일일 손실 한도 (-3%)', `-$${d.dailyMaxLossUsd.toFixed(0)} — 당일 거래 종료`],
     ['주간 손실 한도 (-8%)', `-$${d.weeklyMaxLossUsd.toFixed(0)} — 주간 잠금 (일일 reset 무관)`],
@@ -146,8 +150,8 @@ export function RiskPolicyCard() {
     ['동시 포지션 / 일일 진입', `${p.maxConcurrentPositions}개 / ${p.maxDailyEntries}회`],
     ['연속 손실 중단', `${p.maxConsecutiveLosses}회`],
     ['금지 사항', '마틴게일 · 물타기 · 추격 진입 · 자동 복리'],
-    ['거래일 기준', `${p.timezone} 00:00 (주간: 월요일)`],
-    ['LIVE Canary 한도', `notional ≤ $${canary.maxNotionalUsd} · 손실 ≤ $${canary.maxLossUsd} · ${canary.maxLeverage}x · 수동 승인`],
+    ['거래일 기준', `${p.tradingTimezone} 00:00 (주간: 월요일)`],
+    ['LIVE Canary 한도', `자본 ≤ $${canary.canaryMaxCapitalAtRiskUsd} · 누적손실 ≤ $${canary.canaryMaxCumulativeLossUsd} · ${canary.canaryMaxLeverage}x · 수동 승인`],
     ['자동 승급', data.autoPromotionAllowed ? '허용' : '금지 (운영자 명시 승인 필요)'],
   ];
 
