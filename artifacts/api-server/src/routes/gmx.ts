@@ -417,6 +417,25 @@ function isValidAddress(addr: string): boolean {
 }
 
 /**
+ * 6G-2 §5 — CLOSE 실행 전 열린 포지션 증거 (온체인 PositionReader, 권위 소스).
+ * 조회 실패 = null (호출부는 fail-closed로 CLOSE 차단해야 한다).
+ * fetchServerLiveTestData와 달리 캐시 없이 실조회 — CLOSE는 즉시성이 중요하다.
+ */
+export async function fetchServerOpenPositions(): Promise<
+  { marketAddress: string; isLong: boolean; sizeUsd: number }[] | null
+> {
+  const walletAddress = process.env.GMX_WALLET_ADDRESS?.toLowerCase() ?? '';
+  if (!walletAddress || !isValidAddress(walletAddress)) return null;
+  const positions = await fetchFromRpc(walletAddress);
+  if (positions === null) return null;
+  return positions.map((p) => ({
+    marketAddress: p.market,
+    isLong: p.isLong,
+    sizeUsd: Number(p.sizeInUsd) / 1e30,
+  }));
+}
+
+/**
  * Primary (and only): read positions on-chain via GMX V2 PositionReader on Arbitrum.
  * Uses viem for proper ABI decode. liquidationPrice is not available on-chain
  * without oracle data, so it is left null.

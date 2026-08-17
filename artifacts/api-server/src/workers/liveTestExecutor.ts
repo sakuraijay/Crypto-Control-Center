@@ -18,12 +18,10 @@
  *     LIVE_TEST_EXECUTION_LOCKED=false 설정 (Replit Secrets)
  */
 
-import { encodeFunctionData } from 'viem';
 import { db, workerStateTable } from '@workspace/db';
 import { eq } from 'drizzle-orm';
 import {
   getSignerAddress,
-  getSignerWalletClient,
   getSignerEthBalance,
 } from '../lib/delegatedSigner';
 import {
@@ -53,7 +51,23 @@ import {
   type IntentResolution,
 } from '../lib/intentReconciler';
 import { resolveGmxEventEmitterAddress } from '../lib/gmxOrderEvents';
-import { isGmxLiveRelayConfigured } from '../lib/gmxLiveConfig';
+import { isGmxLiveRelayConfigured, resolveGmxLiveRelayConfig } from '../lib/gmxLiveConfig';
+// ── 6G-2 §5 — 공식 GMX API v2 실행 경로 (legacy writeContract 경로 대체) ──────
+import { createGmxApiTransport, type GmxApiTransport } from '../lib/gmxApiTransport';
+import {
+  executeViaGmxApi,
+  buildActivationInput,
+  type OpenPositionEvidence,
+} from '../lib/gmxApiExecution';
+import type { ActivationGateInput } from '../lib/relayActivationGate';
+import {
+  getCanonicalSnapshot,
+  getDeploymentVerificationState,
+  getFeeEstimateState,
+} from '../lib/relayActivationStatus';
+import { getActiveRevokeSession } from '../lib/revokeSession';
+import { countBlockingIntentsOrNull } from '../lib/executionIntents';
+import { fetchServerOpenPositions } from '../routes/gmx';
 
 /**
  * DEPRECATED — legacy SubaccountRouter 직접 주문 경로 (multicall/sendTokens/createOrder).
@@ -68,23 +82,7 @@ export function assertLegacyOrderPathAllowed(): void {
     throw new Error('[DEPRECATED] legacy SubaccountRouter 주문 경로는 Production에서 차단됨 — 최신 SubaccountGelatoRelayRouter relay 경로 필요');
   }
 }
-import {
-  SUBACCOUNT_ROUTER_ABI,
-  USDC_ADDRESS,
-  ZERO_ADDRESS,
-  ZERO_BYTES32,
-  GMX_ORDER_TYPE,
-  GMX_DECREASE_SWAP_TYPE,
-  getSubaccountRouterAddress,
-  getOrderVaultAddress,
-  getExecutionFeeWei,
-  usdSizeToGmx,
-  usdToUsdcWei,
-  acceptablePriceLong,
-  acceptablePriceShort,
-  acceptablePriceCloseLong,
-  acceptablePriceCloseShort,
-} from '../lib/gmxContracts';
+import { USDC_ADDRESS } from '../lib/gmxContracts';
 
 // ── 감사로그 키 ────────────────────────────────────────────────────────────────
 const AUDIT_LOG_KEY     = 'orderAuditLog';
@@ -309,6 +307,165 @@ export async function reconcileOnRestart(): Promise<void> {
 
 export function isReconciled(): boolean { return _reconciled; }
 
+// ── 6G-2 §5·§6 — 공식 GMX API v2 실행 경로 배선 ───────────────────────────────
+
+/** 테스트 주입용 transport override (production은 env 파생 transport 고정) */
+let _gmxApiTransportOverride: GmxApiTransport | null = null;
+export function __setGmxApiTransportForTests(t: GmxApiTransport | null): void {
+  _gmxApiTransportOverride = t;
+}
+function getGmxApiTransport(): GmxApiTransport {
+  return _gmxApiTransportOverride ?? createGmxApiTransport(process.env);
+}
+
+/** 테스트 주입용 CLOSE 포지션 증거 조회 override */
+let _openPositionsFetchOverride: (() => Promise<OpenPositionEvidence[] | null>) | null = null;
+export function __setOpenPositionsFetchForTests(
+  f: (() => Promise<OpenPositionEvidence[] | null>) | null,
+): void {
+  _openPositionsFetchOverride = f;
+}
+
+/**
+ * §6 — activation gate 입력을 실제 파생값으로 조립 (조회 실패 = 차단).
+ * UI/localStorage 입력은 없다: canonical/deployment/fee/revoke/blocking 전부
+ * 서버 저장 스냅샷·DB에서만 파생한다.
+ */
+async function buildExecutorActivationInput(args: {
+  kind: 'OPEN' | 'CLOSE';
+  liveTestMode: boolean;
+  dbOk: boolean;
+  rpcOk: boolean;
+}): Promise<ActivationGateInput> {
+  const snap = getCanonicalSnapshot();
+  const canonicalAuthorized = !!snap && snap.confirmed && snap.isSubaccountListed === true;
+  let approvalRemainingOk = false;
+  if (snap?.remaining && snap?.expiresAt) {
+    try {
+      approvalRemainingOk =
+        BigInt(snap.remaining) > 0n && Number(snap.expiresAt) * 1000 > Date.now();
+    } catch { approvalRemainingOk = false; }
+  }
+  let blockingIntentCount: number | null = null;
+  try { blockingIntentCount = await countBlockingIntentsOrNull(); } catch { blockingIntentCount = null; }
+  let revoke = true; // 조회 실패 = revoke 진행 중으로 간주 (차단)
+  try { revoke = (await getActiveRevokeSession()) !== null; } catch { revoke = true; }
+  // fee freshness — 저장된 fee estimate 스냅샷만 (10분 이내, mock 불인정)
+  const fe = getFeeEstimateState();
+  const freshLiveFeeQuote =
+    fe.attempted && fe.ok && fe.atMs !== null && Date.now() - fe.atMs < 10 * 60_000;
+
+  return buildActivationInput({
+    env: process.env,
+    liveTestMode: args.liveTestMode,
+    emergencyStopActive: _emergencyStop,
+    reconciled: _reconciled,
+    canonicalAuthorized,
+    approvalRemainingOk,
+    blockingIntentCount,
+    activeRevokeInProgress: revoke,
+    freshLiveFeeQuote,
+    gmxConfigOk: resolveGmxLiveRelayConfig().ok,
+    deploymentVerified: getDeploymentVerificationState().ok,
+    dbOk: args.dbOk,
+    rpcOk: args.rpcOk,
+    kind: args.kind,
+  });
+}
+
+/**
+ * §5 — OPEN/CLOSE 공통: durable intent 생성 이후의 GMX API v2 흐름 실행 +
+ * intent/감사로그 영속. legacy writeContract 경로는 LEGACY_DISABLED로 폐기됨.
+ */
+async function runGmxApiOrderPath(args: {
+  kind: 'OPEN' | 'CLOSE';
+  intentId: string;
+  entryId: string;
+  executedAt: string;
+  gateChecks: Record<string, boolean>;
+  liveTestMode: boolean;
+  dbOk: boolean;
+  rpcOk: boolean;
+  decisionId: string;
+  cycleNumber: number;
+  symbol: string;
+  marketAddress: string;
+  isLong: boolean;
+  sizeUsd: number;
+  collateralUsd: number;
+  mainAddress: string;
+  openPosition: OpenPositionEvidence | null;
+}): Promise<LiveOrderResult> {
+  const orderType = args.kind === 'OPEN' ? 'MarketIncrease' : 'MarketDecrease';
+  const audit = (
+    status: AuditLogEntry['status'],
+    error: string | null,
+    orderKey: string | null = null,
+  ): Promise<boolean> =>
+    appendAuditLog({
+      id: args.entryId, decisionId: args.decisionId, cycleNumber: args.cycleNumber,
+      symbol: args.symbol, orderType, isLong: args.isLong,
+      sizeUsd: args.sizeUsd, collateralUsd: args.collateralUsd,
+      txHash: null, orderKey, status, error,
+      simulated: false, gateChecks: args.gateChecks,
+      submittedAt: args.executedAt, confirmedAt: null,
+    });
+
+  const transport = getGmxApiTransport();
+  const activation = await buildExecutorActivationInput({
+    kind: args.kind, liveTestMode: args.liveTestMode, dbOk: args.dbOk, rpcOk: args.rpcOk,
+  });
+  const canonicalNonce = (() => {
+    const snap = getCanonicalSnapshot();
+    if (!snap?.approvalNonce) return null;
+    try { return BigInt(snap.approvalNonce); } catch { return null; }
+  })();
+
+  const res = await executeViaGmxApi({
+    transport,
+    req: {
+      kind: args.kind, symbol: args.symbol, marketAddress: args.marketAddress,
+      isLong: args.isLong, sizeUsd: args.sizeUsd,
+      collateralUsd: args.kind === 'OPEN' ? args.collateralUsd : 0,
+      mainWallet: args.mainAddress, subaccountAddress: getSignerAddress() ?? '',
+    },
+    intentId: args.intentId,
+    activation,
+    reevaluateActivation: () => buildExecutorActivationInput({
+      kind: args.kind, liveTestMode: args.liveTestMode, dbOk: args.dbOk, rpcOk: args.rpcOk,
+    }),
+    openPosition: args.openPosition,
+    canonicalNonce,
+  });
+
+  const reason = res.blockReasons.join('; ') || null;
+
+  if (res.finalStatus === 'TASK_ACCEPTED' && res.submitted) {
+    // 제출 수락 — orderKey 자리에 GMX requestId 참조 저장 (txHash는 reconciler가 확보).
+    // intent는 PREPARED로 유지: 온체인 확정 전 신규 주문 차단(fail-closed),
+    // 해소는 gmxApiStatusReconciler가 relay task 증거로 수행한다.
+    const audited = await audit('SUBMITTED', null, res.gmxRequestId ? `gmxreq:${res.gmxRequestId}` : null);
+    if (!audited) {
+      _reconciled = false;
+      return { ok: false, txHash: null, orderKey: null, simulated: false, error: '[LIVE TEST] 제출 수락됐으나 감사로그 저장 실패 — 신규 주문 차단', executedAt: args.executedAt };
+    }
+    console.info(`[LiveTestExecutor] ✅ GMX API 제출 수락 — ${args.symbol} ${orderType} requestId=${res.gmxRequestId ?? '?'}`);
+    return { ok: true, txHash: null, orderKey: res.gmxRequestId ? `gmxreq:${res.gmxRequestId}` : null, simulated: false, executedAt: args.executedAt };
+  }
+
+  if (res.finalStatus === 'UNRESOLVED') {
+    await markIntentUnresolved(args.intentId, reason ?? 'GMX API 제출 결과 불명');
+    _reconciled = false; // 상태불명 → 신규 주문 즉시 차단
+    await audit('UNRESOLVED', reason);
+    return { ok: false, txHash: null, orderKey: null, simulated: false, error: reason ?? 'UNRESOLVED', executedAt: args.executedAt };
+  }
+
+  // 제출 미도달 확정 (게이트 차단·prepare/검증/서명 실패·4xx·429·사전 차단)
+  await markIntentFailedPreBroadcast(args.intentId, reason ?? '제출 미도달');
+  await audit('FAILED', reason);
+  return { ok: false, txHash: null, orderKey: null, simulated: false, error: reason ?? 'GMX API 흐름 차단', executedAt: args.executedAt };
+}
+
 // ── 주기적 온체인 intent reconciliation ────────────────────────────────────────
 
 let _intentReconcileTimer: ReturnType<typeof setInterval> | null = null;
@@ -522,86 +679,7 @@ export async function executeLiveTestOrder(params: LiveOrderParams): Promise<Liv
     return { ok: false, txHash: null, orderKey: null, simulated: false, error: gateResult.reason ?? 'Gate failed', gateResult, executedAt };
   }
 
-  // ── 1) calldata 빌드 (broadcast 이전 — 실패 시 intent 없이 FAILED 기록) ──
-  let sendTokensDataBuilt: `0x${string}`;
-  let createOrderDataBuilt: `0x${string}`;
-  let routerAddrBuilt: `0x${string}`;
-  let execFeeBuilt: bigint;
-  try {
-    const routerAddr  = getSubaccountRouterAddress();
-    const vaultAddr   = getOrderVaultAddress();
-    const execFee     = getExecutionFeeWei();
-    const collWei     = usdToUsdcWei(params.collateralUsd);
-    const sizeGmx     = usdSizeToGmx(params.sizeUsd);
-    const acceptPrice = params.isLong
-      ? acceptablePriceLong(params.currentPriceUsd)
-      : acceptablePriceShort(params.currentPriceUsd);
-
-    // 1. sendTokens calldata
-    const sendTokensData = encodeFunctionData({
-      abi: SUBACCOUNT_ROUTER_ABI,
-      functionName: 'sendTokens',
-      args: [
-        params.mainAddress as `0x${string}`,
-        USDC_ADDRESS as `0x${string}`,
-        vaultAddr,
-        collWei,
-      ],
-    });
-
-    // 2. createOrder calldata
-    const createOrderData = encodeFunctionData({
-      abi: SUBACCOUNT_ROUTER_ABI,
-      functionName: 'createOrder',
-      args: [
-        params.mainAddress as `0x${string}`,
-        {
-          addresses: {
-            receiver:              params.mainAddress as `0x${string}`,
-            cancellationReceiver:  params.mainAddress as `0x${string}`,
-            callbackContract:      ZERO_ADDRESS as `0x${string}`,
-            uiFeeReceiver:         ZERO_ADDRESS as `0x${string}`,
-            market:                params.marketAddress as `0x${string}`,
-            initialCollateralToken: USDC_ADDRESS as `0x${string}`,
-            swapPath:              [],
-          },
-          numbers: {
-            sizeDeltaUsd:                sizeGmx,
-            initialCollateralDeltaAmount: collWei,
-            triggerPrice:                0n,
-            acceptablePrice:             acceptPrice,
-            executionFee:                execFee,
-            callbackGasLimit:            0n,
-            minOutputAmount:             0n,
-            validFromTime:               0n,
-          },
-          orderType:                BigInt(GMX_ORDER_TYPE.MarketIncrease),
-          decreasePositionSwapType: BigInt(GMX_DECREASE_SWAP_TYPE.NoSwap),
-          isLong:                   params.isLong,
-          shouldUnwrapNativeToken:  false,
-          autoCancel:               false,
-          referralCode:             ZERO_BYTES32 as `0x${string}`,
-        },
-      ],
-    });
-
-    sendTokensDataBuilt  = sendTokensData;
-    createOrderDataBuilt = createOrderData;
-    routerAddrBuilt      = routerAddr;
-    execFeeBuilt         = execFee;
-  } catch (err: unknown) {
-    // calldata 빌드 실패 — broadcast 이전 확실 구간 (intent 미생성, 온체인 미도달)
-    const msg = (err as Error).message ?? 'Unknown build error';
-    console.error('[LiveTestExecutor] calldata 빌드 실패 (broadcast 이전):', msg);
-    await appendAuditLog({
-      id: entryId, decisionId: params.decisionId, cycleNumber: params.cycleNumber,
-      symbol: params.symbol, orderType: 'MarketIncrease', isLong: params.isLong,
-      sizeUsd: params.sizeUsd, collateralUsd: params.collateralUsd,
-      txHash: null, orderKey: null, status: 'FAILED', error: msg,
-      simulated: false, gateChecks: gateResult.checks, submittedAt: executedAt, confirmedAt: null,
-    });
-    return { ok: false, txHash: null, orderKey: null, simulated: false, error: msg, gateResult, executedAt };
-  }
+  // legacy calldata 빌드 제거됨 (6G-2 §5) — 주문 payload는 GMX API prepare가 생성한다.
 
   // ── 2) durable execution intent — writeContract 도달 전 PREPARED 커밋 필수 ──
   const intentId = buildIntentId(params.decisionId, 'open');
@@ -625,73 +703,17 @@ export async function executeLiveTestOrder(params: LiveOrderParams): Promise<Liv
     return { ok: false, txHash: null, orderKey: null, simulated: false, error: msg, gateResult, executedAt };
   }
 
-  // ── 3) 서명 클라이언트 생성 (로컬 — broadcast 이전 확실 구간) ──
-  let walletClient: ReturnType<typeof getSignerWalletClient>;
-  try {
-    walletClient = getSignerWalletClient(rpcUrl);
-  } catch (err: unknown) {
-    const msg = (err as Error).message ?? 'Wallet client init failed';
-    await markIntentFailedPreBroadcast(intentId, msg);
-    await appendAuditLog({
-      id: entryId, decisionId: params.decisionId, cycleNumber: params.cycleNumber,
-      symbol: params.symbol, orderType: 'MarketIncrease', isLong: params.isLong,
-      sizeUsd: params.sizeUsd, collateralUsd: params.collateralUsd,
-      txHash: null, orderKey: null, status: 'FAILED', error: msg,
-      simulated: false, gateChecks: gateResult.checks, submittedAt: executedAt, confirmedAt: null,
-    });
-    return { ok: false, txHash: null, orderKey: null, simulated: false, error: msg, gateResult, executedAt };
-  }
-
-  // ── 4) 온체인 제출 — 오류 시 broadcast 여부 불명 → UNRESOLVED (자동 FAILED 금지) ──
-  let txHash: `0x${string}`;
-  try {
-    assertLegacyOrderPathAllowed(); // DEPRECATED legacy 경로 — Production broadcast 차단
-    txHash = await walletClient.writeContract({
-      address:      routerAddrBuilt,
-      abi:          SUBACCOUNT_ROUTER_ABI,
-      functionName: 'multicall',
-      args:         [[sendTokensDataBuilt, createOrderDataBuilt]],
-      value:        execFeeBuilt,
-    });
-  } catch (err: unknown) {
-    const msg = (err as Error).message ?? 'Unknown execution error';
-    console.error('[LiveTestExecutor] 주문 제출 오류 — broadcast 여부 불명, UNRESOLVED 처리:', msg);
-    // 시간 경과·타임아웃·네트워크 오류를 FAILED로 단정하지 않는다.
-    // UNRESOLVED 전환 실패 시에도 PREPARED 행이 남아 차단은 유지된다.
-    await markIntentUnresolved(intentId, msg);
-    _reconciled = false; // 상태불명 intent 존재 → 신규 주문 즉시 차단
-    await appendAuditLog({
-      id: entryId, decisionId: params.decisionId, cycleNumber: params.cycleNumber,
-      symbol: params.symbol, orderType: 'MarketIncrease', isLong: params.isLong,
-      sizeUsd: params.sizeUsd, collateralUsd: params.collateralUsd,
-      txHash: null, orderKey: null, status: 'UNRESOLVED', error: msg,
-      simulated: false, gateChecks: gateResult.checks, submittedAt: executedAt, confirmedAt: null,
-    });
-    return { ok: false, txHash: null, orderKey: null, simulated: false, error: msg, gateResult, executedAt };
-  }
-
-  console.info(`[LiveTestExecutor] ✅ 주문 제출 — symbol=${params.symbol} isLong=${params.isLong} size=$${params.sizeUsd} txHash=${txHash}`);
-
-  // ── 5) intent SUBMITTED 전환 + 감사로그 (실패 시 fail-closed, PREPARED 보존) ──
-  const intentSubmitted = await markIntentSubmitted(intentId, txHash);
-  const entry: AuditLogEntry = {
-    id: entryId, decisionId: params.decisionId, cycleNumber: params.cycleNumber,
-    symbol: params.symbol, orderType: 'MarketIncrease', isLong: params.isLong,
+  // ── 3) 공식 GMX API v2 흐름 (§5) — prepare→검증→durable→서명→재게이트→submit 1회 ──
+  // legacy SubaccountRouter writeContract 경로는 LEGACY_DISABLED로 폐기됨.
+  const flowRes = await runGmxApiOrderPath({
+    kind: 'OPEN', intentId, entryId, executedAt, gateChecks: gateResult.checks,
+    liveTestMode: params.liveTestMode, dbOk: params.dbOk, rpcOk: Boolean(rpcUrl),
+    decisionId: params.decisionId, cycleNumber: params.cycleNumber, symbol: params.symbol,
+    marketAddress: params.marketAddress, isLong: params.isLong,
     sizeUsd: params.sizeUsd, collateralUsd: params.collateralUsd,
-    txHash, orderKey: null, status: 'SUBMITTED', error: null,
-    simulated: false, gateChecks: gateResult.checks,
-    submittedAt: executedAt, confirmedAt: null,
-  };
-  const audited = await appendAuditLog(entry);
-  if (!intentSubmitted || !audited) {
-    // 제출된 tx의 영속 기록(intent SUBMITTED 또는 감사로그)이 불완전하면
-    // 재시작 reconciliation이 PREPARED intent를 UNRESOLVED로 발견하고 차단한다.
-    _reconciled = false;
-    console.error(`[LiveTestExecutor] ⚠️ 제출 후 영속화 실패 (txHash=${txHash}, intent=${intentSubmitted}, audit=${audited}) — 신규 주문 차단 (fail-closed)`);
-    return { ok: false, txHash, orderKey: null, simulated: false, error: '[LIVE TEST] 주문은 제출되었으나 영속 기록 저장 실패 — 신규 주문 차단', gateResult, executedAt };
-  }
-
-  return { ok: true, txHash, orderKey: null, simulated: false, gateResult, executedAt };
+    mainAddress: params.mainAddress, openPosition: null,
+  });
+  return { ...flowRes, gateResult };
 }
 
 // ── 포지션 청산 (MarketDecrease) ───────────────────────────────────────────────
@@ -783,69 +805,7 @@ export async function closeLiveTestPosition(params: ClosePositionParams): Promis
     return { ok: false, txHash: null, orderKey: null, simulated: false, error: gateResult.reason ?? 'Gate failed', gateResult, executedAt };
   }
 
-  // ── 1) calldata 빌드 (broadcast 이전 — 실패 시 intent 없이 FAILED 기록) ──
-  let createOrderDataBuilt: `0x${string}`;
-  let routerAddrBuilt: `0x${string}`;
-  let execFeeBuilt: bigint;
-  try {
-    const routerAddr  = getSubaccountRouterAddress();
-    const execFee     = getExecutionFeeWei();
-    const sizeGmx     = usdSizeToGmx(params.sizeUsd);
-    const acceptPrice = params.isLong
-      ? acceptablePriceCloseLong(params.currentPriceUsd)
-      : acceptablePriceCloseShort(params.currentPriceUsd);
-
-    const createOrderData = encodeFunctionData({
-      abi: SUBACCOUNT_ROUTER_ABI,
-      functionName: 'createOrder',
-      args: [
-        params.mainAddress as `0x${string}`,
-        {
-          addresses: {
-            receiver: params.mainAddress as `0x${string}`,
-            cancellationReceiver: params.mainAddress as `0x${string}`,
-            callbackContract: ZERO_ADDRESS as `0x${string}`,
-            uiFeeReceiver: ZERO_ADDRESS as `0x${string}`,
-            market: params.marketAddress as `0x${string}`,
-            initialCollateralToken: USDC_ADDRESS as `0x${string}`,
-            swapPath: [],
-          },
-          numbers: {
-            sizeDeltaUsd: sizeGmx,
-            initialCollateralDeltaAmount: 0n,
-            triggerPrice: 0n,
-            acceptablePrice: acceptPrice,
-            executionFee: execFee,
-            callbackGasLimit: 0n,
-            minOutputAmount: 0n,
-            validFromTime: 0n,
-          },
-          orderType: BigInt(GMX_ORDER_TYPE.MarketDecrease),
-          decreasePositionSwapType: BigInt(GMX_DECREASE_SWAP_TYPE.SwapPnlTokenToCollateralToken),
-          isLong: params.isLong,
-          shouldUnwrapNativeToken: false,
-          autoCancel: false,
-          referralCode: ZERO_BYTES32 as `0x${string}`,
-        },
-      ],
-    });
-
-    createOrderDataBuilt = createOrderData;
-    routerAddrBuilt      = routerAddr;
-    execFeeBuilt         = execFee;
-  } catch (err: unknown) {
-    // calldata 빌드 실패 — broadcast 이전 확실 구간 (intent 미생성, 온체인 미도달)
-    const msg = (err as Error).message ?? 'Unknown build error';
-    console.error('[LiveTestExecutor] 청산 calldata 빌드 실패 (broadcast 이전):', msg);
-    await appendAuditLog({
-      id: entryId, decisionId: params.decisionId, cycleNumber: params.cycleNumber,
-      symbol: params.symbol, orderType: 'MarketDecrease', isLong: params.isLong,
-      sizeUsd: params.sizeUsd, collateralUsd: 0,
-      txHash: null, orderKey: null, status: 'FAILED', error: msg,
-      simulated: false, gateChecks: gateResult.checks, submittedAt: executedAt, confirmedAt: null,
-    });
-    return { ok: false, txHash: null, orderKey: null, simulated: false, error: msg, executedAt };
-  }
+  // legacy calldata 빌드 제거됨 (6G-2 §5) — 청산 payload는 GMX API prepare가 생성한다.
 
   // ── 2) durable execution intent — writeContract 도달 전 PREPARED 커밋 필수 ──
   const intentId = buildIntentId(params.decisionId, 'close');
@@ -869,66 +829,32 @@ export async function closeLiveTestPosition(params: ClosePositionParams): Promis
     return { ok: false, txHash: null, orderKey: null, simulated: false, error: msg, gateResult, executedAt };
   }
 
-  // ── 3) 서명 클라이언트 생성 (로컬 — broadcast 이전 확실 구간) ──
-  let walletClient: ReturnType<typeof getSignerWalletClient>;
+  // ── 3) CLOSE 포지션 증거 (§5) — 조회 실패/부재 = submit 금지 (executeViaGmxApi가 차단) ──
+  let openPosition: OpenPositionEvidence | null = null;
   try {
-    walletClient = getSignerWalletClient(rpcUrl);
-  } catch (err: unknown) {
-    const msg = (err as Error).message ?? 'Wallet client init failed';
-    await markIntentFailedPreBroadcast(intentId, msg);
-    await appendAuditLog({
-      id: entryId, decisionId: params.decisionId, cycleNumber: params.cycleNumber,
-      symbol: params.symbol, orderType: 'MarketDecrease', isLong: params.isLong,
-      sizeUsd: params.sizeUsd, collateralUsd: 0,
-      txHash: null, orderKey: null, status: 'FAILED', error: msg,
-      simulated: false, gateChecks: gateResult.checks, submittedAt: executedAt, confirmedAt: null,
-    });
-    return { ok: false, txHash: null, orderKey: null, simulated: false, error: msg, gateResult, executedAt };
+    const positions = _openPositionsFetchOverride
+      ? await _openPositionsFetchOverride()
+      : await fetchServerOpenPositions();
+    if (positions) {
+      openPosition = positions.find(
+        (p) => p.marketAddress.toLowerCase() === params.marketAddress.toLowerCase()
+          && p.isLong === params.isLong,
+      ) ?? null;
+    }
+  } catch {
+    openPosition = null; // 조회 실패 → 차단 (fail-closed)
   }
 
-  // ── 4) 온체인 제출 — 오류 시 broadcast 여부 불명 → UNRESOLVED (자동 FAILED 금지) ──
-  let txHash: `0x${string}`;
-  try {
-    assertLegacyOrderPathAllowed(); // DEPRECATED legacy 경로 — Production broadcast 차단
-    txHash = await walletClient.writeContract({
-      address: routerAddrBuilt,
-      abi: SUBACCOUNT_ROUTER_ABI,
-      functionName: 'multicall',
-      args: [[createOrderDataBuilt]],
-      value: execFeeBuilt,
-    });
-  } catch (err: unknown) {
-    const msg = (err as Error).message ?? 'Unknown error';
-    console.error('[LiveTestExecutor] 청산 제출 오류 — broadcast 여부 불명, UNRESOLVED 처리:', msg);
-    await markIntentUnresolved(intentId, msg);
-    _reconciled = false; // 상태불명 intent 존재 → 신규 주문 즉시 차단
-    await appendAuditLog({
-      id: entryId, decisionId: params.decisionId, cycleNumber: params.cycleNumber,
-      symbol: params.symbol, orderType: 'MarketDecrease', isLong: params.isLong,
-      sizeUsd: params.sizeUsd, collateralUsd: 0,
-      txHash: null, orderKey: null, status: 'UNRESOLVED', error: msg,
-      simulated: false, gateChecks: gateResult.checks, submittedAt: executedAt, confirmedAt: null,
-    });
-    return { ok: false, txHash: null, orderKey: null, simulated: false, error: msg, executedAt };
-  }
-
-  console.info(`[LiveTestExecutor] ✅ 청산 제출 — symbol=${params.symbol} txHash=${txHash}`);
-
-  // ── 5) intent SUBMITTED 전환 + 감사로그 (실패 시 fail-closed, PREPARED 보존) ──
-  const intentSubmitted = await markIntentSubmitted(intentId, txHash);
-  const audited = await appendAuditLog({
-    id: entryId, decisionId: params.decisionId, cycleNumber: params.cycleNumber,
-    symbol: params.symbol, orderType: 'MarketDecrease', isLong: params.isLong,
+  // ── 4) 공식 GMX API v2 흐름 (§5) — legacy writeContract 경로는 LEGACY_DISABLED로 폐기됨 ──
+  const flowRes = await runGmxApiOrderPath({
+    kind: 'CLOSE', intentId, entryId, executedAt, gateChecks: gateResult.checks,
+    liveTestMode: params.liveTestMode, dbOk: params.dbOk, rpcOk: Boolean(rpcUrl),
+    decisionId: params.decisionId, cycleNumber: params.cycleNumber, symbol: params.symbol,
+    marketAddress: params.marketAddress, isLong: params.isLong,
     sizeUsd: params.sizeUsd, collateralUsd: 0,
-    txHash, orderKey: null, status: 'SUBMITTED', error: null,
-    simulated: false, gateChecks: gateResult.checks, submittedAt: executedAt, confirmedAt: null,
+    mainAddress: params.mainAddress, openPosition,
   });
-  if (!intentSubmitted || !audited) {
-    _reconciled = false;
-    console.error(`[LiveTestExecutor] ⚠️ 청산 제출 후 영속화 실패 (txHash=${txHash}, intent=${intentSubmitted}, audit=${audited}) — 신규 주문 차단 (fail-closed)`);
-    return { ok: false, txHash, orderKey: null, simulated: false, error: '[LIVE TEST] 청산은 제출되었으나 영속 기록 저장 실패 — 신규 주문 차단', gateResult, executedAt };
-  }
-  return { ok: true, txHash, orderKey: null, simulated: false, gateResult, executedAt };
+  return { ...flowRes, gateResult };
 }
 
 // ── 서브계정 권한 철회 (서버 사이너가 직접 호출) ──────────────────────────────

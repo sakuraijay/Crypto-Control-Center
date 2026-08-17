@@ -8,6 +8,7 @@ import { reconcileOnRestart, loadEmergencyStopFromDb, startPeriodicIntentReconci
 import { resolveStaticDir, assertStaticDirReady, attachStaticServing } from "./lib/staticSite";
 import { parsePort } from "./lib/port";
 import { markNotReady, markReady } from "./lib/readiness";
+import { reconcileGmxApiTasksOnStartup, startPeriodicGmxApiReconciliation } from "./lib/gmxApiStatusReconciler";
 import { runStartupRelayReconciliation, isRelayReadonlyNetworkEnabled } from "./lib/relayActivationStatus";
 import { countBlockingIntentsOrNull } from "./lib/executionIntents";
 import { countOpenRelayTasksOrNull } from "./lib/relayLifecycle";
@@ -86,6 +87,10 @@ httpServer = app.listen(port, (err) => {
       reconcileOnRestart().catch(() => {});
       // 차단 intent 온체인 재판정 (차단 intent 없으면 no-op — PAPER 무영향)
       startPeriodicIntentReconciliation();
+
+      // 6G-2 §9 — GMX API v2 relay task reconciliation (readonly 플래그 꺼짐 = 외부 호출 0회)
+      reconcileGmxApiTasksOnStartup().catch(() => {});
+      startPeriodicGmxApiReconciliation();
 
       // Relay startup reconciliation (5단계 §8) — migration 이후 순서 고정.
       // 어떤 실패도 서버·Worker를 중단시키지 않는다. canonical readback은
