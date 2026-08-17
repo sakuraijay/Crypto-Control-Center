@@ -267,11 +267,11 @@ describe('6C — verifyDeployment: 코드 존재·decode·chainId (읽기 전용
     return {
       env,
       checkCanonical: async () => ({ confirmed: true, reason: null }),
-      listOpenTaskIds: async () => [],
+      listOpenTaskIds: async () => [] as { id: string; relayTaskId: string | null; transportGen: string }[],
       countAllocatedNonces: async () => 0,
       transport: {
-        quoteRelayFee: async () => ({ ok: true as const, estimatedFeeWei: 1n, quotedAtMs: 1 }),
-        getRelayTaskStatus: async () => ({ ok: true as const, taskState: 'ExecSuccess', transactionHash: null, blockNumber: null }),
+        getRelayTaskStatus: async () => ({ ok: true as const, statusCode: 200 as const, transactionHash: null, blockNumber: null }),
+        getSponsorBalance: async () => ({ ok: true as const, balance: 10n ** 18n, decimals: 18, unit: 'wei' }),
       },
       readonlyClient: client,
       nowMs: () => 9000,
@@ -280,6 +280,7 @@ describe('6C — verifyDeployment: 코드 존재·decode·chainId (읽기 전용
   const goodClient = () => ({
     getCode: async () => '0x6080deadbeef' as `0x${string}`,
     getChainId: async () => 42161,
+    getGasPrice: async () => 100_000_000n,
     readContract: async (args: { functionName: string }) =>
       args.functionName === 'digests' ? false : 0n,
   });
@@ -326,7 +327,7 @@ describe('6C — verifyDeployment: 코드 존재·decode·chainId (읽기 전용
   it('read-only 비활성 → RPC 0회 + 검증 fail-closed 기록', async () => {
     const spy = vi.fn();
     await performReadinessRefresh(deps(
-      { getCode: spy, getChainId: spy, readContract: spy } as never,
+      { getCode: spy, getChainId: spy, readContract: spy, getGasPrice: spy } as never,
       { ...MANIFEST_ENV } as NodeJS.ProcessEnv, // readonly 플래그 없음
     ));
     expect(spy).not.toHaveBeenCalled();

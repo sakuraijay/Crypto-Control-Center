@@ -243,6 +243,26 @@
   실제 RPC·Gelato·signer 저장소 호출 0회, fixture 키만 사용
 - LIVE 제출·네트워크 활성화는 여전히 구조적 차단 상태
 
+- GMX delegated trading 6F-2 (GMX 공식 fee 산정 + Gelato JSON-RPC 이전) — 완료:
+  - Gelato transport를 legacy REST(api.gelato.digital)에서 신형 JSON-RPC
+    (`https://api.gelato.cloud/rpc`, `X-API-Key`)로 전면 이전 — method
+    allowlist(read: relayer_getStatus·gelato_getBalance / submit:
+    relayer_sendTransaction), envelope(id 일치)·크기 상한·redirect 차단·
+    sanitize(코드 정수만) 강제, 자동 retry 0회
+  - fee 산정을 Gelato fee oracle에서 GMX 공식 방식으로 교체:
+    `gmxFeeEstimate.ts` — applyFactor(gasLimit×gasPrice, DataStore
+    multiplierFactor)+30% buffer, 입력 실패 시 fail-closed (fallback 금지);
+    quote는 chainId·relayRouter·payloadHash 결속 필수, mock/미결속 quote는
+    제출 검증에서 거부. 공식 pin은 docs/GMX_OFFICIAL_PIN.md 참조
+  - `relay_tasks.transport_gen` (migration 0018) — legacy 세대 task는 신형
+    조회 금지, UNRESOLVED_LEGACY_TRANSPORT로 고정 (자동 재제출 없음)
+  - readiness/activation에 §11 항목 추가: gelatoApiConfigured(boolean만),
+    transport 'JSON-RPC v0.0.10', fee estimate(fresh/unavailable),
+    sponsor balance(verified/insufficient/unverified) — 전부 fail-closed 표시
+  - futures-web RelayStatusCard에 §11 표시 반영
+  - `GELATO_API_KEY` Secret은 이번 단계에서 생성하지 않음 — 미설정 시 외부
+    fetch 0회. readyForControlledCanary=false 유지, LIVE 제출 구조적 차단 유지
+
 ## 절대 금지 사항
 
 - 메인 지갑 개인키·시드 문구·Secret 저장 또는 출력

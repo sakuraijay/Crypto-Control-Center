@@ -144,7 +144,7 @@ import {
   RELAY_TASK_STATUS, TERMINAL_STATUSES, isTransitionAllowed, createRelayTask, safeTransition,
   listUnresolvedTasks,
 } from '../lib/relayLifecycle';
-import { buildLiveFeeQuote, WETH_ARBITRUM, type RelayFeeQuote } from '../lib/relayFeeQuote';
+import { WETH_ARBITRUM, type RelayFeeQuote } from '../lib/relayFeeQuote';
 import {
   createGelatoHttpTransport, GELATO_HOST_ALLOWLIST, GELATO_API_KEY_SECRET_NAME,
   type RelayTransport, type SubmitResult, type TaskStatusResult,
@@ -168,14 +168,16 @@ function makeMockTransport(overrides?: {
 }): { transport: RelayTransport; calls: { quote: number; submit: number; status: number } } {
   const calls = { quote: 0, submit: 0, status: 0 };
   const transport: RelayTransport = {
-    async quoteRelayFee() { calls.quote++; return { ok: true, estimatedFeeWei: 10n ** 14n, quotedAtMs: Date.now() }; },
     async submitRelayTask() {
       calls.submit++;
-      return overrides?.submit ?? { ok: true, taskId: 'gelato-task-1' };
+      return overrides?.submit ?? { ok: true, taskId: `0x${'ab'.repeat(32)}` };
     },
     async getRelayTaskStatus() {
       calls.status++;
-      return overrides?.status ?? { ok: true, taskState: 'CheckPending', transactionHash: null, blockNumber: null };
+      return overrides?.status ?? { ok: true, statusCode: 100, transactionHash: null, blockNumber: null };
+    },
+    async getSponsorBalance() {
+      return { ok: true, balance: 10n ** 18n, decimals: 18, unit: 'wei' };
     },
   };
   return { transport, calls };
@@ -219,8 +221,16 @@ function fullActivation(overrides?: Partial<ActivationGateInput>): ActivationGat
   };
 }
 
+const FLOW_ROUTER = '0x2222222222222222222222222222222222222222' as const;
+const FLOW_PAYLOAD_HASH = `0x${'11'.repeat(32)}`;
+
 function liveQuote(nowMs: number): RelayFeeQuote {
-  return buildLiveFeeQuote({ estimatedFeeWei: 10n ** 14n, gasLimit: 3_000_000n, gasPrice: 20_000_000n, quotedAtMs: nowMs });
+  // 6F-2 — gmx_official_estimate + baseFlowInput과 일치하는 결속 필드
+  return {
+    feeToken: WETH_ARBITRUM, feeAmount: 10n ** 14n, gasLimit: 3_000_000n, gasPrice: 20_000_000n,
+    feeSwapPath: [], quotedAtMs: nowMs, source: 'gmx_official_estimate',
+    boundChainId: 42161, boundRelayRouter: FLOW_ROUTER, boundPayloadHash: FLOW_PAYLOAD_HASH,
+  };
 }
 
 function baseFlowInput(transport: RelayTransport, overrides?: Partial<SubmitFlowInput>): SubmitFlowInput {
@@ -229,9 +239,9 @@ function baseFlowInput(transport: RelayTransport, overrides?: Partial<SubmitFlow
     transport,
     activation: fullActivation(),
     chainId: 42161,
-    relayRouter: '0x2222222222222222222222222222222222222222',
+    relayRouter: FLOW_ROUTER,
     packedData: '0xdeadbeef',
-    payloadHash: `0x${'11'.repeat(32)}`,
+    payloadHash: FLOW_PAYLOAD_HASH,
     calldataHash: `0x${'22'.repeat(32)}`,
     idempotencyKey: `submit:OPEN:${Math.random()}`,
     kind: 'OPEN',
@@ -456,7 +466,7 @@ describe('runSubmitFlow — 원자적 제출 흐름 (§5)', () => {
   it('과다 fee(절대 상한 초과) → transport 0회', async () => {
     const { transport, calls } = makeMockTransport();
     const nowMs = Date.now();
-    const q = buildLiveFeeQuote({ estimatedFeeWei: 10n ** 18n, gasLimit: 1n, gasPrice: 1n, quotedAtMs: nowMs });
+    const q: RelayFeeQuote = { ...liveQuote(nowMs), feeAmount: 10n ** 18n, gasLimit: 1n, gasPrice: 1n };
     const r = await runSubmitFlow(baseFlowInput(transport, { quote: q, nowMs }));
     expect(r.submitted).toBe(false);
     expect(calls.submit).toBe(0);
@@ -514,9 +524,9 @@ describe('runSubmitFlow — 원자적 제출 흐름 (§5)', () => {
     expect(calls.submit).toBe(1);
     expect(r.transportCalls).toBe(1);
     expect(r.finalStatus).toBe(RELAY_TASK_STATUS.TASK_ACCEPTED);
-    expect(r.gelatoTaskId).toBe('gelato-task-1');
+    expect(r.gelatoTaskId).toBe(`0x${'ab'.repeat(32)}`);
     const row = store.tasks.find((t) => t.id === r.taskRowId);
-    expect(row?.relayTaskId).toBe('gelato-task-1');
+    expect(row?.relayTaskId).toBe(`0x${'ab'.repeat(32)}`);
     expect(row?.status).toBe(RELAY_TASK_STATUS.TASK_ACCEPTED);
   });
 
@@ -544,7 +554,7 @@ describe('runSubmitFlow — 원자적 제출 흐름 (§5)', () => {
     expect(r.blockReasons.join()).toContain('taskId 저장 실패');
     const row = store.tasks.find((t) => t.id === r.taskRowId);
     expect(row?.status).toBe(RELAY_TASK_STATUS.UNRESOLVED);
-    expect(row?.relayTaskId).toBe('gelato-task-1'); // 복구 시 taskId도 보존
+    expect(row?.relayTaskId).toBe(`0x${'ab'.repeat(32)}`); // 복구 시 taskId도 보존
   });
 
   it('taskId 저장 영구 실패 → DB는 SUBMITTING 잔존, 조사 대상(listUnresolvedTasks 포함)', async () => {
@@ -601,16 +611,16 @@ describe('runSubmitFlow — 원자적 제출 흐름 (§5)', () => {
 describe('relayTaskReconciler — task/온체인 결합 판정 (§7)', () => {
   const noOnchain = { event: null, txHash: null, orderKey: null, blockNumber: null } as const;
 
-  it('Gelato ExecSuccess만으로 CONFIRMED 금지 — TX_SUBMITTED까지', () => {
+  it('Gelato Success(200)만으로 CONFIRMED 금지 — TX_SUBMITTED까지', () => {
     const v = reconcileVerdict({
-      gelato: { taskState: 'ExecSuccess', transactionHash: '0xtx' }, onchain: noOnchain,
+      gelato: { statusCode: 200, transactionHash: '0xtx' }, onchain: noOnchain,
     });
     expect(v.to).toBe(RELAY_TASK_STATUS.TX_SUBMITTED);
   });
 
   it('온체인 OrderExecuted → CONFIRMED', () => {
     const v = reconcileVerdict({
-      gelato: { taskState: 'ExecSuccess', transactionHash: '0xtx' },
+      gelato: { statusCode: 200, transactionHash: '0xtx' },
       onchain: { event: 'ORDER_EXECUTED', txHash: '0xtx', orderKey: '0xkey', blockNumber: 100 },
     });
     expect(v.to).toBe(RELAY_TASK_STATUS.CONFIRMED);
@@ -619,7 +629,7 @@ describe('relayTaskReconciler — task/온체인 결합 판정 (§7)', () => {
 
   it('온체인 OrderCancelled → CANCELLED', () => {
     const v = reconcileVerdict({
-      gelato: { taskState: 'ExecSuccess', transactionHash: '0xtx' },
+      gelato: { statusCode: 200, transactionHash: '0xtx' },
       onchain: { event: 'ORDER_CANCELLED', txHash: '0xtx', orderKey: null, blockNumber: 100 },
     });
     expect(v.to).toBe(RELAY_TASK_STATUS.CANCELLED);
@@ -627,16 +637,16 @@ describe('relayTaskReconciler — task/온체인 결합 판정 (§7)', () => {
 
   it('온체인 OrderFrozen → UNRESOLVED', () => {
     const v = reconcileVerdict({
-      gelato: { taskState: 'ExecSuccess', transactionHash: '0xtx' },
+      gelato: { statusCode: 200, transactionHash: '0xtx' },
       onchain: { event: 'ORDER_FROZEN', txHash: '0xtx', orderKey: null, blockNumber: 100 },
     });
     expect(v.to).toBe(RELAY_TASK_STATUS.UNRESOLVED);
   });
 
-  it('Gelato ExecReverted만으로 FAILED 금지 — 온체인 receipt 필요 (UNRESOLVED)', () => {
+  it('Gelato Reverted(500)만으로 FAILED 금지 — 온체인 receipt 필요 (UNRESOLVED)', () => {
     for (const txHash of ['0xtx', null]) {
       const v = reconcileVerdict({
-        gelato: { taskState: 'ExecReverted', transactionHash: txHash }, onchain: noOnchain,
+        gelato: { statusCode: 500, transactionHash: txHash }, onchain: noOnchain,
       });
       expect(v.to).toBe(RELAY_TASK_STATUS.UNRESOLVED);
     }
@@ -644,26 +654,29 @@ describe('relayTaskReconciler — task/온체인 결합 판정 (§7)', () => {
 
   it('독립 수집 온체인 receipt revert(TX_REVERTED) → FAILED', () => {
     const v = reconcileVerdict({
-      gelato: { taskState: 'ExecReverted', transactionHash: '0xtx' },
+      gelato: { statusCode: 500, transactionHash: '0xtx' },
       onchain: { event: 'TX_REVERTED', txHash: '0xtx', orderKey: null, blockNumber: 100 },
     });
     expect(v.to).toBe(RELAY_TASK_STATUS.FAILED);
   });
 
-  it('pending 상태들 → 전이 없음', () => {
-    for (const s of ['CheckPending', 'ExecPending']) {
-      expect(reconcileVerdict({ gelato: { taskState: s, transactionHash: null }, onchain: noOnchain }).to).toBeNull();
-    }
+  it('Pending(100) → 전이 없음', () => {
+    expect(reconcileVerdict({ gelato: { statusCode: 100, transactionHash: null }, onchain: noOnchain }).to).toBeNull();
   });
 
   it('timeout/불명 → UNRESOLVED (자동 FAILED 금지)', () => {
-    const v = reconcileVerdict({ gelato: { taskState: null, transactionHash: null }, onchain: noOnchain });
+    const v = reconcileVerdict({ gelato: { statusCode: null, transactionHash: null }, onchain: noOnchain });
     expect(v.to).toBe(RELAY_TASK_STATUS.UNRESOLVED);
     expect(v.to).not.toBe(RELAY_TASK_STATUS.FAILED);
   });
 
-  it('Gelato Cancelled → UNRESOLVED (broadcast 여부 재확인 필요)', () => {
-    const v = reconcileVerdict({ gelato: { taskState: 'Cancelled', transactionHash: null }, onchain: noOnchain });
+  it('Gelato Rejected(400) → UNRESOLVED (broadcast 여부 재확인 필요)', () => {
+    const v = reconcileVerdict({ gelato: { statusCode: 400, transactionHash: null }, onchain: noOnchain });
+    expect(v.to).toBe(RELAY_TASK_STATUS.UNRESOLVED);
+  });
+
+  it('알 수 없는 StatusCode → UNRESOLVED (gasless v0.0.10 계약 밖)', () => {
+    const v = reconcileVerdict({ gelato: { statusCode: 42, transactionHash: null }, onchain: noOnchain });
     expect(v.to).toBe(RELAY_TASK_STATUS.UNRESOLVED);
   });
 });
@@ -736,17 +749,17 @@ describe('markConsumedIfNonceAdvanced — canonical nonce 증거 기반 CONSUMED
 
 // ═════════════════════════════════════════════════════════════════════════════
 describe('relayTransport — 네트워크 안전 규칙 (실호출 0회)', () => {
-  it('host allowlist는 api.gelato.digital만', () => {
-    expect(GELATO_HOST_ALLOWLIST).toEqual(['api.gelato.digital']);
+  it('host allowlist는 api.gelato.cloud만', () => {
+    expect(GELATO_HOST_ALLOWLIST).toEqual(['api.gelato.cloud']);
   });
 
   it('GMX_RELAY_NETWORK_ENABLED 미설정 → 세 메서드 모두 네트워크 요청 0회 (중앙 게이트)', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
     // API key가 있어도 네트워크 게이트가 먼저 차단해야 한다
     const transport = createGelatoHttpTransport({ [GELATO_API_KEY_SECRET_NAME]: 'test-key-not-real' } as unknown as NodeJS.ProcessEnv);
-    const q = await transport.quoteRelayFee({ chainId: 42161, paymentToken: '0x1', gasLimit: 1n });
+    const q = await transport.getSponsorBalance();
     const s = await transport.submitRelayTask({ chainId: 42161, target: '0x1', packedData: '0x' });
-    const t = await transport.getRelayTaskStatus({ taskId: 'x' });
+    const t = await transport.getRelayTaskStatus({ taskId: `0x${'cd'.repeat(32)}` });
     for (const r of [q, s, t]) {
       expect(r.ok).toBe(false);
       if (!r.ok) expect(r.kind).toBe('config');

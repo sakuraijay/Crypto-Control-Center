@@ -494,7 +494,7 @@ describe('revokeSession — prepare·서명·변조 거부', () => {
     const a = await prepareApprovalSession({
       mainAccount: OWNER, subaccount: SUBACCOUNT, verifyingContract: ROUTER,
       canonicalNonce: 0n, nowSec: 1_800_000_000n,
-      requestedExpirySec: 3600, requestedMaxAllowedCount: 5,
+      requestedExpirySeconds: 3600, requestedMaxAllowedCount: 5,
     });
     expect(a.ok).toBe(true);
     // REVOKE 세션은 여전히 활성 (PREPARED)

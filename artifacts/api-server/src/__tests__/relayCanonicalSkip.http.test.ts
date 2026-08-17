@@ -65,7 +65,7 @@ describe('readiness refresh — signer 미초기화 시 canonical 생략 (실경
       readContract: readContractSpy,
     })) as never);
     __setRelayTransportForTests({
-      quoteRelayFee: vi.fn().mockResolvedValue({ ok: true, estimatedFeeWei: 100n, quotedAtMs: 1 }),
+      getSponsorBalance: vi.fn().mockResolvedValue({ ok: true, balance: 10n ** 18n, decimals: 18, unit: 'wei' }),
       getRelayTaskStatus: vi.fn(),
       submitRelayTask: vi.fn(),
     } as never);

@@ -272,6 +272,28 @@ export function RelayStatusCard({ snapshot = null }: RelayStatusCardProps = {}) 
             <span>{snapshot.statusFlags.signerDisabled ? '비활성 (예상된 fail-closed — 시스템 고장 아님)' : '활성'}</span>
             <span className="text-muted-foreground">LIVE 잠금</span>
             <span>{snapshot.statusFlags.liveLocked ? '유지 중 (LIVE_TEST_EXECUTION_LOCKED)' : '해제됨'}</span>
+            {snapshot.statusFlags.gelatoApiConfigured !== undefined && (<>
+              <span className="text-muted-foreground">Gelato API key</span>
+              <span data-testid="text-snapshot-gelato-key">{snapshot.statusFlags.gelatoApiConfigured ? '설정됨 (값 미노출)' : '미설정 — 외부 호출 0회 (fail-closed)'}</span>
+            </>)}
+            {snapshot.statusFlags.transportContract && (<>
+              <span className="text-muted-foreground">Transport</span>
+              <span data-testid="text-snapshot-transport">{snapshot.statusFlags.transportContract}</span>
+            </>)}
+            {snapshot.statusFlags.feeEstimate && (<>
+              <span className="text-muted-foreground">GMX fee estimate</span>
+              <span data-testid="text-snapshot-fee-estimate">{snapshot.statusFlags.feeEstimate.status === 'fresh'
+                ? `입력 확보 (${snapshot.statusFlags.feeEstimate.atMs ? new Date(snapshot.statusFlags.feeEstimate.atMs).toLocaleString() : '—'})`
+                : '미확보 (fail-closed — 제출 불가)'}</span>
+            </>)}
+            {snapshot.statusFlags.sponsorBalance && (<>
+              <span className="text-muted-foreground">Sponsor balance</span>
+              <span data-testid="text-snapshot-sponsor-balance">{snapshot.statusFlags.sponsorBalance.status === 'verified'
+                ? '확인됨 (> 0)'
+                : snapshot.statusFlags.sponsorBalance.status === 'insufficient'
+                  ? '잔액 0 — 충전 필요 (fail-closed)'
+                  : '미확인 (fail-closed)'}</span>
+            </>)}
           </div>
           <div className={cn('mt-1 px-2.5 py-1.5 rounded border text-[10px] font-semibold', toneCls.muted)} data-testid="text-snapshot-canary">
             LIVE 적격 여부: 준비 미완료 (fail-closed) — snapshot은 DB 파생 게이트를 포함하지 않으므로 적격으로 표시되지 않습니다
@@ -428,6 +450,29 @@ export function RelayStatusCard({ snapshot = null }: RelayStatusCardProps = {}) 
                   {f.deploymentVerification.basis.map((b, i) => <li key={`b${i}`}>{b}</li>)}
                   {f.deploymentVerification.failures.map((x, i) => <li key={`f${i}`} className="text-amber-400/90">{x}</li>)}
                 </ul>
+              </div>
+            )}
+            {f.transportContract && (
+              <div className="text-[10px] text-muted-foreground" data-testid="text-transport-status">
+                Transport: {f.transportContract}
+                {f.gelatoApiConfigured !== undefined && ` · Gelato API key ${f.gelatoApiConfigured ? '설정됨 (값 미노출)' : '미설정 (외부 호출 0회)'}`}
+              </div>
+            )}
+            {f.feeEstimate && (
+              <div className="text-[10px] text-muted-foreground" data-testid="text-fee-estimate">
+                GMX fee estimate: {f.feeEstimate.status === 'fresh' ? '입력 확보 (eth_gasPrice + multiplierFactor)' : '미확보 (fail-closed — 제출 불가)'}
+                {f.feeEstimate.failures.length > 0 && (
+                  <ul className="list-disc pl-5 space-y-0.5 mt-0.5 text-amber-400/90">
+                    {f.feeEstimate.failures.map((x, i) => <li key={i}>{x}</li>)}
+                  </ul>
+                )}
+              </div>
+            )}
+            {f.sponsorBalance && (
+              <div className="text-[10px] text-muted-foreground" data-testid="text-sponsor-balance">
+                Sponsor balance: {f.sponsorBalance.status === 'verified' ? '확인됨 (> 0)'
+                  : f.sponsorBalance.status === 'insufficient' ? '잔액 0 — 1Balance 충전 필요 (fail-closed)'
+                  : '미확인 (fail-closed)'}
               </div>
             )}
             {rows.map((r) => (

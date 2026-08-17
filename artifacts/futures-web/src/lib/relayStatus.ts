@@ -104,6 +104,11 @@ export interface ActivationStatusFlags {
     basis: string[];
     failures: string[];
   };
+  /** 6F-2 §11 — GMX 공식 fee estimate + JSON-RPC transport + sponsor balance (구 fee oracle 대체) */
+  gelatoApiConfigured?: boolean;
+  transportContract?: string;
+  feeEstimate?: { status: 'fresh' | 'stale' | 'unavailable'; atMs: number | null; basis: string[]; failures: string[] };
+  sponsorBalance?: { status: 'verified' | 'unverified' | 'insufficient'; atMs: number | null; basis: string[] };
 }
 
 export interface ActivationStatusResponse {
@@ -177,6 +182,11 @@ export interface ReadinessSnapshotView {
     readonlyNetworkDisabled: boolean; submitNetworkDisabled: boolean; submissionDisabled: boolean;
     relayMode: 'DISABLED' | 'DRY_RUN' | 'LIVE';
     signerDisabled: boolean; liveLocked: boolean; manifestVersion: number;
+    /** 6F-2 §11 — 구서버 호환 optional */
+    gelatoApiConfigured?: boolean;
+    transportContract?: string;
+    feeEstimate?: { status: 'fresh' | 'stale' | 'unavailable'; atMs: number | null };
+    sponsorBalance?: { status: 'verified' | 'unverified' | 'insufficient'; atMs: number | null };
     readyForControlledCanary: false;
   };
 }

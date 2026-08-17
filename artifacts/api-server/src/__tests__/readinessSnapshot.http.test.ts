@@ -54,7 +54,8 @@ describe('readiness refresh 응답 snapshot (6E-10)', () => {
   const getChainIdSpy = vi.fn().mockResolvedValue(42161);
   const readContractSpy = vi.fn(async (args: { functionName: string }) =>
     args.functionName === 'digests' ? false : 0n);
-  const quoteSpy = vi.fn().mockResolvedValue({ ok: false, kind: 'http', httpStatus: 500 });
+  const getGasPriceSpy = vi.fn().mockResolvedValue(100_000_000n);
+  const sponsorSpy = vi.fn().mockResolvedValue({ ok: false, kind: 'http', httpStatus: 500, message: 'HTTP 500' });
   const taskStatusSpy = vi.fn();
 
   beforeEach(() => {
@@ -72,10 +73,11 @@ describe('readiness refresh 응답 snapshot (6E-10)', () => {
       getCode: getCodeSpy,
       getChainId: getChainIdSpy,
       getBlock: vi.fn().mockResolvedValue({ timestamp: 1n }),
+      getGasPrice: getGasPriceSpy,
       readContract: readContractSpy,
     })) as never);
     __setRelayTransportForTests({
-      quoteRelayFee: quoteSpy,
+      getSponsorBalance: sponsorSpy,
       getRelayTaskStatus: taskStatusSpy,
       submitRelayTask: vi.fn(),
     } as never);
@@ -88,7 +90,7 @@ describe('readiness refresh 응답 snapshot (6E-10)', () => {
     __setRelayTransportForTests(null);
     __resetReadinessRefreshForTests();
     __resetDeploymentVerificationForTests();
-    for (const s of [canonicalFactorySpy, getCodeSpy, getChainIdSpy, readContractSpy, quoteSpy, taskStatusSpy]) s.mockClear();
+    for (const s of [canonicalFactorySpy, getCodeSpy, getChainIdSpy, readContractSpy, getGasPriceSpy, sponsorSpy, taskStatusSpy]) s.mockClear();
   });
 
   async function callRefresh() {
@@ -103,7 +105,7 @@ describe('readiness refresh 응답 snapshot (6E-10)', () => {
     const res = await callRefresh();
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
-    expect(res.body.refresh.ok).toBe(false);              // fee oracle 500 + signer 부재 → fail-closed 유지
+    expect(res.body.refresh.ok).toBe(false);              // sponsor 조회 500 + signer 부재 → fail-closed 유지
     const snap = res.body.snapshot;
     expect(snap).toBeTruthy();
 
@@ -137,21 +139,22 @@ describe('readiness refresh 응답 snapshot (6E-10)', () => {
     expect(snap.lastReadinessRefresh.ok).toBe(false);
   });
 
-  it('fee oracle HTTP 500이 snapshot failures에 그대로 보존된다', async () => {
+  it('sponsor balance 조회 실패(HTTP)가 snapshot failures에 kind로 보존된다', async () => {
     const res = await callRefresh();
     const failures: string[] = res.body.snapshot.lastReadinessRefresh.failures;
-    expect(failures.some((f) => f.includes('외부 fee oracle 일시 장애 — HTTP 500'))).toBe(true);
+    expect(failures.some((f) => f.includes('sponsor balance 조회 실패(http)'))).toBe(true);
     // 실패를 성공으로 오표시하지 않음
     expect(res.body.snapshot.lastReadinessRefresh.ok).toBe(false);
   });
 
   it('snapshot 조립은 추가 외부 호출을 유발하지 않는다 (refresh 수행분 그대로)', async () => {
     await callRefresh();
-    // refresh 자체가 수행한 읽기만 존재: getCode 3회, chainId 1회, readContract 2회, quote 1회
+    // refresh 자체가 수행한 읽기만 존재: getCode 3회, chainId 1회, readContract 3회(digests+getUint+fee getUint), gasPrice 1회, sponsor 1회
     expect(getCodeSpy).toHaveBeenCalledTimes(3);
     expect(getChainIdSpy).toHaveBeenCalledTimes(1);
-    expect(readContractSpy).toHaveBeenCalledTimes(2);
-    expect(quoteSpy).toHaveBeenCalledTimes(1);
+    expect(readContractSpy).toHaveBeenCalledTimes(3);
+    expect(getGasPriceSpy).toHaveBeenCalledTimes(1);
+    expect(sponsorSpy).toHaveBeenCalledTimes(1);
     expect(taskStatusSpy).not.toHaveBeenCalled();
     // signer 부재 → canonical client 생성 0회 (eth_call 0회)
     expect(canonicalFactorySpy).not.toHaveBeenCalled();

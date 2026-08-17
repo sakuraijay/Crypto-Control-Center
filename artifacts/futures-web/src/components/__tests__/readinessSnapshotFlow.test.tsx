@@ -54,12 +54,17 @@ const SNAPSHOT_FIXTURE: ReadinessSnapshotView = {
     basis: ['할당된 userNonce 0건 (신규 할당 없음)', '미종결 relay task 0건 (taskId 보유 0건)'],
     failures: [
       'canonical readback 생략: delegated signer 미초기화 (예상된 fail-closed)',
-      'fee oracle 조회 실패 (외부 fee oracle 일시 장애 — HTTP 500)',
+      'sponsor balance 조회 실패(http)',
     ],
   },
   statusFlags: {
     readonlyNetworkDisabled: false, submitNetworkDisabled: true, submissionDisabled: true,
     relayMode: 'DISABLED', signerDisabled: true, liveLocked: true, manifestVersion: 1,
+    // 6F-2 §11 — transport/fee estimate/sponsor balance
+    gelatoApiConfigured: false,
+    transportContract: 'JSON-RPC v0.0.10',
+    feeEstimate: { status: 'unavailable', atMs: null },
+    sponsorBalance: { status: 'unverified', atMs: null },
     readyForControlledCanary: false,
   },
 };
@@ -110,8 +115,8 @@ describe('RelayStatusCard — snapshot runtime 렌더', () => {
     for (const item of SNAPSHOT_FIXTURE.deploymentVerification.basis) {
       expect(html).toContain(item.replace(/&/g, '&amp;'));
     }
-    // failures 전체 렌더 — HTTP 500을 성공으로 오표시하지 않음
-    expect(html).toContain('외부 fee oracle 일시 장애 — HTTP 500');
+    // failures 전체 렌더 — 실패를 성공으로 오표시하지 않음
+    expect(html).toContain('sponsor balance 조회 실패(http)');
     expect(html).toContain('delegated signer 미초기화 (예상된 fail-closed)');
     // signer 비활성 = 시스템 고장 아님 구분 표기
     expect(html).toContain('예상된 fail-closed — 시스템 고장 아님');
@@ -121,6 +126,11 @@ describe('RelayStatusCard — snapshot runtime 렌더', () => {
     // readiness 갱신 시각 표시
     expect(html).toContain('Readiness 갱신:');
     expect(html).toContain('실패 (fail-closed)');
+    // 6F-2 §11 — transport·API key·fee estimate·sponsor balance fail-closed 표시
+    expect(html).toContain('JSON-RPC v0.0.10');
+    expect(html).toContain('미설정 — 외부 호출 0회 (fail-closed)');
+    expect(html).toContain('미확보 (fail-closed — 제출 불가)');
+    expect(html).toContain('미확인 (fail-closed)');
   });
 
   it('snapshot 없음 → 확인 불가 표시 (초기 false값을 실제 상태처럼 표시하지 않음)', () => {

@@ -74,9 +74,9 @@ describe('deriveRelayEnvFlags', () => {
 
   it('relayDeploymentVerified: attempted && ok 일 때만 true', () => {
     expect(deriveRelayEnvFlags(baseEnv(), false).relayDeploymentVerified).toBe(false);
-    recordDeploymentVerification({ ok: false, atMs: 1, basis: [], failures: ['f'] });
+    recordDeploymentVerification({ ok: false, atMs: 1, basis: [], failures: ['f'], manifestVersion: 1 });
     expect(deriveRelayEnvFlags(baseEnv(), false).relayDeploymentVerified).toBe(false);
-    recordDeploymentVerification({ ok: true, atMs: 2, basis: ['b'], failures: [] });
+    recordDeploymentVerification({ ok: true, atMs: 2, basis: ['b'], failures: [], manifestVersion: 1 });
     expect(deriveRelayEnvFlags(baseEnv(), false).relayDeploymentVerified).toBe(true);
   });
 

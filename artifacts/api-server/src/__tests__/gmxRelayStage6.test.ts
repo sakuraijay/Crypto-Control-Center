@@ -56,18 +56,32 @@ const ALL_SUBMIT_FLAGS = {
   [GELATO_API_KEY_SECRET_NAME]: 'test-key-not-real',
 };
 
+const VALID_TASK_ID = `0x${'ab'.repeat(32)}`;
+
 async function callAll(t: RelayTransport) {
-  const q = await t.quoteRelayFee({ chainId: 42161, paymentToken: VALID_TARGET, gasLimit: 1n });
+  const q = await t.getSponsorBalance();
   const s = await t.submitRelayTask({ chainId: 42161, target: VALID_TARGET, packedData: VALID_DATA });
-  const st = await t.getRelayTaskStatus({ taskId: 'task-1' });
+  const st = await t.getRelayTaskStatus({ taskId: VALID_TASK_ID });
   return { q, s, st };
+}
+
+// JSON-RPC 2.0 mock — 요청 body의 method/id에 맞는 응답을 돌려준다 (6F-2)
+function rpcResponseFor(body: string): Response {
+  const req = JSON.parse(body) as { id: number; method: string };
+  let result: unknown;
+  if (req.method === 'relayer_getStatus') result = { status: 200, hash: `0x${'cd'.repeat(32)}`, receipt: { transactionHash: `0x${'cd'.repeat(32)}`, blockNumber: 1 } };
+  else if (req.method === 'gelato_getBalance') result = { balance: '1000000', decimals: 18, unit: 'wei' };
+  else result = `0x${'ef'.repeat(32)}`; // relayer_sendTransaction → taskId
+  return new Response(JSON.stringify({ jsonrpc: '2.0', id: req.id, result }), {
+    status: 200, headers: { 'content-type': 'application/json' },
+  });
 }
 
 let fetchSpy: ReturnType<typeof vi.spyOn>;
 beforeEach(() => {
   // 매 호출마다 새 Response — body 스트림은 1회만 읽을 수 있으므로 재사용 금지
-  fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
-    new Response(JSON.stringify({ estimatedFee: '100000', task: { taskState: 'ExecSuccess', transactionHash: '0xab', blockNumber: 1 }, taskId: 'tid-1' }), { status: 200 }),
+  fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) =>
+    rpcResponseFor(String((init as RequestInit | undefined)?.body ?? '{}')),
   ) as unknown as ReturnType<typeof vi.spyOn>;
 });
 afterEach(() => {
@@ -98,7 +112,7 @@ describe('6단계 §3 — transport 플래그 매트릭스 (fetch 발신 여부)
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it('read-only만 true → quote/status GET만 허용, submit POST 0회', async () => {
+  it('read-only만 true → balance/status 조회만 허용, submit 발신 0회', async () => {
     const t = createGelatoHttpTransport(envOf({
       GMX_RELAY_READONLY_NETWORK_ENABLED: 'true', [GELATO_API_KEY_SECRET_NAME]: 'test-key-not-real',
     }));
@@ -107,12 +121,12 @@ describe('6단계 §3 — transport 플래그 매트릭스 (fetch 발신 여부)
     expect(st.ok).toBe(true);
     expect(s.ok).toBe(false);
     if (!s.ok) { expect(s.kind).toBe('config'); expect(s.ambiguous).toBe(false); }
-    // fetch 2회 — 전부 GET, POST 없음
+    // fetch 2회 — 전부 read-only method, relayer_sendTransaction 없음
     expect(fetchSpy).toHaveBeenCalledTimes(2);
-    for (const call of fetchSpy.mock.calls) {
-      const init = call[1] as RequestInit;
-      expect(init.method).toBe('GET');
-    }
+    const methods = fetchSpy.mock.calls.map((call: unknown[]) =>
+      (JSON.parse(String((call[1] as RequestInit).body)) as { method: string }).method);
+    expect(methods.sort()).toEqual(['gelato_getBalance', 'relayer_getStatus']);
+    expect(methods).not.toContain('relayer_sendTransaction');
   });
 
   it('submit network만 true → 모든 relay fetch 0회', async () => {
@@ -282,7 +296,7 @@ describe('6단계 §5 — relay read-only RPC client 분리', () => {
     expect(r.ok).toBe(true);
     if (r.ok) {
       expect(Object.keys(r.client).sort()).toEqual(
-        ['getBlockTimestamp', 'getChainId', 'getCode', 'getLogs', 'getTransactionReceipt', 'readContract'].sort(),
+        ['getBlockTimestamp', 'getChainId', 'getCode', 'getGasPrice', 'getLogs', 'getTransactionReceipt', 'readContract'].sort(),
       );
       expect('sendRawTransaction' in r.client).toBe(false);
       expect('writeContract' in r.client).toBe(false);
@@ -328,8 +342,8 @@ describe('6단계 §7 — 읽기 전용 readiness refresh', () => {
   function makeTransport() {
     const submitSpy = vi.fn();
     const transport = {
-      quoteRelayFee: vi.fn().mockResolvedValue({ ok: true, estimatedFeeWei: 100n, quotedAtMs: 1 }),
-      getRelayTaskStatus: vi.fn().mockResolvedValue({ ok: true, taskState: 'ExecSuccess', transactionHash: '0xab', blockNumber: 1 }),
+      getRelayTaskStatus: vi.fn().mockResolvedValue({ ok: true, statusCode: 200, transactionHash: `0x${'ab'.repeat(32)}`, blockNumber: 1 }),
+      getSponsorBalance: vi.fn().mockResolvedValue({ ok: true, balance: 10n ** 18n, decimals: 18, unit: 'wei' }),
       submitRelayTask: submitSpy,
     };
     return { transport, submitSpy };
@@ -350,28 +364,32 @@ describe('6단계 §7 — 읽기 전용 readiness refresh', () => {
     expect(state.ok).toBe(false);
     expect(state.failures[0]).toContain('GMX_RELAY_READONLY_NETWORK_ENABLED');
     expect(canonicalSpy).not.toHaveBeenCalled();
-    expect(transport.quoteRelayFee).not.toHaveBeenCalled();
+    expect(transport.getSponsorBalance).not.toHaveBeenCalled();
     expect(transport.getRelayTaskStatus).not.toHaveBeenCalled();
     expect(submitSpy).not.toHaveBeenCalled();
     expect(getReadinessRefreshState().attempted).toBe(true);
   });
 
-  it('read-only 활성 → canonical·nonce·task status·quote GET만 수행, submit 0회', async () => {
+  it('read-only 활성 → canonical·nonce·task status·balance 조회만 수행, submit 0회', async () => {
     const { transport, submitSpy } = makeTransport();
     const state = await performReadinessRefresh({
       env: envOf({ GMX_RELAY_READONLY_NETWORK_ENABLED: 'true' }),
       checkCanonical: async () => ({ confirmed: true, reason: null }),
-      listOpenTaskIds: async () => [{ id: 't1', relayTaskId: 'gel-1' }, { id: 't2', relayTaskId: null }],
+      listOpenTaskIds: async () => [
+        { id: 't1', relayTaskId: `0x${'11'.repeat(32)}`, transportGen: 'jsonrpc-gasless-0.0.10' },
+        { id: 't2', relayTaskId: null, transportGen: 'jsonrpc-gasless-0.0.10' },
+      ],
       countAllocatedNonces: async () => 3,
       transport,
       readonlyClient: null,
       nowMs: () => 2000,
     });
-    expect(state.ok).toBe(true);
+    // readonlyClient 미주입 → fee estimate 입력은 fail-closed (ok=false 예상)
+    expect(state.ok).toBe(false);
     expect(state.atMs).toBe(2000);
-    expect(transport.getRelayTaskStatus).toHaveBeenCalledTimes(1);   // taskId 있는 것만
-    expect(transport.quoteRelayFee).toHaveBeenCalledTimes(1);
-    expect(submitSpy).not.toHaveBeenCalled();                        // POST 0회
+    expect(transport.getRelayTaskStatus).toHaveBeenCalledTimes(1);   // 신형 세대 + taskId 있는 것만
+    expect(transport.getSponsorBalance).toHaveBeenCalledTimes(1);
+    expect(submitSpy).not.toHaveBeenCalled();                        // submit 0회
     expect(state.basis.join(' ')).toContain('신규 할당 없음');
   });
 
@@ -395,8 +413,8 @@ describe('6단계 §7 — 읽기 전용 readiness refresh', () => {
 
   it('의존성 예외 throw도 fail-closed로 기록된다 (500으로 새지 않음)', async () => {
     const transport = {
-      quoteRelayFee: vi.fn().mockRejectedValue(new Error('boom-quote')),
       getRelayTaskStatus: vi.fn().mockRejectedValue(new Error('boom-status')),
+      getSponsorBalance: vi.fn().mockRejectedValue(new Error('boom-balance')),
     };
     const state = await performReadinessRefresh({
       env: envOf({ GMX_RELAY_READONLY_NETWORK_ENABLED: 'true' }),

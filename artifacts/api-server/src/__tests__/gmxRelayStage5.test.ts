@@ -131,7 +131,7 @@ import {
   runSubmitFlow, type SubmitFlowInput,
 } from '../lib/relaySubmission';
 import type { ActivationGateInput } from '../lib/relayActivationGate';
-import { buildLiveFeeQuote, getMockFeeQuote, type RelayFeeQuote } from '../lib/relayFeeQuote';
+import { getMockFeeQuote, WETH_ARBITRUM, type RelayFeeQuote } from '../lib/relayFeeQuote';
 import type { RelayTransport } from '../lib/relayTransport';
 import {
   runStartupRelayReconciliation, computeReconciliationComplete, evaluateFreshLiveQuote,
@@ -260,15 +260,22 @@ function fullActivation(overrides?: Partial<ActivationGateInput>): ActivationGat
 }
 
 function liveQuote(nowMs: number): RelayFeeQuote {
-  return buildLiveFeeQuote({ estimatedFeeWei: 10n ** 14n, gasLimit: 3_000_000n, gasPrice: 20_000_000n, quotedAtMs: nowMs });
+  // 6F-2 — gmx_official_estimate + flowInput 결속 필드 일치
+  return {
+    feeToken: WETH_ARBITRUM, feeAmount: 10n ** 14n, gasLimit: 3_000_000n, gasPrice: 20_000_000n,
+    feeSwapPath: [], quotedAtMs: nowMs, source: 'gmx_official_estimate',
+    boundChainId: 42161,
+    boundRelayRouter: '0x2222222222222222222222222222222222222222',
+    boundPayloadHash: `0x${'11'.repeat(32)}`,
+  };
 }
 
 function makeTransport(): { transport: RelayTransport; calls: { submit: number } } {
   const calls = { submit: 0 };
   const transport: RelayTransport = {
-    async quoteRelayFee() { return { ok: true, estimatedFeeWei: 10n ** 14n, quotedAtMs: Date.now() }; },
-    async submitRelayTask() { calls.submit++; return { ok: true, taskId: 'gelato-task-5' }; },
-    async getRelayTaskStatus() { return { ok: true, taskState: 'CheckPending', transactionHash: null, blockNumber: null }; },
+    async submitRelayTask() { calls.submit++; return { ok: true, taskId: `0x${'ef'.repeat(32)}` }; },
+    async getRelayTaskStatus() { return { ok: true, statusCode: 100, transactionHash: null, blockNumber: null }; },
+    async getSponsorBalance() { return { ok: true, balance: 10n ** 18n, decimals: 18, unit: 'wei' }; },
   };
   return { transport, calls };
 }
