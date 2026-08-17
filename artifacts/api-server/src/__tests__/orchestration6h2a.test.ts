@@ -70,8 +70,17 @@ const BTC_MARKET = MARKET_BY_SYMBOL_SERVER.get('BTC')!.marketToken;
 const wm = workerManager as unknown as {
   executeCloseAllPositions: (...a: unknown[]) => Promise<void>;
   executeProfitProtectReduction: (...a: unknown[]) => Promise<void>;
+  tryLiveTestExecution: (...a: unknown[]) => Promise<void>;
+  loadProfitProtectRecords: () => Promise<Record<string, unknown> | null>;
+  saveProfitProtectRecords: (r: Record<string, unknown>) => Promise<boolean>;
+  recordLiveTradeUnsettled: (...a: unknown[]) => Promise<void>;
   lastCloseAllSummary: { lockRequired: boolean; allConfirmed: boolean; total: number; pending: number } | null;
 };
+
+// durable 축소 기록을 테스트 내 메모리 store로 대체 (DB mock은 무기록)
+let protectStore: Record<string, unknown> = {};
+wm.loadProfitProtectRecords = async () => protectStore;
+wm.saveProfitProtectRecords = async (r) => { protectStore = { ...r }; return true; };
 
 const decision = { id: 'd-6h2a', operatingState: 'CASH', primarySymbol: 'ETH' };
 const paperState = { liveTestAccumLossUsd: 0, liveTestDbOk: true };
@@ -85,6 +94,7 @@ beforeEach(() => {
   closeMock.mockReset();
   openMock.mockReset();
   authoritativePositions = [];
+  protectStore = {};
   wm.lastCloseAllSummary = null;
   closeMock.mockResolvedValue({ ok: true, txHash: null, orderKey: 'gmxreq:1', simulated: false, executedAt: new Date().toISOString() });
 });
@@ -111,6 +121,61 @@ describe('§11-11 70% 축소 orchestration', () => {
     authoritativePositions = null;
     await wm.executeProfitProtectReduction(decision, paperState, limits, 7, '0xMain', analyses);
     expect(closeMock).not.toHaveBeenCalled();
+  });
+
+  it('§11-9 재사이클에도 동일 포지션 재축소 금지 — durable 기록 기반 (제출 총 1회)', async () => {
+    authoritativePositions = [{ marketAddress: ETH_MARKET, isLong: true, sizeUsd: 100 }];
+    await wm.executeProfitProtectReduction(decision, paperState, limits, 7, '0xMain', analyses);
+    expect(closeMock).toHaveBeenCalledTimes(1);
+    // 다음 사이클(새 decision id) — 기록이 남아 있으므로 재제출 0회
+    await wm.executeProfitProtectReduction({ ...decision, id: 'd-next' }, paperState, limits, 8, '0xMain', analyses);
+    expect(closeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('축소 실패(FAILED) 후에도 재제출 금지 (기록 유지)', async () => {
+    authoritativePositions = [{ marketAddress: ETH_MARKET, isLong: true, sizeUsd: 100 }];
+    closeMock.mockResolvedValue({ ok: false, txHash: null, orderKey: null, simulated: false, error: 'x', executedAt: new Date().toISOString() });
+    await wm.executeProfitProtectReduction(decision, paperState, limits, 7, '0xMain', analyses);
+    await wm.executeProfitProtectReduction(decision, paperState, limits, 8, '0xMain', analyses);
+    expect(closeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('예약 저장 실패 → 제출 0회 (중복 방지 불가 상태에서는 제출 금지)', async () => {
+    authoritativePositions = [{ marketAddress: ETH_MARKET, isLong: true, sizeUsd: 100 }];
+    wm.saveProfitProtectRecords = async () => false;
+    await wm.executeProfitProtectReduction(decision, paperState, limits, 7, '0xMain', analyses);
+    expect(closeMock).not.toHaveBeenCalled();
+    wm.saveProfitProtectRecords = async (r) => { protectStore = { ...r }; return true; };
+  });
+
+  it('시뮬(잠금) 결과는 예약 해제 — 실주문 미제출이므로 이후 실제 축소 가능', async () => {
+    authoritativePositions = [{ marketAddress: ETH_MARKET, isLong: true, sizeUsd: 100 }];
+    closeMock.mockResolvedValueOnce({ ok: true, txHash: null, orderKey: null, simulated: true, executedAt: new Date().toISOString() });
+    await wm.executeProfitProtectReduction(decision, paperState, limits, 7, '0xMain', analyses);
+    expect(Object.keys(protectStore)).toHaveLength(0);
+    await wm.executeProfitProtectReduction(decision, paperState, limits, 8, '0xMain', analyses);
+    expect(closeMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('CASH 청산 — authoritative snapshot 기반 exact-size close', () => {
+  it('CASH + 포지션 존재 → 고정 $15가 아닌 실제 포지션 크기·방향으로 전수 청산', async () => {
+    authoritativePositions = [
+      { marketAddress: ETH_MARKET, isLong: false, sizeUsd: 8.37 },
+      { marketAddress: BTC_MARKET, isLong: true, sizeUsd: 22.5 },
+    ];
+    const cashDecision = { ...decision, operatingState: 'CASH', primarySymbol: null };
+    await wm.tryLiveTestExecution(
+      cashDecision, analyses, { positionCount: 2 }, paperState, limits, 9,
+      { closeAllRequested: false, reduce70Requested: false },
+    );
+    expect(closeMock).toHaveBeenCalledTimes(2);
+    const sizes = closeMock.mock.calls.map(c => (c[0] as { sizeUsd: number }).sizeUsd).sort((a, b) => a - b);
+    expect(sizes[0]).toBeCloseTo(8.37, 6);
+    expect(sizes[1]).toBeCloseTo(22.5, 6);
+    const dirs = closeMock.mock.calls.map(c => (c[0] as { isLong: boolean; symbol: string }));
+    expect(dirs.find(d => d.symbol === 'ETH')!.isLong).toBe(false);
+    expect(dirs.find(d => d.symbol === 'BTC')!.isLong).toBe(true);
   });
 });
 
