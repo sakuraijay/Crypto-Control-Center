@@ -860,7 +860,12 @@ let _protectionRecon: ProtectionReconState = {
   lastPositionsFetchOkAtMs: null,
 };
 export function getProtectionReconState(): ProtectionReconState { return _protectionRecon; }
-export function __setProtectionReconStateForTests(s: ProtectionReconState): void { _protectionRecon = s; }
+/** 테스트 주입 — sticky: 이후 runProtectionPass가 덮어쓰지 않는다 (null로 해제) */
+let _protectionReconOverride: ProtectionReconState | null = null;
+export function __setProtectionReconStateForTests(s: ProtectionReconState | null): void {
+  _protectionReconOverride = s;
+  if (s) _protectionRecon = s;
+}
 
 /** 테스트 주입용 evidence client override */
 let _evidenceClientOverride: EvidenceClient | null = null;
@@ -913,6 +918,7 @@ export async function countInFlightReservedActions(): Promise<number | null> {
 
 export async function runProtectionPass(): Promise<void> {
   wireProtectionExecution();
+  if (_protectionReconOverride) { _protectionRecon = _protectionReconOverride; return; }
   try {
     const [positions, active] = await Promise.all([
       fetchAuthoritativeOpenPositions(), listActiveProtections(),
