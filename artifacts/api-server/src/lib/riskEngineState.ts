@@ -11,8 +11,9 @@
  *    hardStop·UNRESOLVED는 날짜 변경으로 해제 금지
  */
 
-import { db, workerStateTable } from '@workspace/db';
-import { eq } from 'drizzle-orm';
+// 주의: @workspace/db는 import 시점에 DATABASE_URL 부재로 throw한다.
+// 이 모듈의 순수 함수(파싱·롤오버)는 DB 없는 CI에서도 import 가능해야 하므로
+// DB 접근 함수 내부에서만 지연 import한다 (기존 db-free import 규칙).
 import { manilaDayStartIso, manilaWeekStartIso } from './manilaTime';
 import {
   EMPTY_LOCKS, resetDailyLocks, resetWeeklyLocks,
@@ -147,6 +148,9 @@ export async function loadRiskEngineState(): Promise<
   { ok: true; state: PersistedRiskEngineState | null } | { ok: false; reason: string }
 > {
   try {
+    const [{ db, workerStateTable }, { eq }] = await Promise.all([
+      import('@workspace/db'), import('drizzle-orm'),
+    ]);
     const rows = await db.select().from(workerStateTable)
       .where(eq(workerStateTable.key, RISK_ENGINE_STATE_KEY)).limit(1);
     return { ok: true, state: parseRiskEngineState(rows[0]?.value ?? null) };
@@ -160,6 +164,7 @@ export async function saveRiskEngineState(state: PersistedRiskEngineState): Prom
   { ok: true } | { ok: false; reason: string }
 > {
   try {
+    const { db, workerStateTable } = await import('@workspace/db');
     const value = JSON.stringify(state);
     await db.insert(workerStateTable)
       .values({ key: RISK_ENGINE_STATE_KEY, value })
