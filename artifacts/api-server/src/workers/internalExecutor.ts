@@ -110,6 +110,17 @@ export interface ExecutorStatus {
   weeklyRealizedPnlUsd: number | null;
   currentEquityUsd: number | null;
   periodPnlUpdatedAt: string | null;
+  // ── RiskEngine (6H-1 — Manila 기준 $1,000 정책) ────────────────────────────
+  riskOperatingState: import('../lib/riskStateMachine').RiskOperatingState | null;
+  riskEntryAllowed: boolean;
+  riskBlockReasons: string[];
+  riskDbOk: boolean;
+  riskDailyEntryCount: number | null;
+  riskConsecutiveLossCount: number | null;
+  riskDayPeriodStart: string | null;
+  riskWeekPeriodStart: string | null;
+  riskDerivedTargets: import('../lib/riskPolicy').DerivedRiskTargets | null;
+  msUntilNextManilaDay: number;
   // ── 활성 모드 (UI 배지 근거 — 클라이언트 설정값이 아닌 서버 상태) ─────────────
   /** WORKER_ENGINE_MODE 기준 실제 엔진 모드 ('LIVE'가 아니면 항상 PAPER) */
   engineMode: 'PAPER' | 'LIVE';
@@ -235,6 +246,17 @@ export function getExecutorStatus(): ExecutorStatus {
     weeklyRealizedPnlUsd: workerStatus.weeklyRealizedPnlUsd,
     currentEquityUsd:     workerStatus.currentEquityUsd,
     periodPnlUpdatedAt:   workerStatus.periodPnlUpdatedAt,
+    // RiskEngine (6H-1 — Manila 기준 $1,000 정책)
+    riskOperatingState:       workerStatus.riskOperatingState,
+    riskEntryAllowed:         workerStatus.riskEntryAllowed,
+    riskBlockReasons:         workerStatus.riskBlockReasons,
+    riskDbOk:                 workerStatus.riskDbOk,
+    riskDailyEntryCount:      workerStatus.riskDailyEntryCount,
+    riskConsecutiveLossCount: workerStatus.riskConsecutiveLossCount,
+    riskDayPeriodStart:       workerStatus.riskDayPeriodStart,
+    riskWeekPeriodStart:      workerStatus.riskWeekPeriodStart,
+    riskDerivedTargets:       workerStatus.riskDerivedTargets,
+    msUntilNextManilaDay:     workerStatus.msUntilNextManilaDay,
   };
 }
 

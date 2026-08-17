@@ -10,6 +10,7 @@ import notificationsRouter from "./notifications";
 import livetestRouter from "./livetest";
 import relayRouter from "./relay";
 import gmxapiRouter from "./gmxapi";
+import riskRouter from "./risk";
 
 const router: IRouter = Router();
 
@@ -24,5 +25,6 @@ router.use(notificationsRouter);
 router.use(livetestRouter);
 router.use(relayRouter);
 router.use(gmxapiRouter);
+router.use(riskRouter);
 
 export default router;

@@ -220,16 +220,37 @@ function clampRiskLimits(limits: unknown): unknown {
     clamped.maxDrawdownPercent = v !== undefined ? Math.min(50, Math.max(1, v)) : undefined;
   }
 
-  // dailyLossLimitUSDT: $10 ≤ x ≤ $100,000
+  // ── 6H-1 $1,000 최종 정책 하드캡 ────────────────────────────────────────
+  // UI에서 어떤 값을 보내도 서버가 정책 상한으로 강제 클램프한다.
+
+  // dailyLossLimitUSDT: $10 ≤ x ≤ $30 (risk capital $1,000 × 3%)
   if ('dailyLossLimitUSDT' in clamped) {
     const v = safeNum(clamped.dailyLossLimitUSDT);
-    clamped.dailyLossLimitUSDT = v !== undefined ? Math.min(100_000, Math.max(10, v)) : undefined;
+    clamped.dailyLossLimitUSDT = v !== undefined ? Math.min(30, Math.max(10, v)) : undefined;
   }
 
-  // weeklyLossLimitUSDT: $10 ≤ x ≤ $500,000
+  // weeklyLossLimitUSDT: $10 ≤ x ≤ $80 (risk capital $1,000 × 8%)
   if ('weeklyLossLimitUSDT' in clamped) {
     const v = safeNum(clamped.weeklyLossLimitUSDT);
-    clamped.weeklyLossLimitUSDT = v !== undefined ? Math.min(500_000, Math.max(10, v)) : undefined;
+    clamped.weeklyLossLimitUSDT = v !== undefined ? Math.min(80, Math.max(10, v)) : undefined;
+  }
+
+  // maxLeverage: 1x ≤ x ≤ 3x — 조건부 5x는 비활성 (conditional5xEnabled=false)
+  if ('maxLeverage' in clamped) {
+    const v = safeNum(clamped.maxLeverage);
+    clamped.maxLeverage = v !== undefined ? Math.min(3, Math.max(1, v)) : undefined;
+  }
+
+  // tradingCapital: $10 ≤ x ≤ $1,000 — 초과 자본은 위험 산정에서 제외 (복리 금지)
+  if ('tradingCapital' in clamped) {
+    const v = safeNum(clamped.tradingCapital);
+    clamped.tradingCapital = v !== undefined ? Math.min(1_000, Math.max(10, v)) : undefined;
+  }
+
+  // maxSimultaneousPositions: 정확히 1로 강제
+  if ('maxSimultaneousPositions' in clamped) {
+    const v = safeNum(clamped.maxSimultaneousPositions);
+    clamped.maxSimultaneousPositions = v !== undefined ? 1 : undefined;
   }
 
   return clamped;

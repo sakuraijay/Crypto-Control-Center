@@ -32,6 +32,14 @@ import {
   parseBaseline, rollBaseline, computePeriodPnl,
   type EquityBaseline,
 } from "../lib/equityBaselines";
+import { RISK_POLICY, deriveDailyTargets, type DerivedRiskTargets } from "../lib/riskPolicy";
+import { dailyRiskCapital, weeklyRiskCapital, positionSizingCapital } from "../lib/riskCapital";
+import { evaluateRiskState, type RiskEvaluationResult, type RiskOperatingState } from "../lib/riskStateMachine";
+import {
+  initialRiskEngineState, rollRiskPeriods, loadRiskEngineState, saveRiskEngineState,
+  type PersistedRiskEngineState,
+} from "../lib/riskEngineState";
+import { manilaDayStartIso, manilaWeekStartIso, msUntilNextManilaDay } from "../lib/manilaTime";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -48,22 +56,23 @@ const CYCLE_INTERVAL_MS = 60_000;
 const INITIAL_DELAY_MS = 30_000;
 
 /**
- * 기본 리스크 한도
+ * 기본 리스크 한도 — RISK_POLICY($1,000 최종 정책, 6H-1)에서 파생.
  * DB에 전략 설정이 없을 때 사용하는 보수적 기본값.
+ * 구형 $10,000/$500/$1,500 기본값은 6H-1에서 제거됨.
  */
-const DEFAULT_LIMITS: RiskLimits = {
-  dailyLossLimitUSDT:       500,
-  maxDrawdownPercent:        10,
-  consecutiveLossLimit:       3,
-  maxLeverage:                5,
-  maxMarginPerTrade:        200,
-  maxTotalExposureUSDT:    2000,
-  tradingCapital:         10_000,
+export const DEFAULT_LIMITS: RiskLimits = {
+  dailyLossLimitUSDT:  RISK_POLICY.maxRiskCapitalUsd * RISK_POLICY.dailyMaxLossPercent / 100,   // $30
+  maxDrawdownPercent:        15,   // hard stop -15% ($850)과 정합
+  consecutiveLossLimit: RISK_POLICY.maxConsecutiveLosses,                                        // 3
+  maxLeverage:          RISK_POLICY.baseMaxLeverage,                                             // 3x
+  maxMarginPerTrade:        334,   // ≈ capital/3 — 1포지션 담보 상한
+  maxTotalExposureUSDT: RISK_POLICY.maxRiskCapitalUsd * RISK_POLICY.baseMaxLeverage,             // $3,000
+  tradingCapital:       RISK_POLICY.initialCapitalUsd,                                           // $1,000
   reserveCashPct:            20,
-  profitLockThresholdPct:     1,
-  maxSimultaneousPositions:   3,
+  profitLockThresholdPct: RISK_POLICY.primaryProfitTargetPercent,                                // 5%
+  maxSimultaneousPositions: RISK_POLICY.maxConcurrentPositions,                                  // 1
   maxRiskPerSymbolPct:       10,
-  weeklyLossLimitUSDT:     1500,
+  weeklyLossLimitUSDT:  RISK_POLICY.maxRiskCapitalUsd * RISK_POLICY.weeklyMaxLossPercent / 100,  // $80
   rolling24hLossLimitUSDT:    0,  // 0 = disabled by default
   cooldownMinutes:           30,
   maxTradesPerHour:           6,
@@ -117,6 +126,25 @@ export interface WorkerStatus {
   currentEquityUsd: number | null;
   /** 기간 PnL 마지막 갱신 시각 (ISO). null = 미갱신 — 클라이언트는 stale 판정에 사용 */
   periodPnlUpdatedAt: string | null;
+  // ── RiskEngine (6H-1 — Manila 기준 $1,000 정책) ─────────────────────────────
+  /** 현재 Risk 운용 상태. null = 미평가 */
+  riskOperatingState: import('../lib/riskStateMachine').RiskOperatingState | null;
+  /** RiskEngine이 신규 진입을 허용하는지 */
+  riskEntryAllowed: boolean;
+  /** 진입 차단 사유 목록 (빈 배열 = 차단 없음) */
+  riskBlockReasons: string[];
+  /** RiskEngine DB 영속 정상 여부 — false = fail-closed */
+  riskDbOk: boolean;
+  /** Manila 거래일 신규 진입 횟수 / 연속 손실 횟수 */
+  riskDailyEntryCount: number | null;
+  riskConsecutiveLossCount: number | null;
+  /** Manila 거래일/거래주 시작 (UTC ISO) */
+  riskDayPeriodStart: string | null;
+  riskWeekPeriodStart: string | null;
+  /** 파생 목표값 (start-of-day risk capital 기준). null = 미산출 */
+  riskDerivedTargets: import('../lib/riskPolicy').DerivedRiskTargets | null;
+  /** 다음 Manila 거래일까지 남은 ms */
+  msUntilNextManilaDay: number;
 }
 
 // ── WorkerManager ─────────────────────────────────────────────────────────────
@@ -190,6 +218,14 @@ class WorkerManager {
    */
   private pendingApprovalKeys = new Set<string>();
 
+  // ── RiskEngine 상태 (6H-1 — Manila 기준, worker_state 영속) ─────────────────
+  /** 영속 RiskEngine 상태. null = 미수립/로드 실패 → 신규 진입 차단 */
+  private riskState: PersistedRiskEngineState | null = null;
+  /** 마지막 RiskEngine 로드/저장 성공 여부 — false면 fail-closed */
+  private riskDbOk = false;
+  /** 마지막 사이클 RiskEngine 평가 결과 (상태 노출용) */
+  private lastRiskEvaluation: RiskEvaluationResult | null = null;
+
   // ── Public API ──────────────────────────────────────────────────────────────
 
   async start(): Promise<void> {
@@ -207,6 +243,20 @@ class WorkerManager {
 
     // DB에서 Daily/Weekly equity 기준점 복구 (재시작 후 기간 PnL 연속성 유지)
     await this.loadBaselinesFromDb();
+
+    // RiskEngine 영속 상태 복구 (6H-1 §11 — 잠금·카운터·Manila 기준점)
+    const riskLoad = await loadRiskEngineState();
+    if (riskLoad.ok) {
+      this.riskState = riskLoad.state; // null이면 첫 사이클에서 수립
+      this.riskDbOk = true;
+      if (riskLoad.state) {
+        console.info(`[AIWorker] RiskEngine 상태 복구 — ${riskLoad.state.riskOperatingState}, day=${riskLoad.state.dayPeriodStart}`);
+      }
+    } else {
+      this.riskState = null;
+      this.riskDbOk = false; // fail-closed — 신규 진입 차단
+      console.error(`[AIWorker] ${riskLoad.reason} — 신규 진입 차단 (fail-closed)`);
+    }
 
     // 가격 버퍼 폴링 시작 (10s 간격)
     this.updatePriceBuffers(); // 즉시 첫 실행
@@ -246,6 +296,19 @@ class WorkerManager {
       weeklyRealizedPnlUsd: this.lastWeeklyRealizedUsd,
       currentEquityUsd:     this.lastCurrentEquityUsd,
       periodPnlUpdatedAt:   this.periodPnlUpdatedAt,
+      // ── RiskEngine (6H-1) ─────────────────────────────────────────────────
+      riskOperatingState:       this.lastRiskEvaluation?.state ?? null,
+      riskEntryAllowed:         this.lastRiskEvaluation?.entryAllowed === true,
+      riskBlockReasons:         this.lastRiskEvaluation?.blockReasons ?? [],
+      riskDbOk:                 this.riskDbOk,
+      riskDailyEntryCount:      this.riskState?.dailyEntryCount ?? null,
+      riskConsecutiveLossCount: this.riskState?.consecutiveLossCount ?? null,
+      riskDayPeriodStart:       this.riskState?.dayPeriodStart ?? null,
+      riskWeekPeriodStart:      this.riskState?.weekPeriodStart ?? null,
+      riskDerivedTargets:       this.riskState
+        ? deriveDailyTargets(Math.min(this.riskState.startOfDayEquityUsd, RISK_POLICY.maxRiskCapitalUsd))
+        : null,
+      msUntilNextManilaDay:     msUntilNextManilaDay(new Date()),
     };
   }
 
@@ -587,6 +650,12 @@ class WorkerManager {
     liveTestAccumLossUsd: number;
     /** true = DB 조회 성공; false = 실패 → LIVE TEST fail-closed */
     liveTestDbOk: boolean;
+    /** Manila 거래일(00:00 Asia/Manila~) 실현 PnL — RiskEngine 전용 (6H-1) */
+    realizedPnLManilaDay: number;
+    /** Manila 거래주(월요일 00:00 Asia/Manila~) 실현 PnL */
+    realizedPnLManilaWeek: number;
+    /** Manila 거래일 신규 진입(OPEN) 횟수 — maxDailyEntries 강제용 */
+    entriesManilaDay: number;
   }> {
     const ZEROS = {
       realizedPnLToday: 0, realizedPnLRolling24h: 0, realizedPnLWeekly: 0,
@@ -594,6 +663,7 @@ class WorkerManager {
       consecutiveLosses: 0, positions: [],
       tradesInLastHour: 0, lastOpenTradeTimestampMs: null, totalUnrealizedPnl: 0,
       liveTestAccumLossUsd: 0, liveTestDbOk: false,  // false = DB 실패 → fail-closed
+      realizedPnLManilaDay: 0, realizedPnLManilaWeek: 0, entriesManilaDay: 0,
     };
 
     try {
@@ -624,10 +694,17 @@ class WorkerManager {
         t => t.action === 'CLOSE' || t.action === 'CLOSE_ALL',
       );
 
+      // Manila 거래일/거래주 시작 (6H-1 §11 — RiskEngine 전용, UTC 기준점과 별도)
+      const nowDate = new Date(now);
+      const manilaDayStartMs  = new Date(manilaDayStartIso(nowDate)).getTime();
+      const manilaWeekStartMs = new Date(manilaWeekStartIso(nowDate)).getTime();
+
       let realizedPnLToday         = 0;
       let realizedPnLRolling24h    = 0;
       let realizedPnLWeekly        = 0;
       let totalRealizedPnlAllTime  = 0;
+      let realizedPnLManilaDay     = 0;
+      let realizedPnLManilaWeek    = 0;
 
       for (const t of closeTrades) {
         const ts  = new Date(t.timestamp as string | Date).getTime();
@@ -636,6 +713,8 @@ class WorkerManager {
         if (ts >= todayStart.getTime())      realizedPnLToday      += pnl;
         if (ts >= rolling24hStart.getTime()) realizedPnLRolling24h += pnl;
         if (ts >= weekStart.getTime())       realizedPnLWeekly     += pnl;
+        if (ts >= manilaDayStartMs)          realizedPnLManilaDay  += pnl;
+        if (ts >= manilaWeekStartMs)         realizedPnLManilaWeek += pnl;
       }
 
       // LIVE TEST 누적 손실: test_mode=true CLOSE 거래 중 pnl < 0인 것의 절댓값 합계.
@@ -661,6 +740,14 @@ class WorkerManager {
       const tradesInLastHour = allOpenActions.filter(t => {
         const ts = new Date(t.timestamp as string | Date).getTime();
         return ts >= oneHourAgoMs;
+      }).length;
+
+      // Manila 거래일 신규 진입 횟수 — OPEN action만 집계.
+      // 취소·prepare 실패는 trades에 기록되지 않으므로 세지 않음.
+      // 부분청산(CLOSE)은 OPEN이 아니므로 신규 진입으로 세지 않음 (§10).
+      const entriesManilaDay = allOpenActions.filter(t => {
+        const ts = new Date(t.timestamp as string | Date).getTime();
+        return ts >= manilaDayStartMs;
       }).length;
 
       // 가장 최근 OPEN 거래 시각 (쿨다운 기준)
@@ -722,6 +809,7 @@ class WorkerManager {
         tradesInLastHour, lastOpenTradeTimestampMs, totalUnrealizedPnl,
         liveTestAccumLossUsd,
         liveTestDbOk: true,
+        realizedPnLManilaDay, realizedPnLManilaWeek, entriesManilaDay,
       };
     } catch (err) {
       console.warn('[AIWorker] loadPaperState 실패 — synthetic zeros 사용 (LIVE TEST fail-closed):', (err as Error).message);
@@ -848,6 +936,82 @@ class WorkerManager {
 
       // (기간 PnL 갱신은 cooldown/거래한도 게이트 이전에 이미 수행됨 — 위 참조)
 
+      // ── RiskEngine 평가 (6H-1 — Manila 기준, fail-closed) ─────────────────
+      const nowRisk = new Date();
+      // 상태 미수립이면 현재 equity로 수립 (첫 실행)
+      if (this.riskState === null && this.riskDbOk) {
+        this.riskState = initialRiskEngineState(nowRisk, currentEquity);
+      }
+      let riskEval: RiskEvaluationResult | null = null;
+      if (this.riskState) {
+        // Manila 기간 롤오버 (daily reset은 weekly/hard 잠금을 해제하지 않음)
+        const rolled = rollRiskPeriods(this.riskState, nowRisk, currentEquity);
+        this.riskState = rolled.state;
+
+        // 기준점 관측 시각 = 기간 시작. maxAge = 8일 (주간 기준점도 유효해야 함)
+        const RISK_OBS_MAX_AGE_MS = 8 * 24 * 60 * 60 * 1000;
+        const dCap = dailyRiskCapital(
+          { equityUsd: this.riskState.startOfDayEquityUsd, recordedAt: this.riskState.dayPeriodStart },
+          nowRisk, RISK_OBS_MAX_AGE_MS,
+        );
+        const wCap = weeklyRiskCapital(
+          { equityUsd: this.riskState.startOfWeekEquityUsd, recordedAt: this.riskState.weekPeriodStart },
+          nowRisk, RISK_OBS_MAX_AGE_MS,
+        );
+
+        // PAPER 모드: 시뮬레이션 체결에 수수료 0으로 정의 → 실현 PnL = 순 PnL.
+        // LIVE 모드에서는 fee breakdown 필수 — 결측 시 feeDataOk=false로 fail-closed.
+        const dailyRealizedNet = paperState.liveTestDbOk ? paperState.realizedPnLManilaDay : null;
+        const weeklyRealizedNet = paperState.liveTestDbOk ? paperState.realizedPnLManilaWeek : null;
+        const hasOpenPositions = paperState.positions.length > 0;
+        const estimatedExit = dailyRealizedNet !== null && hasOpenPositions
+          ? dailyRealizedNet + paperState.totalUnrealizedPnl
+          : (dailyRealizedNet !== null ? null : null);
+        const lossAware = dailyRealizedNet !== null
+          ? (hasOpenPositions ? Math.min(dailyRealizedNet, dailyRealizedNet + paperState.totalUnrealizedPnl) : dailyRealizedNet)
+          : null;
+
+        riskEval = evaluateRiskState({
+          dailyRiskCapitalUsd:  dCap.ok ? dCap.capitalUsd : null,
+          weeklyRiskCapitalUsd: wCap.ok ? wCap.capitalUsd : null,
+          currentEquityUsd:     Number.isFinite(currentEquity) ? currentEquity : null,
+          dailyRealizedNetPnlUsd:  dailyRealizedNet,
+          dailyLossAwareNetPnlUsd: lossAware,
+          estimatedExitNetPnlUsd:  estimatedExit,
+          weeklyRealizedNetPnlUsd: weeklyRealizedNet,
+          dailyEntryCount:      paperState.entriesManilaDay,
+          consecutiveLossCount: paperState.consecutiveLosses,
+          openPositionCount:    paperState.positions.length,
+          dbOk:                 this.riskDbOk && paperState.liveTestDbOk,
+          feeDataOk:            true,  // PAPER: 수수료 0 정의. LIVE 실행 경로는 별도 fee 게이트.
+          marketDataFresh:      dataFreshMs < 120_000,
+          locks: this.riskState.locks,
+        });
+
+        // 평가 결과 영속화 — 저장 실패 시 다음 사이클 fail-closed
+        this.riskState = {
+          ...this.riskState,
+          dailyRealizedNetPnlUsd:  dailyRealizedNet ?? this.riskState.dailyRealizedNetPnlUsd,
+          dailyLossAwareNetPnlUsd: lossAware ?? this.riskState.dailyLossAwareNetPnlUsd,
+          weeklyRealizedNetPnlUsd: weeklyRealizedNet ?? this.riskState.weeklyRealizedNetPnlUsd,
+          dailyEntryCount:      paperState.entriesManilaDay,
+          consecutiveLossCount: paperState.consecutiveLosses,
+          riskOperatingState:   riskEval.state,
+          locks:                riskEval.locks,
+          lastUpdatedAt:        nowRisk.toISOString(),
+        };
+        const saved = await saveRiskEngineState(this.riskState);
+        if (!saved.ok) {
+          this.riskDbOk = false; // fail-closed — 이번+다음 사이클 진입 차단
+          console.error(`[AIWorker] ${saved.reason} — 신규 진입 차단`);
+          riskEval = { ...riskEval, entryAllowed: false, blockReasons: [...riskEval.blockReasons, 'RiskEngine 상태 저장 실패 — fail-closed'] };
+        } else {
+          this.riskDbOk = true;
+        }
+      }
+      this.lastRiskEvaluation = riskEval;
+      const riskEntryAllowed = riskEval?.entryAllowed === true;
+
       const isLiveMode = process.env.WORKER_ENGINE_MODE === 'LIVE';
       // LIVE TEST verification: query GMX subgraph/RPC server-side using GMX_WALLET_ADDRESS.
       // This is the authoritative source — browser-posted diagnostics are NOT used for
@@ -888,6 +1052,27 @@ class WorkerManager {
         // Never uses browser-posted data; see fetchServerLiveTestData() in gmx.ts.
         livePositionCount: liveTestData.positionCount,
       });
+
+      // ── RiskEngine 강제 (6H-1) — LONG/SHORT 결정 veto + 레버리지 클램프 ────
+      if (engineResult.operatingState === 'LONG' || engineResult.operatingState === 'SHORT') {
+        if (!riskEntryAllowed) {
+          const reasons = riskEval?.blockReasons.join('; ') ?? 'RiskEngine 상태 미수립 (fail-closed)';
+          engineResult.operatingState = 'CASH';
+          engineResult.riskApproved = false;
+          engineResult.riskVetoReason = `[RISK_ENGINE] ${reasons}`;
+          engineResult.sizeUsd = undefined;
+          engineResult.leverage = undefined;
+          console.info(`[AIWorker] 사이클 #${cycleNum} RiskEngine veto — ${reasons}`);
+        } else if (riskEval) {
+          // 레버리지 클램프 (NORMAL 3x / DEFENSIVE 2x) + size factor
+          if (typeof engineResult.leverage === 'number') {
+            engineResult.leverage = Math.min(engineResult.leverage, riskEval.maxLeverage);
+          }
+          if (typeof engineResult.sizeUsd === 'number') {
+            engineResult.sizeUsd = engineResult.sizeUsd * riskEval.sizeFactor;
+          }
+        }
+      }
 
       // LIVE TEST MODE: 상태 업데이트 + 누적 손실 캐시 갱신
       const testModeActive = Boolean(limits.liveTestMode && isLiveMode);
@@ -1064,3 +1249,8 @@ class WorkerManager {
 
 // ── Singleton 인스턴스 ─────────────────────────────────────────────────────────
 export const workerManager = new WorkerManager();
+
+/** 현재 워커 상태 스냅샷 (읽기 전용) — 라우트에서 사용 */
+export function getWorkerStatus(): WorkerStatus {
+  return workerManager.getStatus();
+}

@@ -219,9 +219,10 @@ function setupDbSequence(opts: {
     if (selectCallN === 1) return pending;   // start(): loadPendingApprovals
     if (selectCallN === 2) return hwm;       // start(): loadHwmFromDb
     if (selectCallN === 3) return [];        // start(): loadBaselinesFromDb (기준점 없음)
-    if (selectCallN === 4) return pending;   // runCycle(): loadPendingApprovals again
-    if (selectCallN === 5) return strategy;  // runCycle(): strategyConfigTable
-    if (selectCallN === 6) return trades;    // runCycle(): tradesTable (consecutiveLosses)
+    if (selectCallN === 4) return [];        // start(): loadRiskEngineState (6H-1 — 미수립)
+    if (selectCallN === 5) return pending;   // runCycle(): loadPendingApprovals again
+    if (selectCallN === 6) return strategy;  // runCycle(): strategyConfigTable
+    if (selectCallN === 7) return trades;    // runCycle(): tradesTable (consecutiveLosses)
     return [];
   };
 
