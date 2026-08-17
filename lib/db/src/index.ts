@@ -255,6 +255,15 @@ const MIGRATIONS: { name: string; sql: string }[] = [
       CREATE INDEX IF NOT EXISTS relay_nonces_account_idx ON relay_nonces (main_account);
     `,
   },
+  {
+    name: "0018_relay_tasks_transport_gen",
+    sql: `
+      -- 6F-2 §3 — transport 세대 구분. 기존 행은 legacy REST(api.gelato.digital)
+      -- 세대의 taskId — 신형 JSON-RPC endpoint로 절대 조회하면 안 된다.
+      ALTER TABLE relay_tasks
+        ADD COLUMN IF NOT EXISTS transport_gen text NOT NULL DEFAULT 'legacy-digital';
+    `,
+  },
   // Add future migrations here in chronological order.
 ];
 

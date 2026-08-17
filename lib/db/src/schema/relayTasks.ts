@@ -30,6 +30,9 @@ export const relayTasksTable = pgTable("relay_tasks", {
   feeAmount:         text("fee_amount"),
   userNonce:         text("user_nonce"),
   approvalNonce:     text("approval_nonce"),
+  // 6F-2 §3 — transport 세대: 'legacy-digital'(구 REST) | 'jsonrpc-gasless-0.0.10'.
+  // legacy 세대 taskId는 신형 endpoint로 조회 금지 (UNRESOLVED_LEGACY_TRANSPORT).
+  transportGen:      text("transport_gen").notNull().default("legacy-digital"),
   errorClass:        text("error_class"),                    // 오류 분류
   resolutionBasis:   text("resolution_basis"),               // 판정 근거 (온체인 증거 등)
   createdAt:         timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
