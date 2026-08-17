@@ -150,6 +150,24 @@ export async function saveStopCoverageRecord(rec: StopCoverageRecord): Promise<b
   }
 }
 
+/** 제출 미도달/실패 시 사전 예약된 PENDING 레코드 제거 (best-effort — 실패 시 fail-closed 잔존) */
+export async function removeStopCoverageRecord(positionRef: string): Promise<boolean> {
+  try {
+    const loaded = await loadStopCoverage();
+    if (!loaded.ok) return false;
+    if (!(positionRef in loaded.map)) return true;
+    const map = { ...loaded.map };
+    delete map[positionRef];
+    const value = JSON.stringify(map);
+    await db.insert(workerStateTable)
+      .values({ key: STOP_COVERAGE_KEY, value })
+      .onConflictDoUpdate({ target: workerStateTable.key, set: { value } });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // ── 감사로그 읽기/쓰기 ─────────────────────────────────────────────────────────
 
 /** 감사로그 로드 결과 — DB/파싱 실패를 '빈 로그'로 오인하지 않도록 명시 구분 */
@@ -846,6 +864,17 @@ export async function executeLiveTestOrder(params: LiveOrderParams): Promise<Liv
 
   // ── 2) durable execution intent — writeContract 도달 전 PREPARED 커밋 필수 ──
   const intentId = buildIntentId(params.decisionId, 'open');
+
+  // ── §8 진입 전 계약 — 제출 시도 전에 stop coverage PENDING을 원자적으로 예약.
+  // 저장 실패 = OPEN 차단 (fail-closed). 제출 미도달/실패 시 아래에서 제거를
+  // 시도하며, 제거 실패 시 PENDING 잔존 → 다음 OPEN이 차단된다 (역시 fail-closed).
+  const covReserved = await saveStopCoverageRecord({
+    positionRef: intentId, status: 'PENDING', stopOrderKey: null,
+    triggerPriceUsd: null, updatedAt: new Date().toISOString(),
+  });
+  if (!covReserved) {
+    return sizingFail('[LIVE TEST] stop coverage PENDING 예약 실패 — 신규 OPEN 차단 (fail-closed)');
+  }
   const intentCreated = await createPreparedIntent({
     id: intentId, decisionId: params.decisionId, cycleNumber: params.cycleNumber,
     symbol: params.symbol, orderType: 'open', isLong: params.isLong,
@@ -877,16 +906,12 @@ export async function executeLiveTestOrder(params: LiveOrderParams): Promise<Liv
     mainAddress: params.mainAddress, openPosition: null,
   });
 
-  // ── §8 진입 후 계약 — OPEN 제출 성공 시 stop coverage PENDING 등록.
-  // 등록 실패는 치명적: coverage 불명 상태로 두면 다음 사이클 uncovered 검사가
-  // DB 조회 실패와 동일하게 신규 OPEN을 차단한다 (fail-closed 유지).
-  if (flowRes.ok && !flowRes.simulated) {
-    const saved = await saveStopCoverageRecord({
-      positionRef: intentId, status: 'PENDING', stopOrderKey: null,
-      triggerPriceUsd: null, updatedAt: new Date().toISOString(),
-    });
-    if (!saved) {
-      console.error(`[LiveTestExecutor] stop coverage PENDING 등록 실패 (${intentId}) — 다음 OPEN은 coverage 조회 fail-closed로 차단됨`);
+  // ── §8 사후 정리 — 실주문이 제출되지 않았으면(시뮬/실패) 사전 예약한 PENDING 제거.
+  // 제거 실패 시 PENDING 잔존 → 다음 OPEN 차단 (fail-closed — false positive 허용).
+  if (!flowRes.ok || flowRes.simulated) {
+    const removed = await removeStopCoverageRecord(intentId);
+    if (!removed) {
+      console.error(`[LiveTestExecutor] stop coverage 예약 제거 실패 (${intentId}) — 잔존 PENDING이 다음 OPEN을 차단함 (fail-closed)`);
     }
   }
   return { ...flowRes, gateResult };

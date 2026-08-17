@@ -126,8 +126,10 @@ router.post("/data/trades", async (req, res) => {
         leverage:         leverageVal,
         collateralUsd:    collateralUsdV,
         testMode:         testModeVal,
-        // §5 (6H-2): 시뮬 체결 = 수수료 0 정의 (LIVE 정산은 recordTradeSettlement 전용)
-        settlementStatus: "PAPER_ZERO_FEE",
+        // §5 (6H-2): PAPER 시뮬 체결 = 수수료 0 정의. LIVE TEST(test_mode=true)
+        // 거래는 UNSETTLED로 시작 — 온체인 증거 정산(recordTradeSettlement) 전
+        // 이익은 목표 산정에 반영되지 않는다 (보수적 비대칭).
+        settlementStatus: testModeVal ? "UNSETTLED" : "PAPER_ZERO_FEE",
       })
       .onConflictDoUpdate({
         target: tradesTable.id,

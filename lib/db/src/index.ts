@@ -318,8 +318,13 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         ADD COLUMN IF NOT EXISTS settlement_status  text NOT NULL DEFAULT 'UNSETTLED',
         ADD COLUMN IF NOT EXISTS settled_at         timestamptz,
         ADD COLUMN IF NOT EXISTS evidence_tx_hash   text;
+      -- backfill은 1회만 실행 (worker_state 플래그 가드) — 매 startup 재실행 시
+      -- 신규 LIVE UNSETTLED 거래를 정산 확정으로 오염시키는 것을 방지한다.
       UPDATE trades SET settlement_status = 'PAPER_ZERO_FEE'
-        WHERE settlement_status = 'UNSETTLED' AND evidence_tx_hash IS NULL;
+        WHERE settlement_status = 'UNSETTLED' AND evidence_tx_hash IS NULL
+          AND NOT EXISTS (SELECT 1 FROM worker_state WHERE key = 'settlementBackfill0021Done');
+      INSERT INTO worker_state (key, value) VALUES ('settlementBackfill0021Done', 'true')
+        ON CONFLICT (key) DO NOTHING;
       -- 동일 온체인 증거로 이중 정산 금지 (§5)
       CREATE UNIQUE INDEX IF NOT EXISTS trades_evidence_tx_hash_idx
         ON trades (evidence_tx_hash) WHERE evidence_tx_hash IS NOT NULL;

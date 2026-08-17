@@ -288,7 +288,8 @@ describe('OPEN — durable intent 필수 구간', () => {
   it('제출 수락 후 감사로그 저장 실패 → ok=false + 신규 주문 차단 (fail-closed)', async () => {
     unlockEnv();
     // 수락 이후의 감사로그 append만 실패시킨다
-    mockOnConflictDoUpdate.mockRejectedValueOnce(new Error('db write failed'));
+    // (첫 onConflict 쓰기는 §8 stop coverage PENDING 예약 — 성공 처리)
+    mockOnConflictDoUpdate.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('db write failed'));
     const { executeLiveTestOrder, isReconciled } = await import('../workers/liveTestExecutor');
     const r = await executeLiveTestOrder(openParams());
     expect(r.ok).toBe(false);

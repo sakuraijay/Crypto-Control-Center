@@ -669,6 +669,9 @@ class WorkerManager {
     realizedPnLToday: number;
     realizedPnLRolling24h: number;
     realizedPnLWeekly: number;
+    /** §5 (6H-2) — UNSETTLED 이익 제외 UTC 합계 (엔진 손익 입력용, 보수적) */
+    realizedPnLTodayGated: number;
+    realizedPnLWeeklyGated: number;
     /** 전체 기간 누적 실현 PnL — HWM 계산 기준 */
     totalRealizedPnlAllTime: number;
     consecutiveLosses: number;
@@ -692,6 +695,7 @@ class WorkerManager {
   }> {
     const ZEROS = {
       realizedPnLToday: 0, realizedPnLRolling24h: 0, realizedPnLWeekly: 0,
+      realizedPnLTodayGated: 0, realizedPnLWeeklyGated: 0,
       totalRealizedPnlAllTime: 0,
       consecutiveLosses: 0, positions: [],
       tradesInLastHour: 0, lastOpenTradeTimestampMs: null, totalUnrealizedPnl: 0,
@@ -735,6 +739,8 @@ class WorkerManager {
       let realizedPnLToday         = 0;
       let realizedPnLRolling24h    = 0;
       let realizedPnLWeekly        = 0;
+      let realizedPnLTodayGated    = 0;   // §5 — UNSETTLED 이익 제외 (엔진 입력용)
+      let realizedPnLWeeklyGated   = 0;
       let totalRealizedPnlAllTime  = 0;
       let realizedPnLManilaDay     = 0;
       let realizedPnLManilaWeek    = 0;
@@ -752,6 +758,8 @@ class WorkerManager {
         if (ts >= todayStart.getTime())      realizedPnLToday      += pnl;
         if (ts >= rolling24hStart.getTime()) realizedPnLRolling24h += pnl;
         if (ts >= weekStart.getTime())       realizedPnLWeekly     += pnl;
+        if (ts >= todayStart.getTime())      realizedPnLTodayGated  += gatedPnl;
+        if (ts >= weekStart.getTime())       realizedPnLWeeklyGated += gatedPnl;
         if (ts >= manilaDayStartMs)          realizedPnLManilaDay  += gatedPnl;
         if (ts >= manilaWeekStartMs)         realizedPnLManilaWeek += gatedPnl;
       }
@@ -843,6 +851,7 @@ class WorkerManager {
 
       return {
         realizedPnLToday, realizedPnLRolling24h, realizedPnLWeekly,
+        realizedPnLTodayGated, realizedPnLWeeklyGated,
         totalRealizedPnlAllTime,
         consecutiveLosses, positions,
         tradesInLastHour, lastOpenTradeTimestampMs, totalUnrealizedPnl,
@@ -1071,14 +1080,16 @@ class WorkerManager {
           // 여기서 미리 차감하면 stateEngine이 다시 차감해 이중 공제가 됩니다.
           availableBalance: limits.tradingCapital,
           unrealizedPnl:    paperState.totalUnrealizedPnl,
-          realizedPnlToday: paperState.realizedPnLToday,
+          // §5 (6H-2): UNSETTLED 이익은 엔진 손익 입력에서 제외 — 미정산 이익이
+          // 손실을 상쇄해 일일 손실 한도 발동을 지연시키는 것을 방지 (보수적).
+          realizedPnlToday: paperState.realizedPnLTodayGated,
         },
         limits,
         engineState:              "RUNNING",
         consecutiveLosses:        paperState.consecutiveLosses,
         dataFreshMs,
-        dailyRealizedPnlUsd:      paperState.realizedPnLToday,
-        weeklyRealizedPnlUsd:     paperState.realizedPnLWeekly,
+        dailyRealizedPnlUsd:      paperState.realizedPnLTodayGated,
+        weeklyRealizedPnlUsd:     paperState.realizedPnLWeeklyGated,
         rolling24hRealizedPnlUsd: paperState.realizedPnLRolling24h,
         tradingCapital:           limits.tradingCapital,
         accountDrawdownPct,
