@@ -111,6 +111,22 @@ vi.mock('../lib/gmxContracts', () => ({
   acceptablePriceCloseLong: vi.fn(), acceptablePriceCloseShort: vi.fn(),
 }));
 
+// ── 6G-2 — 공식 GMX API v2 flow 모킹 (기본: 게이트 차단 결과) ──────────────────
+const gmxFlowState = vi.hoisted(() => ({
+  result: {
+    submitted: false, prepareCalls: 0, signCalls: 0, submitCalls: 0,
+    finalStatus: 'FAILED_PRE_BROADCAST', taskRowId: null, gmxRequestId: null,
+    blockReasons: ['activation gate 미충족'], preBlocked: true,
+  } as Record<string, unknown>,
+}));
+vi.mock('../lib/gmxApiExecution', () => ({
+  executeViaGmxApi: vi.fn(async () => gmxFlowState.result),
+  buildActivationInput: vi.fn((x: unknown) => x),
+}));
+vi.mock('../lib/gmxApiTransport', () => ({
+  createGmxApiTransport: vi.fn(() => ({ readonlyEnabled: false, submissionEnabled: false, peers: [] })),
+}));
+
 // ── env 초기화 ────────────────────────────────────────────────────────────────
 const ENV_KEYS = [
   'WORKER_ENGINE_MODE', 'LIVE_TEST_EXECUTION_LOCKED', 'DELEGATED_SIGNER_ENABLED', 'GMX_RPC_URL',
@@ -152,6 +168,11 @@ beforeEach(() => {
   savedValues.length = 0;
   failAuditInsert = false;
   failAuditSelect = false;
+  gmxFlowState.result = {
+    submitted: false, prepareCalls: 0, signCalls: 0, submitCalls: 0,
+    finalStatus: 'FAILED_PRE_BROADCAST', taskRowId: null, gmxRequestId: null,
+    blockReasons: ['activation gate 미충족'], preBlocked: true,
+  };
   intentState.createResult    = 'created';
   intentState.blocking        = false;
   intentState.reconcile       = { ok: true, blockingCount: 0 };
@@ -320,7 +341,7 @@ describe('executeLiveTestOrder — 중앙 게이트 통합 (writeContract 도달
     expect(last.error).toMatch(/CENTRAL GATE/);
   });
 
-  it('주문 제출 후 SUBMITTED 감사기록 저장 실패 → ok=false + 신규 주문 차단 (fail-closed)', async () => {
+  it('주문 제출 수락 후 감사기록 저장 실패 → ok=false + 신규 주문 차단 (fail-closed)', async () => {
     process.env.LIVE_TEST_EXECUTION_LOCKED = 'false';
     process.env.WORKER_ENGINE_MODE = 'LIVE';
     process.env.DELEGATED_SIGNER_ENABLED = 'true';
@@ -333,12 +354,17 @@ describe('executeLiveTestOrder — 중앙 게이트 통합 (writeContract 도달
     await reconcileOnRestart();
     expect(isReconciled()).toBe(true);
 
-    failAuditInsert = true; // writeContract 성공 후 감사기록 저장만 실패
+    // GMX API flow가 제출 수락(TASK_ACCEPTED)까지 성공한 상황을 주입
+    gmxFlowState.result = {
+      submitted: true, prepareCalls: 1, signCalls: 1, submitCalls: 1,
+      finalStatus: 'TASK_ACCEPTED', taskRowId: 'task-1', gmxRequestId: 'req-9',
+      blockReasons: [], preBlocked: false,
+    };
+    failAuditInsert = true; // 제출 수락 후 감사기록 저장만 실패
     const r = await executeLiveTestOrder(orderParams());
 
-    expect(r.txHash).toBe('0xTxSubmitted');       // 제출 자체는 발생
     expect(r.ok).toBe(false);                      // 성공으로 보고하지 않음
-    expect(r.error).toMatch(/영속 기록 저장 실패/);
+    expect(r.error).toMatch(/감사로그 저장 실패/);
     expect(isReconciled()).toBe(false);            // 이후 신규 주문 차단
 
     // 차단 검증: 다음 주문은 중앙 게이트(reconciled)에서 거부

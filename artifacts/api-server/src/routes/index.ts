@@ -9,6 +9,7 @@ import walletDiagnosticRouter from "./wallet-diagnostic";
 import notificationsRouter from "./notifications";
 import livetestRouter from "./livetest";
 import relayRouter from "./relay";
+import gmxapiRouter from "./gmxapi";
 
 const router: IRouter = Router();
 
@@ -22,5 +23,6 @@ router.use(walletDiagnosticRouter);
 router.use(notificationsRouter);
 router.use(livetestRouter);
 router.use(relayRouter);
+router.use(gmxapiRouter);
 
 export default router;

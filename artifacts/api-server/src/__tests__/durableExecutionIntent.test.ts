@@ -117,6 +117,27 @@ vi.mock('../lib/executionIntents', () => {
     reconcileIntentsOnRestart:    intentMocks.reconcileIntentsOnRestart,
   };
 });
+// ── 6G-2 — 공식 GMX API v2 flow 모킹 (제출 결과 주입) ─────────────────────────
+const flowState = vi.hoisted(() => ({
+  result: {
+    submitted: true, prepareCalls: 1, signCalls: 1, submitCalls: 1,
+    finalStatus: 'TASK_ACCEPTED', taskRowId: 'task-1', gmxRequestId: 'req-1',
+    blockReasons: [] as string[], preBlocked: false,
+  } as Record<string, unknown>,
+}));
+const gmxFlowMocks = vi.hoisted(() => ({
+  executeViaGmxApi: vi.fn(),
+}));
+gmxFlowMocks.executeViaGmxApi.mockImplementation(async () => flowState.result);
+vi.mock('../lib/gmxApiExecution', () => ({
+  executeViaGmxApi: gmxFlowMocks.executeViaGmxApi,
+  buildActivationInput: vi.fn((x: unknown) => x),
+}));
+// transport는 config-only stub (외부 호출 없음)
+vi.mock('../lib/gmxApiTransport', () => ({
+  createGmxApiTransport: vi.fn(() => ({ readonlyEnabled: false, submissionEnabled: false, peers: [] })),
+}));
+
 // 온체인 reconciler는 별도 테스트(intentReconciler.test.ts)에서 검증 —
 // 여기서는 "해소 없음" no-op으로 고정 (차단 유지 시나리오 보존)
 vi.mock('../lib/intentReconciler', () => ({
@@ -153,6 +174,12 @@ beforeEach(async () => {
   intentState.markSubmittedOk = true;
   writeContractSpy.fn.mockClear();
   writeContractSpy.fn.mockResolvedValue('0xTxSubmitted');
+  gmxFlowMocks.executeViaGmxApi.mockClear();
+  flowState.result = {
+    submitted: true, prepareCalls: 1, signCalls: 1, submitCalls: 1,
+    finalStatus: 'TASK_ACCEPTED', taskRowId: 'task-1', gmxRequestId: 'req-1',
+    blockReasons: [], preBlocked: false,
+  };
   for (const m of Object.values(intentMocks)) m?.mockClear?.();
   // reconciled 상태를 정상으로 초기화 (모듈은 파일 전체에서 공유됨)
   const { reconcileOnRestart } = await import('../workers/liveTestExecutor');
@@ -183,16 +210,20 @@ function closeParams() {
 }
 
 describe('OPEN — durable intent 필수 구간', () => {
-  it('정상 경로: PREPARED → writeContract → SUBMITTED (txHash 전달)', async () => {
+  it('정상 경로: PREPARED 커밋 → GMX API 제출 수락 (requestId 기록, intent는 PREPARED 유지)', async () => {
     unlockEnv();
     const { executeLiveTestOrder } = await import('../workers/liveTestExecutor');
     const r = await executeLiveTestOrder(openParams());
     expect(r.ok).toBe(true);
-    expect(r.txHash).toBe('0xTxSubmitted');
+    expect(r.txHash).toBeNull();                       // txHash는 reconciler가 온체인 증거로 확보
+    expect(r.orderKey).toBe('gmxreq:req-1');
     expect(intentMocks.createPreparedIntent).toHaveBeenCalledTimes(1);
     expect(intentMocks.createPreparedIntent.mock.calls[0][0]).toMatchObject({ id: 'intent:open:d1', orderType: 'open' });
-    expect(writeContractSpy.fn).toHaveBeenCalledTimes(1);
-    expect(intentMocks.markIntentSubmitted).toHaveBeenCalledWith('intent:open:d1', '0xTxSubmitted');
+    expect(gmxFlowMocks.executeViaGmxApi).toHaveBeenCalledTimes(1);
+    // intent는 PREPARED 유지 — 해소는 gmxApiStatusReconciler가 relay task 증거로 수행
+    expect(intentMocks.markIntentSubmitted).not.toHaveBeenCalled();
+    // legacy writeContract 경로 도달 0회
+    expect(writeContractSpy.fn).not.toHaveBeenCalled();
   });
 
   it('intent INSERT 실패 → writeContract 0회, ok=false (fail-closed)', async () => {
@@ -216,9 +247,13 @@ describe('OPEN — durable intent 필수 구간', () => {
     expect(writeContractSpy.fn).not.toHaveBeenCalled();
   });
 
-  it('writeContract timeout → UNRESOLVED (자동 FAILED 금지) + 신규 주문 차단', async () => {
+  it('제출 결과 불명(UNRESOLVED) → 자동 FAILED 금지 + 신규 주문 차단', async () => {
     unlockEnv();
-    writeContractSpy.fn.mockRejectedValueOnce(new Error('timeout waiting for response'));
+    flowState.result = {
+      submitted: false, prepareCalls: 1, signCalls: 1, submitCalls: 1,
+      finalStatus: 'UNRESOLVED', taskRowId: 'task-1', gmxRequestId: null,
+      blockReasons: ['submit timeout — 수락 여부 불명'], preBlocked: false,
+    };
     const { executeLiveTestOrder, isReconciled } = await import('../workers/liveTestExecutor');
     const r = await executeLiveTestOrder(openParams());
     expect(r.ok).toBe(false);
@@ -231,14 +266,14 @@ describe('OPEN — durable intent 필수 구간', () => {
     expect(entries[entries.length - 1].status).toBe('UNRESOLVED');
   });
 
-  it('제출 성공 후 intent SUBMITTED 갱신 실패 → ok=false + txHash 보고 + 차단', async () => {
+  it('제출 수락 후 감사로그 저장 실패 → ok=false + 신규 주문 차단 (fail-closed)', async () => {
     unlockEnv();
-    intentState.markSubmittedOk = false;
+    // 수락 이후의 감사로그 append만 실패시킨다
+    mockOnConflictDoUpdate.mockRejectedValueOnce(new Error('db write failed'));
     const { executeLiveTestOrder, isReconciled } = await import('../workers/liveTestExecutor');
     const r = await executeLiveTestOrder(openParams());
     expect(r.ok).toBe(false);
-    expect(r.txHash).toBe('0xTxSubmitted');
-    expect(r.error).toMatch(/영속 기록 저장 실패/);
+    expect(r.error).toMatch(/감사로그 저장 실패/);
     expect(isReconciled()).toBe(false);
   });
 
@@ -276,13 +311,19 @@ describe('OPEN — durable intent 필수 구간', () => {
 });
 
 describe('CLOSE — 동일 durable intent 경로', () => {
-  it('정상 경로: intent:close 키로 PREPARED → SUBMITTED', async () => {
+  it('정상 경로: intent:close 키로 PREPARED 커밋 + GMX API 제출 수락', async () => {
     unlockEnv();
-    const { closeLiveTestPosition } = await import('../workers/liveTestExecutor');
-    const r = await closeLiveTestPosition(closeParams());
-    expect(r.ok).toBe(true);
-    expect(intentMocks.createPreparedIntent.mock.calls[0][0]).toMatchObject({ id: 'intent:close:c1', orderType: 'close' });
-    expect(intentMocks.markIntentSubmitted).toHaveBeenCalledWith('intent:close:c1', '0xTxSubmitted');
+    const { closeLiveTestPosition, __setOpenPositionsFetchForTests } = await import('../workers/liveTestExecutor');
+    __setOpenPositionsFetchForTests(async () => [{ marketAddress: '0xM', isLong: true, sizeUsd: 10 }]);
+    try {
+      const r = await closeLiveTestPosition(closeParams());
+      expect(r.ok).toBe(true);
+      expect(r.orderKey).toBe('gmxreq:req-1');
+      expect(intentMocks.createPreparedIntent.mock.calls[0][0]).toMatchObject({ id: 'intent:close:c1', orderType: 'close' });
+      expect(intentMocks.markIntentSubmitted).not.toHaveBeenCalled(); // PREPARED 유지
+    } finally {
+      __setOpenPositionsFetchForTests(null);
+    }
   });
 
   it('intent INSERT 실패 → writeContract 0회', async () => {
@@ -294,14 +335,23 @@ describe('CLOSE — 동일 durable intent 경로', () => {
     expect(writeContractSpy.fn).not.toHaveBeenCalled();
   });
 
-  it('writeContract 오류 → UNRESOLVED (자동 FAILED 금지)', async () => {
+  it('제출 결과 불명(UNRESOLVED) → 자동 FAILED 금지', async () => {
     unlockEnv();
-    writeContractSpy.fn.mockRejectedValueOnce(new Error('ECONNRESET'));
-    const { closeLiveTestPosition } = await import('../workers/liveTestExecutor');
-    const r = await closeLiveTestPosition(closeParams());
-    expect(r.ok).toBe(false);
-    expect(intentMocks.markIntentUnresolved).toHaveBeenCalledWith('intent:close:c1', expect.stringMatching(/ECONNRESET/));
-    expect(intentMocks.markIntentFailedPreBroadcast).not.toHaveBeenCalled();
+    flowState.result = {
+      submitted: false, prepareCalls: 1, signCalls: 1, submitCalls: 1,
+      finalStatus: 'UNRESOLVED', taskRowId: 'task-1', gmxRequestId: null,
+      blockReasons: ['submit 응답 유실(ECONNRESET) — 수락 여부 불명'], preBlocked: false,
+    };
+    const { closeLiveTestPosition, __setOpenPositionsFetchForTests } = await import('../workers/liveTestExecutor');
+    __setOpenPositionsFetchForTests(async () => [{ marketAddress: '0xM', isLong: true, sizeUsd: 10 }]);
+    try {
+      const r = await closeLiveTestPosition(closeParams());
+      expect(r.ok).toBe(false);
+      expect(intentMocks.markIntentUnresolved).toHaveBeenCalledWith('intent:close:c1', expect.stringMatching(/ECONNRESET/));
+      expect(intentMocks.markIntentFailedPreBroadcast).not.toHaveBeenCalled();
+    } finally {
+      __setOpenPositionsFetchForTests(null);
+    }
   });
 });
 
