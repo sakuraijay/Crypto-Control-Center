@@ -122,9 +122,15 @@ const gmxFlowState = vi.hoisted(() => ({
 vi.mock('../lib/gmxApiExecution', () => ({
   executeViaGmxApi: vi.fn(async () => gmxFlowState.result),
   buildActivationInput: vi.fn((x: unknown) => x),
+  usdPriceToGmxString: vi.fn(() => '0'),
 }));
 vi.mock('../lib/gmxApiTransport', () => ({
   createGmxApiTransport: vi.fn(() => ({ readonlyEnabled: false, submissionEnabled: false, peers: [] })),
+}));
+// 6H-2B — 보호 주문 저장소: 차단 없음·활성 없음으로 고정 (별도 테스트에서 검증)
+vi.mock('../lib/protectionOrders', () => ({
+  listBlockingProtections: vi.fn(async () => ({ ok: true, rows: [] })),
+  listActiveProtections: vi.fn(async () => ({ ok: true, rows: [] })),
 }));
 
 // ── env 초기화 ────────────────────────────────────────────────────────────────
@@ -183,6 +189,12 @@ beforeEach(async () => {
   // 6H-2A §7 — stop 능력 게이트는 별도 테스트에서 검증; 여기서는 통과 상태로 주입
   const { __setStopExecutionAvailabilityForTests } = await import('../workers/liveTestExecutor');
   __setStopExecutionAvailabilityForTests(true);
+  // 6H-2B §7 — OPEN 직전 동기 action 예산 게이트 통과용 canonical snapshot (remaining ≥ 4)
+  const { recordCanonicalSnapshot } = await import('../lib/relayActivationStatus');
+  recordCanonicalSnapshot({
+    atMs: Date.now(), confirmed: true, reason: null, approvalNonce: '1',
+    isSubaccountListed: true, expiresAt: String(Math.floor(Date.now() / 1000) + 3600), remaining: '5',
+  });
 });
 afterAll(() => {
   for (const k of ENV_KEYS) {

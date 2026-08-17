@@ -60,6 +60,7 @@ import { createGmxApiTransport, type GmxApiTransport } from '../lib/gmxApiTransp
 import {
   executeViaGmxApi,
   buildActivationInput,
+  usdPriceToGmxString,
   type OpenPositionEvidence,
 } from '../lib/gmxApiExecution';
 import type { ActivationGateInput } from '../lib/relayActivationGate';
@@ -75,7 +76,13 @@ import { fetchServerOpenPositions } from '../routes/gmx';
 // ── 6H-2B §11 — stop 실행 능력 파생 게이트 ──────────────────────────────────
 import { deriveStopExecutionCapability, type StopCapabilityResult } from '../lib/stopExecutionCapability';
 import { evaluateActionBudget } from '../lib/actionBudget';
-import { listBlockingProtections } from '../lib/protectionOrders';
+import { listBlockingProtections, listActiveProtections } from '../lib/protectionOrders';
+import { ORDER_TYPE } from '../lib/gmxCreateOrder';
+import {
+  setProtectionSubmitFn, runEmergencyClose, reconcileProtections,
+  checkStartupProtectionCoverage,
+  type ProtectionSubmitRequest, type ProtectionSubmitOutcome,
+} from './protectionExecutor';
 
 /**
  * DEPRECATED — legacy SubaccountRouter 직접 주문 경로 (multicall/sendTokens/createOrder).
@@ -289,6 +296,9 @@ async function applyIntentResolutionsToAuditLog(resolutions: IntentResolution[])
 }
 
 export async function reconcileOnRestart(): Promise<void> {
+  // 6H-2B — 보호 주문 제출 함수 결선 + startup coverage/재판정 (fail-closed)
+  wireProtectionExecution();
+  try { await runProtectionPass(); } catch { /* 차단은 capability/게이트가 담당 */ }
   try {
     // durable execution intents를 감사로그보다 먼저 reconcile —
     // 감사로그에 상태불명 항목이 있어 조기 반환하더라도 PREPARED intent가
@@ -425,6 +435,25 @@ export function __setStopExecutionAvailabilityForTests(v: boolean | null): void 
 }
 
 /**
+ * §2 — stop 스키마 런타임 검증: 로컬 ORDER_TYPE 상수를 설치된 공식 SDK enum과
+ * 실시간 대조한다 (상수 true 금지 — SDK 로드/대조 실패 = false, 캐시).
+ */
+let _schemaVerifiedCache: boolean | null = null;
+async function verifyStopSchemaAgainstSdk(): Promise<boolean> {
+  if (_schemaVerifiedCache !== null) return _schemaVerifiedCache;
+  try {
+    const sdk = await import('@gmx-io/sdk/types/orders');
+    const e = (sdk as unknown as { OrderType?: Record<string, number> }).OrderType;
+    _schemaVerifiedCache = !!e &&
+      Number(ORDER_TYPE.MarketIncrease) === e.MarketIncrease &&
+      Number(ORDER_TYPE.MarketDecrease) === e.MarketDecrease &&
+      Number(ORDER_TYPE.StopLossDecrease) === e.StopLossDecrease &&
+      Number(ORDER_TYPE.Liquidation) === e.Liquidation;
+  } catch { _schemaVerifiedCache = false; }
+  return _schemaVerifiedCache;
+}
+
+/**
  * §11 — 실제 조건에서 stop 실행 능력 재평가. 조회 실패 = 해당 조건 false.
  * 어느 경로에서도 상수 true를 주입하지 않는다.
  */
@@ -457,7 +486,7 @@ export async function refreshStopExecutionCapability(): Promise<StopCapabilityRe
   try { noBlockingIntents = !(await hasBlockingIntents()); } catch { /* fail-closed */ }
 
   const derived = deriveStopExecutionCapability({
-    schemaVerified: true, // §2 골든 테스트로 고정된 StopLossDecrease=6 빌더 존재
+    schemaVerified: await verifyStopSchemaAgainstSdk(), // 설치된 SDK enum 실시간 대조
     transportConfigured: isGmxLiveRelayConfigured() && resolveGmxEventEmitterAddress().ok,
     signerReady: isDelegatedSignerEnabled() && isSignerInitialized(),
     durableStoreOk,
@@ -631,9 +660,137 @@ let _intentReconcileTimer: ReturnType<typeof setInterval> | null = null;
  *   SUBMITTED intent를 오염시키지 않기 위함. 온체인 판정 규칙만 적용된다.
  * - 오류는 전부 흡수 (Worker 중단 금지). 차단 해소는 온체인 증거로만.
  */
+// ── 6H-2B §5·§6 — 보호 주문 production wiring ────────────────────────────────
+
+/**
+ * 인덱스 토큰 decimals authoritative 소스 — 현재 미구성 (온체인 ERC20 readback
+ * 미구현). null = 변환 불가 → stop 제출 fail-closed. 추측 하드코딩 금지.
+ */
+function resolveIndexTokenDecimals(_marketAddress: string): number | null {
+  return null;
+}
+
+let _protectionWired = false;
+
+/**
+ * 실제 보호 주문 제출 함수 결선 — executeViaGmxApi 경로 재사용 (activation gate·
+ * durable intent·단일 submit 규칙 전부 그대로 적용). LIVE 잠금이면 gate가 차단
+ * (네트워크 0회). 테스트가 setProtectionSubmitFn으로 override 가능.
+ */
+export function wireProtectionExecution(): void {
+  if (_protectionWired) return;
+  _protectionWired = true;
+  setProtectionSubmitFn(async (req: ProtectionSubmitRequest): Promise<ProtectionSubmitOutcome> => {
+    // 포지션 증거 필수 (STOP/CLOSE 공통 — authoritative readback)
+    const positions = await fetchAuthoritativeOpenPositions();
+    if (positions === null) return { status: 'FAILED_PRE_BROADCAST', reason: 'authoritative 포지션 조회 실패 — 제출 0회 (fail-closed)' };
+    const pos = positions.find(
+      (p) => p.marketAddress.toLowerCase() === req.marketAddress.toLowerCase() && p.isLong === req.isLong,
+    ) ?? null;
+    if (!pos) return { status: 'FAILED_PRE_BROADCAST', reason: '대상 포지션 없음 — 보호 주문 제출 0회' };
+
+    const mainAddress = process.env.GMX_WALLET_ADDRESS ?? '';
+    const isStop = req.purpose !== 'EMERGENCY_CLOSE';
+    let triggerPriceGmx: string | undefined;
+    let acceptablePriceGmx: string | undefined;
+    if (isStop) {
+      if (req.triggerPriceUsd === null || req.acceptablePriceUsd === null) {
+        return { status: 'FAILED_PRE_BROADCAST', reason: 'stop trigger/acceptable 가격 누락 — 제출 0회' };
+      }
+      const decimals = resolveIndexTokenDecimals(req.marketAddress);
+      if (decimals === null) {
+        return { status: 'FAILED_PRE_BROADCAST', reason: '인덱스 토큰 decimals authoritative 소스 미구성 — 가격 변환 불가, stop 제출 0회 (fail-closed)' };
+      }
+      try {
+        triggerPriceGmx = usdPriceToGmxString(req.triggerPriceUsd, decimals);
+        acceptablePriceGmx = usdPriceToGmxString(req.acceptablePriceUsd, decimals);
+      } catch (e) {
+        return { status: 'FAILED_PRE_BROADCAST', reason: `가격 정밀도 변환 실패 — ${(e as Error).message}` };
+      }
+    }
+
+    const activationArgs = {
+      kind: 'CLOSE' as const, liveTestMode: true,
+      dbOk: true, rpcOk: Boolean(process.env.GMX_RPC_URL),
+      selfIntentId: null,
+    };
+    const res = await executeViaGmxApi({
+      transport: getGmxApiTransport(),
+      req: {
+        kind: isStop ? 'STOP_LOSS' : 'CLOSE',
+        symbol: req.symbol, marketAddress: req.marketAddress, isLong: req.isLong,
+        sizeUsd: req.sizeDeltaUsd, collateralUsd: 0,
+        mainWallet: mainAddress, subaccountAddress: getSignerAddress() ?? '',
+        ...(isStop ? { triggerPriceGmx, acceptablePriceGmx } : {}),
+      },
+      intentId: req.protectionId,
+      activation: await buildExecutorActivationInput(activationArgs),
+      reevaluateActivation: () => buildExecutorActivationInput(activationArgs),
+      openPosition: pos,
+      canonicalNonce: (() => {
+        const snap = getCanonicalSnapshot();
+        if (!snap?.approvalNonce) return null;
+        try { return BigInt(snap.approvalNonce); } catch { return null; }
+      })(),
+    });
+    if (res.finalStatus === 'TASK_ACCEPTED' && res.submitted) {
+      return { status: 'ACCEPTED', requestId: res.gmxRequestId, typedDataDigest: null };
+    }
+    if (res.finalStatus === 'UNRESOLVED') {
+      return { status: 'UNRESOLVED', reason: res.blockReasons.join('; ') || '제출 결과 불명' };
+    }
+    return { status: 'FAILED_PRE_BROADCAST', reason: res.blockReasons.join('; ') || '제출 미도달' };
+  });
+}
+
+/**
+ * §6·§9 — 주기 보호 주문 pass:
+ *  1. ACTIVE stop 없는 열린 포지션 → runEmergencyClose (durable 1회 보장)
+ *  2. 차단 상태 보호 주문 재판정 (증거 수집 미구현 = 전이 없음 + 차단 유지)
+ * 실패해도 Worker는 계속 — 차단은 capability/OPEN 게이트가 담당 (fail-closed).
+ */
+export async function runProtectionPass(): Promise<void> {
+  wireProtectionExecution();
+  try {
+    const [positions, active] = await Promise.all([
+      fetchAuthoritativeOpenPositions(), listActiveProtections(),
+    ]);
+    const activeKeys = new Set<string>(
+      active.ok ? active.rows.filter((r) => r.status === 'ACTIVE').map((r) => r.positionKey) : [],
+    );
+    const posList = positions === null ? null : positions.map((p) => ({
+      positionKey: `${p.marketAddress.toLowerCase()}:${p.isLong ? 'L' : 'S'}`,
+      marketAddress: p.marketAddress, isLong: p.isLong, sizeUsd: p.sizeUsd,
+    }));
+    const cov = checkStartupProtectionCoverage({
+      positions: active.ok ? posList : null, // 보호 주문 조회 실패도 차단으로 취급
+      activeStopPositionKeys: activeKeys,
+    });
+    if (!cov.ok && posList) {
+      for (const u of cov.uncovered) {
+        const p = posList.find((x) => x.positionKey === u.positionKey);
+        if (!p) continue;
+        console.error(`[LiveTestExecutor] 🚨 ACTIVE stop 없는 포지션 ${u.positionKey} ($${u.sizeUsd}) — emergency close 시도`);
+        const r = await runEmergencyClose({
+          parentOpenIntentId: u.positionKey, positionKey: u.positionKey,
+          symbol: p.marketAddress, marketAddress: p.marketAddress, isLong: p.isLong,
+          fullSizeUsd: u.sizeUsd, reason: 'ACTIVE stop 부재 — 무방비 포지션 (§6)',
+        });
+        if (!r.ok) console.error(`[LiveTestExecutor] emergency close 결과: ${r.reason}`);
+      }
+    }
+    // 증거 수집기 미구현 — null 반환 = 전이 없음 + 차단 유지 (§9 fail-closed)
+    await reconcileProtections(async () => null);
+  } catch (e) {
+    console.error(`[LiveTestExecutor] 보호 주문 pass 오류 (fail-closed 유지): ${(e as Error).message}`);
+  }
+}
+
 export async function runPeriodicIntentReconciliation(): Promise<void> {
   // §11 — stop 실행 능력 주기 재평가 (실패해도 Worker 계속, 능력은 fail-closed 유지)
   try { await refreshStopExecutionCapability(); } catch { /* fail-closed 유지 */ }
+  // 6H-2B §6·§9 — 보호 주문 coverage·재판정 pass
+  try { await runProtectionPass(); } catch { /* fail-closed 유지 */ }
   try {
     if (!(await hasBlockingIntents())) return;
     const summary = await reconcileBlockingIntentsOnchain();
@@ -983,6 +1140,32 @@ export async function executeLiveTestOrder(params: LiveOrderParams): Promise<Liv
     );
     if (!eligible.ok) {
       return sizingFail(`[LIVE TEST] 실행 적격 비용 스냅샷 확인 실패 — ${eligible.reason} — OPEN 차단 (fail-closed)`);
+    }
+  }
+
+  // ── 6H-2B §7 — OPEN 직전 동기 action 예산 게이트 (캐시 아닌 현재 canonical) ──
+  // OPEN 1 + INITIAL_STOP 1 + EMERGENCY_CLOSE 1 + stale CANCEL 1 = 최소 4 action.
+  // capability 5분 캐시와 별개로 매 OPEN마다 재평가 — 부족 시 자동 확대 금지, 차단.
+  {
+    const snap = getCanonicalSnapshot();
+    const budget = evaluateActionBudget({
+      remaining: snap?.remaining ?? null,
+      expiresAt: snap?.expiresAt ?? null,
+      nowMs: Date.now(),
+    });
+    if (!budget.sufficient) {
+      return sizingFail(`[LIVE TEST] action 예산 부족/조회불가 — ${budget.reasons[0] ?? ''} — OPEN 차단 (자동 확대 금지)`);
+    }
+  }
+
+  // ── 6H-2B §3 — 차단 상태 보호 주문(UNRESOLVED/FROZEN/미종결) 존재 시 OPEN 금지 ──
+  {
+    const listed = await listBlockingProtections();
+    if (!listed.ok) {
+      return sizingFail('[LIVE TEST] 보호 주문 상태 조회 실패 — OPEN 차단 (fail-closed)');
+    }
+    if (listed.rows.length > 0) {
+      return sizingFail(`[LIVE TEST] 차단 상태 보호 주문 ${listed.rows.length}건 — 해소 전 신규 OPEN 금지`);
     }
   }
 
