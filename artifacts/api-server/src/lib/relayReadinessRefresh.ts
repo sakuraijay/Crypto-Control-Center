@@ -204,7 +204,7 @@ export async function performReadinessRefresh(deps: ReadinessRefreshDeps): Promi
         // 6E-8 §3·§6 — httpStatus는 정수일 때만 표시; upstream 본문·문자열 미노출.
         // 5xx는 외부 서비스 일시 장애로 분류하되 activation 차단(fail-closed)은 동일 유지.
         const status = 'httpStatus' in quote && Number.isInteger(quote.httpStatus) ? (quote.httpStatus as number) : null;
-        if (status !== null && status >= 500) failures.push(`fee oracle 조회 실패 (외부 fee oracle 일시 장애 — HTTP ${status})`);
+        if (status !== null && status >= 500 && status < 600) failures.push(`fee oracle 조회 실패 (외부 fee oracle 일시 장애 — HTTP ${status})`);
         else if (status !== null) failures.push(`fee oracle 조회 실패 (http: HTTP ${status})`);
         else failures.push(`fee oracle 조회 실패(${quote.kind})`);
       }

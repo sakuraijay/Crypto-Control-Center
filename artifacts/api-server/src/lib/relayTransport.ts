@@ -61,8 +61,12 @@ export interface RelayTransport {
 
 function sanitizeTransportError(e: unknown): string {
   const msg = e instanceof Error ? e.message : String(e);
-  // URL·query·헤더 값이 섞여도 key 패턴 노출 방지
-  return msg.replace(/[A-Za-z0-9_-]{20,}/g, '[redacted]').slice(0, 200);
+  return msg
+    // 6E-8 리뷰 반영: error object에 반향된 URL(host/path/query) 전체 제거
+    .replace(/[a-z][a-z0-9+.-]*:\/\/[^\s'"]+/gi, '[url-redacted]')
+    // URL·query·헤더 값이 섞여도 key 패턴 노출 방지
+    .replace(/[A-Za-z0-9_-]{20,}/g, '[redacted]')
+    .slice(0, 200);
 }
 
 function validateUrl(url: string): { ok: true; parsed: URL } | { ok: false; message: string } {

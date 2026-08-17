@@ -46,13 +46,22 @@ describe('6E-8 §2 — quoteRelayFee HTTP status 구조적 보존', () => {
     expect(dump).not.toContain(WETH);
   });
 
-  it('network 오류 → kind=network, httpStatus 없음', async () => {
-    fetchSpy.mockRejectedValue(Object.assign(new Error('ECONNRESET https://api.gelato.digital/x'), { name: 'FetchError' }));
+  it('network 오류 → kind=network, httpStatus 없음, URL 반향 완전 제거', async () => {
+    fetchSpy.mockRejectedValue(Object.assign(
+      new Error('ECONNRESET https://api.gelato.digital/oracles/42161/estimate?paymentToken=0x82aF49447D8a07e3bd95BD0d56f35241523fBab1&gasLimit=3000000'),
+      { name: 'FetchError' },
+    ));
     const q = await quote();
     expect(q.ok).toBe(false);
     if (q.ok) return;
     expect(q.kind).toBe('network');
     expect('httpStatus' in q ? q.httpStatus : undefined).toBeUndefined();
+    // 리뷰 반영 — error object에 반향된 URL(host/path/query/토큰)이 어떤 필드에도 없음
+    const dump = JSON.stringify(q);
+    expect(dump).not.toContain('https://');
+    expect(dump).not.toContain('gelato.digital');
+    expect(dump).not.toContain('paymentToken');
+    expect(dump).not.toContain(WETH);
   });
 
   it('decode 오류(estimatedFee 없음) → kind=decode, httpStatus 없음', async () => {
@@ -92,6 +101,19 @@ describe('6E-8 §3·§4·§6 — readiness failure 문구 + signer 예상 차단
   it('HTTP 404 (비 5xx) → (http: HTTP 404) 표시', async () => {
     const state = await performReadinessRefresh(deps({ ok: false, kind: 'http', httpStatus: 404, message: 'HTTP 404' }));
     expect(state.failures).toContain('fee oracle 조회 실패 (http: HTTP 404)');
+  });
+
+  it('5xx 경계: 499/600은 일시 장애 아님, 599는 일시 장애', async () => {
+    const cases: [number, string][] = [
+      [499, 'fee oracle 조회 실패 (http: HTTP 499)'],
+      [599, 'fee oracle 조회 실패 (외부 fee oracle 일시 장애 — HTTP 599)'],
+      [600, 'fee oracle 조회 실패 (http: HTTP 600)'],
+    ];
+    for (const [status, expected] of cases) {
+      __resetReadinessRefreshForTests();
+      const state = await performReadinessRefresh(deps({ ok: false, kind: 'http', httpStatus: status, message: `HTTP ${status}` }));
+      expect(state.failures).toContain(expected);
+    }
   });
 
   it('status 없는 실패(network/timeout/decode) → kind만 표시', async () => {
