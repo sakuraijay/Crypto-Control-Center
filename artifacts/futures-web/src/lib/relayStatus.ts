@@ -6,6 +6,8 @@
  * 성공처럼 표시하지 않는 것이 UI 계약의 핵심이다.
  */
 
+import { apiUrl, readApiJson, API_ROUTE_MISMATCH_MESSAGE } from './apiUrl';
+
 export interface RelayFeeQuoteView {
   source: string;
   feeToken: string;
@@ -103,13 +105,15 @@ export interface ActivationStatusResponse {
   error?: string;
 }
 
-export async function fetchActivationStatus(apiBase: string, pin: string): Promise<ActivationStatusResponse | null> {
+export async function fetchActivationStatus(pin: string): Promise<ActivationStatusResponse | null> {
   try {
-    const res = await fetch(`${apiBase}executor/relay/activation`, {
+    const res = await fetch(apiUrl('executor/relay/activation'), {
       headers: { 'x-operator-pin': pin },
     });
     if (!res.ok) return null;
-    return (await res.json()) as ActivationStatusResponse;
+    const body = await readApiJson(res);
+    if (body.kind !== 'json') return null;
+    return body.json as ActivationStatusResponse;
   } catch {
     return null;
   }
@@ -136,19 +140,21 @@ export type ReadinessRefreshResult =
  * 서명·주문·nonce 생성·task 생성을 수행하지 않는 읽기 전용 검증이다.
  * PIN은 헤더로만 전달하고 어디에도 저장/로그하지 않는다.
  */
-export async function postReadinessRefresh(params: { apiBase: string; pin: string }): Promise<ReadinessRefreshResult> {
+export async function postReadinessRefresh(params: { pin: string }): Promise<ReadinessRefreshResult> {
   try {
-    const res = await fetch(`${params.apiBase}executor/relay/readiness/refresh`, {
+    const res = await fetch(apiUrl('executor/relay/readiness/refresh'), {
       method: 'POST',
       headers: { 'x-operator-pin': params.pin },
     });
     if (res.status === 401 || res.status === 403) return { kind: 'auth' };
     if (res.status === 503) return { kind: 'not_configured' };
-    const json = await res.json().catch(() => null);
+    const body = await readApiJson(res);
+    if (body.kind === 'route_mismatch') return { kind: 'error', message: API_ROUTE_MISMATCH_MESSAGE };
+    const json = body.kind === 'json' ? (body.json as { ok?: boolean; refresh?: ReadinessRefreshView; error?: string }) : null;
     if (!res.ok || !json?.ok || !json.refresh) {
       return { kind: 'error', message: json?.error ?? `readiness refresh 실패 (HTTP ${res.status})` };
     }
-    return { kind: 'ok', refresh: json.refresh as ReadinessRefreshView };
+    return { kind: 'ok', refresh: json.refresh };
   } catch (e: unknown) {
     return { kind: 'error', message: (e as Error).message || '네트워크 오류' };
   }
@@ -226,46 +232,51 @@ export function formatWeiToEth(wei: string | null | undefined): string {
 
 // ── fetch 래퍼 ───────────────────────────────────────────────────────────────
 
-export async function fetchRelayStatus(apiBase: string, pin: string): Promise<RelayStatusResponse | null> {
+export async function fetchRelayStatus(pin: string): Promise<RelayStatusResponse | null> {
   try {
-    const res = await fetch(`${apiBase}executor/relay/status`, {
+    const res = await fetch(apiUrl('executor/relay/status'), {
       headers: { 'x-operator-pin': pin },
     });
     if (!res.ok) return null;
-    const json = await res.json();
-    return json?.ok ? (json as RelayStatusResponse) : null;
+    const body = await readApiJson(res);
+    const json = body.kind === 'json' ? (body.json as RelayStatusResponse & { ok?: boolean }) : null;
+    return json?.ok ? json : null;
   } catch {
     return null;
   }
 }
 
-export async function postRevokePrepare(params: { apiBase: string; pin: string }): Promise<{
+export async function postRevokePrepare(params: { pin: string }): Promise<{
   ok: boolean; sessionId?: string; typedData?: unknown; summary?: Record<string, string>; error?: string;
 }> {
   try {
-    const res = await fetch(`${params.apiBase}executor/relay/revoke/prepare`, {
+    const res = await fetch(apiUrl('executor/relay/revoke/prepare'), {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-operator-pin': params.pin },
       body: '{}',
     });
-    const json = await res.json().catch(() => null);
+    const body = await readApiJson(res);
+    if (body.kind === 'route_mismatch') return { ok: false, error: API_ROUTE_MISMATCH_MESSAGE };
+    const json = body.kind === 'json' ? (body.json as { ok?: boolean; error?: string; [k: string]: unknown }) : null;
     if (!res.ok || !json?.ok) return { ok: false, error: json?.error ?? `prepare 실패 (HTTP ${res.status})` };
-    return json;
+    return json as { ok: boolean; sessionId?: string; typedData?: unknown; summary?: Record<string, string>; error?: string };
   } catch (e: unknown) {
     return { ok: false, error: (e as Error).message || '네트워크 오류' };
   }
 }
 
 export async function postRevokeSignature(params: {
-  apiBase: string; pin: string; sessionId: string; signature: string;
+  pin: string; sessionId: string; signature: string;
 }): Promise<{ ok: boolean; error?: string }> {
   try {
-    const res = await fetch(`${params.apiBase}executor/relay/revoke/signature`, {
+    const res = await fetch(apiUrl('executor/relay/revoke/signature'), {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-operator-pin': params.pin },
       body: JSON.stringify({ sessionId: params.sessionId, signature: params.signature }),
     });
-    const json = await res.json().catch(() => null);
+    const body = await readApiJson(res);
+    if (body.kind === 'route_mismatch') return { ok: false, error: API_ROUTE_MISMATCH_MESSAGE };
+    const json = body.kind === 'json' ? (body.json as { ok?: boolean; error?: string; [k: string]: unknown }) : null;
     if (!res.ok || !json?.ok) return { ok: false, error: json?.error ?? `서명 저장 실패 (HTTP ${res.status})` };
     return { ok: true };
   } catch (e: unknown) {
@@ -274,15 +285,17 @@ export async function postRevokeSignature(params: {
 }
 
 export async function postRevokeCancel(params: {
-  apiBase: string; pin: string; sessionId: string;
+  pin: string; sessionId: string;
 }): Promise<{ ok: boolean; error?: string }> {
   try {
-    const res = await fetch(`${params.apiBase}executor/relay/revoke/cancel`, {
+    const res = await fetch(apiUrl('executor/relay/revoke/cancel'), {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-operator-pin': params.pin },
       body: JSON.stringify({ sessionId: params.sessionId }),
     });
-    const json = await res.json().catch(() => null);
+    const body = await readApiJson(res);
+    if (body.kind === 'route_mismatch') return { ok: false, error: API_ROUTE_MISMATCH_MESSAGE };
+    const json = body.kind === 'json' ? (body.json as { ok?: boolean; error?: string; [k: string]: unknown }) : null;
     if (!res.ok || !json?.ok) return { ok: false, error: json?.error ?? `취소 실패 (HTTP ${res.status})` };
     return { ok: true };
   } catch (e: unknown) {
@@ -309,13 +322,14 @@ export interface UnresolvedTaskView {
   blocking: boolean;
 }
 
-export async function fetchUnresolvedTasks(apiBase: string, pin: string): Promise<UnresolvedTaskView[] | null> {
+export async function fetchUnresolvedTasks(pin: string): Promise<UnresolvedTaskView[] | null> {
   try {
-    const res = await fetch(`${apiBase}executor/relay/unresolved`, {
+    const res = await fetch(apiUrl('executor/relay/unresolved'), {
       headers: { 'x-operator-pin': pin },
     });
     if (!res.ok) return null;
-    const json = await res.json();
+    const body = await readApiJson(res);
+    const json = body.kind === 'json' ? (body.json as { ok?: boolean; tasks?: UnresolvedTaskView[] }) : null;
     return json?.ok ? (json.tasks as UnresolvedTaskView[]) : null;
   } catch {
     return null;
@@ -324,32 +338,36 @@ export async function fetchUnresolvedTasks(apiBase: string, pin: string): Promis
 
 /** 증거 재수집만 — 강제 terminal·재제출·삭제는 서버에 존재하지 않는다 */
 export async function postUnresolvedRecheck(params: {
-  apiBase: string; pin: string; taskId: string;
+  pin: string; taskId: string;
 }): Promise<{ ok: boolean; rechecked?: boolean; reason?: string; error?: string }> {
   try {
-    const res = await fetch(`${params.apiBase}executor/relay/unresolved/recheck`, {
+    const res = await fetch(apiUrl('executor/relay/unresolved/recheck'), {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-operator-pin': params.pin },
       body: JSON.stringify({ taskId: params.taskId }),
     });
-    const json = await res.json().catch(() => null);
+    const body = await readApiJson(res);
+    if (body.kind === 'route_mismatch') return { ok: false, error: API_ROUTE_MISMATCH_MESSAGE };
+    const json = body.kind === 'json' ? (body.json as { ok?: boolean; error?: string; [k: string]: unknown }) : null;
     if (!res.ok || !json?.ok) return { ok: false, error: json?.error ?? `재조회 실패 (HTTP ${res.status})` };
-    return { ok: true, rechecked: json.rechecked === true, reason: json.reason };
+    return { ok: true, rechecked: json.rechecked === true, reason: json.reason as string | undefined };
   } catch (e: unknown) {
     return { ok: false, error: (e as Error).message || '네트워크 오류' };
   }
 }
 
-export async function postRevokeDryRun(params: { apiBase: string; pin: string }): Promise<{
+export async function postRevokeDryRun(params: { pin: string }): Promise<{
   ok: boolean; dryRun?: DryRunView; error?: string;
 }> {
   try {
-    const res = await fetch(`${params.apiBase}executor/relay/revoke/dry-run`, {
+    const res = await fetch(apiUrl('executor/relay/revoke/dry-run'), {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-operator-pin': params.pin },
       body: '{}',
     });
-    const json = await res.json().catch(() => null);
+    const body = await readApiJson(res);
+    if (body.kind === 'route_mismatch') return { ok: false, error: API_ROUTE_MISMATCH_MESSAGE };
+    const json = body.kind === 'json' ? (body.json as { ok?: boolean; error?: string; [k: string]: unknown }) : null;
     if (!res.ok || !json?.ok) return { ok: false, error: json?.error ?? `dry-run 실패 (HTTP ${res.status})` };
     return { ok: true, dryRun: json.dryRun as DryRunView };
   } catch (e: unknown) {

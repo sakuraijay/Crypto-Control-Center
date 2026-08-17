@@ -111,19 +111,29 @@ describe('fetchSubaccountAuthDetailed', () => {
 
   it('401 응답은 http/401로 구분된다', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 401 }));
-    const r = await fetchSubaccountAuthDetailed('/api/');
+    const r = await fetchSubaccountAuthDetailed();
     expect(r).toEqual({ kind: 'http', status: 401 });
   });
 
   it('네트워크 오류 → network', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')));
-    const r = await fetchSubaccountAuthDetailed('/api/');
+    const r = await fetchSubaccountAuthDetailed();
     expect(r).toEqual({ kind: 'network' });
   });
 
+  it('200+HTML(정적 SPA fallback) → route_mismatch', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      headers: { get: (k: string) => (k.toLowerCase() === 'content-type' ? 'text/html' : null) },
+      json: async () => { throw new Error('no'); },
+    }));
+    const r = await fetchSubaccountAuthDetailed();
+    expect(r).toEqual({ kind: 'route_mismatch' });
+  });
+
   it('성공 → ok + payload', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => okAuth }));
-    const r = await fetchSubaccountAuthDetailed('/api/');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, headers: { get: (k: string) => (k.toLowerCase() === 'content-type' ? 'application/json' : null) }, json: async () => okAuth }));
+    const r = await fetchSubaccountAuthDetailed();
     expect(r.kind).toBe('ok');
   });
 });

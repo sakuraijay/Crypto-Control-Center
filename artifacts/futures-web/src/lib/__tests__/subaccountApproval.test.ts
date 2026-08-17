@@ -99,27 +99,30 @@ describe('권한 요약 고정 문구', () => {
 describe('API 래퍼 — 오류 시 fail-closed', () => {
   afterEach(() => vi.unstubAllGlobals());
 
+  const jsonHeaders = { get: (k: string) => (k.toLowerCase() === 'content-type' ? 'application/json' : null) };
+
+
   it('fetchSubaccountAuth: 네트워크 오류/HTTP 오류/ok:false → null', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('net')));
-    expect(await fetchSubaccountAuth('/api/')).toBeNull();
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, json: async () => ({}) }));
-    expect(await fetchSubaccountAuth('/api/')).toBeNull();
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: false }) }));
-    expect(await fetchSubaccountAuth('/api/')).toBeNull();
+    expect(await fetchSubaccountAuth()).toBeNull();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 500, headers: jsonHeaders, json: async () => ({}) }));
+    expect(await fetchSubaccountAuth()).toBeNull();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, headers: jsonHeaders, json: async () => ({ ok: false }) }));
+    expect(await fetchSubaccountAuth()).toBeNull();
   });
 
   it('fetchSubaccountAuth: 정상 응답 통과', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-      ok: true, json: async () => ({ ok: true, state: 'UNVERIFIED', displayState: 'UNVERIFIED' }),
+      ok: true, status: 200, headers: jsonHeaders, json: async () => ({ ok: true, state: 'UNVERIFIED', displayState: 'UNVERIFIED' }),
     }));
-    const r = await fetchSubaccountAuth('/api/');
+    const r = await fetchSubaccountAuth();
     expect(r?.state).toBe('UNVERIFIED');
   });
 
   it('postPrepareApproval: PIN 헤더·JSON 전송, 오류 메시지 전달', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 401, json: async () => ({ ok: false, error: '운영자 인증 실패' }) });
+    const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 401, headers: jsonHeaders, json: async () => ({ ok: false, error: '운영자 인증 실패' }) });
     vi.stubGlobal('fetch', fetchMock);
-    const r = await postPrepareApproval({ apiBase: '/api/', pin: 'secret-pin', walletAddress: OWNER });
+    const r = await postPrepareApproval({ pin: 'secret-pin', walletAddress: OWNER });
     expect(r.ok).toBe(false);
     expect(r.error).toContain('인증');
     const [, init] = fetchMock.mock.calls[0];
@@ -128,11 +131,11 @@ describe('API 래퍼 — 오류 시 fail-closed', () => {
   });
 
   it('postApprovalSignature: 성공 시 status 전달, 예외 → ok:false', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true, status: 'OWNER_SIGNATURE_READY' }) }));
-    const r = await postApprovalSignature({ apiBase: '/api/', pin: 'p'.repeat(8), sessionId: 's1', signature: '0x' + 'ab'.repeat(65) });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, headers: jsonHeaders, json: async () => ({ ok: true, status: 'OWNER_SIGNATURE_READY' }) }));
+    const r = await postApprovalSignature({ pin: 'p'.repeat(8), sessionId: 's1', signature: '0x' + 'ab'.repeat(65) });
     expect(r).toMatchObject({ ok: true, status: 'OWNER_SIGNATURE_READY' });
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')));
-    const r2 = await postApprovalSignature({ apiBase: '/api/', pin: 'p'.repeat(8), sessionId: 's1', signature: '0x00' });
+    const r2 = await postApprovalSignature({ pin: 'p'.repeat(8), sessionId: 's1', signature: '0x00' });
     expect(r2.ok).toBe(false);
   });
 });

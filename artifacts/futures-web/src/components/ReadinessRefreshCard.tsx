@@ -11,7 +11,6 @@ import { RadioTower, Loader2, CheckCircle2, XCircle, ShieldAlert, Lock } from 'l
 import { cn } from '@/lib/utils';
 import { postReadinessRefresh, type ReadinessRefreshView } from '@/lib/relayStatus';
 
-const API_BASE = `${import.meta.env.BASE_URL}api/`;
 
 export function ReadinessRefreshCard() {
   const [pin, setPin] = useState('');
@@ -27,7 +26,7 @@ export function ReadinessRefreshCard() {
     setResult(null);
     if (p.length < 6) { setError('운영자 PIN(6자 이상)을 입력하세요.'); return; }
     setBusy(true);
-    const r = await postReadinessRefresh({ apiBase: API_BASE, pin: p });
+    const r = await postReadinessRefresh({ pin: p });
     setBusy(false);
     setRanAtMs(Date.now());
     if (r.kind === 'auth') { setError('운영자 인증 실패 (HTTP 401/403) — PIN을 확인하세요. 환경변수 미설정이 아닙니다.'); return; }

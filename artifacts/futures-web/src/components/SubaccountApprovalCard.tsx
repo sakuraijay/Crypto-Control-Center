@@ -18,7 +18,6 @@ import {
   type SubaccountAuthResponse, type PrepareResponse,
 } from '@/lib/subaccountApproval';
 
-const API_BASE = `${import.meta.env.BASE_URL}api/`;
 
 type Phase = 'idle' | 'preparing' | 'awaiting_signature' | 'submitting' | 'done';
 
@@ -35,7 +34,7 @@ export function SubaccountApprovalCard() {
 
   const refresh = useCallback(async () => {
     setLoading(true);
-    const r = await fetchSubaccountAuthDetailed(API_BASE);
+    const r = await fetchSubaccountAuthDetailed();
     if (r.kind === 'ok') {
       setAuth(r.data);
       setFetchErrorState(null);
@@ -64,7 +63,7 @@ export function SubaccountApprovalCard() {
     if (!prepareGate.ok) { setMessage({ tone: 'error', text: prepareGate.reasons.join(' · ') }); return; }
     if (pin.trim().length < 6) { setMessage({ tone: 'error', text: '운영자 PIN(6자 이상)을 입력하세요.' }); return; }
     setPhase('preparing');
-    const r = await postPrepareApproval({ apiBase: API_BASE, pin: pin.trim(), walletAddress: wallet.address! });
+    const r = await postPrepareApproval({ pin: pin.trim(), walletAddress: wallet.address! });
     if (!r.ok || !r.sessionId || !r.typedData) {
       setPhase('idle');
       setMessage({ tone: 'error', text: r.error ?? 'prepare 실패' });
@@ -97,7 +96,7 @@ export function SubaccountApprovalCard() {
       return;
     }
     setPhase('submitting');
-    const r = await postApprovalSignature({ apiBase: API_BASE, pin: pin.trim(), sessionId: prepared.sessionId, signature });
+    const r = await postApprovalSignature({ pin: pin.trim(), sessionId: prepared.sessionId, signature });
     if (!r.ok) {
       setPhase('awaiting_signature');
       setMessage({ tone: 'error', text: r.error ?? '서명 저장 실패' });

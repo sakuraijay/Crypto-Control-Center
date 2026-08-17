@@ -6,6 +6,8 @@
  * (서명은 브라우저 지갑 eth_signTypedData_v4 전용).
  */
 
+import { apiUrl, readApiJson, API_ROUTE_MISMATCH_MESSAGE } from './apiUrl';
+
 export const ARBITRUM_ONE_CHAIN_ID = 42161;
 
 // ── 서버 subaccount-auth 응답 타입 (요약) ────────────────────────────────────
@@ -182,32 +184,37 @@ export function canPrepareApproval(input: PrepareGateInput): PrepareGateResult {
 export type AuthFetchResult =
   | { kind: 'ok'; data: SubaccountAuthResponse }
   | { kind: 'http'; status: number }
-  | { kind: 'network' };
+  | { kind: 'network' }
+  /** 200인데 JSON이 아님 — 정적 SPA fallback이 API 경로를 삼킨 경우 (API_ROUTE_MISMATCH) */
+  | { kind: 'route_mismatch' };
 
 /** 6E-2 §2 — HTTP status → 표시 상태 매핑. 401/403은 절대 NOT_CONFIGURED로 변환하지 않는다. */
 export function mapAuthFetchToDisplayState(result: AuthFetchResult): string | null {
   if (result.kind === 'ok') return null;
   if (result.kind === 'network') return 'UNVERIFIED';
+  if (result.kind === 'route_mismatch') return 'ERROR';
   if (result.status === 401 || result.status === 403) return 'OPERATOR_AUTH_REQUIRED';
   if (result.status === 503) return 'NOT_CONFIGURED';
   return 'ERROR';
 }
 
-export async function fetchSubaccountAuthDetailed(apiBase: string): Promise<AuthFetchResult> {
+export async function fetchSubaccountAuthDetailed(): Promise<AuthFetchResult> {
   try {
-    const res = await fetch(`${apiBase}executor/subaccount-auth`);
+    const res = await fetch(apiUrl('executor/subaccount-auth'));
     if (!res.ok) return { kind: 'http', status: res.status };
-    const json = await res.json();
+    const body = await readApiJson(res);
+    if (body.kind === 'route_mismatch') return { kind: 'route_mismatch' };
+    const json = body.kind === 'json' ? (body.json as SubaccountAuthResponse & { ok?: boolean }) : null;
     if (!json?.ok) return { kind: 'http', status: 500 };
-    return { kind: 'ok', data: json as SubaccountAuthResponse };
+    return { kind: 'ok', data: json };
   } catch {
     return { kind: 'network' };
   }
 }
 
 /** @deprecated 호환용 — 상태 구분이 필요한 곳은 fetchSubaccountAuthDetailed 사용 */
-export async function fetchSubaccountAuth(apiBase: string): Promise<SubaccountAuthResponse | null> {
-  const r = await fetchSubaccountAuthDetailed(apiBase);
+export async function fetchSubaccountAuth(): Promise<SubaccountAuthResponse | null> {
+  const r = await fetchSubaccountAuthDetailed();
   return r.kind === 'ok' ? r.data : null;
 }
 
@@ -220,15 +227,17 @@ export interface PrepareResponse {
 }
 
 export async function postPrepareApproval(params: {
-  apiBase: string; pin: string; walletAddress: string;
+  pin: string; walletAddress: string;
 }): Promise<PrepareResponse> {
   try {
-    const res = await fetch(`${params.apiBase}executor/subaccount-approval/prepare`, {
+    const res = await fetch(apiUrl('executor/subaccount-approval/prepare'), {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-operator-pin': params.pin },
       body: JSON.stringify({ walletAddress: params.walletAddress }),
     });
-    const json = await res.json().catch(() => null);
+    const body = await readApiJson(res);
+    if (body.kind === 'route_mismatch') return { ok: false, error: API_ROUTE_MISMATCH_MESSAGE };
+    const json = body.kind === 'json' ? (body.json as { ok?: boolean; error?: string; [k: string]: unknown }) : null;
     if (!res.ok || !json?.ok) return { ok: false, error: json?.error ?? `prepare 실패 (HTTP ${res.status})` };
     return json as PrepareResponse;
   } catch (e: unknown) {
@@ -237,15 +246,17 @@ export async function postPrepareApproval(params: {
 }
 
 export async function postApprovalSignature(params: {
-  apiBase: string; pin: string; sessionId: string; signature: string;
+  pin: string; sessionId: string; signature: string;
 }): Promise<{ ok: boolean; status?: string; error?: string }> {
   try {
-    const res = await fetch(`${params.apiBase}executor/subaccount-approval/signature`, {
+    const res = await fetch(apiUrl('executor/subaccount-approval/signature'), {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-operator-pin': params.pin },
       body: JSON.stringify({ sessionId: params.sessionId, signature: params.signature }),
     });
-    const json = await res.json().catch(() => null);
+    const body = await readApiJson(res);
+    if (body.kind === 'route_mismatch') return { ok: false, error: API_ROUTE_MISMATCH_MESSAGE };
+    const json = body.kind === 'json' ? (body.json as { ok?: boolean; error?: string; [k: string]: unknown }) : null;
     if (!res.ok || !json?.ok) return { ok: false, error: json?.error ?? `서명 저장 실패 (HTTP ${res.status})` };
     return json as { ok: boolean; status?: string };
   } catch (e: unknown) {

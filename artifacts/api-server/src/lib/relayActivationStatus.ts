@@ -31,6 +31,44 @@ export function isRelayReadonlyNetworkEnabled(env: NodeJS.ProcessEnv): boolean {
   return env['GMX_RELAY_READONLY_NETWORK_ENABLED'] === 'true';
 }
 
+// ── 6E-5 §6 — relay 설정 파생 상태 (boolean만, Secret 원문 절대 미포함) ──────
+
+export interface RelayEnvFlags {
+  relayReadonlyNetworkEnabled: boolean;
+  relaySubmitNetworkEnabled: boolean;
+  relaySubmissionEnabled: boolean;
+  relayMode: 'DISABLED' | 'DRY_RUN' | 'LIVE';
+  relayManifestConfigured: boolean;
+  relayDeploymentVerified: boolean;
+  operatorPinConfigured: boolean;
+  delegatedSignerEnabled: boolean;
+}
+
+/**
+ * runtime env에서 파생한 relay 설정 인식 상태. 값·주소·URL·PIN 원문은
+ * 절대 포함하지 않는다 — 오직 boolean/enum 파생값만.
+ * relayManifestConfigured는 순환 import를 피하기 위해 호출측에서 주입한다.
+ */
+export function deriveRelayEnvFlags(
+  env: NodeJS.ProcessEnv,
+  manifestConfigured: boolean,
+): RelayEnvFlags {
+  const modeRaw = (env['GMX_RELAY_MODE'] ?? '').trim();
+  const relayMode: RelayEnvFlags['relayMode'] =
+    modeRaw === 'LIVE' ? 'LIVE' : modeRaw === 'DRY_RUN' ? 'DRY_RUN' : 'DISABLED';
+  const dv = getDeploymentVerificationState();
+  return {
+    relayReadonlyNetworkEnabled: isRelayReadonlyNetworkEnabled(env),
+    relaySubmitNetworkEnabled: env['GMX_RELAY_NETWORK_ENABLED'] === 'true',
+    relaySubmissionEnabled: env['GMX_RELAY_SUBMISSION_ENABLED'] === 'true',
+    relayMode,
+    relayManifestConfigured: manifestConfigured,
+    relayDeploymentVerified: dv.attempted && dv.ok,
+    operatorPinConfigured: (env['OPERATOR_MASTER_PIN'] ?? '').trim().length > 0,
+    delegatedSignerEnabled: env['DELEGATED_SIGNER_ENABLED'] === 'true',
+  };
+}
+
 // ── 명시적 읽기 전용 readiness refresh 상태 (모듈 메모리, 6단계 §7) ──────────
 
 export interface ReadinessRefreshState {

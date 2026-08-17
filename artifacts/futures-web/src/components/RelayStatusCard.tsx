@@ -20,7 +20,6 @@ import {
   type RelayStatusResponse, type DryRunView, type UnresolvedTaskView, type ActivationStatusResponse,
 } from '@/lib/relayStatus';
 
-const API_BASE = `${import.meta.env.BASE_URL}api/`;
 
 type RevokePhase = 'idle' | 'preparing' | 'awaiting_signature' | 'submitting';
 
@@ -50,9 +49,9 @@ export function RelayStatusCard() {
     if (p.length < 6) { setStatus(null); setUnresolved([]); setActivation(null); setLoading(false); return; }
     setLoading(true);
     const [s, u, a] = await Promise.all([
-      fetchRelayStatus(API_BASE, p),
-      fetchUnresolvedTasks(API_BASE, p),
-      fetchActivationStatus(API_BASE, p),
+      fetchRelayStatus(p),
+      fetchUnresolvedTasks(p),
+      fetchActivationStatus(p),
     ]);
     setStatus(s);
     setUnresolved(u ?? []);
@@ -62,7 +61,7 @@ export function RelayStatusCard() {
 
   const handleRecheck = useCallback(async (taskId: string) => {
     setRecheckBusy(taskId);
-    const r = await postUnresolvedRecheck({ apiBase: API_BASE, pin: pin.trim(), taskId });
+    const r = await postUnresolvedRecheck({ pin: pin.trim(), taskId });
     setRecheckBusy(null);
     if (!r.ok) { setMessage({ tone: 'error', text: r.error ?? '재조회 실패' }); return; }
     setMessage({
@@ -87,7 +86,7 @@ export function RelayStatusCard() {
     setMessage(null);
     if (!pinOk) { setMessage({ tone: 'error', text: '운영자 PIN(6자 이상)을 입력하세요.' }); return; }
     setPhase('preparing');
-    const r = await postRevokePrepare({ apiBase: API_BASE, pin: pin.trim() });
+    const r = await postRevokePrepare({ pin: pin.trim() });
     if (!r.ok || !r.sessionId || !r.typedData) {
       setPhase('idle');
       setMessage({ tone: 'error', text: r.error ?? 'revoke prepare 실패' });
@@ -119,7 +118,7 @@ export function RelayStatusCard() {
       return;
     }
     setPhase('submitting');
-    const r = await postRevokeSignature({ apiBase: API_BASE, pin: pin.trim(), sessionId: prepared.sessionId, signature });
+    const r = await postRevokeSignature({ pin: pin.trim(), sessionId: prepared.sessionId, signature });
     if (!r.ok) {
       setPhase('awaiting_signature');
       setMessage({ tone: 'error', text: r.error ?? '서명 저장 실패' });
@@ -134,7 +133,7 @@ export function RelayStatusCard() {
   const handleRevokeCancel = useCallback(async () => {
     const sessionId = prepared?.sessionId ?? status?.revokeSession?.sessionId;
     if (!sessionId) { setPhase('idle'); setPrepared(null); return; }
-    const r = await postRevokeCancel({ apiBase: API_BASE, pin: pin.trim(), sessionId });
+    const r = await postRevokeCancel({ pin: pin.trim(), sessionId });
     setPhase('idle');
     setPrepared(null);
     setMessage(r.ok ? { tone: 'ok', text: 'revoke 세션이 취소되었습니다.' } : { tone: 'error', text: r.error ?? '취소 실패' });
@@ -144,7 +143,7 @@ export function RelayStatusCard() {
   const handleRevokeDryRun = useCallback(async () => {
     if (!pinOk) { setMessage({ tone: 'error', text: '운영자 PIN(6자 이상)을 입력하세요.' }); return; }
     setMessage(null);
-    const r = await postRevokeDryRun({ apiBase: API_BASE, pin: pin.trim() });
+    const r = await postRevokeDryRun({ pin: pin.trim() });
     if (!r.ok || !r.dryRun) { setMessage({ tone: 'error', text: r.error ?? 'dry-run 실패' }); return; }
     setDryRun(r.dryRun);
   }, [pin, pinOk]);

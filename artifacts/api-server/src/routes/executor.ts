@@ -12,6 +12,8 @@ import { Router } from "express";
 import { getExecutorStatus, executeOrder } from "../workers/internalExecutor";
 import type { ExecuteOrderParams } from "../workers/internalExecutor";
 import { listRecentIntents } from "../lib/executionIntents";
+import { deriveRelayEnvFlags } from "../lib/relayActivationStatus";
+import { validateEnvAgainstManifest } from "../lib/gmxDeploymentManifest";
 import { getActiveRevokeSession } from "../lib/revokeSession";
 
 const router = Router();
@@ -89,7 +91,14 @@ router.get("/executor/status", async (_req, res) => {
     try {
       activeRevoke = (await getActiveRevokeSession()) !== null;
     } catch { /* 조회 실패 시 false — 주문 경로는 서버측 게이트가 별도 차단 */ }
-    return res.json({ ...status, activeRevoke });
+    // 6E-5 §6 — relay 설정 인식 파생 상태 (boolean/enum만, Secret 원문 없음).
+    // manifest 검증 실패도 status 응답 자체는 200 유지 (표시용 파생값이므로 fail-open 아님:
+    // false = 미충족으로 표시되며 실행 게이트는 별도 서버측 검증을 그대로 거친다.)
+    let relayFlags: ReturnType<typeof deriveRelayEnvFlags> | null = null;
+    try {
+      relayFlags = deriveRelayEnvFlags(process.env, validateEnvAgainstManifest(process.env).ok);
+    } catch { /* 파생 실패 시 null — 클라이언트는 미확인으로 표시 */ }
+    return res.json({ ...status, activeRevoke, relayFlags });
   } catch {
     return res.json({ ok: false, gmxConnected: false, error: "Failed to read executor status" });
   }
