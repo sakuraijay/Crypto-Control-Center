@@ -652,6 +652,51 @@ router.get('/executor/relay/activation', requireOperatorAuth, async (_req, res) 
   }
 });
 
+// ── 6E-10 §2 — 인증된 readiness POST 응답용 저장 스냅샷 조립 ─────────────────
+// 오직 서버 메모리 getter + env 파생 boolean만 사용한다. 추가 eth_call·
+// fee oracle GET·task status GET·내부 HTTP 재호출·DB 조회 없음.
+// Secret·PIN·RPC URL·서명·개인키 원문은 어떤 필드에도 포함되지 않는다.
+export function buildReadinessSnapshot(env: NodeJS.ProcessEnv): {
+  atMs: number;
+  deploymentVerification: { attempted: boolean; atMs: number | null; ok: boolean; manifestVersion: number | null; basis: string[]; failures: string[] };
+  canonical: { confirmed: boolean; reason: string | null; approvalNonce: string | null; isSubaccountListed: boolean | null; expiresAt: string | null; remaining: string | null; atMs: number } | null;
+  lastReadinessRefresh: { attempted: boolean; atMs: number | null; ok: boolean; basis: string[]; failures: string[] };
+  statusFlags: {
+    readonlyNetworkDisabled: boolean; submitNetworkDisabled: boolean; submissionDisabled: boolean;
+    relayMode: 'DISABLED' | 'DRY_RUN' | 'LIVE';
+    signerDisabled: boolean; liveLocked: boolean; manifestVersion: number;
+    readyForControlledCanary: false;
+  };
+} {
+  const dv = getDeploymentVerificationState();
+  const canonical = getCanonicalSnapshot();
+  const lastRefresh = getReadinessRefreshState();
+  return {
+    atMs: Date.now(),
+    deploymentVerification: {
+      attempted: dv.attempted, atMs: dv.atMs, ok: dv.ok,
+      manifestVersion: dv.manifestVersion, basis: dv.basis, failures: dv.failures,
+    },
+    canonical,
+    lastReadinessRefresh: {
+      attempted: lastRefresh.attempted, atMs: lastRefresh.atMs, ok: lastRefresh.ok,
+      basis: lastRefresh.basis, failures: lastRefresh.failures,
+    },
+    statusFlags: {
+      readonlyNetworkDisabled: env.GMX_RELAY_READONLY_NETWORK_ENABLED !== 'true',
+      submitNetworkDisabled: env.GMX_RELAY_NETWORK_ENABLED !== 'true',
+      submissionDisabled: env.GMX_RELAY_SUBMISSION_ENABLED !== 'true',
+      relayMode: env.GMX_RELAY_MODE === 'LIVE' ? 'LIVE' : env.GMX_RELAY_MODE === 'DRY_RUN' ? 'DRY_RUN' : 'DISABLED',
+      signerDisabled: !(isDelegatedSignerEnabled() && isSignerInitialized()),
+      liveLocked: isLiveTestExecutionLocked(),
+      manifestVersion: GMX_DEPLOYMENT_MANIFEST.manifestVersion,
+      // 이 스냅샷은 DB 파생 게이트(reconciliation·blocking intent·unresolved)를
+      // 포함하지 않으므로 canary 적격을 절대 true로 보고하지 않는다 (fail-closed).
+      readyForControlledCanary: false,
+    },
+  };
+}
+
 // ── POST /executor/relay/readiness/refresh — 명시적 읽기 전용 갱신 (6단계 §7) ──
 // 허용: canonical eth_call·nonce/task DB read·기존 taskId의 Gelato status GET·
 // fee oracle GET. 금지: signer 접근·서명·nonce 신규 할당·task/intent 생성·
@@ -684,7 +729,9 @@ router.post('/executor/relay/readiness/refresh', requireOperatorAuth, async (_re
       })(),
       nowMs: () => Date.now(),
     });
-    return res.json({ ok: true, refresh: state });
+    // 6E-10 §2 — refresh 수행 중 이미 저장된 스냅샷을 같은 인증된 응답에 동봉.
+    // /status·/activation 재호출·추가 외부 읽기 없이 메모리 getter로만 조립.
+    return res.json({ ok: true, refresh: state, snapshot: buildReadinessSnapshot(process.env) });
   } catch (e: unknown) {
     return res.status(500).json({ ok: false, error: sanitizeRpcError(e) });
   }

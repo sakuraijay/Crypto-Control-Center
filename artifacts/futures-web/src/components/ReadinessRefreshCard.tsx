@@ -9,13 +9,22 @@
 import { useCallback, useState } from 'react';
 import { RadioTower, Loader2, CheckCircle2, XCircle, ShieldAlert, Lock } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { postReadinessRefresh, type ReadinessRefreshView } from '@/lib/relayStatus';
+import { postReadinessRefresh, type ReadinessRefreshView, type ReadinessSnapshotView } from '@/lib/relayStatus';
 
 
-export function ReadinessRefreshCard() {
+export interface ReadinessRefreshCardProps {
+  /**
+   * 6E-10 §3 — 인증된 POST 응답에 동봉된 서버 저장 스냅샷만 상위로 전달한다.
+   * PIN은 절대 전달되지 않는다 (요청 직전 삭제, 저장·공유 없음).
+   */
+  onSnapshot?: (snapshot: ReadinessSnapshotView | null) => void;
+}
+
+export function ReadinessRefreshCard({ onSnapshot }: ReadinessRefreshCardProps = {}) {
   const [pin, setPin] = useState('');
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<ReadinessRefreshView | null>(null);
+  const [snapshot, setSnapshot] = useState<ReadinessSnapshotView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [ranAtMs, setRanAtMs] = useState<number | null>(null);
 
@@ -33,7 +42,9 @@ export function ReadinessRefreshCard() {
     if (r.kind === 'not_configured') { setError('OPERATOR_MASTER_PIN이 서버에 설정되지 않았습니다 (HTTP 503) — 인증 실패와 다른 상태입니다.'); return; }
     if (r.kind === 'error') { setError(r.message); return; }
     setResult(r.refresh);
-  }, [pin]);
+    setSnapshot(r.snapshot);
+    onSnapshot?.(r.snapshot);   // 스냅샷만 전달 — PIN은 이미 삭제됨
+  }, [pin, onSnapshot]);
 
   return (
     <div className="flex flex-col gap-3 p-4 rounded-lg border border-border bg-card/30" data-testid="card-readiness-refresh">
@@ -115,6 +126,19 @@ export function ReadinessRefreshCard() {
               </div>
               <ul className="list-disc pl-4 space-y-0.5 text-muted-foreground" data-testid="list-readiness-failures">
                 {result.failures.map((f, i) => <li key={i}>{f}</li>)}
+              </ul>
+            </div>
+          )}
+          {snapshot?.deploymentVerification && snapshot.deploymentVerification.attempted && (
+            <div className="p-2 rounded border border-border bg-secondary/30 text-[10px]" data-testid="text-readiness-deployment-verification">
+              <div className="font-semibold text-muted-foreground mb-1">
+                배포 코드 검증 (저장 스냅샷 — 추가 외부 호출 없음):{' '}
+                {snapshot.deploymentVerification.ok ? '전체 통과' : '실패 포함 (fail-closed)'}
+                {snapshot.deploymentVerification.manifestVersion !== null ? ` · manifest v${snapshot.deploymentVerification.manifestVersion}` : ''}
+              </div>
+              <ul className="list-disc pl-4 space-y-0.5 text-muted-foreground" data-testid="list-readiness-deployment-items">
+                {snapshot.deploymentVerification.basis.map((b, i) => <li key={`b${i}`}>{b}</li>)}
+                {snapshot.deploymentVerification.failures.map((f, i) => <li key={`f${i}`} className="text-amber-400/90">{f}</li>)}
               </ul>
             </div>
           )}

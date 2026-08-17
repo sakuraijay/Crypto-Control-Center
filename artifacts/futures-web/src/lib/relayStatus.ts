@@ -114,17 +114,39 @@ export interface ActivationStatusResponse {
   error?: string;
 }
 
-export async function fetchActivationStatus(pin: string): Promise<ActivationStatusResponse | null> {
+// ── 6E-10 §7 — 인증/상태 오류 구분 (silent null 금지) ────────────────────────
+
+export type RelayFetchFailureKind =
+  | 'OPERATOR_AUTH_REQUIRED'  // 401/403 — 운영자 인증 실패
+  | 'NOT_CONFIGURED'          // 503 — OPERATOR_MASTER_PIN 미설정 (fail-closed)
+  | 'UNVERIFIED'              // 네트워크 오류 — 상태 미확인 (fail-closed)
+  | 'ERROR';                  // 기타 HTTP/응답 오류
+
+export type RelayFetchResult<T> =
+  | { kind: 'ok'; data: T }
+  | { kind: RelayFetchFailureKind; message: string };
+
+export function classifyRelayHttpFailure(status: number): { kind: RelayFetchFailureKind; message: string } {
+  if (status === 401 || status === 403) {
+    return { kind: 'OPERATOR_AUTH_REQUIRED', message: '운영자 인증 실패 (HTTP 401/403) — PIN을 확인하세요.' };
+  }
+  if (status === 503) {
+    return { kind: 'NOT_CONFIGURED', message: 'OPERATOR_MASTER_PIN이 서버에 설정되지 않았습니다 (HTTP 503, fail-closed).' };
+  }
+  return { kind: 'ERROR', message: `상태 조회 실패 (HTTP ${status})` };
+}
+
+export async function fetchActivationStatus(pin: string): Promise<RelayFetchResult<ActivationStatusResponse>> {
   try {
     const res = await fetch(apiUrl('executor/relay/activation'), {
       headers: { 'x-operator-pin': pin },
     });
-    if (!res.ok) return null;
+    if (!res.ok) return classifyRelayHttpFailure(res.status);
     const body = await readApiJson(res);
-    if (body.kind !== 'json') return null;
-    return body.json as ActivationStatusResponse;
+    if (body.kind !== 'json') return { kind: 'ERROR', message: API_ROUTE_MISMATCH_MESSAGE };
+    return { kind: 'ok', data: body.json as ActivationStatusResponse };
   } catch {
-    return null;
+    return { kind: 'UNVERIFIED', message: '네트워크 오류 — 상태 미확인 (fail-closed)' };
   }
 }
 
@@ -138,8 +160,29 @@ export interface ReadinessRefreshView {
   failures: string[];
 }
 
+/** 6E-10 §2·§3 — 인증된 readiness POST 응답에 동봉되는 서버 저장 스냅샷 */
+export interface ReadinessSnapshotView {
+  atMs: number;
+  deploymentVerification: {
+    attempted: boolean; atMs: number | null; ok: boolean;
+    manifestVersion: number | null; basis: string[]; failures: string[];
+  };
+  canonical: {
+    confirmed: boolean; reason: string | null; approvalNonce: string | null;
+    isSubaccountListed: boolean | null; expiresAt: string | null; remaining: string | null;
+    atMs: number;
+  } | null;
+  lastReadinessRefresh: { attempted: boolean; atMs: number | null; ok: boolean; basis: string[]; failures: string[] };
+  statusFlags: {
+    readonlyNetworkDisabled: boolean; submitNetworkDisabled: boolean; submissionDisabled: boolean;
+    relayMode: 'DISABLED' | 'DRY_RUN' | 'LIVE';
+    signerDisabled: boolean; liveLocked: boolean; manifestVersion: number;
+    readyForControlledCanary: false;
+  };
+}
+
 export type ReadinessRefreshResult =
-  | { kind: 'ok'; refresh: ReadinessRefreshView }
+  | { kind: 'ok'; refresh: ReadinessRefreshView; snapshot: ReadinessSnapshotView | null }
   | { kind: 'auth' }            // 401/403 — 운영자 인증 실패 (env 미설정 아님)
   | { kind: 'not_configured' }  // 503 — OPERATOR_MASTER_PIN 미설정
   | { kind: 'error'; message: string };
@@ -158,11 +201,12 @@ export async function postReadinessRefresh(params: { pin: string }): Promise<Rea
     if (res.status === 503) return { kind: 'not_configured' };
     const body = await readApiJson(res);
     if (body.kind === 'route_mismatch') return { kind: 'error', message: API_ROUTE_MISMATCH_MESSAGE };
-    const json = body.kind === 'json' ? (body.json as { ok?: boolean; refresh?: ReadinessRefreshView; error?: string }) : null;
+    const json = body.kind === 'json' ? (body.json as { ok?: boolean; refresh?: ReadinessRefreshView; snapshot?: ReadinessSnapshotView; error?: string }) : null;
     if (!res.ok || !json?.ok || !json.refresh) {
       return { kind: 'error', message: json?.error ?? `readiness refresh 실패 (HTTP ${res.status})` };
     }
-    return { kind: 'ok', refresh: json.refresh };
+    // snapshot은 구서버 호환을 위해 optional — 없으면 null (fail-closed 표시 유지)
+    return { kind: 'ok', refresh: json.refresh, snapshot: json.snapshot ?? null };
   } catch (e: unknown) {
     return { kind: 'error', message: (e as Error).message || '네트워크 오류' };
   }
@@ -240,17 +284,18 @@ export function formatWeiToEth(wei: string | null | undefined): string {
 
 // ── fetch 래퍼 ───────────────────────────────────────────────────────────────
 
-export async function fetchRelayStatus(pin: string): Promise<RelayStatusResponse | null> {
+export async function fetchRelayStatus(pin: string): Promise<RelayFetchResult<RelayStatusResponse>> {
   try {
     const res = await fetch(apiUrl('executor/relay/status'), {
       headers: { 'x-operator-pin': pin },
     });
-    if (!res.ok) return null;
+    if (!res.ok) return classifyRelayHttpFailure(res.status);
     const body = await readApiJson(res);
     const json = body.kind === 'json' ? (body.json as RelayStatusResponse & { ok?: boolean }) : null;
-    return json?.ok ? json : null;
+    if (!json?.ok) return { kind: 'ERROR', message: json && 'error' in json && json.error ? json.error : '상태 응답 형식 오류' };
+    return { kind: 'ok', data: json };
   } catch {
-    return null;
+    return { kind: 'UNVERIFIED', message: '네트워크 오류 — 상태 미확인 (fail-closed)' };
   }
 }
 
@@ -326,17 +371,18 @@ export interface UnresolvedTaskView {
   blocking: boolean;
 }
 
-export async function fetchUnresolvedTasks(pin: string): Promise<UnresolvedTaskView[] | null> {
+export async function fetchUnresolvedTasks(pin: string): Promise<RelayFetchResult<UnresolvedTaskView[]>> {
   try {
     const res = await fetch(apiUrl('executor/relay/unresolved'), {
       headers: { 'x-operator-pin': pin },
     });
-    if (!res.ok) return null;
+    if (!res.ok) return classifyRelayHttpFailure(res.status);
     const body = await readApiJson(res);
     const json = body.kind === 'json' ? (body.json as { ok?: boolean; tasks?: UnresolvedTaskView[] }) : null;
-    return json?.ok ? (json.tasks as UnresolvedTaskView[]) : null;
+    if (!json?.ok) return { kind: 'ERROR', message: '상태 응답 형식 오류' };
+    return { kind: 'ok', data: (json.tasks ?? []) as UnresolvedTaskView[] };
   } catch {
-    return null;
+    return { kind: 'UNVERIFIED', message: '네트워크 오류 — 상태 미확인 (fail-closed)' };
   }
 }
 

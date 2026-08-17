@@ -8,7 +8,7 @@
  * 이 카드에서 실행되는 어떤 동작도 온체인 제출·LIVE 실행을 유발하지 않는다.
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { Radio, RefreshCw, Loader2, ShieldAlert, CheckCircle2, PenLine, Lock, Ban } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useWallet } from '@/lib/context';
@@ -18,10 +18,20 @@ import {
   fetchUnresolvedTasks, postUnresolvedRecheck, fetchActivationStatus,
   mapRelayModeToView, mapRelayTaskStatusToView, formatWeiToEth,
   type RelayStatusResponse, type DryRunView, type UnresolvedTaskView, type ActivationStatusResponse,
+  type ReadinessSnapshotView,
 } from '@/lib/relayStatus';
 
 
 type RevokePhase = 'idle' | 'preparing' | 'awaiting_signature' | 'submitting';
+
+export interface RelayStatusCardProps {
+  /**
+   * 6E-10 §3·§5 — 상위(Settings)에서 전달되는, 인증된 Readiness POST 응답의
+   * 서버 저장 스냅샷. PIN은 절대 전달되지 않는다. 없으면 "확인 불가" 표시
+   * (초기 false값을 실제 상태처럼 표시하지 않는다 — fail-closed).
+   */
+  snapshot?: ReadinessSnapshotView | null;
+}
 
 const toneCls = {
   ok:    'border-[var(--color-long)]/40 bg-[var(--color-long)]/10 text-[var(--color-long)]',
@@ -30,10 +40,10 @@ const toneCls = {
   muted: 'border-border bg-secondary text-muted-foreground',
 } as const;
 
-export function RelayStatusCard() {
+export function RelayStatusCard({ snapshot = null }: RelayStatusCardProps = {}) {
   const wallet = useWallet();
   const [status, setStatus] = useState<RelayStatusResponse | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [pin, setPin] = useState('');
   const [phase, setPhase] = useState<RevokePhase>('idle');
   const [prepared, setPrepared] = useState<{ sessionId: string; typedData: unknown; summary?: Record<string, string> } | null>(null);
@@ -44,18 +54,26 @@ export function RelayStatusCard() {
   const [message, setMessage] = useState<{ tone: 'ok' | 'warn' | 'error'; text: string } | null>(null);
 
   const refresh = useCallback(async () => {
-    // status 엔드포인트도 운영자 인증 필요 — PIN 없이는 조회하지 않음
+    // status 엔드포인트도 운영자 인증 필요 — PIN 없이는 조회하지 않음.
+    // 6E-10 §6 — PIN 미입력 시 버튼이 disabled되므로 이 분기는 방어용이며,
+    // 도달하면 명시적 안내를 표시한다 (무반응 금지).
     const p = pin.trim();
-    if (p.length < 6) { setStatus(null); setUnresolved([]); setActivation(null); setLoading(false); return; }
+    if (p.length < 6) {
+      setMessage({ tone: 'warn', text: '상태 조회에는 운영자 PIN(6자 이상)이 필요합니다 — 상태 갱신은 위 Readiness 카드에서 수행하세요.' });
+      return;
+    }
     setLoading(true);
     const [s, u, a] = await Promise.all([
       fetchRelayStatus(p),
       fetchUnresolvedTasks(p),
       fetchActivationStatus(p),
     ]);
-    setStatus(s);
-    setUnresolved(u ?? []);
-    setActivation(a);
+    setStatus(s.kind === 'ok' ? s.data : null);
+    setUnresolved(u.kind === 'ok' ? u.data : []);
+    setActivation(a.kind === 'ok' ? a.data : null);
+    // 6E-10 §7 — 401/503/네트워크 오류를 silent null로 삼키지 않고 구분 표시
+    const failure = [s, u, a].find((r) => r.kind !== 'ok') as { kind: string; message: string } | undefined;
+    if (failure) setMessage({ tone: failure.kind === 'OPERATOR_AUTH_REQUIRED' ? 'error' : 'warn', text: failure.message });
     setLoading(false);
   }, [pin]);
 
@@ -71,9 +89,14 @@ export function RelayStatusCard() {
     void refresh();
   }, [pin, refresh]);
 
-  useEffect(() => { void refresh(); }, [refresh]);
+  // 6E-10 §3 — mount 시 자동 GET 없음 (인증 필요 + polling 금지).
+  // 상태는 상위에서 전달된 인증된 snapshot 또는 명시적 조회로만 채워진다.
 
-  const modeView = mapRelayModeToView(status?.mode ?? 'DISABLED');
+  const modeView = status
+    ? mapRelayModeToView(status.mode)
+    : snapshot
+      ? mapRelayModeToView(snapshot.statusFlags.relayMode)
+      : { label: '확인 불가 (인증 필요)', tone: 'muted' as const };
   const guard = canRequestOwnerSignature({
     walletStatus: wallet.status,
     isArbitrum: wallet.isArbitrum,
@@ -160,25 +183,49 @@ export function RelayStatusCard() {
         <span className={cn('text-[9px] px-1.5 py-0.5 rounded-full border font-bold', toneCls[modeView.tone])} data-testid="badge-relay-mode">
           {modeView.label}
         </span>
-        <button onClick={() => void refresh()} className="ml-auto p-1 rounded hover:bg-secondary" title="새로고침" data-testid="button-refresh-relay">
-          {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
-        </button>
+        {/* 6E-10 §6 — PIN 미입력 시 disabled + 사유 표시 (클릭 무반응 금지) */}
+        <div className="ml-auto flex items-center gap-1.5">
+          {!pinOk && (
+            <span className="text-[9px] text-muted-foreground/70" data-testid="text-refresh-relay-hint">
+              상태 갱신은 위 Readiness 카드에서 수행 (직접 조회는 아래 Revoke PIN 입력 후)
+            </span>
+          )}
+          <button
+            onClick={() => void refresh()}
+            disabled={!pinOk || loading}
+            className={cn('p-1 rounded', pinOk && !loading ? 'hover:bg-secondary' : 'opacity-40 cursor-not-allowed')}
+            title={pinOk ? '새로고침 (운영자 인증 조회)' : '운영자 PIN(6자 이상) 입력 시에만 조회 가능 — 상태 갱신은 위 Readiness 카드에서 수행'}
+            data-testid="button-refresh-relay"
+          >
+            {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+          </button>
+        </div>
       </div>
       <p className="text-[11px] text-muted-foreground leading-relaxed">
         Gelato relay 제출 경로의 검증 전용 상태입니다. LIVE 제출은 이번 단계에서 구조적으로 비활성이며,
         어떤 dry-run 결과도 실제 주문·서명 제출을 의미하지 않습니다.
       </p>
 
-      {/* mode / gate */}
+      {/* mode / gate — 6E-10 §5: 인증되지 않은 초기값을 실제 상태처럼 표시하지 않는다 */}
       <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[10px]">
         <span className="text-muted-foreground">제출 기능</span>
-        <span data-testid="text-submission-enabled">{status?.submissionEnabled ? '환경변수 활성 (DRY-RUN 한정)' : '비활성 (기본)'}</span>
+        <span data-testid="text-submission-enabled">{status
+          ? (status.submissionEnabled ? '환경변수 활성 (DRY-RUN 한정)' : '비활성 (서버 확인됨)')
+          : snapshot
+            ? (snapshot.statusFlags.submissionDisabled ? '비활성 (인증된 snapshot)' : '환경변수 활성 (DRY-RUN 한정)')
+            : '확인 불가 — 운영자 인증 후 Readiness 검증 필요'}</span>
         <span className="text-muted-foreground">LIVE 제출</span>
         <span className="text-[var(--color-short)]" data-testid="text-live-disabled">구조적으로 비활성 (이번 단계)</span>
         <span className="text-muted-foreground">Canonical 확인</span>
-        <span data-testid="text-canonical">{status?.canonical.confirmed
-          ? `확인됨 (nonce ${status.canonical.approvalNonce ?? '—'}, 잔여 ${status.canonical.remaining ?? '—'})`
-          : (status?.canonical.reason ?? '미확인')}</span>
+        <span data-testid="text-canonical">{status
+          ? (status.canonical.confirmed
+              ? `확인됨 (nonce ${status.canonical.approvalNonce ?? '—'}, 잔여 ${status.canonical.remaining ?? '—'})`
+              : (status.canonical.reason ?? '미확인'))
+          : snapshot?.canonical
+            ? (snapshot.canonical.confirmed
+                ? `확인됨 (nonce ${snapshot.canonical.approvalNonce ?? '—'}, 잔여 ${snapshot.canonical.remaining ?? '—'})`
+                : (snapshot.canonical.reason ?? '미확인 (fail-closed)'))
+            : '확인 불가 — 최근 인증된 snapshot 없음'}</span>
         {quote && (<>
           <span className="text-muted-foreground">Fee quote (mock)</span>
           <span data-testid="text-fee-quote">
@@ -186,6 +233,57 @@ export function RelayStatusCard() {
           </span>
         </>)}
       </div>
+
+      {/* 6E-10 §5 — 인증된 Readiness snapshot 렌더 (Readiness 카드와 동일 데이터) */}
+      {snapshot ? (
+        <div className="flex flex-col gap-1.5 p-3 rounded border border-border bg-secondary/30" data-testid="block-readiness-snapshot">
+          <div className="text-[11px] font-semibold text-muted-foreground">
+            인증된 Readiness Snapshot — {new Date(snapshot.atMs).toLocaleString()}
+          </div>
+          <div className="text-[10px] text-muted-foreground" data-testid="text-snapshot-refresh">
+            Readiness 갱신: {snapshot.lastReadinessRefresh.attempted && snapshot.lastReadinessRefresh.atMs
+              ? `${new Date(snapshot.lastReadinessRefresh.atMs).toLocaleString()} — ${snapshot.lastReadinessRefresh.ok ? '성공' : '실패 (fail-closed)'}`
+              : '미수행 (fail-closed)'}
+          </div>
+          {snapshot.lastReadinessRefresh.failures.length > 0 && (
+            <ul className="list-disc pl-5 space-y-0.5 text-[10px] text-amber-400/90" data-testid="list-snapshot-failures">
+              {snapshot.lastReadinessRefresh.failures.map((f, i) => <li key={i}>{f}</li>)}
+            </ul>
+          )}
+          <div className="text-[10px] text-muted-foreground" data-testid="text-snapshot-deployment">
+            배포 검증 (저장 스냅샷 — 추가 외부 호출 없음): {snapshot.deploymentVerification.attempted
+              ? (snapshot.deploymentVerification.ok ? '전체 통과' : '실패 포함 (fail-closed)')
+              : '미수행 (fail-closed)'}
+            {` — 통과 ${snapshot.deploymentVerification.basis.length}건`}
+            {snapshot.deploymentVerification.failures.length > 0 ? `, 실패 ${snapshot.deploymentVerification.failures.length}건` : ''}
+            <ul className="list-disc pl-5 space-y-0.5 mt-0.5" data-testid="list-snapshot-deployment-items">
+              {snapshot.deploymentVerification.basis.map((b, i) => <li key={`b${i}`}>{b}</li>)}
+              {snapshot.deploymentVerification.failures.map((x, i) => <li key={`f${i}`} className="text-amber-400/90">{x}</li>)}
+            </ul>
+          </div>
+          <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 text-[10px]" data-testid="grid-snapshot-flags">
+            <span className="text-muted-foreground">Read-only 네트워크</span>
+            <span>{snapshot.statusFlags.readonlyNetworkDisabled ? '비활성 (인증된 snapshot)' : '활성 (조회 전용)'}</span>
+            <span className="text-muted-foreground">Submit 네트워크</span>
+            <span>{snapshot.statusFlags.submitNetworkDisabled ? '비활성 (인증된 snapshot)' : '활성'}</span>
+            <span className="text-muted-foreground">Relay 모드</span>
+            <span>{snapshot.statusFlags.relayMode}</span>
+            <span className="text-muted-foreground">Delegated signer</span>
+            <span>{snapshot.statusFlags.signerDisabled ? '비활성 (예상된 fail-closed — 시스템 고장 아님)' : '활성'}</span>
+            <span className="text-muted-foreground">LIVE 잠금</span>
+            <span>{snapshot.statusFlags.liveLocked ? '유지 중 (LIVE_TEST_EXECUTION_LOCKED)' : '해제됨'}</span>
+          </div>
+          <div className={cn('mt-1 px-2.5 py-1.5 rounded border text-[10px] font-semibold', toneCls.muted)} data-testid="text-snapshot-canary">
+            LIVE 적격 여부: 준비 미완료 (fail-closed) — snapshot은 DB 파생 게이트를 포함하지 않으므로 적격으로 표시되지 않습니다
+          </div>
+        </div>
+      ) : !activation && (
+        <div className="flex flex-col gap-1 p-3 rounded border border-border bg-secondary/30 text-[10px] text-muted-foreground" data-testid="block-no-snapshot">
+          <span data-testid="text-no-snapshot-1">확인 불가 — 운영자 인증 후 Readiness 검증 필요</span>
+          <span data-testid="text-no-snapshot-2">최근 인증된 snapshot 없음 — 위 Readiness 카드에서 읽기 전용 검증을 수행하세요 (페이지 새로고침 시 snapshot은 사라집니다)</span>
+          <span className="font-semibold" data-testid="text-no-snapshot-3">LIVE 적격 여부: 확인 불가 (fail-closed)</span>
+        </div>
+      )}
 
       {status && status.gate.blockReasons.length > 0 && (
         <div className="p-2 rounded border border-border bg-secondary/50 text-[10px]" data-testid="list-gate-reasons">

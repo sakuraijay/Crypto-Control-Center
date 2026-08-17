@@ -3,6 +3,7 @@ import { useAppContext, useAuthContext, useTradingContext, useWallet } from '@/l
 import { SubaccountApprovalCard } from '@/components/SubaccountApprovalCard';
 import { RelayStatusCard } from '@/components/RelayStatusCard';
 import { ReadinessRefreshCard } from '@/components/ReadinessRefreshCard';
+import type { ReadinessSnapshotView } from '@/lib/relayStatus';
 import { formatConfidencePct } from '@/lib/formatConfidence';
 import { deriveLiveTestDisplay } from '@/lib/liveTestDisplay';
 import { useAiEngine } from '@/lib/context/AiEngineContext';
@@ -193,6 +194,8 @@ export default function Settings() {
   const { limits, syncStatus, updateLiveTestConfig, updateLimit } = useStrategyContext();
 
   const [closeAllPhase, setCloseAllPhase] = useState<0 | 1 | 2>(0);
+  // 6E-10 §3 — 인증된 Readiness snapshot (메모리 전용; storage 저장 없음, PIN 미포함)
+  const [relaySnapshot, setRelaySnapshot] = useState<ReadinessSnapshotView | null>(null);
   const [testNotifState, setTestNotifState] = useState<'idle' | 'sending' | 'sent' | 'denied' | 'unsupported'>('idle');
   const [switchingNet, setSwitchingNet] = useState(false);
   // LIVE TEST MODE draft state
@@ -798,8 +801,11 @@ export default function Settings() {
 
           {/* Step 4b — MetaMask owner approval (2단계) */}
           <SubaccountApprovalCard />
-          <ReadinessRefreshCard />
-          <RelayStatusCard />
+          {/* 6E-10 §3 — 인증된 Readiness POST 응답의 snapshot만 두 카드에 공유.
+              PIN은 전달되지 않으며(요청 직전 삭제), storage 저장·polling 없음.
+              페이지 새로고침 시 snapshot은 사라지고 "검증 필요" 표시로 복귀. */}
+          <ReadinessRefreshCard onSnapshot={setRelaySnapshot} />
+          <RelayStatusCard snapshot={relaySnapshot} />
 
         </div>
 
