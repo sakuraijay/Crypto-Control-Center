@@ -51,6 +51,9 @@ import {
   type IntentResolution,
 } from '../lib/intentReconciler';
 import { resolveGmxEventEmitterAddress } from '../lib/gmxOrderEvents';
+import { enforceOrderSizing } from '../lib/orderSizingEnforcement';
+import type { CostSnapshot } from '../lib/costSnapshot';
+import { listUncovered, type StopCoverageMap, type StopCoverageRecord } from '../lib/stopLossPlan';
 import { isGmxLiveRelayConfigured, resolveGmxLiveRelayConfig } from '../lib/gmxLiveConfig';
 // ── 6G-2 §5 — 공식 GMX API v2 실행 경로 (legacy writeContract 경로 대체) ──────
 import { createGmxApiTransport, type GmxApiTransport } from '../lib/gmxApiTransport';
@@ -113,6 +116,38 @@ export interface AuditLogEntry {
   gateChecks:   Record<string, boolean>;
   submittedAt:  string;
   confirmedAt:  string | null;
+}
+
+// ── Stop coverage 영속 저장 (6H-2 §8) ─────────────────────────────────────────
+// OPEN과 stop 생성은 원자화 불가 — worker_state에 coverage 상태 머신을 영속해
+// "OPEN 성공"만으로 안전 완료 처리하지 않는다. COVERED가 아닌 기록이 있으면
+// 신규 OPEN은 차단된다 (복구/종료 우선).
+
+const STOP_COVERAGE_KEY = 'stopCoverage';
+
+export async function loadStopCoverage(): Promise<{ ok: true; map: StopCoverageMap } | { ok: false }> {
+  try {
+    const rows = await db.select().from(workerStateTable).where(eq(workerStateTable.key, STOP_COVERAGE_KEY));
+    if (!rows.length) return { ok: true, map: {} };
+    return { ok: true, map: JSON.parse(rows[0].value) as StopCoverageMap };
+  } catch {
+    return { ok: false };
+  }
+}
+
+export async function saveStopCoverageRecord(rec: StopCoverageRecord): Promise<boolean> {
+  try {
+    const loaded = await loadStopCoverage();
+    if (!loaded.ok) return false;
+    const map = { ...loaded.map, [rec.positionRef]: rec };
+    const value = JSON.stringify(map);
+    await db.insert(workerStateTable)
+      .values({ key: STOP_COVERAGE_KEY, value })
+      .onConflictDoUpdate({ target: workerStateTable.key, set: { value } });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // ── 감사로그 읽기/쓰기 ─────────────────────────────────────────────────────────
@@ -570,7 +605,50 @@ export interface LiveOrderParams {
   openPositionCount: number;
   /** 운영자 설정 liveTestMode 플래그 (중앙 게이트 검증용, fail-closed) */
   liveTestMode: boolean;
+  /**
+   * 서버 최종 사이징 컨텍스트 (6H-2 §3) — 없으면 OPEN 거부 (fail-closed).
+   * 실행 직전 enforceOrderSizing으로 재계산되며, 요청 sizeUsd/collateralUsd는
+   * 서버 산정값을 초과할 수 없다 (초과 시 clamp + 감사로그).
+   */
+  sizingContext?: OrderSizingContext;
 }
+
+/** OPEN 사이징 강제 입력 — aiWorker가 조립, executor가 실행 직전 재계산 */
+export interface OrderSizingContext {
+  positionSizingCapitalUsd: number;
+  stopDistanceFraction: number | null;
+  costSnapshot: CostSnapshot | null;
+  liquidityCapUsd: number | null;
+  tierNotionalCapUsd: number;
+  defensiveMode: boolean;
+  canaryActive: boolean;
+  operatorApprovedNotionalCapUsd?: number | null;
+}
+
+/** 마지막 사이징 강제 결과 — ExecutorStatus/UI 노출용 */
+export interface SizingEnforcementSnapshot {
+  at: string;
+  decisionId: string;
+  ok: boolean;
+  reason: string | null;
+  requestedSizeUsd: number;
+  finalNotionalUsd: number | null;
+  finalCollateralUsd: number | null;
+  finalLeverage: number | null;
+  allowedRiskUsd: number | null;
+  clamped: boolean;
+  clampDetails: string[];
+  costSource: string | null;
+  costFetchedAt: string | null;
+  estimatedRoundTripCostUsd: number | null;
+}
+
+let _lastSizingEnforcement: SizingEnforcementSnapshot | null = null;
+export function getLastSizingEnforcement(): SizingEnforcementSnapshot | null {
+  return _lastSizingEnforcement;
+}
+/** 테스트 전용 초기화 */
+export function __resetSizingEnforcementForTests(): void { _lastSizingEnforcement = null; }
 
 export interface LiveOrderResult {
   ok:          boolean;
@@ -685,6 +763,85 @@ export async function executeLiveTestOrder(params: LiveOrderParams): Promise<Liv
     return { ok: false, txHash: null, orderKey: null, simulated: false, error: gateResult.reason ?? 'Gate failed', gateResult, executedAt };
   }
 
+  // ── 1.5) 서버 최종 사이징 강제 (6H-2 §3) — intent 생성 전, 실패 시 주문 0회 ──
+  const sizingFail = async (reason: string): Promise<LiveOrderResult> => {
+    _lastSizingEnforcement = {
+      at: executedAt, decisionId: params.decisionId, ok: false, reason,
+      requestedSizeUsd: params.sizeUsd, finalNotionalUsd: null, finalCollateralUsd: null,
+      finalLeverage: null, allowedRiskUsd: null, clamped: false, clampDetails: [],
+      costSource: params.sizingContext?.costSnapshot?.source ?? null,
+      costFetchedAt: params.sizingContext?.costSnapshot?.fetchedAt ?? null,
+      estimatedRoundTripCostUsd: null,
+    };
+    await appendAuditLog({
+      id: entryId, decisionId: params.decisionId, cycleNumber: params.cycleNumber,
+      symbol: params.symbol, orderType: 'MarketIncrease', isLong: params.isLong,
+      sizeUsd: params.sizeUsd, collateralUsd: params.collateralUsd,
+      txHash: null, orderKey: null, status: 'FAILED', error: reason,
+      simulated: false, gateChecks: gateResult.checks, submittedAt: executedAt, confirmedAt: null,
+    });
+    return { ok: false, txHash: null, orderKey: null, simulated: false, error: reason, gateResult, executedAt };
+  };
+
+  // ── §8 — stop coverage 확인: COVERED 아닌 포지션이 있으면 신규 OPEN 금지 ──
+  const coverage = await loadStopCoverage();
+  if (!coverage.ok) {
+    return sizingFail('[LIVE TEST] stop coverage 조회 실패 — 신규 OPEN 차단 (fail-closed)');
+  }
+  const uncovered = listUncovered(coverage.map);
+  if (uncovered.length > 0) {
+    return sizingFail(
+      `[LIVE TEST] stop 미확보 포지션 ${uncovered.length}건 (${uncovered.map(u => `${u.positionRef}:${u.status}`).join(', ')}) — 복구/종료 전 신규 OPEN 금지`,
+    );
+  }
+
+  if (!params.sizingContext) {
+    return sizingFail('[LIVE TEST] 사이징 컨텍스트 없음 — 서버 최종 사이징 강제 불가, OPEN 0회 (fail-closed)');
+  }
+  const enf = enforceOrderSizing({
+    requestedSizeUsd: params.sizeUsd,
+    requestedCollateralUsd: params.collateralUsd,
+    requestedLeverage: params.leverage,
+    positionSizingCapitalUsd: params.sizingContext.positionSizingCapitalUsd,
+    stopDistanceFraction: params.sizingContext.stopDistanceFraction,
+    costSnapshot: params.sizingContext.costSnapshot,
+    liquidityCapUsd: params.sizingContext.liquidityCapUsd,
+    tierNotionalCapUsd: params.sizingContext.tierNotionalCapUsd,
+    defensiveMode: params.sizingContext.defensiveMode,
+    liveMode: true,
+    canaryActive: params.sizingContext.canaryActive,
+    operatorApprovedNotionalCapUsd: params.sizingContext.operatorApprovedNotionalCapUsd ?? null,
+    expected: { market: params.marketAddress, isLong: params.isLong, orderType: 'MarketIncrease' },
+    now: new Date(),
+  });
+  if (!enf.ok) {
+    return sizingFail(`[LIVE TEST] 서버 사이징 거부 — ${enf.reason}`);
+  }
+  _lastSizingEnforcement = {
+    at: executedAt, decisionId: params.decisionId, ok: true, reason: null,
+    requestedSizeUsd: params.sizeUsd, finalNotionalUsd: enf.finalNotionalUsd,
+    finalCollateralUsd: enf.finalCollateralUsd, finalLeverage: enf.finalLeverage,
+    allowedRiskUsd: enf.allowedRiskUsd, clamped: enf.clamped, clampDetails: enf.clampDetails,
+    costSource: params.sizingContext.costSnapshot?.source ?? null,
+    costFetchedAt: params.sizingContext.costSnapshot?.fetchedAt ?? null,
+    estimatedRoundTripCostUsd: enf.estimatedRoundTripCostUsd,
+  };
+  if (enf.clamped) {
+    // clamp 사실은 감사로그에 별도 기록 (§3) — 주문은 서버 산정값으로 계속 진행
+    const clampMsg = `[LIVE TEST] 요청값 clamp: ${enf.clampDetails.join('; ')} (요청 $${params.sizeUsd.toFixed(2)} → 최종 $${enf.finalNotionalUsd.toFixed(2)})`;
+    console.warn(`[LiveTestExecutor] ${clampMsg}`);
+    await appendAuditLog({
+      id: `${entryId}-clamp`, decisionId: params.decisionId, cycleNumber: params.cycleNumber,
+      symbol: params.symbol, orderType: 'SizingClamp', isLong: params.isLong,
+      sizeUsd: enf.finalNotionalUsd, collateralUsd: enf.finalCollateralUsd,
+      txHash: null, orderKey: null, status: 'SIMULATED', error: clampMsg,
+      simulated: false, gateChecks: gateResult.checks, submittedAt: executedAt, confirmedAt: null,
+    });
+  }
+  // 이후 모든 단계(intent·prepare 요청·expected echo 결속)는 서버 최종값 사용
+  const finalSizeUsd = enf.finalNotionalUsd;
+  const finalCollateralUsd = enf.finalCollateralUsd;
+
   // legacy calldata 빌드 제거됨 (6G-2 §5) — 주문 payload는 GMX API prepare가 생성한다.
 
   // ── 2) durable execution intent — writeContract 도달 전 PREPARED 커밋 필수 ──
@@ -692,7 +849,7 @@ export async function executeLiveTestOrder(params: LiveOrderParams): Promise<Liv
   const intentCreated = await createPreparedIntent({
     id: intentId, decisionId: params.decisionId, cycleNumber: params.cycleNumber,
     symbol: params.symbol, orderType: 'open', isLong: params.isLong,
-    sizeUsd: params.sizeUsd, collateralUsd: params.collateralUsd,
+    sizeUsd: finalSizeUsd, collateralUsd: finalCollateralUsd,
   });
   if (intentCreated !== 'created') {
     const msg = intentCreated === 'duplicate'
@@ -716,9 +873,22 @@ export async function executeLiveTestOrder(params: LiveOrderParams): Promise<Liv
     liveTestMode: params.liveTestMode, dbOk: params.dbOk, rpcOk: Boolean(rpcUrl),
     decisionId: params.decisionId, cycleNumber: params.cycleNumber, symbol: params.symbol,
     marketAddress: params.marketAddress, isLong: params.isLong,
-    sizeUsd: params.sizeUsd, collateralUsd: params.collateralUsd,
+    sizeUsd: finalSizeUsd, collateralUsd: finalCollateralUsd,
     mainAddress: params.mainAddress, openPosition: null,
   });
+
+  // ── §8 진입 후 계약 — OPEN 제출 성공 시 stop coverage PENDING 등록.
+  // 등록 실패는 치명적: coverage 불명 상태로 두면 다음 사이클 uncovered 검사가
+  // DB 조회 실패와 동일하게 신규 OPEN을 차단한다 (fail-closed 유지).
+  if (flowRes.ok && !flowRes.simulated) {
+    const saved = await saveStopCoverageRecord({
+      positionRef: intentId, status: 'PENDING', stopOrderKey: null,
+      triggerPriceUsd: null, updatedAt: new Date().toISOString(),
+    });
+    if (!saved) {
+      console.error(`[LiveTestExecutor] stop coverage PENDING 등록 실패 (${intentId}) — 다음 OPEN은 coverage 조회 fail-closed로 차단됨`);
+    }
+  }
   return { ...flowRes, gateResult };
 }
 

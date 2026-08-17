@@ -285,11 +285,27 @@ describe('checkCentralExecutionGate — fail-closed 조합', () => {
 
 describe('executeLiveTestOrder — 중앙 게이트 통합 (writeContract 도달 차단)', () => {
   function orderParams() {
+    const now = Date.now();
     return {
       decisionId: 'd1', cycleNumber: 1, symbol: 'ETH', marketAddress: '0xM',
       isLong: true, sizeUsd: 10, collateralUsd: 5, leverage: 2,
       currentPriceUsd: 3000, mainAddress: '0xMain', accumLossUsd: 0,
       dbOk: true, openPositionCount: 0, liveTestMode: true,
+      // 6H-2 §3 — 서버 사이징 강제 통과용 유효 컨텍스트 (LIVE 소스 스냅샷)
+      sizingContext: {
+        positionSizingCapitalUsd: 1000,
+        stopDistanceFraction: 0.01,
+        costSnapshot: {
+          market: '0xM', isLong: true, orderType: 'MarketIncrease' as const,
+          notionalUsd: 10, positionFeeUsd: 0.006, executionFeeUsd: 0.2,
+          estimatedPriceImpactUsd: 0.005, fundingFeeUsd: 0.005, borrowingFeeUsd: 0,
+          estimatedExitFeeUsd: 0.206, totalEstimatedRoundTripCostUsd: 0.422,
+          source: 'GMX_API' as const, blockNumber: null, apiTimestamp: null,
+          fetchedAt: new Date(now).toISOString(), expiresAt: new Date(now + 60_000).toISOString(),
+        },
+        liquidityCapUsd: 50_000, tierNotionalCapUsd: 30,
+        defensiveMode: false, canaryActive: true,
+      },
     };
   }
 

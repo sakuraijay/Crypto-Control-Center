@@ -300,6 +300,31 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         ADD COLUMN IF NOT EXISTS gmx_prepared_at       timestamptz;
     `,
   },
+  {
+    name: "0021_trades_settlement",
+    sql: `
+      -- 6H-2 §5 — 실제 정산 PnL additive 컬럼. gross/각 fee/net 구분 저장.
+      -- 기존 행(전부 PAPER 시뮬 또는 잠금 상태 LIVE TEST 시뮬)은 수수료 0 정의
+      -- 시뮬 체결이므로 PAPER_ZERO_FEE로 backfill — 이후 신규 LIVE 정산은
+      -- UNSETTLED로 시작해 온체인 증거 확보 후 SETTLED로 전환된다.
+      ALTER TABLE trades
+        ADD COLUMN IF NOT EXISTS gross_pnl_usd      numeric(18,8),
+        ADD COLUMN IF NOT EXISTS position_fee_usd   numeric(18,8),
+        ADD COLUMN IF NOT EXISTS execution_fee_usd  numeric(18,8),
+        ADD COLUMN IF NOT EXISTS price_impact_usd   numeric(18,8),
+        ADD COLUMN IF NOT EXISTS funding_fee_usd    numeric(18,8),
+        ADD COLUMN IF NOT EXISTS borrowing_fee_usd  numeric(18,8),
+        ADD COLUMN IF NOT EXISTS net_pnl_usd        numeric(18,8),
+        ADD COLUMN IF NOT EXISTS settlement_status  text NOT NULL DEFAULT 'UNSETTLED',
+        ADD COLUMN IF NOT EXISTS settled_at         timestamptz,
+        ADD COLUMN IF NOT EXISTS evidence_tx_hash   text;
+      UPDATE trades SET settlement_status = 'PAPER_ZERO_FEE'
+        WHERE settlement_status = 'UNSETTLED' AND evidence_tx_hash IS NULL;
+      -- 동일 온체인 증거로 이중 정산 금지 (§5)
+      CREATE UNIQUE INDEX IF NOT EXISTS trades_evidence_tx_hash_idx
+        ON trades (evidence_tx_hash) WHERE evidence_tx_hash IS NOT NULL;
+    `,
+  },
   // Add future migrations here in chronological order.
 ];
 

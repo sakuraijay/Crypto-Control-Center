@@ -74,6 +74,9 @@ router.post("/data/trades/batch", async (req, res) => {
         // ── Risk fields ────────────────────────────────────────────
         leverage:         r.leverage != null ? String(r.leverage) : null,
         collateralUsd:    r.collateralUsd != null ? String(r.collateralUsd) : null,
+        // §5 (6H-2): 브라우저/PAPER 시뮬 체결 = 수수료 0 정의 → 정산 확정 동등.
+        // 실제 LIVE 정산은 recordTradeSettlement만 UNSETTLED→SETTLED 전환한다.
+        settlementStatus: "PAPER_ZERO_FEE",
       })))
       .onConflictDoNothing();
 
@@ -123,6 +126,8 @@ router.post("/data/trades", async (req, res) => {
         leverage:         leverageVal,
         collateralUsd:    collateralUsdV,
         testMode:         testModeVal,
+        // §5 (6H-2): 시뮬 체결 = 수수료 0 정의 (LIVE 정산은 recordTradeSettlement 전용)
+        settlementStatus: "PAPER_ZERO_FEE",
       })
       .onConflictDoUpdate({
         target: tradesTable.id,

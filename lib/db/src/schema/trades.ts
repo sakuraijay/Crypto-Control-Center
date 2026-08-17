@@ -37,6 +37,22 @@ export const tradesTable = pgTable("trades", {
   collateralUsd:    numeric("collateral_usd", { precision: 18, scale: 4 }),
   /** True for trades recorded during LIVE TEST MODE sessions (default false). */
   testMode:         boolean("test_mode").notNull().default(false),
+
+  // ── Settlement fields (6H-2 §5 — additive, nullable) ──────────────────────
+  /** 가격 차이 기반 gross PnL (수수료 미차감) */
+  grossPnlUsd:      numeric("gross_pnl_usd",     { precision: 18, scale: 8 }),
+  positionFeeUsd:   numeric("position_fee_usd",  { precision: 18, scale: 8 }),
+  executionFeeUsd:  numeric("execution_fee_usd", { precision: 18, scale: 8 }),
+  priceImpactUsd:   numeric("price_impact_usd",  { precision: 18, scale: 8 }),
+  fundingFeeUsd:    numeric("funding_fee_usd",   { precision: 18, scale: 8 }),
+  borrowingFeeUsd:  numeric("borrowing_fee_usd", { precision: 18, scale: 8 }),
+  /** 실제 순 PnL = gross − 모든 수수료 − impact */
+  netPnlUsd:        numeric("net_pnl_usd",       { precision: 18, scale: 8 }),
+  /** 'UNSETTLED' | 'SETTLED' | 'PAPER_ZERO_FEE' — UNSETTLED 이익은 목표 미반영 */
+  settlementStatus: text("settlement_status").notNull().default("UNSETTLED"),
+  settledAt:        timestamp("settled_at", { withTimezone: true }),
+  /** 온체인 정산 증거 tx hash — 동일 증거 이중 정산 금지 (unique partial index) */
+  evidenceTxHash:   text("evidence_tx_hash"),
 });
 
 export const insertTradeSchema = createInsertSchema(tradesTable).omit({ createdAt: true });

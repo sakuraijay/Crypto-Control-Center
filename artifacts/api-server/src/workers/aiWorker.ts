@@ -23,7 +23,12 @@ import { runAiEngine } from "./stateEngine";
 import { getCachedPrices, getCachedChange24h, ensureGmxPoller } from "../routes/gmx";
 import { fetchServerLiveTestData } from "../routes/gmx";
 import type { AiOperatingState, RiskLimits, SymbolAnalysis, ServerAiDecision } from "./serverTypes";
-import { executeLiveTestOrder, closeLiveTestPosition } from "./liveTestExecutor";
+import { executeLiveTestOrder, closeLiveTestPosition, getLastSizingEnforcement, type SizingEnforcementSnapshot } from "./liveTestExecutor";
+import { enforceOrderSizing } from "../lib/orderSizingEnforcement";
+import { buildPaperCostSnapshot, fetchLiveCostSnapshot } from "../lib/costSnapshot";
+import { DEFAULT_STOP_DISTANCE_FRACTION, computeStopTrigger } from "../lib/stopLossPlan";
+import { manilaDayKey } from "../lib/profitProtection";
+import { buildCloseAllPlan, summarizeCloseAll, type CloseAllSummary } from "../lib/closeAllOrchestrator";
 import { LIVE_TEST_CAPS } from "../lib/liveTestGate";
 import { MARKET_BY_SYMBOL_SERVER } from "../lib/gmxMarkets";
 import {
@@ -145,6 +150,26 @@ export interface WorkerStatus {
   riskDerivedTargets: import('../lib/riskPolicy').DerivedRiskTargets | null;
   /** 다음 Manila 거래일까지 남은 ms */
   msUntilNextManilaDay: number;
+  // ── 6H-2 — 사이징 강제·close-all 진행 상태 ──────────────────────────────────
+  /** 마지막 PAPER 사이징 엔진 결과 (LIVE와 동일 엔진). null = 미실행 */
+  paperSizing: PaperSizingSnapshot | null;
+  /** 마지막 LIVE 실행 경로 사이징 강제 결과. null = 미실행 */
+  liveSizingEnforcement: SizingEnforcementSnapshot | null;
+  /** 마지막 CLOSE_ALL orchestration 요약. null = 발생 없음 */
+  closeAllSummary: CloseAllSummary | null;
+}
+
+/** PAPER 사이징 엔진 결과 요약 — 상태 카드 표시용 */
+export interface PaperSizingSnapshot {
+  at: string;
+  ok: boolean;
+  reason: string | null;
+  finalNotionalUsd: number | null;
+  finalLeverage: number | null;
+  allowedRiskUsd: number | null;
+  clamped: boolean;
+  clampDetails: string[];
+  estimatedRoundTripCostUsd: number | null;
 }
 
 // ── WorkerManager ─────────────────────────────────────────────────────────────
@@ -193,6 +218,10 @@ class WorkerManager {
   private lastLiveTestVetoReason: string | null = null;
   /** Whether liveTestMode was active in the last cycle */
   private lastLiveTestMode: boolean = false;
+
+  // ── 6H-2 사이징·close-all 상태 ──────────────────────────────────────────────
+  private lastPaperSizing: PaperSizingSnapshot | null = null;
+  private lastCloseAllSummary: CloseAllSummary | null = null;
   /** Whether the liveTestAccumLossUsd DB query succeeded in the last cycle */
   private lastLiveTestDbOk: boolean = true;
   // ────────────────────────────────────────────────────────────────────────────
@@ -309,6 +338,10 @@ class WorkerManager {
         ? deriveDailyTargets(Math.min(this.riskState.startOfDayEquityUsd, RISK_POLICY.maxRiskCapitalUsd))
         : null,
       msUntilNextManilaDay:     msUntilNextManilaDay(new Date()),
+      // ── 6H-2 사이징 강제·close-all ────────────────────────────────────────
+      paperSizing:           this.lastPaperSizing,
+      liveSizingEnforcement: getLastSizingEnforcement(),
+      closeAllSummary:       this.lastCloseAllSummary,
     };
   }
 
@@ -709,12 +742,18 @@ class WorkerManager {
       for (const t of closeTrades) {
         const ts  = new Date(t.timestamp as string | Date).getTime();
         const pnl = parseFloat(t.pnl ?? '0') || 0;
+        // §5 (6H-2): 정산 확정 전(UNSETTLED) "이익"은 +5%/+10% 목표 산정에
+        // 반영하지 않는다. 손실(추정 포함)은 즉시 반영 (보수적 비대칭).
+        // PAPER_ZERO_FEE = 수수료 0 정의 시뮬 체결 → 정산 확정과 동등.
+        const st = (t as { settlementStatus?: string | null }).settlementStatus ?? 'UNSETTLED';
+        const profitEligible = pnl < 0 || st === 'SETTLED' || st === 'PAPER_ZERO_FEE';
+        const gatedPnl = profitEligible ? pnl : 0;
         totalRealizedPnlAllTime  += pnl;                                    // 전체 누적
         if (ts >= todayStart.getTime())      realizedPnLToday      += pnl;
         if (ts >= rolling24hStart.getTime()) realizedPnLRolling24h += pnl;
         if (ts >= weekStart.getTime())       realizedPnLWeekly     += pnl;
-        if (ts >= manilaDayStartMs)          realizedPnLManilaDay  += pnl;
-        if (ts >= manilaWeekStartMs)         realizedPnLManilaWeek += pnl;
+        if (ts >= manilaDayStartMs)          realizedPnLManilaDay  += gatedPnl;
+        if (ts >= manilaWeekStartMs)         realizedPnLManilaWeek += gatedPnl;
       }
 
       // LIVE TEST 누적 손실: test_mode=true CLOSE 거래 중 pnl < 0인 것의 절댓값 합계.
@@ -1064,6 +1103,35 @@ class WorkerManager {
         engineResult.sizeUsd = undefined;
         engineResult.leverage = undefined;
         console.warn(`[AIWorker] 사이클 #${cycleNum} RiskEngine CLOSE_ALL — ${reasons}`);
+
+        // ── close-all orchestration 계획 (6H-2 §10) — 결정적 intent id 기반 ──
+        // 실행은 CASH 하위 경로(LIVE TEST 청산·PAPER 청산)가 담당하고, 여기서는
+        // 포지션 전수 기준 계획·요약만 수립한다. 전부 terminal 확인 전에는
+        // lockRequired=true가 유지되어 신규 진입이 차단된다.
+        try {
+          const dayKey = manilaDayKey(new Date());
+          const positionsForClose = paperState.positions.map((p, i) => ({
+            positionKey: `${p.symbol}:${p.side}:${i}`,
+            marketAddress: MARKET_BY_SYMBOL_SERVER.get(p.symbol)?.marketToken ?? '',
+            isLong: p.side === 'LONG',
+            sizeUsd: p.sizeInUsd,
+          }));
+          const plan = buildCloseAllPlan({ dayKey, positions: positionsForClose });
+          if (plan.ok) {
+            this.lastCloseAllSummary = summarizeCloseAll(
+              plan.intents.map(it => ({ intentId: it.intentId, positionKey: it.positionKey, status: 'PENDING' as const })),
+            );
+          } else {
+            // 계획 수립 불가 — 잠금 유지 요약 (fail-closed)
+            this.lastCloseAllSummary = {
+              total: 0, confirmed: 0, terminalFailed: 0, unresolved: 0, pending: 0,
+              allTerminal: false, allConfirmed: false, lockRequired: true, rolloverAllowed: false,
+            };
+            console.error(`[AIWorker] close-all 계획 수립 실패 — ${plan.reason}`);
+          }
+        } catch (err) {
+          console.error('[AIWorker] close-all 계획 오류:', err);
+        }
       }
       if (engineResult.operatingState === 'LONG' || engineResult.operatingState === 'SHORT') {
         if (!riskEntryAllowed) {
@@ -1081,6 +1149,70 @@ class WorkerManager {
           }
           if (typeof engineResult.sizeUsd === 'number') {
             engineResult.sizeUsd = engineResult.sizeUsd * riskEval.sizeFactor;
+          }
+
+          // ── PAPER도 동일 사이징 엔진 사용 (6H-2 §3) — LIVE와 다른 크기 관용 금지 ──
+          const paperMkt = engineResult.primarySymbol
+            ? MARKET_BY_SYMBOL_SERVER.get(engineResult.primarySymbol) : undefined;
+          if (typeof engineResult.sizeUsd === 'number' && engineResult.sizeUsd > 0 && paperMkt) {
+            const nowSizing = new Date();
+            const lev = typeof engineResult.leverage === 'number' ? Math.max(1, engineResult.leverage) : 1;
+            const sizingCap = Math.min(limits.tradingCapital, RISK_POLICY.maxRiskCapitalUsd);
+            const tierCap = sizingCap * riskEval.maxLeverage;
+            const paperEnf = enforceOrderSizing({
+              requestedSizeUsd: engineResult.sizeUsd,
+              requestedCollateralUsd: engineResult.sizeUsd / lev,
+              requestedLeverage: lev,
+              positionSizingCapitalUsd: sizingCap,
+              stopDistanceFraction: DEFAULT_STOP_DISTANCE_FRACTION,
+              costSnapshot: buildPaperCostSnapshot({
+                market: paperMkt.marketToken,
+                isLong: engineResult.operatingState === 'LONG',
+                orderType: 'MarketIncrease',
+                notionalUsd: engineResult.sizeUsd,
+                now: nowSizing,
+              }),
+              // PAPER 시뮬 유동성 상한 = tier cap (명시적 시뮬레이션 정의 — LIVE에선 실측 필수)
+              liquidityCapUsd: tierCap,
+              tierNotionalCapUsd: tierCap,
+              defensiveMode: riskEval.sizeFactor < 1,
+              liveMode: false,
+              canaryActive: false,
+              expected: {
+                market: paperMkt.marketToken,
+                isLong: engineResult.operatingState === 'LONG',
+                orderType: 'MarketIncrease',
+              },
+              now: nowSizing,
+            });
+            if (paperEnf.ok) {
+              engineResult.sizeUsd = paperEnf.finalNotionalUsd;
+              engineResult.leverage = paperEnf.finalLeverage;
+              this.lastPaperSizing = {
+                at: nowSizing.toISOString(), ok: true, reason: null,
+                finalNotionalUsd: paperEnf.finalNotionalUsd,
+                finalLeverage: paperEnf.finalLeverage,
+                allowedRiskUsd: paperEnf.allowedRiskUsd,
+                clamped: paperEnf.clamped, clampDetails: paperEnf.clampDetails,
+                estimatedRoundTripCostUsd: paperEnf.estimatedRoundTripCostUsd,
+              };
+              if (paperEnf.clamped) {
+                console.warn(`[AIWorker] 사이클 #${cycleNum} PAPER 사이징 clamp — ${paperEnf.clampDetails.join('; ')}`);
+              }
+            } else {
+              // 사이징 엔진 거부 → 진입 자체 취소 (fail-closed)
+              this.lastPaperSizing = {
+                at: nowSizing.toISOString(), ok: false, reason: paperEnf.reason,
+                finalNotionalUsd: null, finalLeverage: null, allowedRiskUsd: null,
+                clamped: false, clampDetails: [], estimatedRoundTripCostUsd: null,
+              };
+              engineResult.operatingState = 'CASH';
+              engineResult.riskApproved = false;
+              engineResult.riskVetoReason = `[RISK_ENGINE] 사이징 거부 — ${paperEnf.reason}`;
+              engineResult.sizeUsd = undefined;
+              engineResult.leverage = undefined;
+              console.info(`[AIWorker] 사이클 #${cycleNum} PAPER 사이징 거부 — ${paperEnf.reason}`);
+            }
           }
         }
       }
@@ -1204,6 +1336,36 @@ class WorkerManager {
         const collateralUsd = Math.min(limits.tradingCapital, LIVE_TEST_CAPS.maxCapitalUsd / leverage);
         const sizeUsd       = Math.min(collateralUsd * leverage, LIVE_TEST_CAPS.maxCapitalUsd);
 
+        // ── §8 진입 전 stop 계약 — trigger 계산 불가면 OPEN 자체를 시도하지 않음 ──
+        const stopPlan = computeStopTrigger({
+          entryPriceUsd: currentPrice,
+          isLong: operatingState === 'LONG',
+        });
+        if (!stopPlan.ok) {
+          console.warn(`[AIWorker] LIVE TEST OPEN 취소 — ${stopPlan.reason}`);
+          return;
+        }
+
+        // ── §3·§4 서버 사이징 컨텍스트 — 비용 스냅샷은 LIVE 조회 필수(fail-closed).
+        // 실측 비용/유동성 조회 경로가 미배선인 동안 executor의 사이징 강제가
+        // COST_DATA_UNAVAILABLE로 실제 제출을 차단한다 (가짜 성공·고정 fallback 금지).
+        const costRes = await fetchLiveCostSnapshot(
+          {
+            market: market.marketToken, isLong: operatingState === 'LONG',
+            orderType: 'MarketIncrease', notionalUsd: sizeUsd, now: new Date(),
+          },
+          { readonlyEnabled: process.env.GMX_API_READONLY_ENABLED === 'true' },
+        );
+        const sizingContext = {
+          positionSizingCapitalUsd: Math.min(limits.tradingCapital, RISK_POLICY.maxRiskCapitalUsd),
+          stopDistanceFraction: stopPlan.plan.stopDistanceFraction,
+          costSnapshot: costRes.ok ? costRes.snapshot : null,
+          liquidityCapUsd: null as number | null, // 실측 유동성 조회 미배선 — fail-closed
+          tierNotionalCapUsd: LIVE_TEST_CAPS.maxCapitalUsd,
+          defensiveMode: this.lastRiskEvaluation?.sizeFactor != null && this.lastRiskEvaluation.sizeFactor < 1,
+          canaryActive: true, // LIVE TEST = Canary 하드캡 우선순위 적용 (§11)
+        };
+
         const result = await executeLiveTestOrder({
           decisionId:        decision.id,
           cycleNumber:       cycleNum,
@@ -1219,6 +1381,7 @@ class WorkerManager {
           dbOk:              paperState.liveTestDbOk,
           openPositionCount: liveTestData.positionCount,
           liveTestMode:      Boolean(limits.liveTestMode),
+          sizingContext,
         });
 
         if (result.simulated) {

@@ -121,6 +121,10 @@ export interface ExecutorStatus {
   riskWeekPeriodStart: string | null;
   riskDerivedTargets: import('../lib/riskPolicy').DerivedRiskTargets | null;
   msUntilNextManilaDay: number;
+  // ── 6H-2 — 사이징 강제·close-all 진행 상태 ──────────────────────────────────
+  paperSizing: import('./aiWorker').PaperSizingSnapshot | null;
+  liveSizingEnforcement: import('./liveTestExecutor').SizingEnforcementSnapshot | null;
+  closeAllSummary: import('../lib/closeAllOrchestrator').CloseAllSummary | null;
   // ── 활성 모드 (UI 배지 근거 — 클라이언트 설정값이 아닌 서버 상태) ─────────────
   /** WORKER_ENGINE_MODE 기준 실제 엔진 모드 ('LIVE'가 아니면 항상 PAPER) */
   engineMode: 'PAPER' | 'LIVE';
@@ -257,6 +261,10 @@ export function getExecutorStatus(): ExecutorStatus {
     riskWeekPeriodStart:      workerStatus.riskWeekPeriodStart,
     riskDerivedTargets:       workerStatus.riskDerivedTargets,
     msUntilNextManilaDay:     workerStatus.msUntilNextManilaDay,
+    // 6H-2 — 사이징 강제·close-all 진행 상태 (명시 매핑 — spread 금지)
+    paperSizing:           workerStatus.paperSizing,
+    liveSizingEnforcement: workerStatus.liveSizingEnforcement,
+    closeAllSummary:       workerStatus.closeAllSummary,
   };
 }
 

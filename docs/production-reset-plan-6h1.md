@@ -3,6 +3,28 @@
 > **⚠️ 계획 문서 — 실행 금지.** 이 문서의 SQL은 운영자 명시 승인 후에만,
 > Production DB에 수동으로 실행한다. Agent는 이 SQL을 실행하지 않는다.
 
+## 6H-2 갱신 사항 (2026-08-18)
+
+- **trades 정산 컬럼 추가** (마이그레이션 0021, embedded — 배포 시 자동 적용):
+  `gross_pnl_usd`, `position_fee_usd`, `execution_fee_usd`, `price_impact_usd`,
+  `funding_fee_usd`, `borrowing_fee_usd`, `net_pnl_usd`,
+  `settlement_status`(기본 `'UNSETTLED'`), `settled_at`, `evidence_tx_hash`(unique partial index).
+  기존 행은 `'PAPER_ZERO_FEE'`로 backfill — 초기화 시 별도 조치 불필요.
+- **초기화 사전 확인에 추가**: 미정산 LIVE 거래가 없어야 한다.
+  ```sql
+  SELECT count(*) FROM trades WHERE settlement_status = 'UNSETTLED' AND test_mode = true;
+  ```
+  → 0이 아니면 정산(evidence tx 확인) 완료 전 초기화 **중단**.
+- **worker_state 초기화 키 추가**: `stopCoverage` (stop-loss coverage 상태머신).
+  COVERED가 아닌 기록이 있으면 신규 OPEN이 차단되므로, 포지션 0 확인 후에만
+  롤백 캡처에 포함하고 정리한다.
+  ```sql
+  SELECT * FROM worker_state WHERE key = 'stopCoverage';
+  ```
+- **PnL 산정 의미 변경**: RiskEngine 목표(+5%/+10%) 산정에서 UNSETTLED 이익은
+  제외되고 손실은 즉시 반영된다(보수적 비대칭). 초기화 직후 목표 대비 수치가
+  과거 화면과 다르게 보일 수 있으나 이는 의도된 동작이다.
+
 ## 목적
 
 Production을 $1,000 최종 운용 정책 기준으로 초기화:
