@@ -16,7 +16,7 @@ import { db, relayTasksTable, subaccountApprovalSessionsTable } from '@workspace
 import { requireOperatorAuth } from '../lib/operatorAuthGuard';
 import { createGmxApiTransport, GMX_API_PEERS, type GmxApiTransport } from '../lib/gmxApiTransport';
 import { GMX_API_TRANSPORT_GEN } from '../lib/gmxApiOrders';
-import { RELAY_TASK_STATUS } from '../lib/relayLifecycle';
+import { RELAY_TASK_STATUS, TERMINAL_STATUSES } from '../lib/relayLifecycle';
 import { countBlockingIntentsOrNull } from '../lib/executionIntents';
 import { countOpenRelayTasksOrNull, listUnresolvedTasks } from '../lib/relayLifecycle';
 import {
@@ -98,20 +98,22 @@ async function buildGmxApiStatusSnapshot() {
       .limit(20);
     gmxTaskCounts = {};
     for (const r of rows) gmxTaskCounts[r.status] = (gmxTaskCounts[r.status] ?? 0) + 1;
-    const BLOCKING_STAGES = [
-      RELAY_TASK_STATUS.PREPARED, RELAY_TASK_STATUS.PREPARE_REQUESTED,
-      RELAY_TASK_STATUS.API_PREPARED, RELAY_TASK_STATUS.SUBMITTING, RELAY_TASK_STATUS.UNRESOLVED,
-    ] as string[];
-    prepareStageCounts = {
-      PREPARED: 0, PREPARE_REQUESTED: 0, API_PREPARED: 0, SUBMITTING: 0, UNRESOLVED: 0,
-    };
+    // blocking 집계는 최근 20행이 아니라 전체 non-terminal GMX task 기준 (limit 없음)
+    const nonTerminal = (Object.values(RELAY_TASK_STATUS) as string[])
+      .filter((s) => !(TERMINAL_STATUSES as readonly string[]).includes(s));
+    const blockingRows = await db.select({ status: relayTasksTable.status, createdAt: relayTasksTable.createdAt })
+      .from(relayTasksTable)
+      .where(and(
+        eq(relayTasksTable.transportGen, GMX_API_TRANSPORT_GEN),
+        inArray(relayTasksTable.status, nonTerminal as never),
+      ));
+    prepareStageCounts = {};
+    for (const s of nonTerminal) prepareStageCounts[s] = 0;
     let oldest: Date | null = null;
-    for (const r of rows) {
-      if (BLOCKING_STAGES.includes(r.status)) {
-        prepareStageCounts[r.status] = (prepareStageCounts[r.status] ?? 0) + 1;
-        const created = r.createdAt ? new Date(r.createdAt) : null;
-        if (created && (!oldest || created < oldest)) oldest = created;
-      }
+    for (const r of blockingRows) {
+      prepareStageCounts[r.status] = (prepareStageCounts[r.status] ?? 0) + 1;
+      const created = r.createdAt ? new Date(r.createdAt) : null;
+      if (created && (!oldest || created < oldest)) oldest = created;
     }
     oldestBlockingTaskAt = oldest ? oldest.toISOString() : null;
     recentGmxTasks = rows.slice(0, 10).map((r) => ({

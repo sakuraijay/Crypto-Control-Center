@@ -211,6 +211,22 @@ describe('6G-3 §3 — 외부 prepare 호출 전 영속화', () => {
     expect(store.tasks[0]?.status).toBe(RELAY_TASK_STATUS.PREPARED);
   });
 
+  it('삽입 후 fence — 사전 카운트 이후 다른 task가 끼어들면 CANCELLED·prepare 0회', async () => {
+    const { transport, calls } = mockTransport();
+    const prepareSpy = vi.fn(async () => ({ ok: true, data: {}, peerHost: 'x' } as never));
+    // 서로 다른 key의 두 flow를 동시에 실행 — 사전 카운트(1b)는 둘 다 0을 볼 수
+    // 있지만, 삽입 후 재확인(2b)이 상대 행을 감지해 fail-closed로 취소해야 한다.
+    const mk = (n: number) => flowInput(transport, {
+      flowIdempotencyKey: `gmxapi:flow:race-${n}`, prepareOrder: prepareSpy,
+      toView: () => ({ ok: true, view: preparedFixture() }),
+    });
+    const [r1, r2] = await Promise.all([runGmxApiSubmitFlow(mk(1)), runGmxApiSubmitFlow(mk(2))]);
+    // 서로 다른 key의 동시 flow — fence가 최소 한쪽(대개 양쪽)을 취소, prepare 총 ≤1
+    expect(prepareSpy.mock.calls.length).toBeLessThanOrEqual(1);
+    expect([r1, r2].some((r) => r.finalStatus === RELAY_TASK_STATUS.CANCELLED || r.prepareCalls === 0)).toBe(true);
+    expect(calls.submit).toBeLessThanOrEqual(1);
+  });
+
   it('동일 flow idempotency key 동시/연속 실행 → prepare 최대 1회', async () => {
     const { transport } = mockTransport();
     let prepares = 0;
@@ -331,6 +347,14 @@ describe('6G-3 §4 — 재시작 reconciliation (GMX POST·서명 0회)', () => 
     const s = await reconcileGmxPrepareStagesOnStartup();
     expect(s.ok).toBe(true);
     expect(legacy.status).toBe(RELAY_TASK_STATUS.PREPARED);
+  });
+
+  it('배치(200) 초과 잔존 행도 전수 pagination으로 처리 — 250건 전이 + ok=true', async () => {
+    for (let i = 0; i < 250; i++) seedTask(RELAY_TASK_STATUS.PREPARED);
+    const s = await reconcileGmxPrepareStagesOnStartup();
+    expect(s.ok).toBe(true);
+    expect(s.stalePreparedFailed).toBe(250);
+    expect(store.tasks.every((t) => t.status === RELAY_TASK_STATUS.FAILED_PRE_BROADCAST)).toBe(true);
   });
 
   it('조회 실패 → ok=false (LIVE 차단 근거)', async () => {

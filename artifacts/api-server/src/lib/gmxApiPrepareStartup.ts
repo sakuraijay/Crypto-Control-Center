@@ -51,6 +51,16 @@ export async function reconcileGmxPrepareStagesOnStartup(): Promise<GmxPrepareSt
     stalePreparedFailed: 0, requestedToUnresolved: 0, apiPreparedHeld: 0,
   };
   try {
+    // 전수 pagination — 배치가 가득 차면 다음 배치 재조회. PREPARED/PREPARE_REQUESTED는
+    // 전이되어 다음 조회에서 빠지고, API_PREPARED는 seen 집합으로 중복 없이 집계.
+    // 완주를 증명하지 못하면(반복 한도 초과) ok=false.
+    const BATCH = 200;
+    const MAX_ROUNDS = 50;
+    const seenApiPrepared = new Set<string>();
+    let allTransitionsOk = true;
+    let exhausted = false;
+
+    for (let round = 0; round < MAX_ROUNDS && !exhausted; round++) {
     const rows = await db.select({ id: relayTasksTable.id, status: relayTasksTable.status })
       .from(relayTasksTable)
       .where(and(
@@ -59,10 +69,13 @@ export async function reconcileGmxPrepareStagesOnStartup(): Promise<GmxPrepareSt
           RELAY_TASK_STATUS.PREPARED, RELAY_TASK_STATUS.PREPARE_REQUESTED, RELAY_TASK_STATUS.API_PREPARED,
         ]),
       ))
-      .orderBy(desc(relayTasksTable.createdAt)).limit(200);
+      .orderBy(desc(relayTasksTable.createdAt)).limit(BATCH);
 
-    let allTransitionsOk = true;
-    for (const row of rows) {
+    const pending = rows.filter((r) => !seenApiPrepared.has(r.id));
+    if (rows.length < BATCH) exhausted = true;
+    if (pending.length === 0) { exhausted = true; break; }
+    let progressed = false;
+    for (const row of pending) {
       if (row.status === RELAY_TASK_STATUS.PREPARED) {
         const t = await transitionRelayTask({
           taskId: row.id, from: RELAY_TASK_STATUS.PREPARED, to: RELAY_TASK_STATUS.FAILED_PRE_BROADCAST,
@@ -78,9 +91,17 @@ export async function reconcileGmxPrepareStagesOnStartup(): Promise<GmxPrepareSt
       } else {
         // API_PREPARED — 자동 서명/제출 재개 금지, 표시·차단만
         next.apiPreparedHeld++;
+        seenApiPrepared.add(row.id);
+        progressed = true;
       }
     }
-    next.ok = allTransitionsOk;
+    // 전이 실패 행은 다음 배치에도 같은 상태로 남는다 — 무한 루프 방지:
+    // 이번 라운드에 아무 진전(전이 성공/신규 API_PREPARED)이 없으면 중단.
+    const transitioned = pending.some((r) => r.status !== RELAY_TASK_STATUS.API_PREPARED);
+    if (!allTransitionsOk && !progressed && transitioned) break;
+    }
+    // 완주(exhausted)를 증명하지 못했거나 전이 실패가 있으면 ok=false
+    next.ok = allTransitionsOk && exhausted;
   } catch {
     next.ok = false;
   }

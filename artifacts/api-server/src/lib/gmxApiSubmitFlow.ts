@@ -161,6 +161,24 @@ export async function runGmxApiSubmitFlow(input: GmxSubmitFlowInput): Promise<Gm
   result.taskRowId = created.taskId;
   result.finalStatus = RELAY_TASK_STATUS.PREPARED;
 
+  // 2b. 삽입 후 재확인 fence — 1b 카운트와 삽입은 원자적이지 않으므로, 자기 행을
+  // 제외하고 다시 센다. 동시 flow가 있으면 양쪽 다 여기서 CANCELLED(외부 호출 0회)
+  // — 승자 선출 대신 fail-closed. 조회 실패도 CANCELLED.
+  const blockingAfterInsert = await countBlockingRelayTasksOrNull({
+    transportGen: GMX_API_TRANSPORT_GEN, excludeTaskId: created.taskId,
+  });
+  if (blockingAfterInsert === null || blockingAfterInsert > 0) {
+    blockReasons.push(blockingAfterInsert === null
+      ? '삽입 후 blocking 재확인 조회 실패 — prepare 0회 취소 (fail-closed)'
+      : `동시 실행 감지 — 다른 미종결 relay task ${blockingAfterInsert}건, prepare 0회 취소 (fail-closed)`);
+    await transitionRelayTask({
+      taskId: created.taskId, from: RELAY_TASK_STATUS.PREPARED, to: RELAY_TASK_STATUS.CANCELLED,
+      patch: { errorClass: 'CONCURRENT_FLOW_FENCE', resolutionBasis: '외부 prepare 미호출 — broadcast 없음' },
+    });
+    result.finalStatus = RELAY_TASK_STATUS.CANCELLED;
+    return result;
+  }
+
   // 3. PREPARED → PREPARE_REQUESTED 조건부 전환 — 실패 시 prepare 0회.
   //    이 전환이 커밋된 후에만 외부 호출이 나가므로, 재시작 시 PREPARED로 남은
   //    행은 "외부 prepare 미호출 확정"으로 분류할 수 있다 (§4.1).
