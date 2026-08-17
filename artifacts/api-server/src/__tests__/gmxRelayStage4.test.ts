@@ -217,7 +217,12 @@ function fullActivation(overrides?: Partial<ActivationGateInput>): ActivationGat
     gmxConfigOk: true,
     deploymentVerified: true,
     kind: 'OPEN',
-    ...overrides,
+    ...(overrides ? Object.fromEntries(Object.entries(overrides).filter(([k]) => k !== 'quote')) : {}),
+    ...(overrides && 'quote' in overrides
+      ? { buildOfficialQuote: async () => overrides.quote
+          ? { ok: true as const, quote: overrides.quote }
+          : { ok: false as const, reason: 'fee estimate 입력 실패 (fixture)' } }
+      : {}),
   };
 }
 
@@ -233,7 +238,8 @@ function liveQuote(nowMs: number): RelayFeeQuote {
   };
 }
 
-function baseFlowInput(transport: RelayTransport, overrides?: Partial<SubmitFlowInput>): SubmitFlowInput {
+type FlowOverrides = Partial<SubmitFlowInput> & { quote?: RelayFeeQuote | null };
+function baseFlowInput(transport: RelayTransport, overrides?: FlowOverrides): SubmitFlowInput {
   const nowMs = Date.now();
   return {
     transport,
@@ -247,7 +253,7 @@ function baseFlowInput(transport: RelayTransport, overrides?: Partial<SubmitFlow
     kind: 'OPEN',
     intentId: null,
     approvalSessionId: null,
-    quote: liveQuote(nowMs),
+    buildOfficialQuote: async () => ({ ok: true as const, quote: liveQuote(nowMs) }),
     nowMs,
     orderNotionalUsd: null,
     ethPriceUsd: null,
@@ -255,7 +261,12 @@ function baseFlowInput(transport: RelayTransport, overrides?: Partial<SubmitFlow
     userNonce: 7n,
     verifySignatureBinding: async () => ({ ok: true }),
     checkDigestUnused: async () => ({ ok: true, used: false }),
-    ...overrides,
+    ...(overrides ? Object.fromEntries(Object.entries(overrides).filter(([k]) => k !== 'quote')) : {}),
+    ...(overrides && 'quote' in overrides
+      ? { buildOfficialQuote: async () => overrides.quote
+          ? { ok: true as const, quote: overrides.quote }
+          : { ok: false as const, reason: 'fee estimate 입력 실패 (fixture)' } }
+      : {}),
   };
 }
 

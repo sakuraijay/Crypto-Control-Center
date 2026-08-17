@@ -103,6 +103,7 @@ describe('6F-2 §6·§10·§4 — readiness fee estimate + sponsor balance + sig
       checkCanonical: async () => ({ confirmed: true, reason: null }),
       listOpenTaskIds: async () => [] as { id: string; relayTaskId: string | null; transportGen: string }[],
       countAllocatedNonces: async () => 0,
+      markLegacyUnresolved: async () => true,
       transport: {
         getRelayTaskStatus: vi.fn().mockResolvedValue({ ok: true, statusCode: 100, transactionHash: null, blockNumber: null }),
         getSponsorBalance: vi.fn().mockResolvedValue({ ok: true, balance: 10n ** 18n, decimals: 18, unit: 'wei' }),
@@ -199,6 +200,40 @@ describe('6F-2 §6·§10·§4 — readiness fee estimate + sponsor balance + sig
     }));
     expect(statusSpy).not.toHaveBeenCalled();
     expect(state.failures.join(' ')).toContain('UNRESOLVED_LEGACY_TRANSPORT');
+  });
+
+  it('legacy task는 DB 상태를 UNRESOLVED로 영속 전이(markLegacyUnresolved 호출) — 조회 0회', async () => {
+    const markSpy = vi.fn().mockResolvedValue(true);
+    const statusSpy = vi.fn();
+    const state = await performReadinessRefresh(deps({
+      transport: {
+        getRelayTaskStatus: statusSpy,
+        getSponsorBalance: vi.fn().mockResolvedValue({ ok: true, balance: 1n, decimals: 18, unit: 'wei' }),
+      },
+      listOpenTaskIds: async () => [
+        { id: 't-legacy', relayTaskId: 'legacy-task-uuid', transportGen: 'legacy-digital' },
+      ],
+      markLegacyUnresolved: markSpy,
+    }));
+    expect(markSpy).toHaveBeenCalledTimes(1);
+    expect(markSpy).toHaveBeenCalledWith('t-legacy');
+    expect(statusSpy).not.toHaveBeenCalled();
+    expect(state.failures.join(' ')).not.toContain('영속 전이 실패');
+  });
+
+  it('legacy UNRESOLVED 영속 전이 실패 → failures에 기록 (fail-closed)', async () => {
+    const state = await performReadinessRefresh(deps({
+      transport: {
+        getRelayTaskStatus: vi.fn(),
+        getSponsorBalance: vi.fn().mockResolvedValue({ ok: true, balance: 1n, decimals: 18, unit: 'wei' }),
+      },
+      listOpenTaskIds: async () => [
+        { id: 't-legacy', relayTaskId: 'legacy-task-uuid', transportGen: 'legacy-digital' },
+      ],
+      markLegacyUnresolved: vi.fn().mockResolvedValue(false),
+    }));
+    expect(state.ok).toBe(false);
+    expect(state.failures.join(' ')).toContain('legacy UNRESOLVED 영속 전이 실패');
   });
 
   it('signer 미초기화 → 생략 문구(예상된 fail-closed) 유지', async () => {

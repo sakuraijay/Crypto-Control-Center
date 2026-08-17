@@ -84,7 +84,12 @@ export interface SubmitFlowInput {
   kind: 'OPEN' | 'CLOSE' | 'REVOKE';
   intentId: string | null;
   approvalSessionId: string | null;
-  quote: RelayFeeQuote | null;
+  /**
+   * 6F-2 리뷰 반영 — fee quote는 호출자가 공급하지 않는다. 제출 오케스트레이션
+   * 내부에서 이 콜백으로 GMX 공식 입력(estimateGas·eth_gasPrice·DataStore
+   * multiplier)을 즉시 취득해 quote를 생성한다. 실패=제출 차단 (fallback 금지).
+   */
+  buildOfficialQuote: () => Promise<{ ok: true; quote: RelayFeeQuote } | { ok: false; reason: string }>;
   nowMs: number;
   orderNotionalUsd: number | null;
   ethPriceUsd: number | null;
@@ -131,14 +136,26 @@ export async function runSubmitFlow(input: SubmitFlowInput): Promise<SubmitFlowR
     return result;
   }
 
-  // 2·3. fee quote 재검증 — gmx_official_estimate만 + payload/chainId/router 결속 (§6)
+  // 2·3. fee quote — 서버 측에서 공식 입력으로 직접 생성 (§6 + 리뷰 반영).
+  // 입력 취득 실패는 곧 제출 차단 — caller-provided quote 경로는 존재하지 않는다.
+  let quote: RelayFeeQuote;
+  {
+    let built: { ok: true; quote: RelayFeeQuote } | { ok: false; reason: string };
+    try { built = await input.buildOfficialQuote(); }
+    catch (e: unknown) { built = { ok: false, reason: (e as Error).message || '예외' }; }
+    if (!built.ok) {
+      blockReasons.push(`GMX 공식 fee 산정 실패 — 제출 차단 (fail-closed): ${built.reason}`);
+      return result;
+    }
+    quote = built.quote;
+  }
   const feeCheck = validateFeeQuote({
-    quote: input.quote, nowMs: input.nowMs,
+    quote, nowMs: input.nowMs,
     orderNotionalUsd: input.orderNotionalUsd, ethPriceUsd: input.ethPriceUsd,
     expectedBinding: { chainId: input.chainId, relayRouter: input.relayRouter, payloadHash: input.payloadHash },
   });
   if (!feeCheck.ok) { blockReasons.push(`fee 재검증 실패: ${feeCheck.reason}`); return result; }
-  if (input.quote && input.quote.source !== 'gmx_official_estimate') {
+  if (quote.source !== 'gmx_official_estimate') {
     blockReasons.push('gmx_official_estimate quote만 제출 가능 — mock/기타 source 불인정'); return result;
   }
 
@@ -153,8 +170,8 @@ export async function runSubmitFlow(input: SubmitFlowInput): Promise<SubmitFlowR
     calldataHash: input.calldataHash,
     intentId: input.intentId,
     approvalSessionId: input.approvalSessionId,   // 6. approval session ↔ payload 결합
-    feeToken: input.quote!.feeToken,
-    feeAmount: input.quote!.feeAmount.toString(),
+    feeToken: quote.feeToken,
+    feeAmount: quote.feeAmount.toString(),
     userNonce: input.userNonce.toString(),
     transportGen: TRANSPORT_GENERATION,   // §3 — 신형 JSON-RPC 세대 명시
   });

@@ -255,7 +255,12 @@ function fullActivation(overrides?: Partial<ActivationGateInput>): ActivationGat
     emergencyStopActive: false, dbOk: true, rpcOk: true, reconciliationComplete: true,
     blockingIntentCount: 0, activeRevokeInProgress: false, freshLiveFeeQuote: true,
     currentChainId: 42161, gmxConfigOk: true, deploymentVerified: true, kind: 'OPEN',
-    ...overrides,
+    ...(overrides ? Object.fromEntries(Object.entries(overrides).filter(([k]) => k !== 'quote')) : {}),
+    ...(overrides && 'quote' in overrides
+      ? { buildOfficialQuote: async () => overrides.quote
+          ? { ok: true as const, quote: overrides.quote }
+          : { ok: false as const, reason: 'fee estimate 입력 실패 (fixture)' } }
+      : {}),
   };
 }
 
@@ -280,7 +285,8 @@ function makeTransport(): { transport: RelayTransport; calls: { submit: number }
   return { transport, calls };
 }
 
-function flowInput(transport: RelayTransport, overrides?: Partial<SubmitFlowInput>): SubmitFlowInput {
+type FlowOverrides = Partial<SubmitFlowInput> & { quote?: RelayFeeQuote | null };
+function flowInput(transport: RelayTransport, overrides?: FlowOverrides): SubmitFlowInput {
   const nowMs = Date.now();
   return {
     transport, activation: fullActivation(), chainId: 42161,
@@ -289,11 +295,17 @@ function flowInput(transport: RelayTransport, overrides?: Partial<SubmitFlowInpu
     payloadHash: `0x${'11'.repeat(32)}`, calldataHash: `0x${'22'.repeat(32)}`,
     idempotencyKey: `s5:${Math.random()}`, kind: 'OPEN',
     intentId: null, approvalSessionId: null,
-    quote: liveQuote(nowMs), nowMs, orderNotionalUsd: null, ethPriceUsd: null,
+    buildOfficialQuote: async () => ({ ok: true as const, quote: liveQuote(nowMs) }),
+    nowMs, orderNotionalUsd: null, ethPriceUsd: null,
     receiverVerified: true, userNonce: 1n,
     verifySignatureBinding: async () => ({ ok: true }),
     checkDigestUnused: async () => ({ ok: true, used: false }),
-    ...overrides,
+    ...(overrides ? Object.fromEntries(Object.entries(overrides).filter(([k]) => k !== 'quote')) : {}),
+    ...(overrides && 'quote' in overrides
+      ? { buildOfficialQuote: async () => overrides.quote
+          ? { ok: true as const, quote: overrides.quote }
+          : { ok: false as const, reason: 'fee estimate 입력 실패 (fixture)' } }
+      : {}),
   };
 }
 

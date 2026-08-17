@@ -269,6 +269,7 @@ describe('6C — verifyDeployment: 코드 존재·decode·chainId (읽기 전용
       checkCanonical: async () => ({ confirmed: true, reason: null }),
       listOpenTaskIds: async () => [] as { id: string; relayTaskId: string | null; transportGen: string }[],
       countAllocatedNonces: async () => 0,
+      markLegacyUnresolved: async () => true,
       transport: {
         getRelayTaskStatus: async () => ({ ok: true as const, statusCode: 200 as const, transactionHash: null, blockNumber: null }),
         getSponsorBalance: async () => ({ ok: true as const, balance: 10n ** 18n, decimals: 18, unit: 'wei' }),

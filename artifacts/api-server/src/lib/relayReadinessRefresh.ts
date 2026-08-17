@@ -35,6 +35,12 @@ export interface ReadinessRefreshDeps {
   listOpenTaskIds(): Promise<{ id: string; relayTaskId: string | null; transportGen: string }[] | null>;
   /** DB read — nonce 상태 요약 (신규 할당 없음) */
   countAllocatedNonces(): Promise<number | null>;
+  /**
+   * 리뷰 반영 — legacy transport 세대 task를 조회 없이 UNRESOLVED(
+   * UNRESOLVED_LEGACY_TRANSPORT basis)로 영속 전이한다. 네트워크 호출 0회.
+   * 실패 시 false — failures에 기록 (fail-closed).
+   */
+  markLegacyUnresolved(taskRowId: string): Promise<boolean>;
   /** 읽기 전용 transport (없으면 조회 생략) — submit 능력은 구조적으로 없다 (§4) */
   transport: Pick<RelayReadonlyTransport, 'getRelayTaskStatus' | 'getSponsorBalance'> | null;
   /** 6C §7 — 배포 코드 존재 검증 + §6 fee estimate 입력용 read-only RPC client */
@@ -183,6 +189,10 @@ export async function performReadinessRefresh(deps: ReadinessRefreshDeps): Promi
     basis.push(`미종결 relay task ${open.length}건 (taskId 보유 ${withTaskId.length}건)`);
     for (const t of legacy) {
       failures.push(`task ${t.id}: legacy transport 세대(${t.transportGen}) — 신형 조회 금지, UNRESOLVED_LEGACY_TRANSPORT (운영자 조사·자동 재제출 금지)`);
+      // 기록만이 아니라 DB 상태를 UNRESOLVED로 고정한다 (조회·재제출 0회).
+      let persisted = false;
+      try { persisted = await deps.markLegacyUnresolved(t.id); } catch { persisted = false; }
+      if (!persisted) failures.push(`task ${t.id}: legacy UNRESOLVED 영속 전이 실패 (fail-closed — 조사 필요)`);
     }
     if (deps.transport) {
       for (const t of modern) {

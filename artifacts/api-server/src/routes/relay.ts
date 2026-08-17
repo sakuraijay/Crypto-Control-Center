@@ -747,6 +747,11 @@ router.post('/executor/relay/readiness/refresh', requireOperatorAuth, async (_re
       },
       listOpenTaskIds: listOpenRelayTaskIdsOrNull,
       countAllocatedNonces: countAllocatedNoncesOrNull,
+      // 리뷰 반영 — legacy 세대 task는 refresh 시 조회 없이 UNRESOLVED로 영속 고정
+      markLegacyUnresolved: async (taskRowId: string) => {
+        const r = await applyReconcileVerdict(taskRowId, legacyTransportVerdict());
+        return r.ok;
+      },
       // 읽기 전용 GET 전용 transport — submit 메서드는 노출하지 않는다.
       // (injectedTransport는 테스트 주입; 프로덕션은 GET 2종만 뽑아 전달.
       //  quote/status GET은 transport 내부 readonly 게이트가 최종 방어이며,
