@@ -312,8 +312,24 @@ export function RelayStatusCard() {
             {refresh && (
               <div className="text-[10px] text-muted-foreground" data-testid="text-readiness-refresh">
                 Readiness 갱신: {refresh.attempted && refresh.atMs
-                  ? `${new Date(refresh.atMs).toLocaleString()} — ${refresh.ok ? '성공' : `실패(fail-closed): ${refresh.failures[0] ?? ''}`}`
+                  ? `${new Date(refresh.atMs).toLocaleString()} — ${refresh.ok ? '성공' : '실패(fail-closed)'}`
                   : '미수행 (명시적 refresh 필요)'}
+              </div>
+            )}
+            {refresh && refresh.attempted && !refresh.ok && refresh.failures.length > 0 && (
+              <ul className="list-disc pl-5 space-y-0.5 text-[10px] text-amber-400/90" data-testid="list-refresh-failures">
+                {refresh.failures.map((fl, i) => <li key={i}>{fl}</li>)}
+              </ul>
+            )}
+            {f.deploymentVerification && f.deploymentVerification.attempted && (
+              <div className="text-[10px] text-muted-foreground" data-testid="text-deployment-verification">
+                배포 검증 (저장 스냅샷 — 추가 외부 호출 없음): {f.deploymentVerification.ok ? '전체 통과' : '실패 포함'}
+                {' — 통과 '}{f.deploymentVerification.basis.length}건
+                {f.deploymentVerification.failures.length > 0 ? `, 실패 ${f.deploymentVerification.failures.length}건` : ''}
+                <ul className="list-disc pl-5 space-y-0.5 mt-0.5">
+                  {f.deploymentVerification.basis.map((b, i) => <li key={`b${i}`}>{b}</li>)}
+                  {f.deploymentVerification.failures.map((x, i) => <li key={`f${i}`} className="text-amber-400/90">{x}</li>)}
+                </ul>
               </div>
             )}
             {rows.map((r) => (

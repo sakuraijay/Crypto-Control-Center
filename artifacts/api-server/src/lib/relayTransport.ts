@@ -35,7 +35,8 @@ export type TransportErrorKind = 'timeout' | 'http' | 'decode' | 'network' | 'co
 
 export type QuoteResult =
   | { ok: true; estimatedFeeWei: bigint; quotedAtMs: number }
-  | { ok: false; kind: TransportErrorKind; message: string };
+  /** httpStatus: kind='http'일 때만 정수 status — 본문·URL·헤더는 절대 미포함 (6E-8 §2) */
+  | { ok: false; kind: TransportErrorKind; message: string; httpStatus?: number };
 
 export type SubmitResult =
   | { ok: true; taskId: string }
@@ -158,7 +159,8 @@ export function createGelatoHttpTransport(env: NodeJS.ProcessEnv = process.env):
       try {
         const url = `${base}/oracles/${chainId}/estimate?paymentToken=${encodeURIComponent(paymentToken)}&gasLimit=${gasLimit.toString()}`;
         const { status, text } = await fetchGelato(url, { method: 'GET' });
-        if (status !== 200) return { ok: false, kind: 'http', message: `HTTP ${status}` };
+        // 고정 형식 메시지 + 구조화된 정수 status만 — 응답 본문·upstream 문자열은 절대 미포함
+        if (status !== 200) return { ok: false, kind: 'http', httpStatus: Math.trunc(status), message: `HTTP ${Math.trunc(status)}` };
         let json: unknown;
         try { json = JSON.parse(text); } catch { return { ok: false, kind: 'decode', message: 'JSON 파싱 실패' }; }
         const raw = (json as { estimatedFee?: string | number }).estimatedFee;

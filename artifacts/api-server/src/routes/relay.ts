@@ -118,7 +118,7 @@ async function checkCanonicalInner(): Promise<CanonicalCheck> {
   const signer = getSignerAddress();
   if (!cfg.ok) return { confirmed: false, reason: `relay 구성 미해결: ${cfg.reasons.join('; ')}`, approvalNonce: null, isSubaccountListed: null, expiresAt: null, remaining: null };
   if (!mainAccount) return { confirmed: false, reason: 'GMX_WALLET_ADDRESS 미설정', approvalNonce: null, isSubaccountListed: null, expiresAt: null, remaining: null };
-  if (!signer) return { confirmed: false, reason: 'delegated signer 미초기화', approvalNonce: null, isSubaccountListed: null, expiresAt: null, remaining: null };
+  if (!signer) return { confirmed: false, reason: 'delegated signer 미초기화 (예상된 fail-closed — readback 생략)', approvalNonce: null, isSubaccountListed: null, expiresAt: null, remaining: null };
   // 6단계 §5 — relay canonical 읽기는 분리된 read-only client 경유
   // (createRelayReadonlyClient: readonly 플래그 게이트, 읽기 메서드만 노출)
   const client = canonicalClientFactory();

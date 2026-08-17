@@ -95,6 +95,15 @@ export interface ActivationStatusFlags {
   unresolvedCount: number;
   liveLocked: boolean;
   readyForControlledCanary: boolean;
+  /** 6E-8 §5 — 저장된 배포 검증 스냅샷 (표시 전용; 추가 외부 호출 없음) */
+  deploymentVerification?: {
+    attempted: boolean;
+    atMs: number | null;
+    ok: boolean;
+    manifestVersion?: string | null;
+    basis: string[];
+    failures: string[];
+  };
 }
 
 export interface ActivationStatusResponse {

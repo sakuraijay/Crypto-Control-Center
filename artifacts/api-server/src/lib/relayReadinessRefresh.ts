@@ -153,7 +153,10 @@ export async function performReadinessRefresh(deps: ReadinessRefreshDeps): Promi
   try {
     const canonical = await deps.checkCanonical();
     if (canonical.confirmed) basis.push('canonical readback 성공');
-    else failures.push(`canonical readback 미확인: ${canonical.reason ?? '불명'}`);
+    else if ((canonical.reason ?? '').includes('delegated signer 미초기화')) {
+      // 6E-8 §4 — 시스템 고장이 아닌 의도된 차단임을 구분 표기 (여전히 fail-closed 근거)
+      failures.push('canonical readback 생략: delegated signer 미초기화 (예상된 fail-closed)');
+    } else failures.push(`canonical readback 미확인: ${canonical.reason ?? '불명'}`);
   } catch {
     failures.push('canonical readback 예외 (fail-closed)');
   }
@@ -197,7 +200,14 @@ export async function performReadinessRefresh(deps: ReadinessRefreshDeps): Promi
         gasLimit: 3_000_000n,
       });
       if (quote.ok) basis.push('Gelato fee oracle 조회 성공');
-      else failures.push(`fee oracle 조회 실패(${quote.kind})`);
+      else {
+        // 6E-8 §3·§6 — httpStatus는 정수일 때만 표시; upstream 본문·문자열 미노출.
+        // 5xx는 외부 서비스 일시 장애로 분류하되 activation 차단(fail-closed)은 동일 유지.
+        const status = 'httpStatus' in quote && Number.isInteger(quote.httpStatus) ? (quote.httpStatus as number) : null;
+        if (status !== null && status >= 500) failures.push(`fee oracle 조회 실패 (외부 fee oracle 일시 장애 — HTTP ${status})`);
+        else if (status !== null) failures.push(`fee oracle 조회 실패 (http: HTTP ${status})`);
+        else failures.push(`fee oracle 조회 실패(${quote.kind})`);
+      }
     } catch {
       failures.push('fee oracle 조회 예외 (fail-closed)');
     }
