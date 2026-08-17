@@ -17,7 +17,8 @@
  */
 
 import { and, desc, eq } from 'drizzle-orm';
-import { hashTypedData, getAddress, isAddress, type Hex, type Address } from 'viem';
+import { hashTypedData, getAddress, isAddress, keccak256, toHex, type Hex, type Address } from 'viem';
+import { randomUUID } from 'node:crypto';
 import { db, subaccountApprovalSessionsTable, type SubaccountApprovalSessionRow } from '@workspace/db';
 import {
   isDelegatedSignerEnabled,
@@ -567,6 +568,20 @@ export async function executeViaGmxApi(input: ExecuteViaGmxApiInput): Promise<Ex
   return { ...flowResult, preBlocked: false };
 }
 
+/** prepare 요청 body의 결정적 hash — durable task 생성 시 payload hash (6G-3 §3) */
+export function hashPrepareRequestBody(body: Record<string, unknown>): string {
+  const sortDeep = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(sortDeep);
+    if (v && typeof v === 'object') {
+      const out: Record<string, unknown> = {};
+      for (const k of Object.keys(v as Record<string, unknown>).sort()) out[k] = sortDeep((v as Record<string, unknown>)[k]);
+      return out;
+    }
+    return typeof v === 'bigint' ? v.toString() : v;
+  };
+  return keccak256(toHex(JSON.stringify(sortDeep(body))));
+}
+
 function makeFlowInput(input: ExecuteViaGmxApiInput, approval: StoredApprovalForSubmit | null) {
   const { transport, req } = input;
   return {
@@ -575,6 +590,17 @@ function makeFlowInput(input: ExecuteViaGmxApiInput, approval: StoredApprovalFor
     kind: req.kind,
     intentId: input.intentId,
     approvalSessionId: null,
+    // 6G-3 §3 — 외부 prepare 호출 전에 결정되는 flow idempotency key.
+    // intent 1건당 relay task 1건 (intent id 자체가 결정적 idempotent id).
+    flowIdempotencyKey: `gmxapi:flow:${input.intentId ?? randomUUID()}`,
+    requestPayloadHash: hashPrepareRequestBody(buildOrderPrepareBody(req)),
+    extractEvidence: (view: PreparedOrderView) => {
+      const digest = computeOrderTypedDataDigest(view);
+      return {
+        primaryType: view.typedData?.primaryType ?? null,
+        typedDataDigest: digest.ok ? digest.digest : null,
+      };
+    },
     prepareOrder: (): Promise<GmxApiResult<unknown>> =>
       transport.postJson('/orders/txns/prepare', buildOrderPrepareBody(req), 'readonly'),
     toView: (raw: unknown) => toPreparedOrderView(raw, {

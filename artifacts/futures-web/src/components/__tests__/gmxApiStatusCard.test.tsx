@@ -50,6 +50,18 @@ const STATUS_FIXTURE: GmxApiStatusView = {
   gmxTaskCounts: {},
   recentGmxTasks: [],
   readyForControlledCanary: false,
+  // 6G-3 §7 신규 항목
+  prepareStageCounts: { PREPARED: 0, PREPARE_REQUESTED: 0, API_PREPARED: 0, SUBMITTING: 0, UNRESOLVED: 0 },
+  oldestBlockingTaskAt: null,
+  prepareStartupReconciliation: {
+    attempted: true, ok: true, atMs: 1_700_000_000_000,
+    stalePreparedFailed: 0, requestedToUnresolved: 0, apiPreparedHeld: 0,
+  },
+  blockedReasons: ['order submission flag 비활성 — 구조적 차단'],
+  notices: [
+    '자동 재시도 없음 — UNRESOLVED/API_PREPARED는 운영자 확인 전 어떤 자동 조치도 하지 않습니다.',
+    '운영자 확인 전 서명·제출 금지 — 이 화면은 조회 전용이며 강제 완료·삭제·재제출 기능이 없습니다.',
+  ],
 };
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -142,5 +154,17 @@ describe('소스 계약 (§11 규칙)', () => {
 
   it('readyForControlledCanary는 서버 값 그대로 표시 (클라이언트 파생 금지)', () => {
     expect(cardSrc).toContain('String(s.readyForControlledCanary)');
+  });
+
+  // 6G-3 §7 — prepare 단계 관측 항목
+  it('prepare 단계·startup reconciliation·차단 사유·고지 라벨이 카드에 존재한다', () => {
+    for (const label of [
+      'Prepare 단계 (REQ/PREP/SUBM)', '가장 오래된 blocking task',
+      'Prepare startup reconciliation', '신규 주문 차단 사유',
+    ]) expect(cardSrc).toContain(label);
+  });
+
+  it('강제 완료·재제출·삭제 버튼 코드 0건 (조회 전용 계약)', () => {
+    expect(cardSrc).not.toMatch(/강제 완료|재제출|force[- ]?complete|resubmit/i);
   });
 });

@@ -20,6 +20,10 @@ import { db, relayTasksTable, type RelayTaskRow } from '@workspace/db';
 
 export const RELAY_TASK_STATUS = {
   PREPARED: 'PREPARED',
+  /** 6G-3 §3 — 외부 prepare 호출 직전 영속 전환 (이 상태에서 crash = prepare 결과 불명) */
+  PREPARE_REQUESTED: 'PREPARE_REQUESTED',
+  /** 6G-3 §3 — prepare 성공·requestId 등 비민감 증거 저장 완료 */
+  API_PREPARED: 'API_PREPARED',
   DRY_RUN_VALIDATED: 'DRY_RUN_VALIDATED',
   SUBMITTING: 'SUBMITTING',
   TASK_ACCEPTED: 'TASK_ACCEPTED',
@@ -52,7 +56,11 @@ export const RECOVERY_STATUSES: readonly RelayTaskStatus[] = [
 
 /** 허용 전이 테이블 — 명시되지 않은 전이는 전부 거부 */
 const ALLOWED_TRANSITIONS: Record<string, readonly RelayTaskStatus[]> = {
-  PREPARED: ['DRY_RUN_VALIDATED', 'CANCELLED', 'FAILED_PRE_BROADCAST', 'UNRESOLVED'],
+  PREPARED: ['PREPARE_REQUESTED', 'DRY_RUN_VALIDATED', 'CANCELLED', 'FAILED_PRE_BROADCAST', 'UNRESOLVED'],
+  // prepare 결과 불명(timeout/network/5xx/decode) → UNRESOLVED만. 확정 4xx → FAILED_PRE_BROADCAST.
+  PREPARE_REQUESTED: ['API_PREPARED', 'FAILED_PRE_BROADCAST', 'UNRESOLVED', 'CANCELLED'],
+  // API_PREPARED에서 자동 재개 금지 — SUBMITTING 전환은 현행 flow 안에서만.
+  API_PREPARED: ['SUBMITTING', 'FAILED_PRE_BROADCAST', 'UNRESOLVED', 'CANCELLED'],
   DRY_RUN_VALIDATED: ['SUBMITTING', 'CANCELLED', 'FAILED_PRE_BROADCAST', 'UNRESOLVED'],
   SUBMITTING: ['TASK_ACCEPTED', 'FAILED_PRE_BROADCAST', 'UNRESOLVED'],
   TASK_ACCEPTED: ['TX_SUBMITTED', 'UNRESOLVED', 'CANCELLED', 'FAILED'],
@@ -232,6 +240,29 @@ export async function countOpenRelayTasksOrNull(): Promise<number | null> {
     const rows = await db.select({ id: relayTasksTable.id }).from(relayTasksTable)
       .where(inArray(relayTasksTable.status, nonTerminal));
     return rows.length;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 6G-3 §6 — 특정 transportGen의 미종결(blocking) relay task 수.
+ * excludeTaskId는 정확히 자기 task 1건만 제외한다 (다른 task를 숨기지 않음).
+ * 조회 실패 = null (fail-closed 판단용).
+ */
+export async function countBlockingRelayTasksOrNull(params: {
+  transportGen: string;
+  excludeTaskId?: string | null;
+}): Promise<number | null> {
+  const nonTerminal = (Object.values(RELAY_TASK_STATUS) as RelayTaskStatus[])
+    .filter((s) => !TERMINAL_STATUSES.includes(s));
+  try {
+    const rows = await db.select({ id: relayTasksTable.id }).from(relayTasksTable)
+      .where(and(
+        eq(relayTasksTable.transportGen, params.transportGen),
+        inArray(relayTasksTable.status, nonTerminal),
+      ));
+    return rows.filter((r) => r.id !== (params.excludeTaskId ?? null)).length;
   } catch {
     return null;
   }

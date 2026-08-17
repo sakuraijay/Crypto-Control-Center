@@ -193,6 +193,36 @@ export function GmxApiStatusCard() {
               : '기록 없음'} />
           <Row label="readyForControlledCanary" tone={s.readyForControlledCanary ? 'warn' : 'muted'}
             value={String(s.readyForControlledCanary)} />
+          <Row label="Prepare 단계 (REQ/PREP/SUBM)"
+            tone={s.prepareStageCounts === null ? 'warn'
+              : Object.values(s.prepareStageCounts).reduce((a, b) => a + b, 0) > 0 ? 'error' : 'ok'}
+            value={s.prepareStageCounts === null ? '조회 실패'
+              : `${s.prepareStageCounts.PREPARE_REQUESTED ?? 0} / ${s.prepareStageCounts.API_PREPARED ?? 0} / ${s.prepareStageCounts.SUBMITTING ?? 0}`} />
+          <Row label="가장 오래된 blocking task" tone="muted"
+            value={s.oldestBlockingTaskAt ? new Date(s.oldestBlockingTaskAt).toLocaleString() : '없음'} />
+          <Row label="Prepare startup reconciliation"
+            tone={s.prepareStartupReconciliation.attempted && s.prepareStartupReconciliation.ok ? 'ok' : 'error'}
+            value={s.prepareStartupReconciliation.attempted
+              ? (s.prepareStartupReconciliation.ok
+                ? `완료 (stale ${s.prepareStartupReconciliation.stalePreparedFailed} · 불명 ${s.prepareStartupReconciliation.requestedToUnresolved} · 보류 ${s.prepareStartupReconciliation.apiPreparedHeld})`
+                : '실패 — LIVE 차단')
+              : '미시도 — LIVE 차단'} />
+        </div>
+      )}
+
+      {s && s.blockedReasons.length > 0 && (
+        <div className="px-2.5 py-1.5 rounded border border-amber-500/40 bg-amber-500/10 text-[11px] text-amber-400 space-y-0.5"
+          data-testid="gmx-api-blocked-reasons">
+          <p className="font-medium">신규 주문 차단 사유</p>
+          <ul className="list-disc list-inside">
+            {s.blockedReasons.map((r, i) => <li key={i}>{r}</li>)}
+          </ul>
+        </div>
+      )}
+
+      {s && (
+        <div className="text-[10px] text-muted-foreground space-y-0.5" data-testid="gmx-api-notices">
+          {s.notices.map((n, i) => <p key={i}>{n}</p>)}
         </div>
       )}
 

@@ -409,6 +409,8 @@ function flowInput(transport: GmxApiTransport, overrides?: Partial<GmxSubmitFlow
   const view = preparedFixture({ idempotencyKey: `idem-${Math.random()}` });
   return {
     transport, activation: fullActivation(), kind: 'OPEN', intentId: null, approvalSessionId: null,
+    flowIdempotencyKey: `flow-${Math.random()}`,
+    requestPayloadHash: '0xreqhash',
     prepareOrder: async () => ({ ok: true, data: { view }, peerHost: 'arbitrum.gmxapi.io' } as never),
     toView: () => ({ ok: true, view }),
     expected: EXPECTED,
@@ -435,26 +437,31 @@ describe('6G-1 §7 — runGmxApiSubmitFlow', () => {
     expect(store.tasks.length).toBe(0);
   });
 
-  it('prepare 실패 → 서명·제출 0회', async () => {
+  it('prepare 실패(5xx ambiguous) → 서명·제출 0회 + UNRESOLVED (6G-3 §3.4)', async () => {
     const { transport, calls } = mockGmxTransport();
     const r = await runGmxApiSubmitFlow(flowInput(transport, {
       prepareOrder: async () => ({ ok: false, kind: 'http', httpStatus: 500, ambiguous: true, message: 'x', peerHost: null } as never),
     }));
     expect(r.signCalls).toBe(0); expect(calls.submit).toBe(0);
+    expect(r.finalStatus).toBe(RELAY_TASK_STATUS.UNRESOLVED);
   });
 
-  it('prepare 검증 실패(size 불일치) → 서명 0회 + durable 기록 없음', async () => {
+  it('prepare 검증 실패(size 불일치) → 서명 0회 + UNRESOLVED (echo 불일치는 보수적 처리)', async () => {
     const { transport, calls } = mockGmxTransport();
     const view = preparedFixture({ sizeDeltaUsd: '9999' });
     const r = await runGmxApiSubmitFlow(flowInput(transport, { toView: () => ({ ok: true, view }) }));
     expect(r.signCalls).toBe(0); expect(calls.submit).toBe(0);
     expect(r.blockReasons.join(' ')).toContain('prepare 검증 실패');
+    expect(r.finalStatus).toBe(RELAY_TASK_STATUS.UNRESOLVED);
   });
 
-  it('durable PREPARED 저장 실패 → 서명·제출 0회', async () => {
+  it('durable PREPARED 저장 실패 → prepare·서명·제출 0회 (6G-3 §3.1)', async () => {
     store.failInsert = true;
     const { transport, calls } = mockGmxTransport();
-    const r = await runGmxApiSubmitFlow(flowInput(transport));
+    const prepareSpy = vi.fn(async () => ({ ok: true, data: {}, peerHost: 'x' } as never));
+    const r = await runGmxApiSubmitFlow(flowInput(transport, { prepareOrder: prepareSpy }));
+    expect(prepareSpy).not.toHaveBeenCalled();
+    expect(r.prepareCalls).toBe(0);
     expect(r.signCalls).toBe(0); expect(calls.submit).toBe(0);
   });
 
@@ -520,13 +527,16 @@ describe('6G-1 §7 — runGmxApiSubmitFlow', () => {
     expect(r.blockReasons.join(' ')).toContain('재시도 금지');
   });
 
-  it('같은 idempotencyKey 재실행 → duplicate로 제출 0회', async () => {
-    const view = preparedFixture({ idempotencyKey: 'idem-dup' });
+  it('같은 flow idempotency key 재실행 → duplicate로 prepare·제출 0회', async () => {
     const { transport: t1 } = mockGmxTransport();
-    await runGmxApiSubmitFlow(flowInput(t1, { toView: () => ({ ok: true, view }) }));
+    await runGmxApiSubmitFlow(flowInput(t1, { flowIdempotencyKey: 'flow-dup' }));
+    // 첫 실행이 남긴 task를 terminal로 만들어 blocking 사전 차단과 분리
+    for (const t of store.tasks) t.status = 'CONFIRMED';
     const { transport: t2, calls: c2 } = mockGmxTransport();
-    const r2 = await runGmxApiSubmitFlow(flowInput(t2, { toView: () => ({ ok: true, view }) }));
+    const prepareSpy = vi.fn(async () => ({ ok: true, data: {}, peerHost: 'x' } as never));
+    const r2 = await runGmxApiSubmitFlow(flowInput(t2, { flowIdempotencyKey: 'flow-dup', prepareOrder: prepareSpy }));
     expect(r2.submitted).toBe(false);
+    expect(prepareSpy).not.toHaveBeenCalled();
     expect(c2.submit).toBe(0);
   });
 });

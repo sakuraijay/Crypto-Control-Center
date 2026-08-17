@@ -41,6 +41,12 @@ export const relayTasksTable = pgTable("relay_tasks", {
   gmxOrderKeys:       text("gmx_order_keys"),        // JSON array 직렬화된 order key 목록
   gmxApiPeer:         text("gmx_api_peer"),          // 제출에 사용된 peer host (경로/쿼리 제외)
   preparedPayloadHash: text("prepared_payload_hash"), // prepare typed data 전체 hash (결속 검증용)
+  // 6G-3 §5 — prepare 단계 비민감 증거 (전문·서명·암호문 저장 금지).
+  gmxPrimaryType:        text("gmx_primary_type"),        // typedData.primaryType
+  gmxTypedDataDigest:    text("gmx_typed_data_digest"),   // 서버 독립 재계산 digest
+  gmxPreparePeer:        text("gmx_prepare_peer"),        // prepare에 응답한 peer host
+  gmxPrepareRequestedAt: timestamp("gmx_prepare_requested_at", { withTimezone: true }), // 외부 prepare 요청 시각
+  gmxPreparedAt:         timestamp("gmx_prepared_at", { withTimezone: true }),          // 증거 저장 완료 시각
   errorClass:        text("error_class"),                    // 오류 분류
   resolutionBasis:   text("resolution_basis"),               // 판정 근거 (온체인 증거 등)
   createdAt:         timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),

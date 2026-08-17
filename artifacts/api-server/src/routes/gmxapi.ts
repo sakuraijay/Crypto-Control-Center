@@ -33,6 +33,7 @@ import { isEmergencyStopActive, isReconciled } from '../workers/liveTestExecutor
 import { GMX_DEPLOYMENT_MANIFEST } from '../lib/gmxDeploymentManifest';
 import { APPROVAL_PURPOSE, SESSION_STATUS } from '../lib/ownerApprovalSession';
 import { reconcileGmxApiTasks, makeProductionDeps } from '../lib/gmxApiStatusReconciler';
+import { getGmxPrepareStartupState } from '../lib/gmxApiPrepareStartup';
 import { sanitizeRpcError } from '../lib/rpcErrorSanitize';
 
 const router = Router();
@@ -87,6 +88,9 @@ async function buildGmxApiStatusSnapshot() {
     gmxApiStatus: string | null; hasRequestId: boolean;
     txHash: string | null; updatedAt: string | null;
   }> | null = null;
+  // 6G-3 §7 — prepare 단계별 blocking task 집계 (조회 실패 = null, fail-closed 표시)
+  let prepareStageCounts: Record<string, number> | null = null;
+  let oldestBlockingTaskAt: string | null = null;
   try {
     const rows = await db.select().from(relayTasksTable)
       .where(eq(relayTasksTable.transportGen, GMX_API_TRANSPORT_GEN))
@@ -94,6 +98,22 @@ async function buildGmxApiStatusSnapshot() {
       .limit(20);
     gmxTaskCounts = {};
     for (const r of rows) gmxTaskCounts[r.status] = (gmxTaskCounts[r.status] ?? 0) + 1;
+    const BLOCKING_STAGES = [
+      RELAY_TASK_STATUS.PREPARED, RELAY_TASK_STATUS.PREPARE_REQUESTED,
+      RELAY_TASK_STATUS.API_PREPARED, RELAY_TASK_STATUS.SUBMITTING, RELAY_TASK_STATUS.UNRESOLVED,
+    ] as string[];
+    prepareStageCounts = {
+      PREPARED: 0, PREPARE_REQUESTED: 0, API_PREPARED: 0, SUBMITTING: 0, UNRESOLVED: 0,
+    };
+    let oldest: Date | null = null;
+    for (const r of rows) {
+      if (BLOCKING_STAGES.includes(r.status)) {
+        prepareStageCounts[r.status] = (prepareStageCounts[r.status] ?? 0) + 1;
+        const created = r.createdAt ? new Date(r.createdAt) : null;
+        if (created && (!oldest || created < oldest)) oldest = created;
+      }
+    }
+    oldestBlockingTaskAt = oldest ? oldest.toISOString() : null;
     recentGmxTasks = rows.slice(0, 10).map((r) => ({
       id: r.id, kind: r.kind, status: r.status,
       gmxApiStatus: r.gmxApiStatus ?? null,
@@ -101,7 +121,7 @@ async function buildGmxApiStatusSnapshot() {
       txHash: r.txHash ?? r.gmxExecutionTxHash ?? null,
       updatedAt: r.updatedAt ? new Date(r.updatedAt).toISOString() : null,
     }));
-  } catch { gmxTaskCounts = null; recentGmxTasks = null; }
+  } catch { gmxTaskCounts = null; recentGmxTasks = null; prepareStageCounts = null; oldestBlockingTaskAt = null; }
 
   let unresolvedCount: number | null = null;
   try { unresolvedCount = (await listUnresolvedTasks(50)).length; } catch { unresolvedCount = null; }
@@ -120,6 +140,26 @@ async function buildGmxApiStatusSnapshot() {
   const gmxConfigOk = resolveGmxLiveRelayConfig().ok;
   const feeEstimateFresh =
     fe.attempted && fe.ok && fe.atMs !== null && Date.now() - fe.atMs < 10 * 60_000;
+
+  // 6G-3 §7 — startup prepare reconciliation 상태 (메모리 getter만, 외부 호출 0회)
+  const prepareStartup = getGmxPrepareStartupState();
+
+  // 6G-3 §7 — 신규 주문 차단 사유 전체 (표시 전용, 파생값만)
+  const blockedReasons: string[] = [];
+  if (!submissionEnabled) blockedReasons.push('order submission flag 비활성 — 구조적 차단');
+  if (isLiveTestExecutionLocked()) blockedReasons.push('LIVE_TEST_EXECUTION_LOCKED — 실행 잠금');
+  if (isEmergencyStopActive()) blockedReasons.push('Emergency Stop 활성');
+  if (!isReconciled()) blockedReasons.push('intent reconciliation 미완료');
+  if (!prepareStartup.attempted || !prepareStartup.ok) blockedReasons.push('prepare 단계 startup reconciliation 미완료/실패');
+  if (!dbOk) blockedReasons.push('DB 조회 실패 (fail-closed)');
+  if (blockingIntents === null || blockingIntents > 0) blockedReasons.push(`blocking intent ${blockingIntents ?? '조회 실패'}`);
+  if (prepareStageCounts === null) {
+    blockedReasons.push('relay task 단계 집계 조회 실패 (fail-closed)');
+  } else {
+    const blockingTasks = Object.values(prepareStageCounts).reduce((a, b) => a + b, 0);
+    if (blockingTasks > 0) blockedReasons.push(`미종결 relay task ${blockingTasks}건 — 운영자 확인 필요`);
+  }
+  if ((unresolvedCount ?? 1) > 0) blockedReasons.push(`UNRESOLVED task ${unresolvedCount ?? '조회 실패'} — 자동 재시도 없음`);
 
   // readyForControlledCanary — 전 항목 파생값의 논리곱 (fail-closed; 어느 하나
   // null/false면 false). 현 단계는 submissionEnabled=false라 항상 false.
@@ -165,6 +205,20 @@ async function buildGmxApiStatusSnapshot() {
     gmxTaskCounts,
     recentGmxTasks,
     readyForControlledCanary,
+    // 6G-3 §7 — prepare 단계 관측·차단 사유 (조회 전용)
+    prepareStageCounts,
+    oldestBlockingTaskAt,
+    prepareStartupReconciliation: {
+      attempted: prepareStartup.attempted, ok: prepareStartup.ok, atMs: prepareStartup.atMs,
+      stalePreparedFailed: prepareStartup.stalePreparedFailed,
+      requestedToUnresolved: prepareStartup.requestedToUnresolved,
+      apiPreparedHeld: prepareStartup.apiPreparedHeld,
+    },
+    blockedReasons,
+    notices: [
+      '자동 재시도 없음 — UNRESOLVED/API_PREPARED는 운영자 확인 전 어떤 자동 조치도 하지 않습니다.',
+      '운영자 확인 전 서명·제출 금지 — 이 화면은 조회 전용이며 강제 완료·삭제·재제출 기능이 없습니다.',
+    ],
   };
 }
 

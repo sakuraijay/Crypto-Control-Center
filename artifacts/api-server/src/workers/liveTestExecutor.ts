@@ -66,6 +66,7 @@ import {
   getFeeEstimateState,
 } from '../lib/relayActivationStatus';
 import { getActiveRevokeSession } from '../lib/revokeSession';
+import { getGmxPrepareStartupState } from '../lib/gmxApiPrepareStartup';
 import { countBlockingIntentsOrNull } from '../lib/executionIntents';
 import { fetchServerOpenPositions } from '../routes/gmx';
 
@@ -361,7 +362,8 @@ async function buildExecutorActivationInput(args: {
     env: process.env,
     liveTestMode: args.liveTestMode,
     emergencyStopActive: _emergencyStop,
-    reconciled: _reconciled,
+    // 6G-3 §4 — prepare 단계 startup reconciliation 실패 시 LIVE 경로 전체 차단
+    reconciled: _reconciled && getGmxPrepareStartupState().attempted && getGmxPrepareStartupState().ok,
     canonicalAuthorized,
     approvalRemainingOk,
     blockingIntentCount,

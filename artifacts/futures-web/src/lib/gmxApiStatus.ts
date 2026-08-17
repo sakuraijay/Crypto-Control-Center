@@ -45,6 +45,15 @@ export interface GmxApiStatusView {
     txHash: string | null; updatedAt: string | null;
   }> | null;
   readyForControlledCanary: boolean;
+  // 6G-3 §7 — prepare 단계 관측 (조회 전용; null = 조회 실패, "미설정" 위장 금지)
+  prepareStageCounts: Record<string, number> | null;
+  oldestBlockingTaskAt: string | null;
+  prepareStartupReconciliation: {
+    attempted: boolean; ok: boolean; atMs: number | null;
+    stalePreparedFailed: number; requestedToUnresolved: number; apiPreparedHeld: number;
+  };
+  blockedReasons: string[];
+  notices: string[];
 }
 
 export type GmxApiFetchFailureKind =

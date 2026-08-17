@@ -286,6 +286,20 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         ON relay_tasks (gmx_api_status) WHERE gmx_api_status IS NOT NULL;
     `,
   },
+  {
+    name: "0020_relay_tasks_prepare_durability",
+    sql: `
+      -- 6G-3 §3·§5 — prepare 단계 durable 상태 머신 additive 증거 컬럼.
+      -- 상태 값 추가(PREPARE_REQUESTED/API_PREPARED)는 text 컬럼이라 스키마 변경 불필요.
+      -- 비민감 증거만: primaryType·typed-data digest·prepare 시각·prepare peer host.
+      ALTER TABLE relay_tasks
+        ADD COLUMN IF NOT EXISTS gmx_primary_type      text,
+        ADD COLUMN IF NOT EXISTS gmx_typed_data_digest text,
+        ADD COLUMN IF NOT EXISTS gmx_prepare_peer      text,
+        ADD COLUMN IF NOT EXISTS gmx_prepare_requested_at timestamptz,
+        ADD COLUMN IF NOT EXISTS gmx_prepared_at       timestamptz;
+    `,
+  },
   // Add future migrations here in chronological order.
 ];
 
