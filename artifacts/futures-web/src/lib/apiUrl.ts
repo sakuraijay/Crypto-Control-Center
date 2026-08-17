@@ -69,6 +69,36 @@ export type ApiJsonBody =
   /** Content-Type은 JSON인데 decode 실패 */
   | { kind: 'invalid_json' };
 
+// ── 6E-6 §3 — 공용 JSON POST helper ─────────────────────────────────────────
+
+/**
+ * 내부 API로 JSON body를 보내는 mutation 요청(POST/PUT/PATCH)의 단일 계약.
+ *  - URL은 apiUrl()로 origin root `/api/...` 강제
+ *  - `Content-Type: application/json` + `Accept: application/json` 자동 부여
+ *  - body는 항상 JSON.stringify(body ?? {})
+ *  - PIN 등 민감 header는 호출자가 headers로 명시적으로 주입 (여기서 저장·로그하지 않음)
+ *  - 자동 retry 없음, header/body/error 로그 미출력
+ * FormData/파일 업로드에는 사용하지 말 것 (JSON Content-Type을 강제하므로).
+ */
+export async function postApiJson(
+  path: string,
+  options?: {
+    method?: 'POST' | 'PUT' | 'PATCH';
+    body?: Record<string, unknown>;
+    headers?: Record<string, string>;
+  },
+): Promise<Response> {
+  return fetch(apiUrl(path), {
+    method: options?.method ?? 'POST',
+    headers: {
+      'content-type': 'application/json',
+      accept: 'application/json',
+      ...(options?.headers ?? {}),
+    },
+    body: JSON.stringify(options?.body ?? {}),
+  });
+}
+
 /**
  * JSON API 응답 본문을 fail-closed로 읽는다.
  *  - Content-Type에 application/json이 없으면 route_mismatch (본문 미노출)

@@ -6,7 +6,7 @@
  * 성공처럼 표시하지 않는 것이 UI 계약의 핵심이다.
  */
 
-import { apiUrl, readApiJson, API_ROUTE_MISMATCH_MESSAGE } from './apiUrl';
+import { apiUrl, readApiJson, API_ROUTE_MISMATCH_MESSAGE, postApiJson } from './apiUrl';
 
 export interface RelayFeeQuoteView {
   source: string;
@@ -142,8 +142,7 @@ export type ReadinessRefreshResult =
  */
 export async function postReadinessRefresh(params: { pin: string }): Promise<ReadinessRefreshResult> {
   try {
-    const res = await fetch(apiUrl('executor/relay/readiness/refresh'), {
-      method: 'POST',
+    const res = await postApiJson('executor/relay/readiness/refresh', {
       headers: { 'x-operator-pin': params.pin },
     });
     if (res.status === 401 || res.status === 403) return { kind: 'auth' };
@@ -250,10 +249,8 @@ export async function postRevokePrepare(params: { pin: string }): Promise<{
   ok: boolean; sessionId?: string; typedData?: unknown; summary?: Record<string, string>; error?: string;
 }> {
   try {
-    const res = await fetch(apiUrl('executor/relay/revoke/prepare'), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-operator-pin': params.pin },
-      body: '{}',
+    const res = await postApiJson('executor/relay/revoke/prepare', {
+      headers: { 'x-operator-pin': params.pin },
     });
     const body = await readApiJson(res);
     if (body.kind === 'route_mismatch') return { ok: false, error: API_ROUTE_MISMATCH_MESSAGE };
@@ -269,10 +266,9 @@ export async function postRevokeSignature(params: {
   pin: string; sessionId: string; signature: string;
 }): Promise<{ ok: boolean; error?: string }> {
   try {
-    const res = await fetch(apiUrl('executor/relay/revoke/signature'), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-operator-pin': params.pin },
-      body: JSON.stringify({ sessionId: params.sessionId, signature: params.signature }),
+    const res = await postApiJson('executor/relay/revoke/signature', {
+      headers: { 'x-operator-pin': params.pin },
+      body: { sessionId: params.sessionId, signature: params.signature },
     });
     const body = await readApiJson(res);
     if (body.kind === 'route_mismatch') return { ok: false, error: API_ROUTE_MISMATCH_MESSAGE };
@@ -288,10 +284,9 @@ export async function postRevokeCancel(params: {
   pin: string; sessionId: string;
 }): Promise<{ ok: boolean; error?: string }> {
   try {
-    const res = await fetch(apiUrl('executor/relay/revoke/cancel'), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-operator-pin': params.pin },
-      body: JSON.stringify({ sessionId: params.sessionId }),
+    const res = await postApiJson('executor/relay/revoke/cancel', {
+      headers: { 'x-operator-pin': params.pin },
+      body: { sessionId: params.sessionId },
     });
     const body = await readApiJson(res);
     if (body.kind === 'route_mismatch') return { ok: false, error: API_ROUTE_MISMATCH_MESSAGE };
@@ -341,10 +336,9 @@ export async function postUnresolvedRecheck(params: {
   pin: string; taskId: string;
 }): Promise<{ ok: boolean; rechecked?: boolean; reason?: string; error?: string }> {
   try {
-    const res = await fetch(apiUrl('executor/relay/unresolved/recheck'), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-operator-pin': params.pin },
-      body: JSON.stringify({ taskId: params.taskId }),
+    const res = await postApiJson('executor/relay/unresolved/recheck', {
+      headers: { 'x-operator-pin': params.pin },
+      body: { taskId: params.taskId },
     });
     const body = await readApiJson(res);
     if (body.kind === 'route_mismatch') return { ok: false, error: API_ROUTE_MISMATCH_MESSAGE };
@@ -360,10 +354,8 @@ export async function postRevokeDryRun(params: { pin: string }): Promise<{
   ok: boolean; dryRun?: DryRunView; error?: string;
 }> {
   try {
-    const res = await fetch(apiUrl('executor/relay/revoke/dry-run'), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-operator-pin': params.pin },
-      body: '{}',
+    const res = await postApiJson('executor/relay/revoke/dry-run', {
+      headers: { 'x-operator-pin': params.pin },
     });
     const body = await readApiJson(res);
     if (body.kind === 'route_mismatch') return { ok: false, error: API_ROUTE_MISMATCH_MESSAGE };

@@ -38,9 +38,12 @@ describe('postReadinessRefresh', () => {
     expect(url).toBe('/api/executor/relay/readiness/refresh');
     expect(url).not.toContain('/futures-web/');       // BASE_URL 오염 없음
     expect(init.method).toBe('POST');
+    expect(init.headers['content-type']).toBe('application/json'); // 6E-6: JSON Content-Type 필수
+    expect(init.headers['accept']).toBe('application/json');
     expect(init.headers['x-operator-pin']).toBe('123456');
     expect(url).not.toContain('123456');           // PIN이 URL에 없음
-    expect(init.body).toBeUndefined();             // PIN이 body에 없음
+    expect(init.body).toBe('{}');                  // body는 빈 JSON 객체 — PIN이 body에 없음
+    expect(String(init.body)).not.toContain('123456');
   });
 
   it('401 → auth (env 미설정과 구분)', async () => {

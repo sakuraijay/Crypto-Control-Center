@@ -6,7 +6,7 @@
  * (서명은 브라우저 지갑 eth_signTypedData_v4 전용).
  */
 
-import { apiUrl, readApiJson, API_ROUTE_MISMATCH_MESSAGE } from './apiUrl';
+import { apiUrl, readApiJson, API_ROUTE_MISMATCH_MESSAGE, postApiJson } from './apiUrl';
 
 export const ARBITRUM_ONE_CHAIN_ID = 42161;
 
@@ -230,10 +230,9 @@ export async function postPrepareApproval(params: {
   pin: string; walletAddress: string;
 }): Promise<PrepareResponse> {
   try {
-    const res = await fetch(apiUrl('executor/subaccount-approval/prepare'), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-operator-pin': params.pin },
-      body: JSON.stringify({ walletAddress: params.walletAddress }),
+    const res = await postApiJson('executor/subaccount-approval/prepare', {
+      headers: { 'x-operator-pin': params.pin },
+      body: { walletAddress: params.walletAddress },
     });
     const body = await readApiJson(res);
     if (body.kind === 'route_mismatch') return { ok: false, error: API_ROUTE_MISMATCH_MESSAGE };
@@ -249,10 +248,9 @@ export async function postApprovalSignature(params: {
   pin: string; sessionId: string; signature: string;
 }): Promise<{ ok: boolean; status?: string; error?: string }> {
   try {
-    const res = await fetch(apiUrl('executor/subaccount-approval/signature'), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-operator-pin': params.pin },
-      body: JSON.stringify({ sessionId: params.sessionId, signature: params.signature }),
+    const res = await postApiJson('executor/subaccount-approval/signature', {
+      headers: { 'x-operator-pin': params.pin },
+      body: { sessionId: params.sessionId, signature: params.signature },
     });
     const body = await readApiJson(res);
     if (body.kind === 'route_mismatch') return { ok: false, error: API_ROUTE_MISMATCH_MESSAGE };
