@@ -135,6 +135,108 @@ function collectAddressLikeStrings(v: unknown, out: string[]): void {
 
 export type BindingCheck = { ok: true; digest: Hex } | { ok: false; reason: string };
 
+/** message 깊이 우선 탐색으로 특정 key의 모든 값 수집 (중첩 struct/배열 포함) */
+function collectFieldValues(v: unknown, key: string, out: unknown[]): void {
+  if (Array.isArray(v)) { for (const x of v) collectFieldValues(x, key, out); return; }
+  if (v && typeof v === 'object') {
+    for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
+      if (k === key) out.push(x);
+      collectFieldValues(x, key, out);
+    }
+  }
+}
+
+/** GMX OrderType enum — MarketIncrease=2, MarketDecrease=4 */
+const ORDER_TYPE_ENUM: Record<string, number> = { MarketIncrease: 2, MarketDecrease: 4 };
+
+/**
+ * 6G-2 리뷰(Critical) 반영 — typed data message의 의미 필드를 canonical 요청과
+ * 구조적으로 대조한다. 주소 allowlist만으로는 "허용된 주소만 쓴 다른 주문"
+ * (방향 반전·사이즈 변조·다른 시장)을 걸러내지 못한다.
+ * 규칙: 필수 의미 필드(sizeDeltaUsd/isLong/market 계열)는 message에 반드시
+ * 존재해야 하며(부재=서명 금지), 등장하는 모든 값이 요청값과 일치해야 한다.
+ */
+export function verifyOrderSemanticBinding(
+  message: unknown,
+  req: GmxOrderRequest,
+): { ok: true } | { ok: false; reason: string } {
+  const expectSize = sizeDeltaUsdString(req.sizeUsd);
+  const expectKind = orderKindOf(req);
+  const expectOrderTypeNum = ORDER_TYPE_ENUM[expectKind];
+
+  // sizeDeltaUsd — 필수, 전 출현 일치
+  const sizes: unknown[] = [];
+  collectFieldValues(message, 'sizeDeltaUsd', sizes);
+  if (sizes.length === 0) return { ok: false, reason: 'typed data에 sizeDeltaUsd 부재 — 의미 결속 불가, 서명 금지' };
+  for (const s of sizes) {
+    if (String(s) !== expectSize) {
+      return { ok: false, reason: `typed data sizeDeltaUsd(${String(s)}) ≠ 요청(${expectSize}) — 서명 금지` };
+    }
+  }
+
+  // isLong — 필수, 전 출현 일치
+  const longs: unknown[] = [];
+  collectFieldValues(message, 'isLong', longs);
+  if (longs.length === 0) return { ok: false, reason: 'typed data에 isLong 부재 — 의미 결속 불가, 서명 금지' };
+  for (const l of longs) {
+    const b = typeof l === 'boolean' ? l : String(l) === 'true';
+    if (b !== req.isLong) return { ok: false, reason: 'typed data isLong이 요청 방향과 불일치 — 서명 금지' };
+  }
+
+  // market 계열 — 필수(최소 1개 key 존재), 전 출현 일치
+  const markets: unknown[] = [];
+  for (const key of ['market', 'marketAddress', 'marketToken']) collectFieldValues(message, key, markets);
+  if (markets.length === 0) return { ok: false, reason: 'typed data에 market 필드 부재 — 의미 결속 불가, 서명 금지' };
+  for (const m of markets) {
+    if (typeof m !== 'string' || m.toLowerCase() !== req.marketAddress.toLowerCase()) {
+      return { ok: false, reason: 'typed data market이 요청 시장과 불일치 — 서명 금지' };
+    }
+  }
+
+  // orderType — 존재하면 요청 kind와 정확 일치 (숫자 enum 또는 문자열 표기)
+  const orderTypes: unknown[] = [];
+  collectFieldValues(message, 'orderType', orderTypes);
+  for (const t of orderTypes) {
+    const okNum = String(t) === String(expectOrderTypeNum);
+    const okStr = typeof t === 'string' && t === expectKind;
+    if (!okNum && !okStr) {
+      return { ok: false, reason: `typed data orderType(${String(t)})이 요청(${expectKind})과 불일치 — 서명 금지` };
+    }
+  }
+
+  // collateral token 계열 — 존재하면 USDC만
+  const collaterals: unknown[] = [];
+  for (const key of ['initialCollateralToken', 'collateralToken']) collectFieldValues(message, key, collaterals);
+  for (const c of collaterals) {
+    if (typeof c !== 'string' || c.toLowerCase() !== USDC_ADDRESS.toLowerCase()) {
+      return { ok: false, reason: 'typed data collateral token이 USDC가 아님 — 서명 금지' };
+    }
+  }
+
+  // OPEN 담보 수량 — 존재하면 요청 변환값과 일치 (CLOSE는 부분 청산 규칙상 미강제)
+  if (req.kind === 'OPEN') {
+    const deltas: unknown[] = [];
+    collectFieldValues(message, 'initialCollateralDeltaAmount', deltas);
+    const expectCollateral = collateralAmountString(req.collateralUsd);
+    for (const d of deltas) {
+      if (String(d) !== expectCollateral) {
+        return { ok: false, reason: `typed data 담보 수량(${String(d)}) ≠ 요청(${expectCollateral}) — 서명 금지` };
+      }
+    }
+  }
+
+  // swapPath — 존재하면 빈 배열만 (경유 스왑으로 자금 우회 금지)
+  const swapPaths: unknown[] = [];
+  collectFieldValues(message, 'swapPath', swapPaths);
+  for (const p of swapPaths) {
+    if (!Array.isArray(p) || p.length !== 0) {
+      return { ok: false, reason: 'typed data swapPath가 비어있지 않음 — 서명 금지' };
+    }
+  }
+
+  return { ok: true };
+}
+
 /**
  * §4 — 서명 직전 typed data 재계산·결속 검증.
  *  - domain chainId=42161, verifyingContract는 감사된 manifest 주소만
@@ -171,6 +273,16 @@ export function verifyOrderTypedDataBinding(view: PreparedOrderView, req: GmxOrd
     if (!allowed.has(a.toLowerCase())) {
       return { ok: false, reason: 'typed data message에 허용되지 않은 주소 존재 — 서명 금지 (fail-closed)' };
     }
+  }
+
+  // 6G-2 리뷰(Critical) — 의미 필드 결속: 방향·사이즈·시장·담보·orderType이
+  // canonical 요청과 일치하지 않으면 서명 금지 (주소 allowlist만으로는 불충분)
+  const semantic = verifyOrderSemanticBinding(td.message, req);
+  if (!semantic.ok) return semantic;
+
+  // primaryType 명시 필수 — 추론 서명 금지 (스키마 모호성으로 인한 digest 변조 방지)
+  if (typeof td.primaryType !== 'string' || td.primaryType.length === 0) {
+    return { ok: false, reason: 'typedData.primaryType 부재 — 추론 서명 금지 (fail-closed)' };
   }
 
   // receiver 계열 필드가 존재하면 main wallet이어야 한다 (명시 강제)

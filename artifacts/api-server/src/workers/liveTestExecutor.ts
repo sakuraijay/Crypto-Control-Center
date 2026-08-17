@@ -336,6 +336,8 @@ async function buildExecutorActivationInput(args: {
   liveTestMode: boolean;
   dbOk: boolean;
   rpcOk: boolean;
+  /** 이 실행 흐름이 방금 생성한 자기 intent id — blocking count에서 제외 */
+  selfIntentId?: string | null;
 }): Promise<ActivationGateInput> {
   const snap = getCanonicalSnapshot();
   const canonicalAuthorized = !!snap && snap.confirmed && snap.isSubaccountListed === true;
@@ -347,7 +349,7 @@ async function buildExecutorActivationInput(args: {
     } catch { approvalRemainingOk = false; }
   }
   let blockingIntentCount: number | null = null;
-  try { blockingIntentCount = await countBlockingIntentsOrNull(); } catch { blockingIntentCount = null; }
+  try { blockingIntentCount = await countBlockingIntentsOrNull(args.selfIntentId ?? null); } catch { blockingIntentCount = null; }
   let revoke = true; // 조회 실패 = revoke 진행 중으로 간주 (차단)
   try { revoke = (await getActiveRevokeSession()) !== null; } catch { revoke = true; }
   // fee freshness — 저장된 fee estimate 스냅샷만 (10분 이내, mock 불인정)
@@ -414,6 +416,7 @@ async function runGmxApiOrderPath(args: {
   const transport = getGmxApiTransport();
   const activation = await buildExecutorActivationInput({
     kind: args.kind, liveTestMode: args.liveTestMode, dbOk: args.dbOk, rpcOk: args.rpcOk,
+    selfIntentId: args.intentId,
   });
   const canonicalNonce = (() => {
     const snap = getCanonicalSnapshot();
@@ -433,6 +436,7 @@ async function runGmxApiOrderPath(args: {
     activation,
     reevaluateActivation: () => buildExecutorActivationInput({
       kind: args.kind, liveTestMode: args.liveTestMode, dbOk: args.dbOk, rpcOk: args.rpcOk,
+      selfIntentId: args.intentId,
     }),
     openPosition: args.openPosition,
     canonicalNonce,

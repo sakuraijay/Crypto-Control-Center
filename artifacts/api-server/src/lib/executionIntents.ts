@@ -162,12 +162,20 @@ export async function hasBlockingIntents(): Promise<boolean> {
   }
 }
 
-/** blocking intent 수 — 조회 실패는 null (호출측 fail-closed 판단용, 5단계) */
-export async function countBlockingIntentsOrNull(): Promise<number | null> {
+/**
+ * blocking intent 수 — 조회 실패는 null (호출측 fail-closed 판단용, 5단계).
+ * excludeIntentId: 실행 흐름이 방금 스스로 생성한 intent를 제외하기 위한 값
+ * (6G-2 리뷰 반영 — 자기 intent가 자기 gate를 영구 차단하는 결함 수정).
+ * 다른 프로세스/과거의 blocking intent는 여전히 카운트되어 차단한다.
+ */
+export async function countBlockingIntentsOrNull(excludeIntentId?: string | null): Promise<number | null> {
   try {
     const rows = await db.select({ id: executionIntentsTable.id })
       .from(executionIntentsTable)
       .where(inArray(executionIntentsTable.status, BLOCKING_INTENT_STATUSES));
+    if (excludeIntentId) {
+      return rows.filter((r) => r.id !== excludeIntentId).length;
+    }
     return rows.length;
   } catch {
     return null;

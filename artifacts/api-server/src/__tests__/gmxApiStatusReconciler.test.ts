@@ -44,7 +44,7 @@ vi.mock('drizzle-orm', () => ({
 }));
 
 // ── lifecycle/intent/이벤트 mock ─────────────────────────────────────────────
-const transitionSpy = vi.hoisted(() => vi.fn(async () => ({ ok: true })));
+const transitionSpy = vi.hoisted(() => vi.fn(async (..._args: unknown[]) => ({ ok: true })));
 vi.mock('../lib/relayLifecycle', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../lib/relayLifecycle')>();
   return { ...actual, transitionRelayTask: transitionSpy };
