@@ -384,6 +384,26 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         ON protection_orders (status);
     `,
   },
+  {
+    name: "0024_protection_evidence",
+    sql: `
+      -- 6H-2C §3·§4·§6 — decimals·온체인 증거·action budget 스냅샷 (additive, idempotent).
+      ALTER TABLE protection_orders ADD COLUMN IF NOT EXISTS decimals_used integer;
+      ALTER TABLE protection_orders ADD COLUMN IF NOT EXISTS decimals_source text;
+      ALTER TABLE protection_orders ADD COLUMN IF NOT EXISTS decimals_token_address text;
+      ALTER TABLE protection_orders ADD COLUMN IF NOT EXISTS decimals_verified_at timestamptz;
+      ALTER TABLE protection_orders ADD COLUMN IF NOT EXISTS emitter_address text;
+      ALTER TABLE protection_orders ADD COLUMN IF NOT EXISTS created_tx_hash text;
+      ALTER TABLE protection_orders ADD COLUMN IF NOT EXISTS executed_tx_hash text;
+      ALTER TABLE protection_orders ADD COLUMN IF NOT EXISTS cancelled_tx_hash text;
+      ALTER TABLE protection_orders ADD COLUMN IF NOT EXISTS frozen_tx_hash text;
+      ALTER TABLE protection_orders ADD COLUMN IF NOT EXISTS evidence_block_number text;
+      ALTER TABLE protection_orders ADD COLUMN IF NOT EXISTS action_budget_snapshot text;
+      -- emergency close 중복 방어 보강: purpose별 시도 이력 조회용
+      CREATE INDEX IF NOT EXISTS idx_protection_position_purpose
+        ON protection_orders (position_key, purpose);
+    `,
+  },
   // Add future migrations here in chronological order.
 ];
 

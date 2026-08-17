@@ -76,7 +76,25 @@ import { fetchServerOpenPositions } from '../routes/gmx';
 // ── 6H-2B §11 — stop 실행 능력 파생 게이트 ──────────────────────────────────
 import { deriveStopExecutionCapability, type StopCapabilityResult } from '../lib/stopExecutionCapability';
 import { evaluateActionBudget } from '../lib/actionBudget';
-import { listBlockingProtections, listActiveProtections } from '../lib/protectionOrders';
+import {
+  listBlockingProtections, listActiveProtections, recordProtectionEvidenceFields,
+} from '../lib/protectionOrders';
+// ── 6H-2C §3·§4 — decimals 권위 소스 + 온체인 증거 수집기 ────────────────────
+import {
+  resolveIndexTokenDecimals as resolveDecimalsAuthoritative,
+  lookupSdkIndexToken, getDecimalsCacheSnapshot, ARBITRUM_CHAIN_ID,
+  type DecimalsEvidence,
+} from '../lib/indexTokenDecimals';
+import {
+  collectProtectionEvidence, analyzeProtectionAnomalies,
+  type ProtectionAnomalies, type EvidenceClient,
+} from '../lib/protectionEvidence';
+import {
+  EVENT_LOG_2_TOPIC0, ORDER_EVENT_NAME_HASH, resolveGmxEventEmitterAddress as resolveEmitterCfg,
+  type RawLog,
+} from '../lib/gmxOrderEvents';
+import { createPublicClient, http } from 'viem';
+import { arbitrum } from 'viem/chains';
 import { ORDER_TYPE } from '../lib/gmxCreateOrder';
 import {
   setProtectionSubmitFn, runEmergencyClose, reconcileProtections,
@@ -477,6 +495,7 @@ export async function refreshStopExecutionCapability(): Promise<StopCapabilityRe
     remaining: snap?.remaining ?? null,
     expiresAt: snap?.expiresAt ?? null,
     nowMs: Date.now(),
+    inFlightReservedActions: await countInFlightReservedActions(),
   });
   // fee freshness — 저장 스냅샷 (10분 활성 게이트와 동일 소스; 실행 직전 30초
   // 재확인은 executeLiveTestOrder의 validateExecutionEligibleSnapshot이 담당)
@@ -497,6 +516,17 @@ export async function refreshStopExecutionCapability(): Promise<StopCapabilityRe
     uncoveredCount,
     blockingProtectionCount,
     executionUnlocked: !isLiveTestExecutionLocked() && !_emergencyStop,
+    // ── 6H-2C §9 — 추가 조건 (전부 실제 파생, 상수 금지) ──
+    decimalsSourceReady:
+      Boolean(process.env.GMX_RPC_URL?.trim()) &&
+      lookupSdkIndexToken(ARBITRUM_CHAIN_ID, '0x70d95587d40A2caf56bd97485aB3Eec10Bee6336').ok, // SDK registry 로드 검증 (ETH/USD 공식 market)
+    priceConversionVerified: verifyPriceConversionGolden(),
+    evidenceCollectorReady: resolveEmitterCfg().ok && Boolean(process.env.GMX_RPC_URL?.trim()),
+    protectionReconciliationClean:
+      _protectionRecon.complete && !_protectionRecon.blockNewOpens,
+    positionSnapshotFresh:
+      _protectionRecon.lastPositionsFetchOkAtMs !== null &&
+      Date.now() - _protectionRecon.lastPositionsFetchOkAtMs < 10 * 60_000,
   });
   _stopCapability = { ...derived, evaluatedAt: new Date().toISOString() };
   return derived;
@@ -663,11 +693,57 @@ let _intentReconcileTimer: ReturnType<typeof setInterval> | null = null;
 // ── 6H-2B §5·§6 — 보호 주문 production wiring ────────────────────────────────
 
 /**
- * 인덱스 토큰 decimals authoritative 소스 — 현재 미구성 (온체인 ERC20 readback
- * 미구현). null = 변환 불가 → stop 제출 fail-closed. 추측 하드코딩 금지.
+ * 6H-2C §3 — 인덱스 토큰 decimals 권위 소스: SDK metadata + 온체인 ERC-20
+ * decimals() 교차검증 (indexTokenDecimals 모듈). 어느 한쪽 실패/불일치 = null.
+ * §13 고지: 여기서 read-only eth_call(decimals()) 1회를 GMX_RPC_URL로 수행한다.
  */
-function resolveIndexTokenDecimals(_marketAddress: string): number | null {
-  return null;
+async function fetchOnchainErc20Decimals(tokenAddress: string): Promise<number | null> {
+  const url = process.env.GMX_RPC_URL?.trim();
+  if (!url) return null;
+  try {
+    const client = createPublicClient({ chain: arbitrum, transport: http(url, { timeout: 8_000 }) });
+    const chainId = await client.getChainId();
+    if (chainId !== ARBITRUM_CHAIN_ID) return null; // 네트워크 불일치 = 차단
+    const v = await client.readContract({
+      address: tokenAddress as `0x${string}`,
+      abi: [{ type: 'function', name: 'decimals', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint8' }] }],
+      functionName: 'decimals',
+    });
+    return typeof v === 'number' ? v : Number(v);
+  } catch { return null; }
+}
+
+/** 테스트 주입용 override (null = 실 경로) */
+let _decimalsResolverOverride: ((marketAddress: string) => Promise<DecimalsEvidence | null>) | null = null;
+export function __setDecimalsResolverForTests(fn: ((m: string) => Promise<DecimalsEvidence | null>) | null): void {
+  _decimalsResolverOverride = fn;
+}
+
+async function resolveIndexTokenDecimalsEvidence(marketAddress: string): Promise<DecimalsEvidence | null> {
+  if (_decimalsResolverOverride) return _decimalsResolverOverride(marketAddress);
+  const res = await resolveDecimalsAuthoritative({
+    chainId: ARBITRUM_CHAIN_ID,
+    marketAddress,
+    fetchOnchainDecimals: fetchOnchainErc20Decimals,
+  });
+  if (!res.ok) {
+    console.error(`[LiveTestExecutor] decimals 확보 실패 — ${res.reason}`);
+    return null;
+  }
+  return res.evidence;
+}
+
+/** §3 — 가격 변환 규칙 런타임 자기검증 (골든 값 대조; 상수 true 금지) */
+let _priceConversionVerifiedCache: boolean | null = null;
+export function verifyPriceConversionGolden(): boolean {
+  if (_priceConversionVerifiedCache !== null) return _priceConversionVerifiedCache;
+  try {
+    _priceConversionVerifiedCache =
+      usdPriceToGmxString(2000, 18) === (2000n * 10n ** 12n).toString() &&      // 10^(30-18)
+      usdPriceToGmxString(65000, 8) === (65000n * 10n ** 22n).toString() &&     // 10^(30-8)
+      usdPriceToGmxString(1.5, 8) === (15n * 10n ** 21n).toString();
+  } catch { _priceConversionVerifiedCache = false; }
+  return _priceConversionVerifiedCache;
 }
 
 let _protectionWired = false;
@@ -697,15 +773,36 @@ export function wireProtectionExecution(): void {
       if (req.triggerPriceUsd === null || req.acceptablePriceUsd === null) {
         return { status: 'FAILED_PRE_BROADCAST', reason: 'stop trigger/acceptable 가격 누락 — 제출 0회' };
       }
-      const decimals = resolveIndexTokenDecimals(req.marketAddress);
-      if (decimals === null) {
-        return { status: 'FAILED_PRE_BROADCAST', reason: '인덱스 토큰 decimals authoritative 소스 미구성 — 가격 변환 불가, stop 제출 0회 (fail-closed)' };
+      if (!verifyPriceConversionGolden()) {
+        return { status: 'FAILED_PRE_BROADCAST', reason: '가격 변환 규칙 자기검증 실패 — stop 제출 0회 (fail-closed)' };
+      }
+      const dec = await resolveIndexTokenDecimalsEvidence(req.marketAddress);
+      if (dec === null) {
+        return { status: 'FAILED_PRE_BROADCAST', reason: '인덱스 토큰 decimals 권위 소스 확보 실패 (SDK+온체인 교차검증) — 가격 변환 불가, stop 제출 0회 (fail-closed)' };
       }
       try {
-        triggerPriceGmx = usdPriceToGmxString(req.triggerPriceUsd, decimals);
-        acceptablePriceGmx = usdPriceToGmxString(req.acceptablePriceUsd, decimals);
+        triggerPriceGmx = usdPriceToGmxString(req.triggerPriceUsd, dec.decimals);
+        acceptablePriceGmx = usdPriceToGmxString(req.acceptablePriceUsd, dec.decimals);
       } catch (e) {
         return { status: 'FAILED_PRE_BROADCAST', reason: `가격 정밀도 변환 실패 — ${(e as Error).message}` };
+      }
+      // §3 — durable decimals 증거 기록 (저장 실패 = 제출 금지, fail-closed)
+      const snapNow = getCanonicalSnapshot();
+      const budgetNow = evaluateActionBudget({
+        remaining: snapNow?.remaining ?? null, expiresAt: snapNow?.expiresAt ?? null,
+        nowMs: Date.now(), inFlightReservedActions: await countInFlightReservedActions(),
+      });
+      const recorded = await recordProtectionEvidenceFields(req.protectionId, {
+        decimalsUsed: dec.decimals, decimalsSource: dec.source,
+        decimalsTokenAddress: dec.indexTokenAddress, decimalsVerifiedAt: new Date(dec.verifiedAtMs),
+        actionBudgetSnapshot: JSON.stringify({
+          remaining: budgetNow.remainingActions, required: budgetNow.requiredActions,
+          inFlight: budgetNow.inFlightReservedActions, shortfall: budgetNow.budgetShortfall,
+          atMs: Date.now(),
+        }),
+      });
+      if (!recorded) {
+        return { status: 'FAILED_PRE_BROADCAST', reason: 'decimals 증거 durable 기록 실패 — stop 제출 0회 (fail-closed)' };
       }
     }
 
@@ -749,6 +846,71 @@ export function wireProtectionExecution(): void {
  *  2. 차단 상태 보호 주문 재판정 (증거 수집 미구현 = 전이 없음 + 차단 유지)
  * 실패해도 Worker는 계속 — 차단은 capability/OPEN 게이트가 담당 (fail-closed).
  */
+// ── 6H-2C §4·§5 — 증거 수집기 + reconciliation 상태 ──────────────────────────
+
+export interface ProtectionReconState {
+  lastRunAtMs: number | null;
+  complete: boolean;               // 전수 판정 성공 (조회 실패 없음)
+  anomalies: ProtectionAnomalies | null;
+  blockNewOpens: boolean;
+  lastPositionsFetchOkAtMs: number | null;
+}
+let _protectionRecon: ProtectionReconState = {
+  lastRunAtMs: null, complete: false, anomalies: null, blockNewOpens: true,
+  lastPositionsFetchOkAtMs: null,
+};
+export function getProtectionReconState(): ProtectionReconState { return _protectionRecon; }
+export function __setProtectionReconStateForTests(s: ProtectionReconState): void { _protectionRecon = s; }
+
+/** 테스트 주입용 evidence client override */
+let _evidenceClientOverride: EvidenceClient | null = null;
+export function __setEvidenceClientForTests(c: EvidenceClient | null): void { _evidenceClientOverride = c; }
+
+/** §4 — orderKey 결속 EventLog2 로그 조회 클라이언트 (read-only eth_getLogs) */
+function createEvidenceClient(): EvidenceClient | null {
+  if (_evidenceClientOverride) return _evidenceClientOverride;
+  const url = process.env.GMX_RPC_URL?.trim();
+  if (!url) return null;
+  const client = createPublicClient({ chain: arbitrum, transport: http(url, { timeout: 8_000 }) });
+  return {
+    async getOrderLogs(orderKey: string, emitters: string[]): Promise<RawLog[] | null> {
+      try {
+        const raw = await client.request({
+          method: 'eth_getLogs',
+          params: [{
+            address: emitters,
+            fromBlock: 'earliest', toBlock: 'latest',
+            topics: [
+              EVENT_LOG_2_TOPIC0,
+              [
+                ORDER_EVENT_NAME_HASH.OrderCreated, ORDER_EVENT_NAME_HASH.OrderExecuted,
+                ORDER_EVENT_NAME_HASH.OrderCancelled, ORDER_EVENT_NAME_HASH.OrderFrozen,
+              ],
+              orderKey,
+            ],
+          }],
+        } as never) as Array<{ address: string; topics: string[]; transactionHash?: string; blockNumber?: string }>;
+        return (raw ?? []).map(l => ({
+          address: l.address, topics: l.topics,
+          transactionHash: l.transactionHash ?? null,
+          blockNumber: l.blockNumber ? String(BigInt(l.blockNumber)) : null,
+        }));
+      } catch { return null; }
+    },
+  };
+}
+
+/** §6 — 진행 중(비terminal) 보호 주문의 앞으로의 action 예약분 (조회 실패 = null) */
+export async function countInFlightReservedActions(): Promise<number | null> {
+  try {
+    const listed = await listActiveProtections();
+    if (!listed.ok) return null;
+    // ACTIVE stop은 이미 action을 소비했지만 정리(cancel) 1회를 예약한다.
+    // PLANNED~SUBMITTED/UNRESOLVED/FROZEN은 해소(제출 또는 취소) 1회 예약.
+    return listed.rows.length;
+  } catch { return null; }
+}
+
 export async function runProtectionPass(): Promise<void> {
   wireProtectionExecution();
   try {
@@ -779,9 +941,42 @@ export async function runProtectionPass(): Promise<void> {
         if (!r.ok) console.error(`[LiveTestExecutor] emergency close 결과: ${r.reason}`);
       }
     }
-    // 증거 수집기 미구현 — null 반환 = 전이 없음 + 차단 유지 (§9 fail-closed)
-    await reconcileProtections(async () => null);
+    // ── 6H-2C §4 — 온체인 증거 수집기 결선 (조회 실패 = 전이 없음 + 차단 유지) ──
+    const evClient = createEvidenceClient();
+    const emitterCfg = resolveEmitterCfg();
+    const configuredEmitter = emitterCfg.ok ? emitterCfg.address : null;
+    const positionsOk = positions !== null;
+    if (positionsOk) _protectionRecon.lastPositionsFetchOkAtMs = Date.now();
+    const summary = await reconcileProtections(async (row) => {
+      if (!evClient || !configuredEmitter) return null; // 수집기 미구성 — 판정 금지
+      const posExists = positions === null ? null : positions.some(
+        (p) => p.marketAddress.toLowerCase() === row.marketAddress.toLowerCase() && p.isLong === row.isLong,
+      );
+      return collectProtectionEvidence({
+        row, client: evClient, configuredEmitter, positionExists: posExists,
+      });
+    });
+
+    // ── §5 — 포지션-stop 정합성 분석 (무stop/고아/oversized/다중/키 누락) ──────
+    const anomalies = analyzeProtectionAnomalies({
+      positions: posList,
+      stopRows: active.ok ? active.rows.map((r) => ({
+        id: r.id, positionKey: r.positionKey, status: r.status, purpose: r.purpose,
+        sizeDeltaUsd: Number(r.sizeDeltaUsd), orderKey: r.orderKey,
+      })) : null,
+    });
+    if (anomalies.blockNewOpens) {
+      console.error(`[LiveTestExecutor] 보호 주문 정합성 불일치 — ${anomalies.details.join('; ')}`);
+    }
+    _protectionRecon = {
+      lastRunAtMs: Date.now(),
+      complete: positionsOk && active.ok && !summary.blockNewOpens,
+      anomalies,
+      blockNewOpens: summary.blockNewOpens || anomalies.blockNewOpens,
+      lastPositionsFetchOkAtMs: _protectionRecon.lastPositionsFetchOkAtMs,
+    };
   } catch (e) {
+    _protectionRecon = { ..._protectionRecon, lastRunAtMs: Date.now(), complete: false, blockNewOpens: true };
     console.error(`[LiveTestExecutor] 보호 주문 pass 오류 (fail-closed 유지): ${(e as Error).message}`);
   }
 }
@@ -1152,9 +1347,15 @@ export async function executeLiveTestOrder(params: LiveOrderParams): Promise<Liv
       remaining: snap?.remaining ?? null,
       expiresAt: snap?.expiresAt ?? null,
       nowMs: Date.now(),
+      inFlightReservedActions: await countInFlightReservedActions(),
     });
     if (!budget.sufficient) {
       return sizingFail(`[LIVE TEST] action 예산 부족/조회불가 — ${budget.reasons[0] ?? ''} — OPEN 차단 (자동 확대 금지)`);
+    }
+    // §5 — 최근 reconciliation 미완료/불일치 존재 시 OPEN 금지 (fail-closed)
+    const recon = getProtectionReconState();
+    if (!recon.complete || recon.blockNewOpens) {
+      return sizingFail('[LIVE TEST] 보호 주문 reconciliation 미완료/불일치 — 신규 OPEN 차단 (fail-closed)');
     }
   }
 

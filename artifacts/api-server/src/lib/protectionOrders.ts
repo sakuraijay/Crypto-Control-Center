@@ -100,6 +100,18 @@ export interface TransitionPatch {
   evidence?: string | null;
   error?: string | null;
   incrementSubmitAttempts?: boolean;
+  // ── 6H-2C §3·§4 — durable 증거 필드 ──
+  decimalsUsed?: number | null;
+  decimalsSource?: string | null;
+  decimalsTokenAddress?: string | null;
+  decimalsVerifiedAt?: Date | null;
+  emitterAddress?: string | null;
+  createdTxHash?: string | null;
+  executedTxHash?: string | null;
+  cancelledTxHash?: string | null;
+  frozenTxHash?: string | null;
+  evidenceBlockNumber?: string | null;
+  actionBudgetSnapshot?: string | null;
 }
 
 export type TransitionResult = { ok: true } | { ok: false; reason: string };
@@ -124,6 +136,17 @@ export async function transitionProtection(
     if (patch.incrementSubmitAttempts) {
       set.submitAttempts = sql`${protectionOrdersTable.submitAttempts} + 1`;
     }
+    if (patch.decimalsUsed !== undefined) set.decimalsUsed = patch.decimalsUsed;
+    if (patch.decimalsSource !== undefined) set.decimalsSource = patch.decimalsSource;
+    if (patch.decimalsTokenAddress !== undefined) set.decimalsTokenAddress = patch.decimalsTokenAddress;
+    if (patch.decimalsVerifiedAt !== undefined) set.decimalsVerifiedAt = patch.decimalsVerifiedAt;
+    if (patch.emitterAddress !== undefined) set.emitterAddress = patch.emitterAddress;
+    if (patch.createdTxHash !== undefined) set.createdTxHash = patch.createdTxHash;
+    if (patch.executedTxHash !== undefined) set.executedTxHash = patch.executedTxHash;
+    if (patch.cancelledTxHash !== undefined) set.cancelledTxHash = patch.cancelledTxHash;
+    if (patch.frozenTxHash !== undefined) set.frozenTxHash = patch.frozenTxHash;
+    if (patch.evidenceBlockNumber !== undefined) set.evidenceBlockNumber = patch.evidenceBlockNumber;
+    if (patch.actionBudgetSnapshot !== undefined) set.actionBudgetSnapshot = patch.actionBudgetSnapshot;
     const rows = await db.update(protectionOrdersTable)
       .set(set as never)
       .where(and(eq(protectionOrdersTable.id, id), eq(protectionOrdersTable.status, from)))
@@ -146,6 +169,20 @@ export async function markProtectionActive(
     return { ok: false, reason: 'orderKey 형식 오류 — ACTIVE 전이 금지 (증거 필수)' };
   }
   return transitionProtection(id, from, 'ACTIVE', { orderKey, evidence });
+}
+
+/** §3 — 상태 전이 없이 decimals/budget 증거만 durable 기록 (제출 직전 호출) */
+export async function recordProtectionEvidenceFields(id: string, patch: {
+  decimalsUsed?: number; decimalsSource?: string; decimalsTokenAddress?: string;
+  decimalsVerifiedAt?: Date; actionBudgetSnapshot?: string; emitterAddress?: string;
+}): Promise<boolean> {
+  try {
+    const rows = await db.update(protectionOrdersTable)
+      .set({ ...patch, updatedAt: new Date() } as never)
+      .where(eq(protectionOrdersTable.id, id))
+      .returning({ id: protectionOrdersTable.id });
+    return rows.length > 0;
+  } catch { return false; }
 }
 
 export async function getProtection(id: string): Promise<ProtectionOrderRow | null> {

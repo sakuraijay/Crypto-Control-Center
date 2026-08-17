@@ -161,23 +161,33 @@ describe('§7 action 예산', () => {
     expect(ACTION_COST.createOrder).toBe(1);
     expect(ACTION_COST.updateOrder).toBe(1);
     expect(ACTION_COST.cancelOrder).toBe(1);
-    expect(MIN_SAFE_ACTION_BUDGET).toBe(4);
+    // 6H-2C §6 — 과거 고정 4는 과소계산: 최악 경로(+5% 이익보호 5) + 비상 예약 1 = 6
+    expect(MIN_SAFE_ACTION_BUDGET).toBe(6);
   });
-  it('remaining=4 → 충분, remaining=3 → 부족', () => {
-    expect(evaluateActionBudget({ remaining: '4', expiresAt: future, nowMs: now }).sufficient).toBe(true);
-    const r = evaluateActionBudget({ remaining: '3', expiresAt: future, nowMs: now });
+  it('remaining=6 → 충분, remaining=5 → 부족 (진행중 예약 0)', () => {
+    expect(evaluateActionBudget({ remaining: '6', expiresAt: future, nowMs: now, inFlightReservedActions: 0 }).sufficient).toBe(true);
+    const r = evaluateActionBudget({ remaining: '5', expiresAt: future, nowMs: now, inFlightReservedActions: 0 });
     expect(r.sufficient).toBe(false);
-    expect(r.reasons.join(' ')).toContain('최소 안전 예산');
+    expect(r.budgetShortfall).toBe(1);
   });
   it('현재 기본 maxAllowedCount=2 → 부족 (자동 확대 금지 보고)', () => {
-    const r = evaluateActionBudget({ remaining: '2', expiresAt: future, nowMs: now });
+    const r = evaluateActionBudget({ remaining: '2', expiresAt: future, nowMs: now, inFlightReservedActions: 0 });
     expect(r.sufficient).toBe(false);
+    expect(r.budgetShortfall).toBe(4);
     expect(r.reasons.join(' ')).toContain('자동 확대 금지');
   });
-  it('remaining 조회불가/만료 → 차단 (fail-closed)', () => {
-    expect(evaluateActionBudget({ remaining: null, expiresAt: future, nowMs: now }).sufficient).toBe(false);
-    expect(evaluateActionBudget({ remaining: '10', expiresAt: String(Math.floor(now / 1000) - 1), nowMs: now }).sufficient).toBe(false);
-    expect(evaluateActionBudget({ remaining: 'abc', expiresAt: future, nowMs: now }).sufficient).toBe(false);
+  it('remaining 조회불가/만료/예약분 불명 → 차단 (fail-closed)', () => {
+    expect(evaluateActionBudget({ remaining: null, expiresAt: future, nowMs: now, inFlightReservedActions: 0 }).sufficient).toBe(false);
+    expect(evaluateActionBudget({ remaining: '10', expiresAt: String(Math.floor(now / 1000) - 1), nowMs: now, inFlightReservedActions: 0 }).sufficient).toBe(false);
+    expect(evaluateActionBudget({ remaining: 'abc', expiresAt: future, nowMs: now, inFlightReservedActions: 0 }).sufficient).toBe(false);
+    expect(evaluateActionBudget({ remaining: '10', expiresAt: future, nowMs: now }).sufficient).toBe(false);          // 예약분 미제공
+    expect(evaluateActionBudget({ remaining: '10', expiresAt: future, nowMs: now, inFlightReservedActions: null }).sufficient).toBe(false);
+  });
+  it('진행중 예약분 가산 — remaining=6 + 예약 2 → 부족 2', () => {
+    const r = evaluateActionBudget({ remaining: '6', expiresAt: future, nowMs: now, inFlightReservedActions: 2 });
+    expect(r.sufficient).toBe(false);
+    expect(r.budgetShortfall).toBe(2);
+    expect(r.budgetBasis.length).toBeGreaterThan(0);
   });
 });
 
@@ -225,6 +235,10 @@ describe('§11 stop 실행 능력 파생', () => {
     actionBudgetSufficient: true, actionBudgetRemaining: 10,
     freshFeeQuote: true, uncoveredCount: 0, blockingProtectionCount: 0,
     executionUnlocked: true,
+    // 6H-2C §9 — 추가 조건
+    decimalsSourceReady: true, priceConversionVerified: true,
+    evidenceCollectorReady: true, protectionReconciliationClean: true,
+    positionSnapshotFresh: true,
   };
   it('전 조건 충족 시에만 available=true', () => {
     expect(deriveStopExecutionCapability(allOk).available).toBe(true);

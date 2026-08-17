@@ -61,7 +61,24 @@ export interface GmxApiStatusView {
     sufficient: boolean;
     remainingActions: number | null;
     requiredActions: number;
+    reservedEmergencyActions?: number;
+    inFlightReservedActions?: number | null;
+    budgetShortfall?: number | null;
+    budgetBasis?: string[];
     reasons: string[];
+  };
+  // ── 6H-2C §10 — decimals·증거 수집기·reconciliation 관측값 ──
+  decimalsCache?: Array<{
+    key: string; decimals: number; source: string; tokenAddress: string;
+    verifiedAtMs: number; ageMs: number; stale: boolean;
+  }>;
+  priceConversionVerified?: boolean;
+  evidenceCollector?: { emitterConfigured: boolean; rpcConfigured: boolean };
+  protectionReconciliation?: {
+    lastRunAtMs: number | null; complete: boolean; blockNewOpens: boolean;
+    uncoveredCount: number | null; staleActiveCount: number | null;
+    oversizedCount: number | null; multipleActiveCount: number | null;
+    keyMismatchCount: number | null;
   };
   uncoveredStopCount?: number | null;
   executionEligibleCostMaxAgeMs?: number;

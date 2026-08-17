@@ -29,7 +29,13 @@ import { getActiveRevokeSession } from '../lib/revokeSession';
 import { resolveGmxLiveRelayConfig } from '../lib/gmxLiveConfig';
 import { isDelegatedSignerEnabled, isSignerInitialized } from '../lib/delegatedSigner';
 import { isLiveTestExecutionLocked } from '../lib/liveTestGate';
-import { isEmergencyStopActive, isReconciled, isStopExecutionAvailable, getStopExecutionCapability, STOP_EXECUTION_UNAVAILABLE } from '../workers/liveTestExecutor';
+import {
+  isEmergencyStopActive, isReconciled, isStopExecutionAvailable, getStopExecutionCapability,
+  STOP_EXECUTION_UNAVAILABLE, getProtectionReconState, countInFlightReservedActions,
+  verifyPriceConversionGolden,
+} from '../workers/liveTestExecutor';
+import { getDecimalsCacheSnapshot } from '../lib/indexTokenDecimals';
+import { resolveGmxEventEmitterAddress } from '../lib/gmxOrderEvents';
 import { listActiveProtections, PROTECTION_BLOCKING_SET } from '../lib/protectionOrders';
 import { evaluateActionBudget } from '../lib/actionBudget';
 import { EXECUTION_ELIGIBLE_MAX_AGE_MS } from '../lib/costSnapshot';
@@ -236,8 +242,20 @@ async function buildGmxApiStatusSnapshot() {
     remaining: snap?.remaining ?? null,
     expiresAt: snap?.expiresAt ?? null,
     nowMs: Date.now(),
+    inFlightReservedActions: await countInFlightReservedActions(),
   });
   if (!actionBudget.sufficient) blockedReasons.push(`action 예산 부족/조회불가 — ${actionBudget.reasons[0] ?? ''}`);
+  // ── 6H-2C §10 — decimals·증거 수집기·reconciliation 관측값 (저장 스냅샷만) ──
+  const protectionRecon = getProtectionReconState();
+  const decimalsCache = getDecimalsCacheSnapshot(Date.now());
+  const evidenceCollector = {
+    emitterConfigured: resolveGmxEventEmitterAddress().ok,
+    rpcConfigured: Boolean(process.env.GMX_RPC_URL?.trim()),
+  };
+  const priceConversionVerified = verifyPriceConversionGolden();
+  if (!protectionRecon.complete || protectionRecon.blockNewOpens) {
+    blockedReasons.push('보호 주문 reconciliation 미완료/불일치 — 신규 OPEN 차단');
+  }
 
   // readyForControlledCanary — 전 항목 파생값의 논리곱 (fail-closed; 어느 하나
   // null/false면 false). 현 단계는 submissionEnabled=false라 항상 false.
@@ -249,7 +267,8 @@ async function buildGmxApiStatusSnapshot() {
     gmxConfigOk && dv.ok && feeEstimateFresh &&
     stopExecutionAvailable && uncoveredStopCount === 0 && settlementComplete &&
     legacyZeroFeeCount === 0 && unsettledLiveTradeCount === 0 &&
-    blockingProtectionCount === 0 && (staleStopCount ?? 1) === 0 && actionBudget.sufficient;
+    blockingProtectionCount === 0 && (staleStopCount ?? 1) === 0 && actionBudget.sufficient &&
+    priceConversionVerified && protectionRecon.complete && !protectionRecon.blockNewOpens;
 
   return {
     transportGen: GMX_API_TRANSPORT_GEN,
@@ -302,7 +321,25 @@ async function buildGmxApiStatusSnapshot() {
       sufficient: actionBudget.sufficient,
       remainingActions: actionBudget.remainingActions,
       requiredActions: actionBudget.requiredActions,
+      reservedEmergencyActions: actionBudget.reservedEmergencyActions,
+      inFlightReservedActions: actionBudget.inFlightReservedActions,
+      budgetShortfall: actionBudget.budgetShortfall,
+      budgetBasis: actionBudget.budgetBasis,
       reasons: actionBudget.reasons,
+    },
+    // ── 6H-2C §10 — decimals·증거 수집기·reconciliation 관측값 ────────────────
+    decimalsCache,
+    priceConversionVerified,
+    evidenceCollector,
+    protectionReconciliation: {
+      lastRunAtMs: protectionRecon.lastRunAtMs,
+      complete: protectionRecon.complete,
+      blockNewOpens: protectionRecon.blockNewOpens,
+      uncoveredCount: protectionRecon.anomalies?.uncoveredCount ?? null,
+      staleActiveCount: protectionRecon.anomalies?.staleActiveCount ?? null,
+      oversizedCount: protectionRecon.anomalies?.oversizedCount ?? null,
+      multipleActiveCount: protectionRecon.anomalies?.multipleActiveCount ?? null,
+      keyMismatchCount: protectionRecon.anomalies?.keyMismatchCount ?? null,
     },
     executionEligibleCostMaxAgeMs: EXECUTION_ELIGIBLE_MAX_AGE_MS,
     uncoveredStopCount,

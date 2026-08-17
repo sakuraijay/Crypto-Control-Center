@@ -187,13 +187,18 @@ beforeEach(() => {
 });
 beforeEach(async () => {
   // 6H-2A §7 — stop 능력 게이트는 별도 테스트에서 검증; 여기서는 통과 상태로 주입
-  const { __setStopExecutionAvailabilityForTests } = await import('../workers/liveTestExecutor');
+  const { __setStopExecutionAvailabilityForTests, __setProtectionReconStateForTests } = await import('../workers/liveTestExecutor');
   __setStopExecutionAvailabilityForTests(true);
-  // 6H-2B §7 — OPEN 직전 동기 action 예산 게이트 통과용 canonical snapshot (remaining ≥ 4)
+  // 6H-2C §5 — OPEN 게이트용 보호 reconciliation 정상 상태 주입
+  __setProtectionReconStateForTests({
+    lastRunAtMs: Date.now(), complete: true, anomalies: null, blockNewOpens: false,
+    lastPositionsFetchOkAtMs: Date.now(),
+  });
+  // 6H-2B §7 — OPEN 직전 동기 action 예산 게이트 통과용 canonical snapshot (6H-2C: remaining ≥ 6 + inFlight)
   const { recordCanonicalSnapshot } = await import('../lib/relayActivationStatus');
   recordCanonicalSnapshot({
     atMs: Date.now(), confirmed: true, reason: null, approvalNonce: '1',
-    isSubaccountListed: true, expiresAt: String(Math.floor(Date.now() / 1000) + 3600), remaining: '5',
+    isSubaccountListed: true, expiresAt: String(Math.floor(Date.now() / 1000) + 3600), remaining: '8',
   });
 });
 afterAll(() => {

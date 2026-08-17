@@ -46,6 +46,20 @@ export const protectionOrdersTable = pgTable("protection_orders", {
   submitAttempts:     integer("submit_attempts").notNull().default(0),
   createdAt:          timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt:          timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  // ── 6H-2C §3 — 가격 변환에 사용한 decimals 증거 (durable) ──────────────────
+  decimalsUsed:        integer("decimals_used"),
+  decimalsSource:      text("decimals_source"),          // 'sdk+onchain'
+  decimalsTokenAddress: text("decimals_token_address"),
+  decimalsVerifiedAt:  timestamp("decimals_verified_at", { withTimezone: true }),
+  // ── 6H-2C §4 — 상태별 온체인 증거 (tx/block) ────────────────────────────────
+  emitterAddress:      text("emitter_address"),          // 제출 당시 허용 emitter (판정 결속)
+  createdTxHash:       text("created_tx_hash"),
+  executedTxHash:      text("executed_tx_hash"),
+  cancelledTxHash:     text("cancelled_tx_hash"),
+  frozenTxHash:        text("frozen_tx_hash"),
+  evidenceBlockNumber: text("evidence_block_number"),
+  // ── 6H-2C §6 — 제출 시점 action budget 스냅샷 (JSON, 사후 감사용) ──────────
+  actionBudgetSnapshot: text("action_budget_snapshot"),
 });
 
 export type ProtectionOrderRow = typeof protectionOrdersTable.$inferSelect;

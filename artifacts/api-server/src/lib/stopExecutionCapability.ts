@@ -29,6 +29,17 @@ export interface StopCapabilityInput {
   blockingProtectionCount: number | null;
   /** 기존 잠금: emergency stop / execution locked / live 모드 아님 등 */
   executionUnlocked: boolean;
+  // ── 6H-2C §9 — 추가 조건 (전부 증거 필요, 낙관 기본값 금지) ──
+  /** §3 — decimals 권위 소스 구성 (SDK registry 로드 + read-only RPC 조회 가능) */
+  decimalsSourceReady: boolean;
+  /** §3 — 가격 변환 규칙 런타임 자기검증 (골든 값 대조) 통과 */
+  priceConversionVerified: boolean;
+  /** §4 — 온체인 증거 수집기 구성 (emitter 설정 + 조회 클라이언트) */
+  evidenceCollectorReady: boolean;
+  /** §5 — 최근 reconciliation pass 완료 + 포지션-stop 불일치 0건 */
+  protectionReconciliationClean: boolean;
+  /** authoritative 포지션 스냅샷 신선 (최근 조회 성공) */
+  positionSnapshotFresh: boolean;
 }
 
 export interface StopCapabilityResult {
@@ -52,6 +63,11 @@ export function deriveStopExecutionCapability(input: StopCapabilityInput): StopC
   if (input.blockingProtectionCount === null) reasons.push('보호 주문 상태 조회 실패');
   else if (input.blockingProtectionCount > 0) reasons.push(`차단 상태 보호 주문 ${input.blockingProtectionCount}건`);
   if (!input.executionUnlocked) reasons.push('실행 잠금 상태 (LIVE 잠금/emergency stop)');
+  if (!input.decimalsSourceReady) reasons.push('index token decimals 권위 소스 미구성 (§3)');
+  if (!input.priceConversionVerified) reasons.push('가격 변환 규칙 런타임 자기검증 실패 (§3)');
+  if (!input.evidenceCollectorReady) reasons.push('온체인 증거 수집기 미구성 (§4)');
+  if (!input.protectionReconciliationClean) reasons.push('보호 주문 reconciliation 미완료/불일치 존재 (§5)');
+  if (!input.positionSnapshotFresh) reasons.push('authoritative 포지션 스냅샷 미신선 (§5)');
   return { available: reasons.length === 0, reasons };
 }
 

@@ -233,6 +233,29 @@ export function GmxApiStatusCard() {
                 ? `조회 실패 — ${s.actionBudget.reasons[0] ?? ''}`
                 : `${s.actionBudget.remainingActions} / ${s.actionBudget.requiredActions}${s.actionBudget.sufficient ? '' : ' — 부족 (자동 확대 금지)'}`} />
           )}
+          {s.actionBudget && (
+            <Row label="Action 예산 세부 (예약/진행중/부족)"
+              tone={(s.actionBudget.budgetShortfall ?? 1) > 0 ? 'error' : 'ok'}
+              value={`예약 ${s.actionBudget.reservedEmergencyActions ?? '—'} · 진행중 ${s.actionBudget.inFlightReservedActions ?? '조회실패'} · 부족 ${s.actionBudget.budgetShortfall ?? '조회실패'}`} />
+          )}
+          {/* ── 6H-2C §10 — decimals·증거 수집기·reconciliation ── */}
+          <Row label="Decimals 소스 (검증 캐시)"
+            tone={(s.decimalsCache?.length ?? 0) > 0 && s.decimalsCache!.every(d => !d.stale) ? 'ok' : 'muted'}
+            value={(s.decimalsCache?.length ?? 0) === 0
+              ? '검증 이력 없음 (실행 전 SDK+온체인 교차검증 필요)'
+              : s.decimalsCache!.map(d => `${d.decimals} (${d.source}, ${Math.round(d.ageMs / 60000)}분 전${d.stale ? ' · stale' : ''})`).join(' · ')} />
+          <Row label="가격 변환 자기검증" tone={s.priceConversionVerified ? 'ok' : 'error'}
+            value={s.priceConversionVerified ? '골든 값 대조 통과' : '실패 — stop 제출 차단'} />
+          <Row label="증거 수집기 (§4)"
+            tone={s.evidenceCollector?.emitterConfigured && s.evidenceCollector?.rpcConfigured ? 'ok' : 'muted'}
+            value={s.evidenceCollector
+              ? `emitter ${s.evidenceCollector.emitterConfigured ? 'OK' : '미설정'} · RPC ${s.evidenceCollector.rpcConfigured ? 'OK' : '미설정'}`
+              : '조회 실패'} />
+          {s.protectionReconciliation && (
+            <Row label="보호 reconciliation (§5)"
+              tone={s.protectionReconciliation.complete && !s.protectionReconciliation.blockNewOpens ? 'ok' : 'warn'}
+              value={`${s.protectionReconciliation.lastRunAtMs ? new Date(s.protectionReconciliation.lastRunAtMs).toLocaleTimeString() : '미실행'} · ${s.protectionReconciliation.complete ? '완료' : '미완료'}${s.protectionReconciliation.blockNewOpens ? ' · OPEN 차단' : ''} · 무stop ${s.protectionReconciliation.uncoveredCount ?? '—'} / 고아 ${s.protectionReconciliation.staleActiveCount ?? '—'} / 초과 ${s.protectionReconciliation.oversizedCount ?? '—'} / 다중 ${s.protectionReconciliation.multipleActiveCount ?? '—'}`} />
+          )}
           <Row label="Stop 미확보 포지션"
             tone={(s.uncoveredStopCount ?? 1) > 0 ? 'error' : 'ok'}
             value={s.uncoveredStopCount === null || s.uncoveredStopCount === undefined ? '조회 실패' : String(s.uncoveredStopCount)} />
