@@ -86,9 +86,15 @@ export function isAllowedPeer(base: string): boolean {
   }
 }
 
-/** path 검증 — 절대 URL·프로토콜·역참조 금지, /로 시작하는 단순 경로만 */
+/** path 검증 — 절대 URL·프로토콜·역참조 금지, /로 시작하는 단순 경로만.
+ *  GET 한정으로 엄격한 charset의 query string 1개를 허용한다 (SDK readonly 조회용). */
 function isSafePath(path: string): boolean {
-  return /^\/[a-z0-9\-_/{}]*$/i.test(path) && !path.includes('..') && !path.includes('//');
+  const qIdx = path.indexOf('?');
+  const base = qIdx === -1 ? path : path.slice(0, qIdx);
+  const query = qIdx === -1 ? '' : path.slice(qIdx + 1);
+  if (!/^\/[a-z0-9\-_/{}]*$/i.test(base) || base.includes('..') || base.includes('//')) return false;
+  if (query !== '' && !/^[a-z0-9\-_=&%.,]*$/i.test(query)) return false;
+  return !query.includes('..');
 }
 
 function bigIntReplacer(_k: string, v: unknown): unknown {

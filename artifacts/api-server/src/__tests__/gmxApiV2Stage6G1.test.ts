@@ -173,7 +173,7 @@ describe('6G-1 §3 — gmxApiTransport peer·플래그·failover·단일 제출'
     const r = await t.getJson('/markets');
     expect(r.ok).toBe(true);
     expect(fetchSpy).toHaveBeenCalledTimes(2);
-    const hosts = fetchSpy.mock.calls.map((c) => new URL(String(c[0])).host);
+    const hosts = fetchSpy.mock.calls.map((c: unknown[]) => new URL(String(c[0])).host);
     expect(new Set(hosts).size).toBe(2); // 서로 다른 peer
   });
 
@@ -214,6 +214,32 @@ describe('6G-1 §3 — gmxApiTransport peer·플래그·failover·단일 제출'
       expect(r.ok).toBe(false);
     }
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('readonly GET — 엄격 charset query string 허용 (SDK 잔액/allowance 조회 경로)', async () => {
+    fetchSpy.mockImplementation(async () => jsonResponse({ balances: [] }));
+    const t = createGmxApiTransport(BOTH_FLAGS);
+    const r = await t.getJson(`/tokens/balances?account=${MAIN}&spender=router`);
+    expect(r.ok).toBe(true);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    // 위험 charset은 여전히 거부
+    const bad = await t.getJson('/x?a=<script>');
+    expect(bad.ok).toBe(false);
+  });
+
+  it('prepare 응답 echo 필드가 요청값과 불일치하면 decode 거부 (스푸핑 차단)', () => {
+    const raw = {
+      requestId: 'r', idempotencyKey: 'i', mode: 'express', payloadType: 'typed-data',
+      payload: { typedData: { domain: { chainId: 42161 }, types: {}, message: {} } },
+      estimates: { executionFeeAmount: '1' },
+      sizeDeltaUsd: '999999', // 요청값 '1000'과 불일치 echo
+    };
+    const r = toPreparedOrderView(raw, {
+      from: MAIN, subaccountAddress: SUB, orderKind: 'MarketIncrease',
+      isLong: true, sizeDeltaUsd: '1000', collateralToken: USDC, receiver: MAIN,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain('echo');
   });
 
   it('SDK 어댑터 — submit 경로 postJson은 구조적으로 차단', async () => {

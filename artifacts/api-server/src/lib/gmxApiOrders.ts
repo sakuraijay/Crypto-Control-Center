@@ -201,6 +201,30 @@ export function toPreparedOrderView(raw: unknown, requested: {
     return { ok: false, reason: 'prepare 응답에 typedData(domain/types/message) 없음' };
   }
   const estimates = r.estimates as Record<string, unknown> | undefined;
+  // API가 주문 필드를 echo하는 경우 요청값과 대조 — 불일치는 즉시 decode 거부.
+  // (echo가 없으면 요청값으로 결속하되, typed data 재계산 게이트가 최종 검증한다.)
+  const echoConflict = (key: string, requestedVal: unknown): boolean => {
+    const echoed = r[key];
+    if (echoed === undefined || echoed === null) return false;
+    if (typeof echoed === 'string' && typeof requestedVal === 'string'
+      && /^0x[0-9a-fA-F]{40}$/.test(echoed) && /^0x[0-9a-fA-F]{40}$/.test(requestedVal)) {
+      return echoed.toLowerCase() !== requestedVal.toLowerCase();
+    }
+    return String(echoed) !== String(requestedVal);
+  };
+  const echoChecks: [string, unknown][] = [
+    ['subaccountAddress', requested.subaccountAddress],
+    ['orderKind', requested.orderKind],
+    ['isLong', requested.isLong],
+    ['sizeDeltaUsd', requested.sizeDeltaUsd],
+    ['collateralToken', requested.collateralToken],
+    ['receiver', requested.receiver],
+  ];
+  for (const [key, val] of echoChecks) {
+    if (echoConflict(key, val)) {
+      return { ok: false, reason: `prepare 응답 echo 필드(${key})가 요청값과 불일치 — 차단 (fail-closed)` };
+    }
+  }
   return {
     ok: true,
     view: {
