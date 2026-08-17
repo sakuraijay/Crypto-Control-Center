@@ -17,6 +17,11 @@ interface PaperSizingSnapshot {
   finalNotionalUsd: number | null; finalLeverage: number | null;
   allowedRiskUsd: number | null; clamped: boolean; clampDetails: string[];
   estimatedRoundTripCostUsd: number | null;
+  costSource?: string | null;
+}
+interface ReconcileResult {
+  ok: boolean; unsettledCount: number; settledNow: number;
+  incomplete: boolean; reasons: string[];
 }
 interface SizingEnforcementSnapshot {
   at: string; decisionId: string; ok: boolean; reason: string | null;
@@ -36,6 +41,7 @@ interface StatusSlice {
   paperSizing: PaperSizingSnapshot | null;
   liveSizingEnforcement: SizingEnforcementSnapshot | null;
   closeAllSummary: CloseAllSummary | null;
+  settlementReconcile: ReconcileResult | null;
 }
 
 function fmtUsd(v: number | null | undefined): string {
@@ -64,6 +70,7 @@ export function RiskExecutionStatusCard() {
         paperSizing: j.paperSizing ?? null,
         liveSizingEnforcement: j.liveSizingEnforcement ?? null,
         closeAllSummary: j.closeAllSummary ?? null,
+        settlementReconcile: j.settlementReconcile ?? null,
       });
       setError(false);
     } catch {
@@ -82,6 +89,7 @@ export function RiskExecutionStatusCard() {
   const ps = data?.paperSizing ?? null;
   const ls = data?.liveSizingEnforcement ?? null;
   const ca = data?.closeAllSummary ?? null;
+  const sr = data?.settlementReconcile ?? null;
 
   return (
     <Card className="p-5 flex flex-col gap-3" data-testid="risk-execution-status-card">
@@ -107,6 +115,7 @@ export function RiskExecutionStatusCard() {
         ) : ps.ok ? (
           <div className="text-[11px] font-mono space-y-0.5">
             <p>최종 {fmtUsd(ps.finalNotionalUsd)} · {ps.finalLeverage ?? '—'}x · 허용위험 {fmtUsd(ps.allowedRiskUsd)} · 왕복비용 {fmtUsd(ps.estimatedRoundTripCostUsd)} <span className="text-muted-foreground">({fmtAge(ps.at)})</span></p>
+            <p className="text-muted-foreground">비용 출처: <span className="text-sky-400">{ps.costSource ?? 'COST_DATA_UNAVAILABLE'}</span> · PnL 표시: <span className="text-sky-400">ESTIMATED NET</span> (실제 정산 아님)</p>
             {ps.clamped && <p className="text-amber-400">CLAMP: {ps.clampDetails.join(' · ')}</p>}
           </div>
         ) : (
@@ -130,6 +139,18 @@ export function RiskExecutionStatusCard() {
         )}
       </div>
 
+      {/* LIVE 정산 상태 (6H-2A §9) */}
+      <div className="space-y-1">
+        <p className="text-[11px] font-semibold text-muted-foreground">LIVE 정산 (actual fee 증거)</p>
+        {!sr ? (
+          <p className="text-[11px] text-amber-400 font-mono">LIVE_SETTLEMENT_INCOMPLETE — reconciliation 미수행 (미정산 이익은 목표 미반영)</p>
+        ) : sr.incomplete ? (
+          <p className="text-[11px] text-amber-400 font-mono">LIVE_SETTLEMENT_INCOMPLETE — UNSETTLED {sr.unsettledCount}건 (이번 사이클 SETTLED {sr.settledNow}건)</p>
+        ) : (
+          <p className="text-[11px] text-[var(--color-long)] font-mono">SETTLED — 미정산 LIVE 거래 없음</p>
+        )}
+      </div>
+
       {/* close-all */}
       <div className="space-y-1">
         <p className="text-[11px] font-semibold text-muted-foreground">CLOSE_ALL orchestration</p>
@@ -139,7 +160,7 @@ export function RiskExecutionStatusCard() {
           <div className="text-[11px] font-mono space-y-0.5">
             <p>{ca.confirmed}/{ca.total} 확정 · 실패 {ca.terminalFailed} · 불명 {ca.unresolved} · 대기 {ca.pending}</p>
             {ca.lockRequired
-              ? <p className="text-red-400 font-semibold">전량 종료 미확정 — 신규 진입 잠금 유지 {ca.rolloverAllowed ? '' : '(자정 rollover 해제 금지)'}</p>
+              ? <p className="text-red-400 font-semibold">CLOSE_ALL_PENDING — 전량 종료 미확정, 신규 진입 잠금 유지 {ca.rolloverAllowed ? '' : '(자정 rollover 해제 금지)'}</p>
               : <p className="text-[var(--color-long)]">전량 CONFIRMED — 잠금 해제 가능</p>}
           </div>
         )}

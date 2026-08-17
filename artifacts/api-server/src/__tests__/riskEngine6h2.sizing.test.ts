@@ -7,7 +7,7 @@ import {
   enforceOrderSizing, MIN_ORDER_NOTIONAL_USD, type EnforcementInput,
 } from '../lib/orderSizingEnforcement';
 import {
-  buildPaperCostSnapshot, validateCostSnapshot, fetchLiveCostSnapshot,
+  validateCostSnapshot, fetchLiveCostSnapshot,
   sanitizeCostError, COST_DATA_UNAVAILABLE, type CostSnapshot,
 } from '../lib/costSnapshot';
 import { CANARY_POLICY } from '../lib/riskPolicy';
@@ -15,8 +15,36 @@ import { CANARY_POLICY } from '../lib/riskPolicy';
 const NOW = new Date('2026-08-18T03:00:00Z');
 const MARKET = '0x70d95587d40A2caf56bd97485aB3Eec10Bee6336';
 
+// 6H-2A §2 — buildPaperCostSnapshot(고정 모델)은 폐지됨. 테스트 fixture는
+// 공식 추정과 동일 형태의 값을 로컬로 조립한다 (source=PAPER_GMX_ESTIMATE).
 function snap(notional: number, over: Partial<CostSnapshot> = {}): CostSnapshot {
-  return { ...buildPaperCostSnapshot({ market: MARKET, isLong: true, orderType: 'MarketIncrease', notionalUsd: notional, now: NOW }), ...over };
+  const positionFeeUsd = notional * 0.0006;
+  const executionFeeUsd = 0.2;
+  const estimatedPriceImpactUsd = notional * 0.0005;
+  const estimatedExitPriceImpactUsd = notional * 0.0005;
+  const fundingFeeUsd = notional * 0.0001;
+  const borrowingFeeUsd = 0;
+  const estimatedExitFeeUsd = notional * 0.0006 + 0.2;
+  const base: CostSnapshot = {
+    market: MARKET, isLong: true, orderType: 'MarketIncrease',
+    notionalUsd: notional,
+    positionFeeUsd, executionFeeUsd, estimatedPriceImpactUsd,
+    estimatedExitPriceImpactUsd, fundingFeeUsd, borrowingFeeUsd, estimatedExitFeeUsd,
+    fundingRatePerHourFraction: 0.00001, borrowingRatePerHourFraction: 0.000005,
+    totalEstimatedRoundTripCostUsd:
+      positionFeeUsd + executionFeeUsd + estimatedPriceImpactUsd +
+      estimatedExitPriceImpactUsd + fundingFeeUsd + borrowingFeeUsd + estimatedExitFeeUsd,
+    source: 'PAPER_GMX_ESTIMATE', blockNumber: null, apiTimestamp: null,
+    fetchedAt: NOW.toISOString(), expiresAt: new Date(NOW.getTime() + 60_000).toISOString(),
+  };
+  const merged = { ...base, ...over };
+  if (!('totalEstimatedRoundTripCostUsd' in over)) {
+    merged.totalEstimatedRoundTripCostUsd =
+      merged.positionFeeUsd + merged.executionFeeUsd + merged.estimatedPriceImpactUsd +
+      merged.estimatedExitPriceImpactUsd + merged.fundingFeeUsd + merged.borrowingFeeUsd +
+      merged.estimatedExitFeeUsd;
+  }
+  return merged;
 }
 
 function baseInput(over: Partial<EnforcementInput> = {}): EnforcementInput {
@@ -104,11 +132,11 @@ describe('§13 사이징 강제', () => {
     expect(r.clamped).toBe(false);
   });
 
-  it('9. LIVE 경로에 PAPER_MODEL 비용 → 거부', () => {
+  it('9. LIVE 경로에 비-LIVE(PAPER_GMX_ESTIMATE) 비용 → 거부', () => {
     const r = enforceOrderSizing(baseInput({ liveMode: true }));
     expect(r.ok).toBe(false);
     if (r.ok) return;
-    expect(r.reason).toContain('PAPER_MODEL');
+    expect(r.reason).toContain('PAPER_GMX_ESTIMATE');
   });
 
   it('9b. DEFENSIVE 모드 → 서버 최대 명목 50% 축소 반영', () => {

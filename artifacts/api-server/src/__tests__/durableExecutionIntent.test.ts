@@ -182,8 +182,10 @@ beforeEach(async () => {
   };
   for (const m of Object.values(intentMocks)) m?.mockClear?.();
   // reconciled 상태를 정상으로 초기화 (모듈은 파일 전체에서 공유됨)
-  const { reconcileOnRestart } = await import('../workers/liveTestExecutor');
+  const { reconcileOnRestart, __setStopExecutionAvailabilityForTests } = await import('../workers/liveTestExecutor');
   await reconcileOnRestart();
+  // 6H-2A §7 — stop 능력 게이트는 별도 테스트에서 검증; 여기서는 통과 상태로 주입
+  __setStopExecutionAvailabilityForTests(true);
   savedValues.length = 0;
 });
 afterAll(() => {
@@ -201,8 +203,10 @@ function testSizingContext() {
     costSnapshot: {
       market: '0xM', isLong: true, orderType: 'MarketIncrease' as const,
       notionalUsd: 10, positionFeeUsd: 0.006, executionFeeUsd: 0.2,
-      estimatedPriceImpactUsd: 0.005, fundingFeeUsd: 0.005, borrowingFeeUsd: 0,
-      estimatedExitFeeUsd: 0.206, totalEstimatedRoundTripCostUsd: 0.422,
+      estimatedPriceImpactUsd: 0.005, estimatedExitPriceImpactUsd: 0.005,
+      fundingFeeUsd: 0.005, borrowingFeeUsd: 0,
+      fundingRatePerHourFraction: 0.00001, borrowingRatePerHourFraction: 0.000005,
+      estimatedExitFeeUsd: 0.206, totalEstimatedRoundTripCostUsd: 0.427,
       source: 'GMX_API' as const, blockNumber: null, apiTimestamp: null,
       fetchedAt: new Date(now).toISOString(), expiresAt: new Date(now + 60_000).toISOString(),
     },

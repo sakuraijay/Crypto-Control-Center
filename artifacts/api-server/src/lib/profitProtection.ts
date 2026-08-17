@@ -17,6 +17,12 @@ export const PROFIT_PROTECT_REDUCTION_FRACTION = 0.7;
 /** size 정밀도 (USD) — 보수적 내림 단위 */
 export const REDUCTION_SIZE_PRECISION_USD = 0.01;
 
+/**
+ * GMX 최소 포지션 명목가 기준 (USD, 보수적) — 축소 후 잔여가 이 값 미만이면
+ * 부분 축소 대신 100% 종료로 전환한다 (§6).
+ */
+export const GMX_MIN_POSITION_NOTIONAL_USD = 2;
+
 /** Manila 거래일 키 (YYYY-MM-DD) — idempotency key 구성요소 */
 export function manilaDayKey(now: Date): string {
   return manilaDayStartIso(now).slice(0, 10);

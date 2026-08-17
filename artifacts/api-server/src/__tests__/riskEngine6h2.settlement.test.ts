@@ -26,11 +26,23 @@ describe('§13 정산/회귀', () => {
     const r = pnlForTargets([
       { pnl: 100, settlementStatus: 'UNSETTLED' },      // 이익·미정산 → 제외
       { pnl: 50,  settlementStatus: 'SETTLED' },        // 이익·정산 → 포함
-      { pnl: 30,  settlementStatus: 'PAPER_ZERO_FEE' }, // PAPER 수수료 0 정의 → 포함
+      // 6H-2A §2 — legacy PAPER_ZERO_FEE는 더 이상 이익 적격 아님 (손실만 반영)
+      { pnl: 30,  settlementStatus: 'PAPER_ZERO_FEE' },
       { pnl: -20, settlementStatus: 'UNSETTLED' },      // 손실·미정산 → 즉시 포함
     ]);
-    expect(r.profitEligibleUsd).toBe(80);
+    expect(r.profitEligibleUsd).toBe(50);
     expect(r.lossAwareUsd).toBe(-20);
+  });
+
+  it('40b. PAPER_ESTIMATED는 net 추정값 기준으로 이익/손실 모두 반영', () => {
+    const r = pnlForTargets([
+      { pnl: 10, settlementStatus: 'PAPER_ESTIMATED', netPnlEstimatedUsd: 8 },   // net 이익 반영
+      { pnl: -5, settlementStatus: 'PAPER_ESTIMATED', netPnlEstimatedUsd: -6 },  // net 손실 반영
+      { pnl: 7,  settlementStatus: 'PAPER_ESTIMATED', netPnlEstimatedUsd: null }, // net 없음 → 이익 미반영
+      { pnl: -3, settlementStatus: 'PAPER_ESTIMATED', netPnlEstimatedUsd: null }, // net 없음 → gross 손실 반영
+    ]);
+    expect(r.profitEligibleUsd).toBe(8);
+    expect(r.lossAwareUsd).toBe(-9);
   });
 
   it('41. settlementStatus null(legacy) → UNSETTLED로 취급 (이익 미반영)', () => {

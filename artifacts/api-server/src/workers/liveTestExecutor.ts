@@ -380,6 +380,34 @@ export function __setOpenPositionsFetchForTests(
   _openPositionsFetchOverride = f;
 }
 
+/** authoritative 온체인 포지션 조회 (override 우선) — 실패 = null (fail-closed) */
+export async function fetchAuthoritativeOpenPositions(): Promise<OpenPositionEvidence[] | null> {
+  try {
+    return _openPositionsFetchOverride
+      ? await _openPositionsFetchOverride()
+      : await fetchServerOpenPositions();
+  } catch {
+    return null;
+  }
+}
+
+// ── 6H-2A §7 — stop 실행 능력 게이트 ──────────────────────────────────────────
+
+export const STOP_EXECUTION_UNAVAILABLE = 'STOP_EXECUTION_UNAVAILABLE';
+
+/**
+ * stop(trigger) 주문 제출 경로 구현 여부.
+ * 현재 GMX API 실행 경로는 MarketIncrease/MarketDecrease만 지원하며
+ * StopLossDecrease trigger 주문 스키마는 미구현 → 구조적으로 false.
+ * "포지션 오픈 후 stop 심기"를 가정한 낙관 처리 금지 — 실제(비시뮬) OPEN은
+ * 이 능력이 확보되기 전까지 fail-closed로 차단된다.
+ */
+let _stopExecutionAvailable = false;
+export function isStopExecutionAvailable(): boolean { return _stopExecutionAvailable; }
+export function __setStopExecutionAvailabilityForTests(v: boolean): void {
+  _stopExecutionAvailable = v;
+}
+
 /**
  * §6 — activation gate 입력을 실제 파생값으로 조립 (조회 실패 = 차단).
  * UI/localStorage 입력은 없다: canonical/deployment/fee/revoke/blocking 전부
@@ -714,6 +742,20 @@ export async function executeLiveTestOrder(params: LiveOrderParams): Promise<Liv
   }
 
   const rpcUrl = process.env.GMX_RPC_URL ?? '';
+
+  // ── 6H-2A §7 — stop 실행 능력 게이트: trigger 주문 제출 경로가 없으면
+  // 실제(비시뮬) OPEN 자체를 차단한다. "오픈 후 stop 심기" 낙관 처리 금지.
+  if (!isStopExecutionAvailable()) {
+    const msg = `[LIVE TEST] ${STOP_EXECUTION_UNAVAILABLE}: stop(trigger) 주문 제출 경로 미구현 — 실제 OPEN 차단 (fail-closed)`;
+    await appendAuditLog({
+      id: entryId, decisionId: params.decisionId, cycleNumber: params.cycleNumber,
+      symbol: params.symbol, orderType: 'MarketIncrease', isLong: params.isLong,
+      sizeUsd: params.sizeUsd, collateralUsd: params.collateralUsd,
+      txHash: null, orderKey: null, status: 'FAILED', error: msg,
+      simulated: false, gateChecks: {}, submittedAt: executedAt, confirmedAt: null,
+    });
+    return { ok: false, txHash: null, orderKey: null, simulated: false, error: msg, executedAt };
+  }
 
   // ── 중앙 실행 게이트 (writeContract에 도달하기 전 최종 fail-closed 검증) ──
   const central = checkCentralExecutionGate({

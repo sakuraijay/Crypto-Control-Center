@@ -125,6 +125,8 @@ export interface ExecutorStatus {
   paperSizing: import('./aiWorker').PaperSizingSnapshot | null;
   liveSizingEnforcement: import('./liveTestExecutor').SizingEnforcementSnapshot | null;
   closeAllSummary: import('../lib/closeAllOrchestrator').CloseAllSummary | null;
+  // ── 6H-2A §5 — LIVE 정산 reconciliation 상태 ────────────────────────────────
+  settlementReconcile: import('../lib/tradeSettlement').ReconcileResult | null;
   // ── 활성 모드 (UI 배지 근거 — 클라이언트 설정값이 아닌 서버 상태) ─────────────
   /** WORKER_ENGINE_MODE 기준 실제 엔진 모드 ('LIVE'가 아니면 항상 PAPER) */
   engineMode: 'PAPER' | 'LIVE';
@@ -265,6 +267,8 @@ export function getExecutorStatus(): ExecutorStatus {
     paperSizing:           workerStatus.paperSizing,
     liveSizingEnforcement: workerStatus.liveSizingEnforcement,
     closeAllSummary:       workerStatus.closeAllSummary,
+    // 6H-2A §5 — LIVE 정산 reconciliation (명시 매핑 — spread 금지)
+    settlementReconcile:   workerStatus.settlementReconcile,
   };
 }
 

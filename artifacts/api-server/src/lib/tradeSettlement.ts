@@ -11,7 +11,16 @@
 
 const fin = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
 
-export type SettlementStatus = 'UNSETTLED' | 'SETTLED' | 'PAPER_ZERO_FEE';
+/**
+ * 정산 상태 (6H-2A §3·§5):
+ *  - UNSETTLED: LIVE 체결 후 온체인 증거 정산 전 — 이익 목표 미반영
+ *  - SETTLED: 온체인 증거 기반 실제 정산 완료 (pnl = 실제 순 PnL)
+ *  - PAPER_ESTIMATED: PAPER 시뮬 — 추정 순 PnL(netPnlEstimatedUsd)만 이익 적격.
+ * ('PAPER_ZERO_FEE'는 폐기된 legacy 값 — 과거 행에만 잔존, 이익 적격 아님)
+ */
+export type SettlementStatus = 'UNSETTLED' | 'SETTLED' | 'PAPER_ESTIMATED';
+
+export const LIVE_SETTLEMENT_INCOMPLETE = 'LIVE_SETTLEMENT_INCOMPLETE';
 
 export interface SettlementInput {
   tradeId: string;
@@ -106,23 +115,111 @@ export async function recordTradeSettlement(input: SettlementInput): Promise<Set
 }
 
 /**
- * 목표/손실 gate용 보수적 PnL 선별 (§5):
- *  - 이익: SETTLED 또는 PAPER_ZERO_FEE만 반영 (UNSETTLED 이익 미반영)
- *  - 손실: 상태 무관 즉시 반영
+ * 목표/손실 gate용 보수적 PnL 선별 (6H-2A §3·§5):
+ *  - SETTLED: pnl(=실제 순 PnL) 그대로 반영
+ *  - PAPER_ESTIMATED: netPnlEstimatedUsd(추정 순)가 있으면 그 값 사용 —
+ *    이익도 손실도 net 기준. net이 없으면(비용 불명) 이익은 미반영,
+ *    gross 손실만 반영 (0 대체 금지 · 보수적 비대칭)
+ *  - UNSETTLED / legacy PAPER_ZERO_FEE: 이익 미반영, 손실은 즉시 반영
  */
-export function pnlForTargets(rows: { pnl: number; settlementStatus: string | null }[]): {
+export function pnlForTargets(rows: {
+  pnl: number;
+  settlementStatus: string | null;
+  netPnlEstimatedUsd?: number | null;
+}[]): {
   profitEligibleUsd: number;
   lossAwareUsd: number;
 } {
   let profit = 0, loss = 0;
   for (const r of rows) {
     if (!fin(r.pnl)) continue;
-    if (r.pnl >= 0) {
-      const st = r.settlementStatus ?? 'UNSETTLED';
-      if (st === 'SETTLED' || st === 'PAPER_ZERO_FEE') profit += r.pnl;
-    } else {
+    const st = r.settlementStatus ?? 'UNSETTLED';
+    let effective: number | null = null; // null = 이익 부적격 (손실만 gross로)
+    if (st === 'SETTLED') {
+      effective = r.pnl;
+    } else if (st === 'PAPER_ESTIMATED' && fin(r.netPnlEstimatedUsd)) {
+      effective = r.netPnlEstimatedUsd as number;
+    }
+    if (effective !== null) {
+      if (effective >= 0) profit += effective;
+      else loss += effective;
+    } else if (r.pnl < 0) {
       loss += r.pnl;
     }
   }
   return { profitEligibleUsd: profit, lossAwareUsd: loss };
+}
+
+// ── LIVE 정산 reconciliation (6H-2A §5) ─────────────────────────────────────
+
+/** 정산 증거 조회 fetcher — 주입식 (이번 단계 실제 네트워크 경로 미구성) */
+export interface SettlementEvidenceFetcher {
+  /** trade에 대한 온체인 정산 증거 전체 확보 시도 — 부분 확보 금지 */
+  fetchEvidence?: (args: { tradeId: string; symbol: string }) => Promise<{
+    grossPnlUsd: number; positionFeeUsd: number; executionFeeUsd: number;
+    priceImpactUsd: number; fundingFeeUsd: number; borrowingFeeUsd: number;
+    evidenceTxHash: string; settledAt: Date;
+  } | null>;
+}
+
+export interface ReconcileResult {
+  ok: boolean;
+  /** 조회 대상이었던 UNSETTLED LIVE 거래 수 */
+  unsettledCount: number;
+  settledNow: number;
+  /** 전부 정산하지 못함 → LIVE_SETTLEMENT_INCOMPLETE (신규 LIVE 진입 차단 사유) */
+  incomplete: boolean;
+  reasons: string[];
+}
+
+/**
+ * UNSETTLED LIVE(test_mode=true) 거래 전수 → 증거 수집 → SETTLED 전환 시도.
+ * 실패해도 예외를 던지지 않음 (Worker 생존) — 대신 incomplete=true를 반환하며,
+ * 호출자는 incomplete 동안 신규 LIVE 진입을 차단해야 한다 (fail-closed).
+ */
+export async function reconcileLiveSettlements(fetcher: SettlementEvidenceFetcher): Promise<ReconcileResult> {
+  const reasons: string[] = [];
+  try {
+    const { db, tradesTable } = await import('@workspace/db');
+    const { eq, and, or } = await import('drizzle-orm');
+    const rows = await db.select({
+      id: tradesTable.id, symbol: tradesTable.symbol,
+    }).from(tradesTable)
+      .where(and(
+        eq(tradesTable.testMode, true),
+        eq(tradesTable.settlementStatus, 'UNSETTLED'),
+        or(eq(tradesTable.action, 'CLOSE'), eq(tradesTable.action, 'CLOSE_ALL')),
+      ));
+    const unsettledCount = rows.length;
+    if (unsettledCount === 0) return { ok: true, unsettledCount: 0, settledNow: 0, incomplete: false, reasons: [] };
+
+    if (!fetcher.fetchEvidence) {
+      return {
+        ok: false, unsettledCount, settledNow: 0, incomplete: true,
+        reasons: [`${LIVE_SETTLEMENT_INCOMPLETE}: 정산 증거 조회 경로 미구성 — UNSETTLED ${unsettledCount}건 유지`],
+      };
+    }
+    let settledNow = 0;
+    for (const row of rows) {
+      try {
+        const ev = await fetcher.fetchEvidence({ tradeId: row.id, symbol: row.symbol });
+        if (!ev) {
+          reasons.push(`${LIVE_SETTLEMENT_INCOMPLETE}: trade=${row.id} 증거 미확보`);
+          continue;
+        }
+        const rec = await recordTradeSettlement({ tradeId: row.id, ...ev });
+        if (rec.ok) settledNow++;
+        else reasons.push(`${LIVE_SETTLEMENT_INCOMPLETE}: trade=${row.id} ${rec.reason}`);
+      } catch (err) {
+        reasons.push(`${LIVE_SETTLEMENT_INCOMPLETE}: trade=${row.id} 조회 실패 — ${(err as Error).message}`);
+      }
+    }
+    const incomplete = settledNow < unsettledCount;
+    return { ok: !incomplete, unsettledCount, settledNow, incomplete, reasons };
+  } catch (err) {
+    return {
+      ok: false, unsettledCount: -1, settledNow: 0, incomplete: true,
+      reasons: [`${LIVE_SETTLEMENT_INCOMPLETE}: DB 조회 실패 — ${(err as Error).message}`],
+    };
+  }
 }

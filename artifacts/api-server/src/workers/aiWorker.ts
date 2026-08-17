@@ -23,11 +23,13 @@ import { runAiEngine } from "./stateEngine";
 import { getCachedPrices, getCachedChange24h, ensureGmxPoller } from "../routes/gmx";
 import { fetchServerLiveTestData } from "../routes/gmx";
 import type { AiOperatingState, RiskLimits, SymbolAnalysis, ServerAiDecision } from "./serverTypes";
-import { executeLiveTestOrder, closeLiveTestPosition, getLastSizingEnforcement, type SizingEnforcementSnapshot } from "./liveTestExecutor";
+import { executeLiveTestOrder, closeLiveTestPosition, getLastSizingEnforcement, fetchAuthoritativeOpenPositions, type SizingEnforcementSnapshot } from "./liveTestExecutor";
 import { enforceOrderSizing } from "../lib/orderSizingEnforcement";
-import { buildPaperCostSnapshot, fetchLiveCostSnapshot } from "../lib/costSnapshot";
+import { fetchPaperCostSnapshot, fetchLiveCostSnapshot, COST_DATA_UNAVAILABLE, type LiveCostFetchers } from "../lib/costSnapshot";
+import { storePaperCostSnapshot } from "../lib/paperCostCache";
+import { reconcileLiveSettlements, type ReconcileResult, type SettlementEvidenceFetcher } from "../lib/tradeSettlement";
 import { DEFAULT_STOP_DISTANCE_FRACTION, computeStopTrigger } from "../lib/stopLossPlan";
-import { manilaDayKey } from "../lib/profitProtection";
+import { manilaDayKey, computeReduction, GMX_MIN_POSITION_NOTIONAL_USD } from "../lib/profitProtection";
 import { buildCloseAllPlan, summarizeCloseAll, type CloseAllSummary } from "../lib/closeAllOrchestrator";
 import { LIVE_TEST_CAPS } from "../lib/liveTestGate";
 import { MARKET_BY_SYMBOL_SERVER } from "../lib/gmxMarkets";
@@ -157,6 +159,9 @@ export interface WorkerStatus {
   liveSizingEnforcement: SizingEnforcementSnapshot | null;
   /** 마지막 CLOSE_ALL orchestration 요약. null = 발생 없음 */
   closeAllSummary: CloseAllSummary | null;
+  // ── 6H-2A §5 — LIVE 정산 reconciliation ─────────────────────────────────────
+  /** 마지막 정산 reconciliation 결과. incomplete=true → 신규 LIVE 진입 차단 */
+  settlementReconcile: ReconcileResult | null;
 }
 
 /** PAPER 사이징 엔진 결과 요약 — 상태 카드 표시용 */
@@ -170,6 +175,29 @@ export interface PaperSizingSnapshot {
   clamped: boolean;
   clampDetails: string[];
   estimatedRoundTripCostUsd: number | null;
+  /** 6H-2A §9 — PAPER 비용 출처 (성공 시 'PAPER_GMX_ESTIMATE', 미확보 시 null) */
+  costSource: string | null;
+}
+
+// ── 주입식 조회 경로 (6H-2A — 실제 네트워크 호출은 이번 단계 금지) ──────────────
+
+/**
+ * PAPER 비용 조회 fetchers — 기본은 env readonly 플래그 + fetchCosts 미구성.
+ * 미구성이면 fetchPaperCostSnapshot이 COST_DATA_UNAVAILABLE을 반환하고
+ * PAPER도 신규 진입하지 않는다 (§3 fail-closed — zero-fee/고정 모델 fallback 없음).
+ */
+let paperCostFetchers: LiveCostFetchers | null = null;
+export function __setPaperCostFetchersForTests(f: LiveCostFetchers | null): void {
+  paperCostFetchers = f;
+}
+function getPaperCostFetchers(): LiveCostFetchers {
+  return paperCostFetchers ?? { readonlyEnabled: process.env.GMX_API_READONLY_ENABLED === 'true' };
+}
+
+/** LIVE 정산 증거 fetcher — 기본 미구성 → LIVE_SETTLEMENT_INCOMPLETE (§5 fail-closed) */
+let settlementEvidenceFetcher: SettlementEvidenceFetcher = {};
+export function __setSettlementEvidenceFetcherForTests(f: SettlementEvidenceFetcher): void {
+  settlementEvidenceFetcher = f;
 }
 
 // ── WorkerManager ─────────────────────────────────────────────────────────────
@@ -222,6 +250,8 @@ class WorkerManager {
   // ── 6H-2 사이징·close-all 상태 ──────────────────────────────────────────────
   private lastPaperSizing: PaperSizingSnapshot | null = null;
   private lastCloseAllSummary: CloseAllSummary | null = null;
+  /** 6H-2A §5 — 마지막 LIVE 정산 reconciliation 결과 */
+  private lastSettlementReconcile: ReconcileResult | null = null;
   /** Whether the liveTestAccumLossUsd DB query succeeded in the last cycle */
   private lastLiveTestDbOk: boolean = true;
   // ────────────────────────────────────────────────────────────────────────────
@@ -342,6 +372,7 @@ class WorkerManager {
       paperSizing:           this.lastPaperSizing,
       liveSizingEnforcement: getLastSizingEnforcement(),
       closeAllSummary:       this.lastCloseAllSummary,
+      settlementReconcile:   this.lastSettlementReconcile,
     };
   }
 
@@ -748,12 +779,18 @@ class WorkerManager {
       for (const t of closeTrades) {
         const ts  = new Date(t.timestamp as string | Date).getTime();
         const pnl = parseFloat(t.pnl ?? '0') || 0;
-        // §5 (6H-2): 정산 확정 전(UNSETTLED) "이익"은 +5%/+10% 목표 산정에
-        // 반영하지 않는다. 손실(추정 포함)은 즉시 반영 (보수적 비대칭).
-        // PAPER_ZERO_FEE = 수수료 0 정의 시뮬 체결 → 정산 확정과 동등.
+        // 6H-2A §3·§5 gated PnL:
+        //  - SETTLED: pnl(실제 순) 그대로
+        //  - PAPER_ESTIMATED + netPnlEstimatedUsd: 추정 순 PnL 사용 (이익/손실 모두)
+        //  - 그 외(UNSETTLED / legacy PAPER_ZERO_FEE / 비용 불명): 이익 미반영,
+        //    gross 손실만 즉시 반영 (보수적 비대칭 — zero-fee 이익 인정 금지)
         const st = (t as { settlementStatus?: string | null }).settlementStatus ?? 'UNSETTLED';
-        const profitEligible = pnl < 0 || st === 'SETTLED' || st === 'PAPER_ZERO_FEE';
-        const gatedPnl = profitEligible ? pnl : 0;
+        const netEstRaw = (t as { netPnlEstimatedUsd?: string | null }).netPnlEstimatedUsd;
+        const netEst = netEstRaw != null ? parseFloat(netEstRaw) : NaN;
+        let gatedPnl: number;
+        if (st === 'SETTLED') gatedPnl = pnl;
+        else if (st === 'PAPER_ESTIMATED' && Number.isFinite(netEst)) gatedPnl = netEst;
+        else gatedPnl = pnl < 0 ? pnl : 0;
         totalRealizedPnlAllTime  += pnl;                                    // 전체 누적
         if (ts >= todayStart.getTime())      realizedPnLToday      += pnl;
         if (ts >= rolling24hStart.getTime()) realizedPnLRolling24h += pnl;
@@ -1170,19 +1207,44 @@ class WorkerManager {
             const lev = typeof engineResult.leverage === 'number' ? Math.max(1, engineResult.leverage) : 1;
             const sizingCap = Math.min(limits.tradingCapital, RISK_POLICY.maxRiskCapitalUsd);
             const tierCap = sizingCap * riskEval.maxLeverage;
+
+            // ── 6H-2A §3 — PAPER 비용은 공식 GMX read-only 추정(PAPER_GMX_ESTIMATE)만.
+            // 확보 실패 시 PAPER도 진입 금지: NO_TRADE(COST_DATA_UNAVAILABLE).
+            // 이전 quote fallback·고정 모델·zero-fee 대체 금지.
+            const paperCostRes = await fetchPaperCostSnapshot(
+              {
+                market: paperMkt.marketToken,
+                isLong: engineResult.operatingState === 'LONG',
+                orderType: 'MarketIncrease',
+                notionalUsd: engineResult.sizeUsd,
+                now: nowSizing,
+              },
+              getPaperCostFetchers(),
+            );
+            if (!paperCostRes.ok) {
+              this.lastPaperSizing = {
+                at: nowSizing.toISOString(), ok: false,
+                reason: `NO_TRADE: ${paperCostRes.reason}`,
+                finalNotionalUsd: null, finalLeverage: null, allowedRiskUsd: null,
+                clamped: false, clampDetails: [], estimatedRoundTripCostUsd: null,
+                costSource: null,
+              };
+              engineResult.operatingState = 'CASH';
+              engineResult.riskApproved = false;
+              engineResult.riskVetoReason = `[RISK_ENGINE] NO_TRADE: ${COST_DATA_UNAVAILABLE} — ${paperCostRes.reason}`;
+              engineResult.sizeUsd = undefined;
+              engineResult.leverage = undefined;
+              console.info(`[AIWorker] 사이클 #${cycleNum} PAPER 비용 미확보 — NO_TRADE (${paperCostRes.reason})`);
+            } else {
+            // 신선한 스냅샷을 캐시에 저장 — 거래 저장 시 비용 결속에 사용 (data.ts)
+            storePaperCostSnapshot(engineResult.primarySymbol ?? '', paperCostRes.snapshot, nowSizing.getTime());
             const paperEnf = enforceOrderSizing({
               requestedSizeUsd: engineResult.sizeUsd,
               requestedCollateralUsd: engineResult.sizeUsd / lev,
               requestedLeverage: lev,
               positionSizingCapitalUsd: sizingCap,
               stopDistanceFraction: DEFAULT_STOP_DISTANCE_FRACTION,
-              costSnapshot: buildPaperCostSnapshot({
-                market: paperMkt.marketToken,
-                isLong: engineResult.operatingState === 'LONG',
-                orderType: 'MarketIncrease',
-                notionalUsd: engineResult.sizeUsd,
-                now: nowSizing,
-              }),
+              costSnapshot: paperCostRes.snapshot,
               // PAPER 시뮬 유동성 상한 = tier cap (명시적 시뮬레이션 정의 — LIVE에선 실측 필수)
               liquidityCapUsd: tierCap,
               tierNotionalCapUsd: tierCap,
@@ -1206,6 +1268,7 @@ class WorkerManager {
                 allowedRiskUsd: paperEnf.allowedRiskUsd,
                 clamped: paperEnf.clamped, clampDetails: paperEnf.clampDetails,
                 estimatedRoundTripCostUsd: paperEnf.estimatedRoundTripCostUsd,
+                costSource: paperCostRes.snapshot.source,
               };
               if (paperEnf.clamped) {
                 console.warn(`[AIWorker] 사이클 #${cycleNum} PAPER 사이징 clamp — ${paperEnf.clampDetails.join('; ')}`);
@@ -1216,6 +1279,7 @@ class WorkerManager {
                 at: nowSizing.toISOString(), ok: false, reason: paperEnf.reason,
                 finalNotionalUsd: null, finalLeverage: null, allowedRiskUsd: null,
                 clamped: false, clampDetails: [], estimatedRoundTripCostUsd: null,
+                costSource: paperCostRes.snapshot.source,
               };
               engineResult.operatingState = 'CASH';
               engineResult.riskApproved = false;
@@ -1224,8 +1288,25 @@ class WorkerManager {
               engineResult.leverage = undefined;
               console.info(`[AIWorker] 사이클 #${cycleNum} PAPER 사이징 거부 — ${paperEnf.reason}`);
             }
+            } // paperCostRes.ok
           }
         }
+      }
+
+      // ── 6H-2A §5 — LIVE 정산 reconciliation (비치명 — 실패해도 Worker 생존) ──
+      // UNSETTLED LIVE 거래가 있고 전부 SETTLED 전환하지 못하면 incomplete=true →
+      // 아래 tryLiveTestExecution 호출부에서 신규 LIVE 진입이 차단된다.
+      try {
+        this.lastSettlementReconcile = await reconcileLiveSettlements(settlementEvidenceFetcher);
+        if (this.lastSettlementReconcile.incomplete) {
+          console.warn(`[AIWorker] 사이클 #${cycleNum} LIVE_SETTLEMENT_INCOMPLETE — 신규 LIVE 진입 차단 (${this.lastSettlementReconcile.reasons[0] ?? ''})`);
+        }
+      } catch (err) {
+        // reconcileLiveSettlements는 예외를 던지지 않도록 설계됨 — 방어적 이중 안전망
+        this.lastSettlementReconcile = {
+          ok: false, unsettledCount: -1, settledNow: 0, incomplete: true,
+          reasons: [`LIVE_SETTLEMENT_INCOMPLETE: 예외 — ${(err as Error).message}`],
+        };
       }
 
       // LIVE TEST MODE: 상태 업데이트 + 누적 손실 캐시 갱신
@@ -1264,7 +1345,13 @@ class WorkerManager {
 
       // LIVE TEST 자율 실행 (운영자 반복 승인 없음 — 별도 실행 경로)
       if (testModeActive && isLiveMode) {
-        void this.tryLiveTestExecution(decision, analyses, liveTestData, paperState, limits, cycleNum, stateBeforeCycle);
+        void this.tryLiveTestExecution(
+          decision, analyses, liveTestData, paperState, limits, cycleNum, stateBeforeCycle,
+          {
+            closeAllRequested: riskEval?.actions.includes('CLOSE_ALL_POSITIONS') === true,
+            reduce70Requested: riskEval?.actions.includes('REDUCE_POSITION_70PCT') === true,
+          },
+        );
       }
 
       this.lastCycleAt = new Date();
@@ -1325,6 +1412,9 @@ class WorkerManager {
     /** 이번 사이클 결정이 반영되기 전의 운영 상태 — CASH 청산 방향 판정용.
      *  this.prevState는 이 시점에 이미 이번 결정으로 덮여 있어 사용 금지. */
     stateBeforeCycle: AiOperatingState = 'CASH',
+    /** 6H-2A §6·§8 — RiskEngine 액션 실배선 플래그 */
+    riskActions: { closeAllRequested: boolean; reduce70Requested: boolean } =
+      { closeAllRequested: false, reduce70Requested: false },
   ): Promise<void> {
     try {
       const { operatingState, primarySymbol } = decision;
@@ -1339,7 +1429,27 @@ class WorkerManager {
 
       const mainAddress = process.env.GMX_WALLET_ADDRESS ?? '';
 
+      // ── 6H-2A §8 — CLOSE_ALL 실배선: authoritative 포지션 전수 청산 ─────────
+      // "CASH 표시만으로 완료 처리 금지" — 포지션별 실제 청산 시도 결과로
+      // summarizeCloseAll을 갱신한다. 조회 실패 = lockRequired 유지 (fail-closed).
+      if (riskActions.closeAllRequested && liveTestData.positionCount > 0) {
+        await this.executeCloseAllPositions(decision, paperState, limits, cycleNum, mainAddress, analyses);
+        return; // close-all 사이클에는 신규 진입 없음
+      }
+
+      // ── 6H-2A §6 — REDUCE_POSITION_70PCT 실배선: 부분 청산 실행 ─────────────
+      if (riskActions.reduce70Requested && liveTestData.positionCount > 0) {
+        await this.executeProfitProtectReduction(decision, paperState, limits, cycleNum, mainAddress, analyses);
+        return; // 축소 사이클에는 신규 진입 없음
+      }
+
       if (operatingState === 'LONG' || operatingState === 'SHORT') {
+        // ── 6H-2A §5 — 정산 미완료 동안 신규 LIVE 진입 차단 (청산은 허용) ──
+        const rec = this.lastSettlementReconcile;
+        if (!rec || rec.incomplete) {
+          console.warn(`[AIWorker] LIVE TEST OPEN 차단 — LIVE_SETTLEMENT_INCOMPLETE (${rec?.reasons[0] ?? 'reconciliation 미실행'})`);
+          return;
+        }
         // 레버리지: stateEngine 값 존재 시 사용, 없으면 1x (LIVE TEST 하드캡 2x 적용)
         const rawLeverage   = decision.leverage ?? 1;
         const leverage      = Math.max(1, Math.min(rawLeverage, LIVE_TEST_CAPS.maxLeverage));
@@ -1432,6 +1542,135 @@ class WorkerManager {
     } catch (err: unknown) {
       // LIVE TEST 실행 오류는 워커 사이클 전체에 전파하지 않는다 (fail-silent)
       console.error(`[AIWorker] LIVE TEST 실행 오류 (cycle #${cycleNum}):`, err);
+    }
+  }
+
+  /** marketAddress → 심볼 역조회 (대소문자 무시) — 미등록 시장 = null */
+  private symbolForMarket(marketAddress: string): string | null {
+    for (const [sym, m] of MARKET_BY_SYMBOL_SERVER) {
+      if (m.marketToken.toLowerCase() === marketAddress.toLowerCase()) return sym;
+    }
+    return null;
+  }
+
+  /**
+   * 6H-2A §8 — CLOSE_ALL 실배선.
+   * authoritative(온체인/공식) 포지션 전수 조회 → 포지션별 closeLiveTestPosition
+   * 실제 시도 → 실제 결과로 summarizeCloseAll 갱신. 조회 실패·부분 실패 =
+   * lockRequired 유지 (fail-closed). "CASH 표시"만으로는 완료 처리하지 않는다.
+   */
+  private async executeCloseAllPositions(
+    decision: ServerAiDecision,
+    paperState: { liveTestAccumLossUsd: number; liveTestDbOk: boolean },
+    limits: RiskLimits,
+    cycleNum: number,
+    mainAddress: string,
+    analyses: SymbolAnalysis[],
+  ): Promise<void> {
+    const positions = await fetchAuthoritativeOpenPositions();
+    if (positions === null) {
+      // 조회 실패 — 계획조차 수립 불가 → 잠금 유지 요약 (fail-closed)
+      this.lastCloseAllSummary = {
+        total: 0, confirmed: 0, terminalFailed: 0, unresolved: 0, pending: 0,
+        allTerminal: false, allConfirmed: false, lockRequired: true, rolloverAllowed: false,
+      };
+      console.error('[AIWorker] CLOSE_ALL — authoritative 포지션 조회 실패, 잠금 유지 (fail-closed)');
+      return;
+    }
+    const dayKey = manilaDayKey(new Date());
+    const plan = buildCloseAllPlan({
+      dayKey,
+      positions: positions.map((p, i) => ({
+        positionKey: `${p.marketAddress.toLowerCase()}:${p.isLong ? 'LONG' : 'SHORT'}:${i}`,
+        marketAddress: p.marketAddress, isLong: p.isLong, sizeUsd: p.sizeUsd,
+      })),
+    });
+    if (!plan.ok) {
+      this.lastCloseAllSummary = {
+        total: 0, confirmed: 0, terminalFailed: 0, unresolved: 0, pending: 0,
+        allTerminal: false, allConfirmed: false, lockRequired: true, rolloverAllowed: false,
+      };
+      console.error(`[AIWorker] CLOSE_ALL 계획 수립 실패 — ${plan.reason} (잠금 유지)`);
+      return;
+    }
+    const progress: { intentId: string; positionKey: string; status: 'PENDING' | 'SUBMITTED' | 'FAILED' | 'UNRESOLVED' }[] = [];
+    for (const intent of plan.intents) {
+      const symbol = this.symbolForMarket(intent.marketAddress);
+      const price = symbol ? (analyses.find(a => a.symbol === symbol)?.price ?? 0) : 0;
+      if (!symbol || price <= 0) {
+        progress.push({ intentId: intent.intentId, positionKey: intent.positionKey, status: 'FAILED' });
+        console.error(`[AIWorker] CLOSE_ALL — 시장/가격 미확인 (${intent.marketAddress}) → FAILED 기록`);
+        continue;
+      }
+      const result = await closeLiveTestPosition({
+        decisionId: `${decision.id}:closeall:${intent.positionKey}`,
+        cycleNumber: cycleNum, symbol,
+        marketAddress: intent.marketAddress, isLong: intent.isLong,
+        sizeUsd: intent.closeSizeUsd, currentPriceUsd: price, mainAddress,
+        accumLossUsd: paperState.liveTestAccumLossUsd, dbOk: paperState.liveTestDbOk,
+        liveTestMode: Boolean(limits.liveTestMode),
+      });
+      // 실제 결과 기반 상태 — 제출 수락=SUBMITTED(온체인 확정은 reconciler),
+      // 시뮬(잠금)=PENDING(실주문 미제출 — 완료로 간주 금지), 실패=FAILED.
+      progress.push({
+        intentId: intent.intentId, positionKey: intent.positionKey,
+        status: result.simulated ? 'PENDING' : result.ok ? 'SUBMITTED' : 'FAILED',
+      });
+    }
+    this.lastCloseAllSummary = summarizeCloseAll(progress);
+    console.warn(
+      `[AIWorker] CLOSE_ALL 실행 — 대상 ${plan.intents.length}건, ` +
+      `제출 ${progress.filter(p => p.status === 'SUBMITTED').length}건, ` +
+      `실패 ${progress.filter(p => p.status === 'FAILED').length}건, lockRequired=${this.lastCloseAllSummary.lockRequired}`,
+    );
+  }
+
+  /**
+   * 6H-2A §6 — REDUCE_POSITION_70PCT 실배선.
+   * authoritative 포지션 조회 → computeReduction(보수적 내림, 70% 초과 금지,
+   * 잔여<최소면 100% 종료) → closeLiveTestPosition 부분 청산. 조회/계산 실패 =
+   * 실행 0회 (fail-closed).
+   */
+  private async executeProfitProtectReduction(
+    decision: ServerAiDecision,
+    paperState: { liveTestAccumLossUsd: number; liveTestDbOk: boolean },
+    limits: RiskLimits,
+    cycleNum: number,
+    mainAddress: string,
+    analyses: SymbolAnalysis[],
+  ): Promise<void> {
+    const positions = await fetchAuthoritativeOpenPositions();
+    if (positions === null || positions.length === 0) {
+      console.error('[AIWorker] REDUCE_70PCT — authoritative 포지션 조회 실패/없음, 실행 0회 (fail-closed)');
+      return;
+    }
+    for (const p of positions) {
+      const reduction = computeReduction({
+        openSizeUsd: p.sizeUsd,
+        minPositionNotionalUsd: GMX_MIN_POSITION_NOTIONAL_USD,
+      });
+      if (!reduction.ok) {
+        console.error(`[AIWorker] REDUCE_70PCT 계산 거부 (${p.marketAddress}) — ${reduction.reason}`);
+        continue;
+      }
+      const symbol = this.symbolForMarket(p.marketAddress);
+      const price = symbol ? (analyses.find(a => a.symbol === symbol)?.price ?? 0) : 0;
+      if (!symbol || price <= 0) {
+        console.error(`[AIWorker] REDUCE_70PCT — 시장/가격 미확인 (${p.marketAddress}), 해당 포지션 건너뜀 (fail-closed)`);
+        continue;
+      }
+      const result = await closeLiveTestPosition({
+        decisionId: `${decision.id}:reduce70:${p.marketAddress.toLowerCase()}:${p.isLong ? 'L' : 'S'}`,
+        cycleNumber: cycleNum, symbol,
+        marketAddress: p.marketAddress, isLong: p.isLong,
+        sizeUsd: reduction.reduceSizeUsd, currentPriceUsd: price, mainAddress,
+        accumLossUsd: paperState.liveTestAccumLossUsd, dbOk: paperState.liveTestDbOk,
+        liveTestMode: Boolean(limits.liveTestMode),
+      });
+      console.warn(
+        `[AIWorker] REDUCE_70PCT — ${symbol} ${reduction.fullClose ? '100% 종료(잔여<최소)' : `$${reduction.reduceSizeUsd.toFixed(2)} 축소`} ` +
+        `→ ${result.simulated ? '시뮬레이션(잠금)' : result.ok ? '제출' : `실패(${result.error ?? ''})`}`,
+      );
     }
   }
 }

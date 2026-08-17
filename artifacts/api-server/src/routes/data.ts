@@ -10,7 +10,9 @@
 
 import { Router } from "express";
 import { db, tradesTable, strategyConfigTable, workerStateTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
+import { getPaperCostBinding } from "../lib/paperCostCache";
+import { accrueHoldingCostsFromEntryRates, computePaperNetPnl } from "../lib/holdingCosts";
 
 const router = Router();
 
@@ -74,9 +76,9 @@ router.post("/data/trades/batch", async (req, res) => {
         // ── Risk fields ────────────────────────────────────────────
         leverage:         r.leverage != null ? String(r.leverage) : null,
         collateralUsd:    r.collateralUsd != null ? String(r.collateralUsd) : null,
-        // §5 (6H-2): 브라우저/PAPER 시뮬 체결 = 수수료 0 정의 → 정산 확정 동등.
-        // 실제 LIVE 정산은 recordTradeSettlement만 UNSETTLED→SETTLED 전환한다.
-        settlementStatus: "PAPER_ZERO_FEE",
+        // 6H-2A §2·§3: zero-fee 정의 폐기. bulk sync 행은 비용 결속 데이터가 없어
+        // cost 필드 null = 비용 불명 → 해당 행의 "이익"은 목표 산정에 미반영.
+        settlementStatus: "PAPER_ESTIMATED",
       })))
       .onConflictDoNothing();
 
@@ -103,6 +105,82 @@ router.post("/data/trades", async (req, res) => {
     const leverageVal    = r.leverage != null ? String(r.leverage) : null;
     const collateralUsdV = r.collateralUsd != null ? String(r.collateralUsd) : null;
     const testModeVal    = r.testMode === true;           // LIVE TEST MODE flag
+    const actionVal      = String(r.action ?? "CLOSE");
+
+    // ── 6H-2A §3·§4 — PAPER 비용 결속 (test_mode 거래는 실제 정산 경로 사용) ──
+    // OPEN: 서버의 신선한 PAPER_GMX_ESTIMATE 스냅샷에서 추정 진입/청산 비용+rate 결속.
+    //       스냅샷 부재 → cost 필드 null = 비용 불명 (해당 거래 이익은 목표 미반영).
+    // CLOSE: 대응 OPEN 행의 비용 결속 + 실제 보유시간으로 추정 순 PnL(ESTIMATED) 계산.
+    let costFields: {
+      costSource: string | null; estEntryCostUsd: string | null; estExitCostUsd: string | null;
+      estHoldingCostUsd: string | null; fundingRatePerHour: string | null;
+      borrowingRatePerHour: string | null; costFetchedAt: Date | null;
+      netPnlEstimatedUsd: string | null;
+    } = {
+      costSource: null, estEntryCostUsd: null, estExitCostUsd: null, estHoldingCostUsd: null,
+      fundingRatePerHour: null, borrowingRatePerHour: null, costFetchedAt: null, netPnlEstimatedUsd: null,
+    };
+    if (!testModeVal && actionVal === "OPEN") {
+      const b = getPaperCostBinding(String(r.symbol ?? ""));
+      if (b) {
+        costFields = {
+          costSource: b.costSource,
+          estEntryCostUsd: String(b.estEntryCostUsd),
+          estExitCostUsd: String(b.estExitCostUsd),
+          estHoldingCostUsd: null,
+          fundingRatePerHour: b.fundingRatePerHourFraction != null ? String(b.fundingRatePerHourFraction) : null,
+          borrowingRatePerHour: b.borrowingRatePerHourFraction != null ? String(b.borrowingRatePerHourFraction) : null,
+          costFetchedAt: new Date(b.costFetchedAt),
+          netPnlEstimatedUsd: null,
+        };
+      }
+    } else if (!testModeVal && (actionVal === "CLOSE" || actionVal === "CLOSE_ALL")) {
+      try {
+        // 대응 OPEN 행 — 동일 심볼의 가장 최근 OPEN (정책상 동시 포지션 1개)
+        const openRows = await db.select().from(tradesTable)
+          .where(and(eq(tradesTable.symbol, String(r.symbol ?? "")), eq(tradesTable.action, "OPEN")))
+          .orderBy(desc(tradesTable.timestamp)).limit(1);
+        const openRow = openRows[0];
+        if (openRow?.costSource === "PAPER_GMX_ESTIMATE"
+          && openRow.estEntryCostUsd != null && openRow.estExitCostUsd != null) {
+          const entryCost = parseFloat(openRow.estEntryCostUsd);
+          const exitCost  = parseFloat(openRow.estExitCostUsd);
+          const notional  = parseFloat(openRow.sizeInUsd ?? openRow.size ?? "0") || 0;
+          const openedAt  = new Date(openRow.timestamp as unknown as string | Date).getTime();
+          const closedAt  = typeof r.closeTime === "number" && r.closeTime > 0
+            ? r.closeTime : Date.now();
+          const holding = accrueHoldingCostsFromEntryRates({
+            notionalUsd: notional, openedAtMs: openedAt, closedAtMs: closedAt,
+            fundingRatePerHourFraction: openRow.fundingRatePerHour != null ? parseFloat(openRow.fundingRatePerHour) : null,
+            borrowingRatePerHourFraction: openRow.borrowingRatePerHour != null ? parseFloat(openRow.borrowingRatePerHour) : null,
+          });
+          if (holding.ok) {
+            const net = computePaperNetPnl({
+              simulatedGrossPnlUsd: parseFloat(String(r.pnl ?? 0)) || 0,
+              estimatedEntryCostsUsd: entryCost,
+              estimatedExitCostsUsd: exitCost,
+              elapsedHoldingFundingUsd: holding.fundingUsd,
+              elapsedHoldingBorrowingUsd: holding.borrowingUsd,
+            });
+            if (net.ok) {
+              costFields = {
+                costSource: "PAPER_GMX_ESTIMATE",
+                estEntryCostUsd: String(entryCost), estExitCostUsd: String(exitCost),
+                estHoldingCostUsd: String(holding.totalUsd),
+                fundingRatePerHour: openRow.fundingRatePerHour,
+                borrowingRatePerHour: openRow.borrowingRatePerHour,
+                costFetchedAt: openRow.costFetchedAt as unknown as Date | null,
+                netPnlEstimatedUsd: String(net.netPnlUsd),
+              };
+            }
+          }
+          // holding/net 실패 → 비용 불명 유지 (0 대체 금지 — 이익 목표 미반영)
+        }
+      } catch (err) {
+        // 비용 결속 실패는 거래 저장 자체를 막지 않음 — 비용 불명으로 보수적 처리
+        console.warn("[data] PAPER 비용 결속 실패 — 비용 불명 저장:", (err as Error).message);
+      }
+    }
 
     await db
       .insert(tradesTable)
@@ -126,10 +204,12 @@ router.post("/data/trades", async (req, res) => {
         leverage:         leverageVal,
         collateralUsd:    collateralUsdV,
         testMode:         testModeVal,
-        // §5 (6H-2): PAPER 시뮬 체결 = 수수료 0 정의. LIVE TEST(test_mode=true)
-        // 거래는 UNSETTLED로 시작 — 온체인 증거 정산(recordTradeSettlement) 전
-        // 이익은 목표 산정에 반영되지 않는다 (보수적 비대칭).
-        settlementStatus: testModeVal ? "UNSETTLED" : "PAPER_ZERO_FEE",
+        // 6H-2A §2·§3: zero-fee 정의 폐기. PAPER 거래는 PAPER_ESTIMATED —
+        // 순 PnL은 net_pnl_estimated_usd(ESTIMATED)로만 이익 적격.
+        // LIVE TEST(test_mode=true)는 UNSETTLED로 시작 — 온체인 증거 정산
+        // (recordTradeSettlement) 전 이익은 목표 산정에 반영되지 않는다.
+        settlementStatus: testModeVal ? "UNSETTLED" : "PAPER_ESTIMATED",
+        ...costFields,
       })
       .onConflictDoUpdate({
         target: tradesTable.id,

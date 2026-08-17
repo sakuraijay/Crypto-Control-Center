@@ -6,12 +6,18 @@
  *  - 다른 market/direction/orderType/상위 주문금액에 quote 재사용 금지
  *  - 음수·NaN·비정상 거부, positive impact는 비용 상쇄에 20%까지만 반영
  *  - LIVE 조회 실패/readonly 플래그 꺼짐 → COST_DATA_UNAVAILABLE (가짜 성공 금지)
- *  - PAPER는 명시적 PAPER_MODEL 비용을 차감 (수수료 0 처리 금지 — §13.15)
+ *  - PAPER도 공식 GMX read-only 입력만 사용 (6H-2A §3 — source=PAPER_GMX_ESTIMATE).
+ *    고정 모델값(구 PAPER_MODEL)·수수료 0 정의는 실행 경로에서 완전 제거됨.
+ *  - 값 누락과 실제 0을 구분 — 필드 부재를 0으로 추정하는 행위 금지.
  */
 
 export const COST_DATA_UNAVAILABLE = 'COST_DATA_UNAVAILABLE';
 
-export type CostSnapshotSource = 'GMX_API' | 'RPC_DATASTORE' | 'PAPER_MODEL';
+/**
+ * PAPER_GMX_ESTIMATE = PAPER 시뮬용, 그러나 데이터 출처는 LIVE와 동일한
+ * 공식 GMX read-only 조회다 (합성/고정 모델 아님).
+ */
+export type CostSnapshotSource = 'GMX_API' | 'RPC_DATASTORE' | 'PAPER_GMX_ESTIMATE';
 
 export interface CostSnapshot {
   market: string;
@@ -25,6 +31,12 @@ export interface CostSnapshot {
   fundingFeeUsd: number;
   borrowingFeeUsd: number;
   estimatedExitFeeUsd: number;
+  /** 청산 시 추정 impact (부호 있음) — 명시적 0 허용, 누락 금지 */
+  estimatedExitPriceImpactUsd: number;
+  /** 보유시간 누적용 시간당 funding rate (notional 대비 비율). null = 데이터 누락(UNAVAILABLE) */
+  fundingRatePerHourFraction: number | null;
+  /** 보유시간 누적용 시간당 borrowing rate. null = 데이터 누락(UNAVAILABLE) */
+  borrowingRatePerHourFraction: number | null;
   totalEstimatedRoundTripCostUsd: number;
   source: CostSnapshotSource;
   blockNumber: number | null;
@@ -89,7 +101,14 @@ export function validateCostSnapshot(
     if (!nonNeg(v)) return { ok: false, reason: `${k} 음수/NaN — 거부` };
   }
   if (!fin(snap.estimatedPriceImpactUsd)) return { ok: false, reason: 'estimatedPriceImpactUsd NaN — 거부' };
+  if (!fin(snap.estimatedExitPriceImpactUsd)) return { ok: false, reason: 'estimatedExitPriceImpactUsd NaN/누락 — 거부 (누락≠0)' };
   if (!fin(snap.totalEstimatedRoundTripCostUsd)) return { ok: false, reason: 'total NaN — 거부' };
+  // rate 필드는 null(누락) 허용 — 단 보유시간 비용 누적 시 UNAVAILABLE 처리됨.
+  // 값이 있으면 음수/NaN 거부 (funding은 이론상 음수 가능하나 보수적으로 0 하한).
+  for (const [k, v] of [['fundingRatePerHourFraction', snap.fundingRatePerHourFraction],
+                        ['borrowingRatePerHourFraction', snap.borrowingRatePerHourFraction]] as const) {
+    if (v !== null && !nonNeg(v)) return { ok: false, reason: `${k} 음수/NaN — 거부` };
+  }
 
   // staleness
   const fetched = Date.parse(snap.fetchedAt);
@@ -98,11 +117,11 @@ export function validateCostSnapshot(
   if (fetched > nowMs + 5_000) return { ok: false, reason: '스냅샷 fetchedAt이 미래 — 거부' };
   if (nowMs > expires) return { ok: false, reason: `stale snapshot (expiresAt=${snap.expiresAt}) — 거부` };
 
-  // positive impact 상쇄 제한
+  // positive impact 상쇄 제한 (진입+청산 impact 합산)
   const otherCosts = snap.positionFeeUsd + snap.executionFeeUsd + snap.fundingFeeUsd
     + snap.borrowingFeeUsd + snap.estimatedExitFeeUsd;
   const impactCost = Math.max(
-    snap.estimatedPriceImpactUsd,
+    snap.estimatedPriceImpactUsd + snap.estimatedExitPriceImpactUsd,
     -(otherCosts * MAX_POSITIVE_IMPACT_OFFSET_FRACTION),
   );
   const effective = otherCosts + impactCost;
@@ -111,60 +130,40 @@ export function validateCostSnapshot(
   return { ok: true, effectiveRoundTripCostUsd: effective, roundTripFraction: effective / snap.notionalUsd };
 }
 
-// ── PAPER 비용 모델 (명시적 — fallback이 아니라 PAPER 시뮬레이션 정의) ──────────
-/**
- * PAPER 시뮬레이션 비용 모델. LIVE 경로에는 절대 사용 금지 —
- * enforceOrderSizing이 source='PAPER_MODEL'을 LIVE에서 거부한다.
- * 값 근거: GMX V2 position fee 0.06%/side, 실행비 고정 $0.20/side,
- * 불리 impact 버퍼 0.05%, funding/borrowing 버퍼 0.05%.
- */
-export const PAPER_COST_MODEL = {
-  positionFeeFractionPerSide: 0.0006,
-  executionFeeUsdPerSide: 0.2,
-  adverseImpactFraction: 0.0005,
-  fundingBorrowingFraction: 0.0005,
-} as const;
+// ── 공식 GMX read-only 비용 스냅샷 조회 (주입식 — 실제 네트워크 호출 금지) ──────
+// PAPER와 LIVE는 동일한 조회 경로를 사용하며 source 태그만 다르다 (6H-2A §3).
+// 구 PAPER_COST_MODEL(고정 모델값)·buildPaperCostSnapshot은 완전 제거됨 —
+// 비용 데이터를 확보하지 못하면 PAPER도 신규 진입하지 않는다 (NO_TRADE).
 
-export function buildPaperCostSnapshot(args: {
-  market: string; isLong: boolean; orderType: 'MarketIncrease' | 'MarketDecrease';
-  notionalUsd: number; now: Date;
-}): CostSnapshot {
-  const m = PAPER_COST_MODEL;
-  const n = args.notionalUsd;
-  const positionFeeUsd = n * m.positionFeeFractionPerSide;
-  const estimatedExitFeeUsd = n * m.positionFeeFractionPerSide;
-  const executionFeeUsd = m.executionFeeUsdPerSide * 2;
-  const estimatedPriceImpactUsd = n * m.adverseImpactFraction;
-  const fundingFeeUsd = n * m.fundingBorrowingFraction / 2;
-  const borrowingFeeUsd = n * m.fundingBorrowingFraction / 2;
-  return {
-    market: args.market, isLong: args.isLong, orderType: args.orderType, notionalUsd: n,
-    positionFeeUsd, executionFeeUsd, estimatedPriceImpactUsd, fundingFeeUsd, borrowingFeeUsd,
-    estimatedExitFeeUsd,
-    totalEstimatedRoundTripCostUsd:
-      positionFeeUsd + executionFeeUsd + estimatedPriceImpactUsd + fundingFeeUsd + borrowingFeeUsd + estimatedExitFeeUsd,
-    source: 'PAPER_MODEL', blockNumber: null, apiTimestamp: null,
-    fetchedAt: args.now.toISOString(),
-    expiresAt: new Date(args.now.getTime() + COST_SNAPSHOT_TTL_MS).toISOString(),
-  };
+/** fetchCosts 결과 — 모든 필수 필드는 명시적 값이어야 함. 누락(undefined)≠0. */
+export interface FetchedCostFields {
+  positionFeeUsd: number; executionFeeUsd: number; estimatedPriceImpactUsd: number;
+  fundingFeeUsd: number; borrowingFeeUsd: number; estimatedExitFeeUsd: number;
+  /** 청산 시 추정 impact — 공식 데이터가 명시적으로 0을 반환한 경우만 0 */
+  estimatedExitPriceImpactUsd: number;
+  /** 시간당 rate — 데이터가 없으면 null (0으로 추정 금지) */
+  fundingRatePerHourFraction: number | null;
+  borrowingRatePerHourFraction: number | null;
+  blockNumber: number | null; apiTimestamp: string | null;
 }
-
-// ── LIVE 비용 스냅샷 조회 (주입식 — 이번 단계 실제 네트워크 호출 금지) ──────────
 
 export interface LiveCostFetchers {
   /** readonly 플래그 상태 — false면 조회 없이 COST_DATA_UNAVAILABLE */
   readonlyEnabled: boolean;
   /** 비용 필드 조회 (mock/fixture 주입) — 하나라도 실패/결측이면 전체 실패 */
-  fetchCosts?: (args: { market: string; isLong: boolean; notionalUsd: number }) => Promise<{
-    positionFeeUsd: number; executionFeeUsd: number; estimatedPriceImpactUsd: number;
-    fundingFeeUsd: number; borrowingFeeUsd: number; estimatedExitFeeUsd: number;
-    blockNumber: number | null; apiTimestamp: string | null;
-  }>;
+  fetchCosts?: (args: { market: string; isLong: boolean; notionalUsd: number }) => Promise<FetchedCostFields>;
 }
 
-export async function fetchLiveCostSnapshot(
+/** 필수 USD 비용 필드 — 누락(undefined/null)을 0으로 추정하는 행위 금지 (§3) */
+const REQUIRED_COST_FIELDS = [
+  'positionFeeUsd', 'executionFeeUsd', 'estimatedPriceImpactUsd',
+  'fundingFeeUsd', 'borrowingFeeUsd', 'estimatedExitFeeUsd', 'estimatedExitPriceImpactUsd',
+] as const;
+
+async function fetchCostSnapshotWithSource(
   args: { market: string; isLong: boolean; orderType: 'MarketIncrease' | 'MarketDecrease'; notionalUsd: number; now: Date },
   fetchers: LiveCostFetchers,
+  source: CostSnapshotSource,
 ): Promise<{ ok: true; snapshot: CostSnapshot } | { ok: false; reason: string }> {
   if (!fetchers.readonlyEnabled) {
     return { ok: false, reason: `${COST_DATA_UNAVAILABLE}: readonly 네트워크 플래그 비활성 — 비용 조회 불가 (가짜 성공 금지)` };
@@ -174,15 +173,29 @@ export async function fetchLiveCostSnapshot(
   }
   try {
     const c = await fetchers.fetchCosts({ market: args.market, isLong: args.isLong, notionalUsd: args.notionalUsd });
+    // 값 누락 ≠ 실제 0 — 필드가 없으면 즉시 실패 (0으로 추정 금지)
+    for (const k of REQUIRED_COST_FIELDS) {
+      if (!fin((c as unknown as Record<string, unknown>)[k])) {
+        return { ok: false, reason: `${COST_DATA_UNAVAILABLE}: ${k} 값 누락/비수치 — 0으로 추정 금지` };
+      }
+    }
+    // rate 필드는 명시적 null(누락 표시)만 허용, undefined는 계약 위반
+    if (c.fundingRatePerHourFraction === undefined || c.borrowingRatePerHourFraction === undefined) {
+      return { ok: false, reason: `${COST_DATA_UNAVAILABLE}: funding/borrowing rate 필드 부재 — 누락은 null로 명시해야 함` };
+    }
     const snap: CostSnapshot = {
       market: args.market, isLong: args.isLong, orderType: args.orderType, notionalUsd: args.notionalUsd,
       positionFeeUsd: c.positionFeeUsd, executionFeeUsd: c.executionFeeUsd,
       estimatedPriceImpactUsd: c.estimatedPriceImpactUsd,
       fundingFeeUsd: c.fundingFeeUsd, borrowingFeeUsd: c.borrowingFeeUsd,
-      estimatedExitFeeUsd: c.estimatedExitFeeUsd, source: 'GMX_API',
+      estimatedExitFeeUsd: c.estimatedExitFeeUsd,
+      estimatedExitPriceImpactUsd: c.estimatedExitPriceImpactUsd,
+      fundingRatePerHourFraction: c.fundingRatePerHourFraction,
+      borrowingRatePerHourFraction: c.borrowingRatePerHourFraction,
+      source,
       blockNumber: c.blockNumber, apiTimestamp: c.apiTimestamp,
       totalEstimatedRoundTripCostUsd:
-        c.positionFeeUsd + c.executionFeeUsd + c.estimatedPriceImpactUsd
+        c.positionFeeUsd + c.executionFeeUsd + c.estimatedPriceImpactUsd + c.estimatedExitPriceImpactUsd
         + c.fundingFeeUsd + c.borrowingFeeUsd + c.estimatedExitFeeUsd,
       fetchedAt: args.now.toISOString(),
       expiresAt: new Date(args.now.getTime() + COST_SNAPSHOT_TTL_MS).toISOString(),
@@ -193,4 +206,23 @@ export async function fetchLiveCostSnapshot(
   } catch (err) {
     return { ok: false, reason: `${COST_DATA_UNAVAILABLE}: ${sanitizeCostError((err as Error).message)}` };
   }
+}
+
+export async function fetchLiveCostSnapshot(
+  args: { market: string; isLong: boolean; orderType: 'MarketIncrease' | 'MarketDecrease'; notionalUsd: number; now: Date },
+  fetchers: LiveCostFetchers,
+): Promise<{ ok: true; snapshot: CostSnapshot } | { ok: false; reason: string }> {
+  return fetchCostSnapshotWithSource(args, fetchers, 'GMX_API');
+}
+
+/**
+ * PAPER 비용 스냅샷 — LIVE와 동일한 공식 read-only 조회, source만 PAPER_GMX_ESTIMATE.
+ * 조회 실패 시 PAPER도 신규 진입 금지 (NO_TRADE: COST_DATA_UNAVAILABLE).
+ * 네트워크 장애 시 이전 quote fallback 금지 — 호출자는 stale 캐시를 재사용하면 안 된다.
+ */
+export async function fetchPaperCostSnapshot(
+  args: { market: string; isLong: boolean; orderType: 'MarketIncrease' | 'MarketDecrease'; notionalUsd: number; now: Date },
+  fetchers: LiveCostFetchers,
+): Promise<{ ok: true; snapshot: CostSnapshot } | { ok: false; reason: string }> {
+  return fetchCostSnapshotWithSource(args, fetchers, 'PAPER_GMX_ESTIMATE');
 }

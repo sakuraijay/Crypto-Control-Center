@@ -330,6 +330,24 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         ON trades (evidence_tx_hash) WHERE evidence_tx_hash IS NOT NULL;
     `,
   },
+  {
+    name: "0022_trades_paper_cost_binding",
+    sql: `
+      -- 6H-2A §3·§4 — PAPER 추정비용 결속 additive 컬럼.
+      -- PAPER_ZERO_FEE(무비용 정의)는 폐기 — 신규 PAPER 거래는 PAPER_ESTIMATED로
+      -- 저장되며 추정 순 PnL(net_pnl_estimated_usd)이 이익 목표 산정에 사용된다.
+      -- 기존 PAPER_ZERO_FEE 행은 legacy로 잔존 (실행 경로에서 정상 source로 미인정).
+      ALTER TABLE trades
+        ADD COLUMN IF NOT EXISTS cost_source             text,
+        ADD COLUMN IF NOT EXISTS est_entry_cost_usd      numeric(18,8),
+        ADD COLUMN IF NOT EXISTS est_exit_cost_usd       numeric(18,8),
+        ADD COLUMN IF NOT EXISTS est_holding_cost_usd    numeric(18,8),
+        ADD COLUMN IF NOT EXISTS funding_rate_per_hour   numeric(18,12),
+        ADD COLUMN IF NOT EXISTS borrowing_rate_per_hour numeric(18,12),
+        ADD COLUMN IF NOT EXISTS cost_fetched_at         timestamptz,
+        ADD COLUMN IF NOT EXISTS net_pnl_estimated_usd   numeric(18,8);
+    `,
+  },
   // Add future migrations here in chronological order.
 ];
 

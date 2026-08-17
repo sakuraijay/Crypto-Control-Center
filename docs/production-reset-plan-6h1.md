@@ -120,3 +120,40 @@ DB 초기화 후 반드시 Reserved VM 재시작(또는 재배포)으로 워커�
 - trades / ai_decisions / live_approvals 이력 삭제 (감사 기록 보존)
 - execution_intents / relay_* 테이블 접촉 (전부 0행, 접촉 불필요)
 - Secrets / env 변경
+
+## 6H-2A 추가 — 비용/정산 사전 조회 (읽기 전용, 실행 금지)
+
+reset 실행 전, 아래 읽기 전용 조회로 legacy·미정산 상태를 확인한다.
+**이 섹션의 어떤 항목도 자동 실행하지 않는다 — 문서상 계획일 뿐이다.**
+
+```sql
+-- 1) legacy PAPER_ZERO_FEE 행 존재 여부 사전 조회 (신규 기록 경로는 폐지됨)
+SELECT count(*) FROM trades WHERE settlement_status = 'PAPER_ZERO_FEE';
+
+-- 2) settlementStatus별 row count
+SELECT settlement_status, count(*) FROM trades GROUP BY settlement_status;
+
+-- 3) UNSETTLED row 0 확인 — LIVE 미정산 거래가 남아 있으면 canary 부적격
+SELECT count(*) FROM trades
+ WHERE test_mode = true AND settlement_status = 'UNSETTLED';
+
+-- 4) stopCoverage 잔존 PENDING/ACTIVE 확인 (worker_state 'stopCoverageV1')
+SELECT value FROM worker_state WHERE key = 'stopCoverageV1';
+--   → JSON에서 status가 PENDING/FAILED_CLOSING/UNRESOLVED인 항목이 있으면 미해결
+
+-- 5) close-all pending 확인 — /api/executor/status의 closeAllSummary에서
+--   lockRequired=true 또는 pending>0이면 reset 전 운영자 확인 필수
+```
+
+### 비용/정산 데이터가 없을 때의 초기 상태
+
+- trades에 비용 컬럼(cost_source, est_*)이 비어 있는 것은 reset 직후의 정상 상태다.
+- settlementStatus가 전무한(전부 NULL/legacy) 상태에서는 이익이 목표 산정에
+  반영되지 않는다 — 이는 fail-closed 설계이며 오류가 아니다.
+
+### reset 이후 NO_TRADE가 정상임을 명시
+
+reset 직후 Worker는 PAPER 진입 전 `PAPER_GMX_ESTIMATE` 비용 스냅샷 확보를
+요구한다. 비용 조회 경로가 아직 데이터를 확보하지 못한 동안 모든 사이클이
+`NO_TRADE (COST_DATA_UNAVAILABLE)`로 끝나는 것은 **정상 동작**이다.
+비용 확보 전에 0/추정 비용으로 진입을 허용하는 우회는 금지된다.

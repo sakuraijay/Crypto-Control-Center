@@ -32,7 +32,7 @@ export interface EnforcementInput {
   liquidityCapUsd: number | null;
   tierNotionalCapUsd: number;
   defensiveMode: boolean;
-  /** LIVE 경로 여부 — LIVE에서 PAPER_MODEL 스냅샷 거부 */
+  /** LIVE 경로 여부 — LIVE에서 PAPER_GMX_ESTIMATE 등 비-LIVE 스냅샷 거부 */
   liveMode: boolean;
   canaryActive: boolean;
   /** 운영자 승인 상한 (없으면 null) — §11 min() 요소 */
@@ -71,8 +71,15 @@ export function enforceOrderSizing(input: EnforcementInput): EnforcementResult {
   if (!input.costSnapshot) {
     return { ok: false, reason: `${COST_DATA_UNAVAILABLE}: 비용 스냅샷 없음 — OPEN 0회` };
   }
-  if (input.liveMode && input.costSnapshot.source === 'PAPER_MODEL') {
-    return { ok: false, reason: 'LIVE 경로에 PAPER_MODEL 비용 사용 금지 — OPEN 0회' };
+  // source 게이트 (6H-2A §2·§3): LIVE는 실측 소스만, PAPER는 공식 read-only 추정만.
+  // 합성/고정 모델(구 PAPER_MODEL)·미지의 source 문자열은 어느 경로에서도 거부.
+  const src = input.costSnapshot.source as string;
+  if (input.liveMode) {
+    if (src !== 'GMX_API' && src !== 'RPC_DATASTORE') {
+      return { ok: false, reason: `LIVE 경로에 비-LIVE 비용 source(${src}) 사용 금지 — OPEN 0회` };
+    }
+  } else if (src !== 'PAPER_GMX_ESTIMATE' && src !== 'GMX_API' && src !== 'RPC_DATASTORE') {
+    return { ok: false, reason: `PAPER 경로에 허용되지 않은 비용 source(${src}) — OPEN 0회 (고정 모델/zero-fee 금지)` };
   }
   const cost = validateCostSnapshot(input.costSnapshot, {
     market: input.expected.market, isLong: input.expected.isLong,

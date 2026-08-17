@@ -11,8 +11,8 @@
  */
 
 import { Router } from 'express';
-import { and, desc, eq, inArray } from 'drizzle-orm';
-import { db, relayTasksTable, subaccountApprovalSessionsTable } from '@workspace/db';
+import { and, desc, eq, inArray, or } from 'drizzle-orm';
+import { db, relayTasksTable, subaccountApprovalSessionsTable, tradesTable } from '@workspace/db';
 import { requireOperatorAuth } from '../lib/operatorAuthGuard';
 import { createGmxApiTransport, GMX_API_PEERS, type GmxApiTransport } from '../lib/gmxApiTransport';
 import { GMX_API_TRANSPORT_GEN } from '../lib/gmxApiOrders';
@@ -29,7 +29,10 @@ import { getActiveRevokeSession } from '../lib/revokeSession';
 import { resolveGmxLiveRelayConfig } from '../lib/gmxLiveConfig';
 import { isDelegatedSignerEnabled, isSignerInitialized } from '../lib/delegatedSigner';
 import { isLiveTestExecutionLocked } from '../lib/liveTestGate';
-import { isEmergencyStopActive, isReconciled } from '../workers/liveTestExecutor';
+import { isEmergencyStopActive, isReconciled, isStopExecutionAvailable, STOP_EXECUTION_UNAVAILABLE } from '../workers/liveTestExecutor';
+import { listUncovered } from '../lib/stopLossPlan';
+import { loadStopCoverage } from '../workers/liveTestExecutor';
+import { getWorkerStatus } from '../workers/aiWorker';
 import { GMX_DEPLOYMENT_MANIFEST } from '../lib/gmxDeploymentManifest';
 import { APPROVAL_PURPOSE, SESSION_STATUS } from '../lib/ownerApprovalSession';
 import { reconcileGmxApiTasks, makeProductionDeps } from '../lib/gmxApiStatusReconciler';
@@ -163,6 +166,41 @@ async function buildGmxApiStatusSnapshot() {
   }
   if ((unresolvedCount ?? 1) > 0) blockedReasons.push(`UNRESOLVED task ${unresolvedCount ?? '조회 실패'} — 자동 재시도 없음`);
 
+  // ── 6H-2A §10 — Canary 적격 조건 확장 (전부 fail-closed) ────────────────────
+  // stop 실행 능력 (§7) — trigger 주문 경로 미구현 = 부적격
+  const stopExecutionAvailable = isStopExecutionAvailable();
+  if (!stopExecutionAvailable) blockedReasons.push(`${STOP_EXECUTION_UNAVAILABLE} — stop(trigger) 주문 제출 경로 미구현`);
+  // stop 미확보 포지션 0건 필수 (§7)
+  let uncoveredStopCount: number | null = null;
+  try {
+    const cov = await loadStopCoverage();
+    uncoveredStopCount = cov.ok ? listUncovered(cov.map).length : null;
+  } catch { uncoveredStopCount = null; }
+  if ((uncoveredStopCount ?? 1) > 0) blockedReasons.push(`STOP_UNCOVERED ${uncoveredStopCount ?? '조회 실패'}건 — stop 미확보 포지션 존재/조회 실패`);
+  // LIVE 정산 능력 (§5) — reconciliation 미완료/미실행 = 부적격
+  const settlementReconcile = getWorkerStatus().settlementReconcile;
+  const settlementComplete = settlementReconcile !== null && !settlementReconcile.incomplete;
+  if (!settlementComplete) {
+    blockedReasons.push(`LIVE_SETTLEMENT_INCOMPLETE — ${settlementReconcile?.reasons[0] ?? '정산 reconciliation 미실행'}`);
+  }
+  // legacy zero-fee/UNSETTLED LIVE 거래 잔존 0건 필수 (§2·§10)
+  let legacyZeroFeeCount: number | null = null;
+  let unsettledLiveTradeCount: number | null = null;
+  try {
+    const rows = await db.select({ st: tradesTable.settlementStatus, tm: tradesTable.testMode })
+      .from(tradesTable)
+      .where(or(
+        eq(tradesTable.settlementStatus, 'PAPER_ZERO_FEE'),
+        and(eq(tradesTable.testMode, true), eq(tradesTable.settlementStatus, 'UNSETTLED')),
+      ));
+    legacyZeroFeeCount = rows.filter(r => r.st === 'PAPER_ZERO_FEE').length;
+    unsettledLiveTradeCount = rows.filter(r => r.tm === true && r.st === 'UNSETTLED').length;
+  } catch { legacyZeroFeeCount = null; unsettledLiveTradeCount = null; }
+  if ((legacyZeroFeeCount ?? 1) > 0) blockedReasons.push(`legacy PAPER_ZERO_FEE 거래 ${legacyZeroFeeCount ?? '조회 실패'}건 잔존`);
+  if ((unsettledLiveTradeCount ?? 1) > 0) blockedReasons.push(`UNSETTLED LIVE 거래 ${unsettledLiveTradeCount ?? '조회 실패'}건 — 정산 증거 확보 전 canary 부적격`);
+  // 비용 스냅샷 능력 — readonly 조회 경로 활성 필수 (§3; zero-fee/고정 모델 경로는 코드에서 제거됨)
+  if (!readonlyEnabled) blockedReasons.push('COST_DATA_UNAVAILABLE — readonly 비용 조회 경로 비활성');
+
   // readyForControlledCanary — 전 항목 파생값의 논리곱 (fail-closed; 어느 하나
   // null/false면 false). 현 단계는 submissionEnabled=false라 항상 false.
   const readyForControlledCanary =
@@ -170,7 +208,9 @@ async function buildGmxApiStatusSnapshot() {
     !liveLocked && !emergencyStop && reconciled && dbOk &&
     canonicalAuthorized && approvalRemainingOk && approvalSessionReady === true &&
     blockingIntents === 0 && (unresolvedCount ?? 1) === 0 && revoke === false &&
-    gmxConfigOk && dv.ok && feeEstimateFresh;
+    gmxConfigOk && dv.ok && feeEstimateFresh &&
+    stopExecutionAvailable && uncoveredStopCount === 0 && settlementComplete &&
+    legacyZeroFeeCount === 0 && unsettledLiveTradeCount === 0;
 
   return {
     transportGen: GMX_API_TRANSPORT_GEN,
@@ -206,6 +246,12 @@ async function buildGmxApiStatusSnapshot() {
     },
     gmxTaskCounts,
     recentGmxTasks,
+    // ── 6H-2A §10 — canary 적격 조건 확장 관측값 ─────────────────────────────
+    stopExecutionAvailable,
+    uncoveredStopCount,
+    settlementReconcile,
+    legacyZeroFeeCount,
+    unsettledLiveTradeCount,
     readyForControlledCanary,
     // 6G-3 §7 — prepare 단계 관측·차단 사유 (조회 전용)
     prepareStageCounts,

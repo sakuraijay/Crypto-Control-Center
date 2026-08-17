@@ -48,11 +48,24 @@ export const tradesTable = pgTable("trades", {
   borrowingFeeUsd:  numeric("borrowing_fee_usd", { precision: 18, scale: 8 }),
   /** 실제 순 PnL = gross − 모든 수수료 − impact */
   netPnlUsd:        numeric("net_pnl_usd",       { precision: 18, scale: 8 }),
-  /** 'UNSETTLED' | 'SETTLED' | 'PAPER_ZERO_FEE' — UNSETTLED 이익은 목표 미반영 */
+  /** 'UNSETTLED' | 'SETTLED' | 'PAPER_ESTIMATED' — UNSETTLED 이익은 목표 미반영.
+   *  ('PAPER_ZERO_FEE'는 6H-2A에서 폐기된 legacy 값 — 과거 행에만 잔존, 실행 경로 사용 금지) */
   settlementStatus: text("settlement_status").notNull().default("UNSETTLED"),
   settledAt:        timestamp("settled_at", { withTimezone: true }),
   /** 온체인 정산 증거 tx hash — 동일 증거 이중 정산 금지 (unique partial index) */
   evidenceTxHash:   text("evidence_tx_hash"),
+
+  // ── PAPER 추정비용 결속 (6H-2A §3·§4 — additive, nullable) ────────────────
+  /** 'PAPER_GMX_ESTIMATE' — null = 비용 불명 (이익 목표 미반영) */
+  costSource:            text("cost_source"),
+  estEntryCostUsd:       numeric("est_entry_cost_usd",   { precision: 18, scale: 8 }),
+  estExitCostUsd:        numeric("est_exit_cost_usd",    { precision: 18, scale: 8 }),
+  estHoldingCostUsd:     numeric("est_holding_cost_usd", { precision: 18, scale: 8 }),
+  fundingRatePerHour:    numeric("funding_rate_per_hour",   { precision: 18, scale: 12 }),
+  borrowingRatePerHour:  numeric("borrowing_rate_per_hour", { precision: 18, scale: 12 }),
+  costFetchedAt:         timestamp("cost_fetched_at", { withTimezone: true }),
+  /** ESTIMATED 순 PnL = gross − 추정 진입/청산/보유 비용 (SETTLED 아님) */
+  netPnlEstimatedUsd:    numeric("net_pnl_estimated_usd", { precision: 18, scale: 8 }),
 });
 
 export const insertTradeSchema = createInsertSchema(tradesTable).omit({ createdAt: true });

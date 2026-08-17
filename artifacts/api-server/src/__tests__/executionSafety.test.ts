@@ -179,6 +179,11 @@ beforeEach(() => {
   intentState.markSubmittedOk = true;
   for (const m of Object.values(intentMocks)) m?.mockClear?.();
 });
+beforeEach(async () => {
+  // 6H-2A §7 — stop 능력 게이트는 별도 테스트에서 검증; 여기서는 통과 상태로 주입
+  const { __setStopExecutionAvailabilityForTests } = await import('../workers/liveTestExecutor');
+  __setStopExecutionAvailabilityForTests(true);
+});
 afterAll(() => {
   for (const k of ENV_KEYS) {
     if (savedEnv[k] === undefined) delete process.env[k];
@@ -298,8 +303,10 @@ describe('executeLiveTestOrder — 중앙 게이트 통합 (writeContract 도달
         costSnapshot: {
           market: '0xM', isLong: true, orderType: 'MarketIncrease' as const,
           notionalUsd: 10, positionFeeUsd: 0.006, executionFeeUsd: 0.2,
-          estimatedPriceImpactUsd: 0.005, fundingFeeUsd: 0.005, borrowingFeeUsd: 0,
-          estimatedExitFeeUsd: 0.206, totalEstimatedRoundTripCostUsd: 0.422,
+          estimatedPriceImpactUsd: 0.005, estimatedExitPriceImpactUsd: 0.005,
+          fundingFeeUsd: 0.005, borrowingFeeUsd: 0,
+          fundingRatePerHourFraction: 0.00001, borrowingRatePerHourFraction: 0.000005,
+          estimatedExitFeeUsd: 0.206, totalEstimatedRoundTripCostUsd: 0.427,
           source: 'GMX_API' as const, blockNumber: null, apiTimestamp: null,
           fetchedAt: new Date(now).toISOString(), expiresAt: new Date(now + 60_000).toISOString(),
         },
@@ -388,6 +395,51 @@ describe('executeLiveTestOrder — 중앙 게이트 통합 (writeContract 도달
     const r2 = await executeLiveTestOrder(orderParams());
     expect(r2.ok).toBe(false);
     expect(r2.error).toMatch(/reconciliation/);
+  });
+
+  // ── 6H-2A §7/§11-12·13 — stop 실행 능력 게이트 ─────────────────────────────
+  it('stop 실행 능력 미가용 → 실제 OPEN 차단 (중앙 게이트 이전, fail-closed)', async () => {
+    process.env.LIVE_TEST_EXECUTION_LOCKED = 'false';
+    process.env.WORKER_ENGINE_MODE = 'LIVE';
+    process.env.DELEGATED_SIGNER_ENABLED = 'true';
+    process.env.GMX_RPC_URL = 'https://rpc';
+    const { executeLiveTestOrder, __setStopExecutionAvailabilityForTests, STOP_EXECUTION_UNAVAILABLE } =
+      await import('../workers/liveTestExecutor');
+    __setStopExecutionAvailabilityForTests(false);
+    const r = await executeLiveTestOrder(orderParams());
+    expect(r.ok).toBe(false);
+    expect(r.txHash).toBeNull();
+    expect(r.error).toContain(STOP_EXECUTION_UNAVAILABLE);
+    // 감사로그 FAILED 기록 확인
+    const auditWrites = savedValues.filter(v => v.key === 'orderAuditLog');
+    const entries = JSON.parse(auditWrites[auditWrites.length - 1].value) as { status: string; error: string }[];
+    expect(entries[entries.length - 1].status).toBe('FAILED');
+  });
+
+  it('stop 미가용이어도 잠금(시뮬) 경로는 영향 없음 — stop 게이트는 실제 실행에만 적용', async () => {
+    process.env.LIVE_TEST_EXECUTION_LOCKED = 'true';
+    process.env.WORKER_ENGINE_MODE = 'LIVE';
+    const { executeLiveTestOrder, __setStopExecutionAvailabilityForTests } =
+      await import('../workers/liveTestExecutor');
+    __setStopExecutionAvailabilityForTests(false);
+    const r = await executeLiveTestOrder(orderParams());
+    expect(r.simulated).toBe(true);
+    expect(r.ok).toBe(true);
+  });
+
+  it('stop 미가용이어도 close(청산)는 stop 게이트에 걸리지 않는다 (§11-13: stop 실패→close 허용)', async () => {
+    process.env.LIVE_TEST_EXECUTION_LOCKED = 'false';
+    process.env.WORKER_ENGINE_MODE = 'PAPER'; // 중앙 게이트에서 차단되지만 stop 게이트 사유가 아님을 확인
+    process.env.GMX_RPC_URL = 'https://rpc';
+    const { closeLiveTestPosition, __setStopExecutionAvailabilityForTests, STOP_EXECUTION_UNAVAILABLE } =
+      await import('../workers/liveTestExecutor');
+    __setStopExecutionAvailabilityForTests(false);
+    const r = await closeLiveTestPosition({
+      decisionId: 'c-stop', cycleNumber: 1, symbol: 'ETH', marketAddress: '0xM',
+      isLong: true, sizeUsd: 10, currentPriceUsd: 3000, mainAddress: '0xMain',
+      accumLossUsd: 0, dbOk: true, liveTestMode: true,
+    });
+    expect(r.error ?? '').not.toContain(STOP_EXECUTION_UNAVAILABLE);
   });
 
   it('closeLiveTestPosition도 동일 중앙 게이트로 차단된다', async () => {
