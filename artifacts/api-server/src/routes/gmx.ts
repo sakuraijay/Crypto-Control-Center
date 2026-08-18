@@ -12,6 +12,53 @@
  */
 
 import { Router } from "express";
+import { createRequire } from "node:module";
+
+// ── #120: 공식 SDK token registry (address→symbol/decimals 결속) ─────────────
+// 과거 심볼 기반 decimals 추측(기본 18)이 XRP(6)/HYPE(8) 가격을 1e10~1e12배
+// 과대 오염시켰다 (upstream /tokens 404 → fallback만 동작). 이제 tokenAddress를
+// 공식 @gmx-io/sdk configs/tokens[42161]에 결속하고, 미등재·심볼 불일치·범위 밖
+// 가격은 tick 자체를 폐기한다 (추측/클램프/0 대체 금지 — fail-closed).
+const _require = createRequire(import.meta.url ?? __filename);
+const { TOKENS: SDK_TOKENS } = _require("@gmx-io/sdk/configs/tokens") as typeof import("@gmx-io/sdk/configs/tokens");
+
+export const PRICE_SOURCE_PIN =
+  "arbitrum-api.gmxinfra.io/prices/tickers(1e30-scale)+@gmx-io/sdk configs/tokens[42161] address-bound decimals";
+
+/** 합리적 USD 가격 범위 — 범위 밖 = 스케일 오염 의심, tick 폐기 (클램프 금지) */
+export const PRICE_SANE_MIN_USD = 1e-9;
+export const PRICE_SANE_MAX_USD = 1e8;
+
+interface SdkTokenBinding { symbol: string; decimals: number; }
+// 주소 하나에 복수 심볼 허용: 공식 tickers는 native 심볼(ETH)을 wrapped 주소(WETH)로
+// 보고한다 — SDK native 항목의 wrappedAddress도 native 심볼로 함께 등록 (추측 아님,
+// SDK registry의 명시 필드 결속).
+const sdkTokensByAddress: Map<string, SdkTokenBinding[]> = (() => {
+  const m = new Map<string, SdkTokenBinding[]>();
+  const add = (addr: string, b: SdkTokenBinding) => {
+    const k = addr.toLowerCase();
+    const arr = m.get(k) ?? [];
+    if (!arr.some((x) => x.symbol === b.symbol)) arr.push(b);
+    m.set(k, arr);
+  };
+  type SdkTokenEntry = { symbol: string; address: string; decimals: number; wrappedAddress?: string; isNative?: boolean };
+  const arb = (SDK_TOKENS as Record<number, SdkTokenEntry[] | Record<string, SdkTokenEntry>>)[42161] ?? [];
+  const list: SdkTokenEntry[] = Array.isArray(arb) ? arb : Object.values(arb);
+  for (const t of list) {
+    if (typeof t?.address !== "string" || typeof t?.symbol !== "string" || !Number.isInteger(t?.decimals)) continue;
+    add(t.address, { symbol: t.symbol, decimals: t.decimals });
+    if (t.isNative && typeof t.wrappedAddress === "string") {
+      add(t.wrappedAddress, { symbol: t.symbol, decimals: t.decimals });
+    }
+  }
+  return m;
+})();
+
+/** #120 계측 — 폐기 사유별 카운터 (0 위장 방지: 폐기는 침묵하지 않고 집계) */
+export const priceTickRejectStats = {
+  unknownAddress: 0, symbolMismatch: 0, badRaw: 0, outOfRange: 0,
+  lastRejectAtMs: 0 as number, lastRejectSymbols: [] as string[],
+};
 
 const router = Router();
 const GMX_API  = "https://arbitrum-api.gmxinfra.io";
@@ -71,12 +118,48 @@ async function loadDecimals(): Promise<Record<string, number>> {
   return decimalsMap;
 }
 
-function convertPrice(raw: string, decimals: number): number {
-  try {
-    return Number(raw) / Math.pow(10, 30 - decimals);
-  } catch {
-    return 0;
-  }
+/** raw 1e30-scale 문자열 → USD. 비정상 입력은 null (0 대체 금지). */
+function convertPrice(raw: string, decimals: number): number | null {
+  if (typeof raw !== "string" || !/^\d+$/.test(raw)) return null;
+  const v = Number(raw) / Math.pow(10, 30 - decimals);
+  return Number.isFinite(v) && v > 0 ? v : null;
+}
+
+/**
+ * #120 — RawTicker 1건을 SDK registry 결속 + 범위 검증으로 변환.
+ * 미등재 주소·심볼 불일치·비정상 raw·범위 밖 가격 = null (tick 폐기, 집계).
+ */
+export function bindAndConvertTick(t: RawTicker, ch: Record<string, number>): PriceTick | null {
+  const reject = (kind: keyof typeof priceTickRejectStats & string) => {
+    (priceTickRejectStats as Record<string, number | unknown>)[kind] =
+      (priceTickRejectStats as unknown as Record<string, number>)[kind] + 1;
+    priceTickRejectStats.lastRejectAtMs = Date.now();
+    const tag = `${t.tokenSymbol}:${kind}`;
+    if (!priceTickRejectStats.lastRejectSymbols.includes(tag)) {
+      priceTickRejectStats.lastRejectSymbols.push(tag);
+      if (priceTickRejectStats.lastRejectSymbols.length > 20) priceTickRejectStats.lastRejectSymbols.shift();
+    }
+    return null;
+  };
+  if (typeof t.tokenAddress !== "string") return reject("unknownAddress");
+  const candidates = sdkTokensByAddress.get(t.tokenAddress.toLowerCase());
+  if (!candidates || candidates.length === 0) return reject("unknownAddress");
+  // 대소문자 차이만 있는 결속 허용 (SDK 'USDC.E' vs tickers 'USDC.e' — 동일 주소·동일 토큰)
+  const sdk = candidates.find((c) => c.symbol.toLowerCase() === String(t.tokenSymbol).toLowerCase());
+  if (!sdk) return reject("symbolMismatch");
+  const minUsd = convertPrice(t.minPrice, sdk.decimals);
+  const maxUsd = convertPrice(t.maxPrice, sdk.decimals);
+  if (minUsd === null || maxUsd === null) return reject("badRaw");
+  if (minUsd < PRICE_SANE_MIN_USD || maxUsd > PRICE_SANE_MAX_USD || maxUsd < minUsd) return reject("outOfRange");
+  return {
+    tokenAddress: t.tokenAddress,
+    tokenSymbol: t.tokenSymbol,
+    priceUsd: minUsd,
+    minPriceUsd: minUsd,
+    maxPriceUsd: maxUsd,
+    change24hPct: ch[t.tokenSymbol] ?? 0,
+    updatedAt: t.updatedAt,
+  };
 }
 
 // ── 24h change cache ──────────────────────────────────────────────────────────
@@ -175,18 +258,14 @@ async function refreshPrices() {
       loadDecimals(),
     ]);
     const ch = change24hCache?.data ?? {};
-    const prices: PriceTick[] = tickers.map(t => {
-      const d = dec[t.tokenSymbol] ?? 18;
-      return {
-        tokenAddress:  t.tokenAddress,
-        tokenSymbol:   t.tokenSymbol,
-        priceUsd:      convertPrice(t.minPrice, d),
-        minPriceUsd:   convertPrice(t.minPrice, d),
-        maxPriceUsd:   convertPrice(t.maxPrice, d),
-        change24hPct:  ch[t.tokenSymbol] ?? 0,
-        updatedAt:     t.updatedAt,
-      };
-    });
+    void dec; // decimals API 맵은 /gmx/tokens 표시용으로만 유지 — 가격 결속은 SDK registry 전용 (#120)
+    const prices: PriceTick[] = [];
+    for (const t of tickers) {
+      const tick = bindAndConvertTick(t, ch);
+      if (tick) prices.push(tick);
+    }
+    // 전량 폐기 = 피드 오염/계약 위반 의심 — 빈 캐시로 교체하지 않고 stale 유지 (0 위장 금지)
+    if (prices.length === 0) return;
     priceCache = { data: prices, expiresAt: Date.now() + 10_000 };
   } catch { /* keep stale cache */ }
 }

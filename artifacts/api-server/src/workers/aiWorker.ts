@@ -277,6 +277,8 @@ class WorkerManager {
   private lastPriceAt: number = 0;
   /** Task #111 — 심볼별 마지막 유효 가격 수신 시각 (per-symbol stale 판정) */
   private priceAtBySymbol = new Map<string, number>();
+  /** #120 — 심볼별 마지막으로 관측한 upstream tick.updatedAt (stale 캐시 재인증 방지) */
+  private lastTickUpdatedAtBySymbol = new Map<string, number>();
 
   /** 가격 폴링 타이머 */
   private pricePollTimer: ReturnType<typeof setInterval> | null = null;
@@ -676,19 +678,30 @@ class WorkerManager {
     const prices = getCachedPrices();
     if (!prices || prices.length === 0) return;
 
-    this.lastPriceAt = Date.now();
+    let anyAdvanced = false;
 
     for (const tick of prices) {
       const sym = tick.tokenSymbol;
       if (!WORKER_SYMBOLS.includes(sym)) continue;
       if (tick.priceUsd <= 0) continue;
 
+      // #120 P0 — stale 캐시 재인증 금지: upstream tick(updatedAt)이 실제로
+      // 전진했을 때만 버퍼·신선도를 갱신한다. 전량 폐기로 캐시가 동결되면
+      // updatedAt이 멈추므로 priceAtBySymbol도 함께 낡아져 freshness 게이트가
+      // 정상적으로 진입/관리를 차단한다.
+      const lastSeen = this.lastTickUpdatedAtBySymbol.get(sym) ?? 0;
+      if (!(tick.updatedAt > lastSeen)) continue;
+      this.lastTickUpdatedAtBySymbol.set(sym, tick.updatedAt);
+      anyAdvanced = true;
+
       const buf = this.priceBuffer.get(sym) ?? [];
       buf.push(tick.priceUsd);
       if (buf.length > MAX_PRICE_HISTORY) buf.shift();
-      this.priceAtBySymbol.set(sym, Date.now()); // Task #111 — per-symbol 신선도
+      this.priceAtBySymbol.set(sym, Date.now()); // Task #111 — per-symbol 신선도 (새 관측시각)
       this.priceBuffer.set(sym, buf);
     }
+
+    if (anyAdvanced) this.lastPriceAt = Date.now();
   }
 
   /** 현재 가격 버퍼에서 SymbolAnalysis 배열을 빌드한다. */
