@@ -466,13 +466,24 @@ describe('6I-1 §12 Shadow outcome', () => {
     expect(r.maxAdverseExcursionPct).toBeNull();
   });
 
-  it('stop first-touch — 같은 캔들에서 stop/target 모두 닿으면 보수적으로 STOP', () => {
+  it('6I-2 §7 — 같은 캔들에서 stop/target 모두 닿으면 AMBIGUOUS_INTRABAR (임의 선택 금지)', () => {
     const wild: Candle = { t: base.decidedAtMs + 900_000, o: 100, h: 103, l: 98, c: 100, v: 1 };
     const rest = mkCandles(6, { start: base.decidedAtMs + 2 * 900_000, stepMs: 900_000, base: 100 });
     const r = computeShadowOutcome({ ...base, candlesAfter: [wild, ...rest] });
+    expect(r.firstTouch).toBe('AMBIGUOUS_INTRABAR');
+    expect(r.status).toBe('AMBIGUOUS_INTRABAR');
+    expect(r.complete).toBe(false);                  // 보정 표본으로 세지 않음
+    expect(r.exitPrice).toBe(99);                    // 참고 exit은 보수적 stop
+    expect(r.hypotheticalGrossPnlUsd).toBeCloseTo(-10); // 1% × $1000 (참고값)
+  });
+
+  it('stop만 닿으면 STOP first-touch 유지', () => {
+    const stopOnly: Candle = { t: base.decidedAtMs + 900_000, o: 100, h: 100.5, l: 98, c: 99.5, v: 1 };
+    const rest = mkCandles(6, { start: base.decidedAtMs + 2 * 900_000, stepMs: 900_000, base: 99.5 });
+    const r = computeShadowOutcome({ ...base, candlesAfter: [stopOnly, ...rest] });
     expect(r.firstTouch).toBe('STOP');
-    expect(r.exitPrice).toBe(99);
-    expect(r.hypotheticalGrossPnlUsd).toBeCloseTo(-10); // 1% × $1000
+    expect(r.status).toBe('COMPLETE');
+    expect(r.complete).toBe(true);
   });
 
   it('lookahead 방지 — horizon 경계에 걸친/미폐쇄 캔들은 제외된다', () => {
@@ -531,9 +542,10 @@ describe('6I-1 §12 boundedNum 영속화 직렬화', () => {
 describe('6I-1 §13 Shadow metrics', () => {
   const row = (over?: Partial<ShadowOutcomeRow>): ShadowOutcomeRow => ({
     candidateId: 'x', direction: 'LONG', regime: 'STRONG_BULL', decision: 'SHADOW_ONLY',
-    selected: false, calibratedProbability: null, expectedRMultiple: 1.5,
+    selected: false, rank: null, calibratedProbability: null, expectedRMultiple: 1.5,
     outcome1hNetUsd: 2, outcome4hNetUsd: 5, hypotheticalGrossPnlUsd: 8, hypotheticalTotalCostUsd: 3,
-    maxFavorableExcursionPct: 1, maxAdverseExcursionPct: 0.5, complete: true, ...over,
+    maxFavorableExcursionPct: 1, maxAdverseExcursionPct: 0.5, complete: true,
+    outcomeStatus4h: 'COMPLETE', firstTouch: 'TARGET', ...over,
   });
 
   it('표본 부족 = INSUFFICIENT_SAMPLE (0/정상 위장 금지)', () => {

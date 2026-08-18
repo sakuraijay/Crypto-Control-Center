@@ -14,6 +14,7 @@ export interface ShadowOutcomeRow {
   regime: string;
   decision: string;                       // ELIGIBLE/SHADOW_ONLY/REJECTED/DATA_UNAVAILABLE
   selected: boolean;
+  rank: number | null;
   calibratedProbability: number | null;   // 결정 당시 보정 확률 (대부분 null)
   expectedRMultiple: number | null;
   outcome1hNetUsd: number | null;
@@ -23,6 +24,99 @@ export interface ShadowOutcomeRow {
   maxFavorableExcursionPct: number | null;
   maxAdverseExcursionPct: number | null;
   complete: boolean;
+  outcomeStatus4h: string | null;         // COMPLETE|INCOMPLETE|AMBIGUOUS_INTRABAR|DATA_UNAVAILABLE|null(legacy)
+  firstTouch: string | null;
+}
+
+/** 6I-2 §8 — NO_TRADE counterfactual 분류 */
+export type CounterfactualLabel =
+  | 'CORRECT_REJECTION' | 'MISSED_OPPORTUNITY' | 'RISK_AVOIDED' | 'COST_AVOIDED'
+  | 'DATA_UNAVAILABLE' | 'AMBIGUOUS' | 'INCOMPLETE';
+
+/**
+ * 비선택 상위 후보의 가상 결과 분류 — "안 한 것이 옳았나"를 정직하게 기록.
+ * 순서: 데이터 없음 → 모호 → 미완 → stop 터치(위험 회피) → net>0(기회 상실)
+ *      → gross>0이나 비용 잠식(비용 회피) → 그 외 net≤0(올바른 거부).
+ */
+export function classifyCounterfactual(row: ShadowOutcomeRow): CounterfactualLabel {
+  if (row.outcomeStatus4h === 'DATA_UNAVAILABLE') return 'DATA_UNAVAILABLE';
+  if (row.outcomeStatus4h === 'AMBIGUOUS_INTRABAR' || row.firstTouch === 'AMBIGUOUS_INTRABAR') return 'AMBIGUOUS';
+  if (!row.complete) return 'INCOMPLETE';
+  if (row.firstTouch === 'STOP') return 'RISK_AVOIDED';
+  if (row.outcome4hNetUsd !== null && row.outcome4hNetUsd > 0) return 'MISSED_OPPORTUNITY';
+  if (row.outcome4hNetUsd === null) {
+    // net 미상(비용 미상) — gross만으로 이익 단정 금지
+    return row.hypotheticalGrossPnlUsd !== null && row.hypotheticalGrossPnlUsd > 0 ? 'INCOMPLETE' : 'CORRECT_REJECTION';
+  }
+  if (row.hypotheticalGrossPnlUsd !== null && row.hypotheticalGrossPnlUsd > 0 && row.outcome4hNetUsd <= 0) return 'COST_AVOIDED';
+  return 'CORRECT_REJECTION';
+}
+
+export interface CounterfactualSummary {
+  evaluated: number;
+  byLabel: Record<CounterfactualLabel, number>;
+}
+
+/** 비선택 rank=1 후보(NO_TRADE 사이클의 top rejected)만 대상으로 counterfactual 집계 */
+export function summarizeCounterfactuals(rows: ShadowOutcomeRow[]): CounterfactualSummary {
+  const byLabel: Record<CounterfactualLabel, number> = {
+    CORRECT_REJECTION: 0, MISSED_OPPORTUNITY: 0, RISK_AVOIDED: 0, COST_AVOIDED: 0,
+    DATA_UNAVAILABLE: 0, AMBIGUOUS: 0, INCOMPLETE: 0,
+  };
+  const targets = rows.filter(r => !r.selected && r.rank === 1);
+  for (const r of targets) byLabel[classifyCounterfactual(r)]++;
+  return { evaluated: targets.length, byLabel };
+}
+
+/** 6I-2 §10 — 표본 성숙도 정책 (자동 승격·자율 LIVE 구조적 금지) */
+export const RESEARCH_PREVIEW_MIN = 30;
+export const MANUAL_REVIEW_MIN = 100;
+
+export interface ShadowMaturity {
+  sampleCount4h: number;                  // 4h COMPLETE만 (1h 혼합 금지)
+  ambiguousCount: number;
+  directionCounts: { LONG: number; SHORT: number };
+  regimeCounts: Record<string, number>;
+  researchPreviewEligible: boolean;       // ≥30 — 연구용 미리보기만
+  manualReviewSampleEligible: boolean;    // ≥100 — 수동 검토 최소선
+  calibrationEligible: boolean;           // ≥100 + 방향·regime 편중 아님
+  autoPromotionAllowed: false;
+  autonomousLiveEligible: false;
+  blockedReasons: string[];
+}
+
+export function computeShadowMaturity(rows: ShadowOutcomeRow[]): ShadowMaturity {
+  // 4h COMPLETE 표본만 — AMBIGUOUS/INCOMPLETE/1h-only는 세지 않음
+  const complete4h = rows.filter(r => r.complete && (r.outcomeStatus4h === null || r.outcomeStatus4h === 'COMPLETE'));
+  const ambiguousCount = rows.filter(r => r.outcomeStatus4h === 'AMBIGUOUS_INTRABAR').length;
+  const dirCounts = { LONG: complete4h.filter(r => r.direction === 'LONG').length, SHORT: complete4h.filter(r => r.direction === 'SHORT').length };
+  const regimeCounts: Record<string, number> = {};
+  for (const r of complete4h) regimeCounts[r.regime] = (regimeCounts[r.regime] ?? 0) + 1;
+
+  const n = complete4h.length;
+  const blockedReasons: string[] = [];
+  if (n < RESEARCH_PREVIEW_MIN) blockedReasons.push(`표본 부족: ${n} < ${RESEARCH_PREVIEW_MIN} (research preview 최소)`);
+  if (n < MANUAL_REVIEW_MIN) blockedReasons.push(`표본 부족: ${n} < ${MANUAL_REVIEW_MIN} (수동 검토 최소)`);
+  // 방향 편중: 한 방향이 85% 초과 시 보정 검토 불가
+  const dirSkewed = n > 0 && Math.max(dirCounts.LONG, dirCounts.SHORT) / n > 0.85;
+  if (dirSkewed) blockedReasons.push('방향 편중 — 한 방향이 85% 초과 (보정 검토 불가)');
+  // regime 편중: 단일 regime이 90% 초과
+  const regimeSkewed = n > 0 && Math.max(0, ...Object.values(regimeCounts)) / n > 0.9;
+  if (regimeSkewed) blockedReasons.push('regime 편중 — 단일 regime 90% 초과 (보정 검토 불가)');
+  blockedReasons.push('자동 승격·자율 LIVE는 정책상 항상 차단 (수동 검토 전용)');
+
+  return {
+    sampleCount4h: n,
+    ambiguousCount,
+    directionCounts: dirCounts,
+    regimeCounts,
+    researchPreviewEligible: n >= RESEARCH_PREVIEW_MIN,
+    manualReviewSampleEligible: n >= MANUAL_REVIEW_MIN,
+    calibrationEligible: n >= MANUAL_REVIEW_MIN && !dirSkewed && !regimeSkewed,
+    autoPromotionAllowed: false,
+    autonomousLiveEligible: false,
+    blockedReasons,
+  };
 }
 
 export interface ShadowMetricsSufficient {

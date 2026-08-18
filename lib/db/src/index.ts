@@ -488,6 +488,31 @@ const MIGRATIONS: { name: string; sql: string }[] = [
       CREATE UNIQUE INDEX IF NOT EXISTS uq_shadow_outcome_candidate ON shadow_outcomes (candidate_id);
     `,
   },
+  {
+    name: "0027_intel_runtime_hardening",
+    sql: `
+      -- 6I-2 §3·§7 — cycle 상태·durable identity·outcome per-horizon 상태 (additive, idempotent).
+      ALTER TABLE market_intelligence_snapshots ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'SUCCESS';
+      ALTER TABLE market_intelligence_snapshots ADD COLUMN IF NOT EXISTS started_at_ms numeric(16,0);
+      ALTER TABLE market_intelligence_snapshots ADD COLUMN IF NOT EXISTS finished_at_ms numeric(16,0);
+      -- 결정적 cycle window key 중복 방어 (재시작 시 같은 window 재실행 idempotent)
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_mi_snapshots_cycle ON market_intelligence_snapshots (cycle_id);
+
+      ALTER TABLE shadow_outcomes ADD COLUMN IF NOT EXISTS outcome_status_1h text;
+      ALTER TABLE shadow_outcomes ADD COLUMN IF NOT EXISTS outcome_status_4h text;
+      ALTER TABLE shadow_outcomes ADD COLUMN IF NOT EXISTS first_touch_1h text;
+      ALTER TABLE shadow_outcomes ADD COLUMN IF NOT EXISTS outcome_1h_gross_usd numeric(18,6);
+      ALTER TABLE shadow_outcomes ADD COLUMN IF NOT EXISTS decision_observed_at_ms numeric(16,0);
+      ALTER TABLE shadow_outcomes ADD COLUMN IF NOT EXISTS horizon_end_1h_ms numeric(16,0);
+      ALTER TABLE shadow_outcomes ADD COLUMN IF NOT EXISTS horizon_end_4h_ms numeric(16,0);
+      ALTER TABLE shadow_outcomes ADD COLUMN IF NOT EXISTS source_candle_from_ms numeric(16,0);
+      ALTER TABLE shadow_outcomes ADD COLUMN IF NOT EXISTS source_candle_to_ms numeric(16,0);
+      ALTER TABLE shadow_outcomes ADD COLUMN IF NOT EXISTS entry_reference_price numeric(18,8);
+      ALTER TABLE shadow_outcomes ADD COLUMN IF NOT EXISTS data_coverage numeric(8,6);
+      ALTER TABLE shadow_outcomes ADD COLUMN IF NOT EXISTS attempts integer NOT NULL DEFAULT 0;
+      ALTER TABLE shadow_outcomes ADD COLUMN IF NOT EXISTS completed_at timestamptz;
+    `,
+  },
   // Add future migrations here in chronological order.
 ];
 

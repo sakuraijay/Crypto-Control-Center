@@ -6,26 +6,49 @@
  * 조회 실패 = 오류 응답 (가짜 0/NORMAL 금지). 쓰기/실행 엔드포인트 없음.
  */
 import { Router, type IRouter } from 'express';
-import { getIntelServiceState } from '../intel/intelService';
-import { loadShadowOutcomeRows } from '../intel/shadowStore';
-import { computeShadowMetrics } from '../intel/shadowMetrics';
+import { getIntelServiceState, getIntelRuntimeStats } from '../intel/intelService';
+import { loadShadowOutcomeRows, getEnrichmentBacklog } from '../intel/shadowStore';
+import { computeShadowMetrics, computeShadowMaturity, summarizeCounterfactuals } from '../intel/shadowMetrics';
 import { db, marketIntelligenceSnapshotsTable, opportunityCandidatesTable } from '@workspace/db';
 import { desc, eq } from 'drizzle-orm';
 
 const router: IRouter = Router();
+
+/** 6I-2 §11 — MI Runtime 관측치 (메모리 저장 상태만, 외부 호출 0회) */
+function runtimeBlock() {
+  const s = getIntelServiceState();
+  const stats = getIntelRuntimeStats();
+  return {
+    mode: 'SHADOW_ONLY' as const,
+    inFlight: s.inFlight,
+    currentCycleId: s.currentCycleId,
+    skippedInFlight: s.skippedInFlight,
+    timeoutCount: s.timeoutCount,
+    failedCount: s.failedCount,
+    shutdownRequested: s.shutdownRequested,
+    lastAttempt: s.lastAttempt,
+    lastRecordStale: s.lastRecordStale,
+    requestStats: stats.candleFetch,
+    dataSourceStats: stats.dataSource,
+  };
+}
 
 router.get('/market-intelligence/status', (_req, res) => {
   const s = getIntelServiceState();
   if (!s.lastRecord) {
     return res.status(200).json({
       available: false,
+      mode: 'SHADOW_ONLY',
       reason: s.lastError ?? 'intel 사이클 미실행 — Worker 기동 후 첫 사이클 대기',
       cycleCount: s.cycleCount,
+      runtime: runtimeBlock(),
     });
   }
   const r = s.lastRecord;
   return res.json({
     available: true,
+    mode: 'SHADOW_ONLY',
+    stale: s.lastRecordStale,
     cycleId: r.cycleId,
     at: new Date(r.nowMs).toISOString(),
     universeCount: r.universeCount,
@@ -46,7 +69,23 @@ router.get('/market-intelligence/status', (_req, res) => {
     lastError: s.lastError,
     lastEnrichment: s.lastEnrichment,
     snapshotHash: r.snapshotHash,
+    runtime: runtimeBlock(),
   });
+});
+
+/** 6I-2 §11 — Outcome Enrichment 상태 (DB 저장 상태만, 외부 호출 0회) */
+router.get('/shadow/enrichment', async (_req, res) => {
+  try {
+    const s = getIntelServiceState();
+    const backlog = await getEnrichmentBacklog(Date.now());
+    return res.json({
+      mode: 'SHADOW_ONLY',
+      lastRun: s.lastEnrichment,
+      backlog,
+    });
+  } catch (e) {
+    return res.status(500).json({ error: 'enrichment 상태 조회 실패', reason: e instanceof Error ? e.message : 'unknown' });
+  }
 });
 
 router.get('/opportunities/latest', async (_req, res) => {
@@ -90,7 +129,13 @@ router.get('/shadow/metrics', async (_req, res) => {
     const rows = await loadShadowOutcomeRows();
     const s = getIntelServiceState();
     const metrics = computeShadowMetrics(rows, { cycleCount: s.cycleCount, noTradeCycles: s.noTradeCycles });
-    return res.json(metrics);
+    // 6I-2 §8·§10 — counterfactual + 표본 성숙도 (승격 플래그는 구조적으로 항상 false)
+    return res.json({
+      mode: 'SHADOW_ONLY',
+      ...metrics,
+      maturity: computeShadowMaturity(rows),
+      counterfactual: summarizeCounterfactuals(rows),
+    });
   } catch (e) {
     return res.status(500).json({ error: 'shadow metrics 조회 실패', reason: e instanceof Error ? e.message : 'unknown' });
   }

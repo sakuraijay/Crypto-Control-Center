@@ -67,6 +67,11 @@ export function MarketIntelligenceCard() {
           {status.reason ?? '첫 사이클 대기 중'}
         </div>
       )}
+      {error === null && status?.stale === true && (
+        <div className="flex items-center gap-2 text-xs text-amber-500" data-testid="text-intel-stale">
+          <AlertTriangle className="h-3 w-3" /> 이후 사이클 실패 — 아래는 마지막 성공 스냅샷(STALE)입니다
+        </div>
+      )}
       {error === null && status?.available && (
         <>
           <div className="grid grid-cols-3 gap-2 text-xs">
@@ -108,6 +113,33 @@ export function MarketIntelligenceCard() {
             사이클 {status.cycleCount}회 · NO_TRADE {status.noTradeCycles}회
           </div>
         </>
+      )}
+      {/* 6I-2 §11 — MI Runtime 관측치 (저장 상태만) */}
+      {error === null && status?.runtime !== undefined && (
+        <div className="text-[11px] text-muted-foreground space-y-0.5 border-t pt-2" data-testid="text-intel-runtime">
+          <div className="flex items-center justify-between">
+            <span>Runtime (SHADOW_ONLY)</span>
+            <span className="font-mono">
+              {status.runtime.inFlight ? `실행 중 ${status.runtime.currentCycleId ?? ''}` : '대기'}
+              {status.runtime.shutdownRequested && ' · 종료 중'}
+            </span>
+          </div>
+          <div className="flex items-center justify-between font-mono">
+            <span>skip(inflight) {status.runtime.skippedInFlight} · timeout {status.runtime.timeoutCount} · 실패 {status.runtime.failedCount}</span>
+          </div>
+          {status.runtime.dataSourceStats && (
+            <div className="font-mono">
+              candle 요청 {status.runtime.dataSourceStats.candleRequests} · 캐시적중 {status.runtime.dataSourceStats.candleCacheHits}
+              {' · '}예산초과 {status.runtime.dataSourceStats.budgetExceededCount} · 429대기 {status.runtime.dataSourceStats.backoffSkips}
+            </div>
+          )}
+          {status.runtime.requestStats && status.runtime.requestStats.http429 > 0 && (
+            <div className="text-amber-500">429 감지 {status.runtime.requestStats.http429}회 — 외부 요청 억제 중</div>
+          )}
+          {status.runtime.lastAttempt?.error && (
+            <div className="text-red-500 truncate">최근 시도 {status.runtime.lastAttempt.status}: {status.runtime.lastAttempt.error}</div>
+          )}
+        </div>
       )}
       <p className="text-[11px] text-muted-foreground border-t pt-2">{INTEL_NOTICE_SHADOW}</p>
     </Card>

@@ -22,6 +22,10 @@ export const marketIntelligenceSnapshotsTable = pgTable("market_intelligence_sna
   noTradeReasons:  text("no_trade_reasons"),
   snapshotHash:    text("snapshot_hash").notNull(),
   fullJson:        text("full_json"),
+  // 6I-2 §3 — cycle 수명주기 상태 (SUCCESS|FAILED|TIMEOUT|BLOCKED)
+  status:          text("status").notNull().default("SUCCESS"),
+  startedAtMs:     numeric("started_at_ms", { precision: 16, scale: 0 }),
+  finishedAtMs:    numeric("finished_at_ms", { precision: 16, scale: 0 }),
 });
 
 export const opportunityCandidatesTable = pgTable("opportunity_candidates", {
@@ -65,7 +69,21 @@ export const shadowOutcomesTable = pgTable("shadow_outcomes", {
   totalCostUsd:    numeric("total_cost_usd", { precision: 18, scale: 6 }),
   maxFavorableExcursionPct: numeric("max_favorable_excursion_pct", { precision: 10, scale: 4 }),
   maxAdverseExcursionPct:   numeric("max_adverse_excursion_pct", { precision: 10, scale: 4 }),
-  firstTouch:      text("first_touch"),                // STOP|TARGET|NONE
+  firstTouch:      text("first_touch"),                // STOP|TARGET|NONE|AMBIGUOUS_INTRABAR
   complete:        boolean("complete").notNull().default(false),
   incompleteReason: text("incomplete_reason"),
+  // 6I-2 §7 — per-horizon 상태·증거 필드
+  outcomeStatus1h: text("outcome_status_1h"),          // COMPLETE|INCOMPLETE|AMBIGUOUS_INTRABAR|DATA_UNAVAILABLE
+  outcomeStatus4h: text("outcome_status_4h"),
+  firstTouch1h:    text("first_touch_1h"),
+  outcome1hGrossUsd: numeric("outcome_1h_gross_usd", { precision: 18, scale: 6 }),
+  decisionObservedAtMs: numeric("decision_observed_at_ms", { precision: 16, scale: 0 }),
+  horizonEnd1hMs:  numeric("horizon_end_1h_ms", { precision: 16, scale: 0 }),
+  horizonEnd4hMs:  numeric("horizon_end_4h_ms", { precision: 16, scale: 0 }),
+  sourceCandleFromMs: numeric("source_candle_from_ms", { precision: 16, scale: 0 }),
+  sourceCandleToMs:   numeric("source_candle_to_ms", { precision: 16, scale: 0 }),
+  entryReferencePrice: numeric("entry_reference_price", { precision: 18, scale: 8 }),
+  dataCoverage:    numeric("data_coverage", { precision: 8, scale: 6 }),
+  attempts:        integer("attempts").notNull().default(0),
+  completedAt:     timestamp("completed_at", { withTimezone: true }),
 });

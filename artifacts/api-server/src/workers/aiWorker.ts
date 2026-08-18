@@ -50,7 +50,7 @@ import {
   type PersistedRiskEngineState,
 } from "../lib/riskEngineState";
 import { manilaDayStartIso, manilaWeekStartIso, msUntilNextManilaDay } from "../lib/manilaTime";
-import { runIntelServiceCycle } from "../intel/intelService";
+import { runIntelServiceCycle, stopIntelService, resumeIntelService } from "../intel/intelService";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -328,6 +328,7 @@ class WorkerManager {
     // 초기 지연 후 사이클 시작 (가격 히스토리 축적 대기)
     this.cycleTimer = setTimeout(() => void this.runCycle(), INITIAL_DELAY_MS);
 
+    resumeIntelService();   // stop() 이후 재기동 시 intel 진입 차단 해제
     console.info('[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링');
   }
 
@@ -335,6 +336,7 @@ class WorkerManager {
     this.active = false;
     if (this.pricePollTimer) { clearInterval(this.pricePollTimer); this.pricePollTimer = null; }
     if (this.cycleTimer)    { clearTimeout(this.cycleTimer);       this.cycleTimer    = null; }
+    stopIntelService();   // 6I-2 §3 — 신규 intel 사이클/enrichment 진입 차단
     console.info('[AIWorker] 정지');
   }
 

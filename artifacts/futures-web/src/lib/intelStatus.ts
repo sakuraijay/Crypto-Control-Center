@@ -13,8 +13,36 @@ export interface IntelRegimeRow {
   tradeAllowed: boolean;
 }
 
+/** 6I-2 §11 — MI Runtime 관측치 (서버 저장 상태만) */
+export interface IntelRuntime {
+  mode: 'SHADOW_ONLY';
+  inFlight: boolean;
+  currentCycleId: string | null;
+  skippedInFlight: number;
+  timeoutCount: number;
+  failedCount: number;
+  shutdownRequested: boolean;
+  lastAttempt: {
+    cycleId: string; windowKey: number; status: string;
+    startedAtMs: number; finishedAtMs: number | null; error: string | null;
+  } | null;
+  lastRecordStale: boolean;
+  requestStats?: {
+    requests: number; ok: number; http429: number; http5xx: number;
+    timeouts: number; invalidPayload: number; maxLatencyMs: number; totalLatencyMs: number;
+  } | null;
+  dataSourceStats?: {
+    candleRequests: number; candleCacheHits: number; candleCacheMisses: number;
+    candleDeduped: number; marketsRequests: number; marketsCacheHits: number;
+    budgetExceededCount: number; backoffSkips: number;
+  } | null;
+}
+
 export interface IntelStatus {
   available: boolean;
+  mode?: 'SHADOW_ONLY';
+  stale?: boolean;
+  runtime?: IntelRuntime;
   reason?: string;
   cycleId?: string;
   at?: string;
@@ -59,9 +87,50 @@ export interface OpportunitiesLatest {
   candidates: OpportunityRow[];
 }
 
+/** 6I-2 §10 — 표본 성숙도 (승격 플래그는 항상 false) */
+export interface ShadowMaturity {
+  sampleCount4h: number;
+  ambiguousCount: number;
+  directionCounts: { LONG: number; SHORT: number };
+  regimeCounts: Record<string, number>;
+  researchPreviewEligible: boolean;
+  manualReviewSampleEligible: boolean;
+  calibrationEligible: boolean;
+  autoPromotionAllowed: false;
+  autonomousLiveEligible: false;
+  blockedReasons: string[];
+}
+
+export interface CounterfactualSummary {
+  evaluated: number;
+  byLabel: Record<string, number>;
+}
+
 export type ShadowMetricsResponse =
-  | { status: 'INSUFFICIENT_SAMPLE'; sampleCount: number; required: number; autoPromotionAllowed: false }
-  | ({ status: 'OK'; sampleCount: number; autoPromotionAllowed: false } & Record<string, unknown>);
+  | ({ status: 'INSUFFICIENT_SAMPLE'; sampleCount: number; required: number; autoPromotionAllowed: false } & ShadowMetricsExtras)
+  | ({ status: 'OK'; sampleCount: number; autoPromotionAllowed: false } & ShadowMetricsExtras & Record<string, unknown>);
+
+export interface ShadowMetricsExtras {
+  mode?: 'SHADOW_ONLY';
+  maturity?: ShadowMaturity;
+  counterfactual?: CounterfactualSummary;
+}
+
+/** 6I-2 §11 — Outcome Enrichment 상태 */
+export interface EnrichmentStatus {
+  mode: 'SHADOW_ONLY';
+  lastRun: {
+    scanned: number; enriched: number; enriched1h: number;
+    ambiguous: number; incomplete: number; exhausted: number; atMs: number;
+  } | null;
+  backlog: {
+    dueCount: number;
+    oldestPendingDecidedAtMs: number | null;
+    terminalCount: number;
+    ambiguousCount: number;
+    complete4hCount: number;
+  };
+}
 
 async function getJson<T>(path: string): Promise<T> {
   const r = await fetch(apiUrl(path));
@@ -72,6 +141,7 @@ async function getJson<T>(path: string): Promise<T> {
 export const fetchIntelStatus = () => getJson<IntelStatus>('market-intelligence/status');
 export const fetchOpportunitiesLatest = () => getJson<OpportunitiesLatest>('opportunities/latest');
 export const fetchShadowMetrics = () => getJson<ShadowMetricsResponse>('shadow/metrics');
+export const fetchEnrichmentStatus = () => getJson<EnrichmentStatus>('shadow/enrichment');
 
 /** §7·§15 — 보정 확률 표시 규칙: null=미보정 문구, 절대 %로 위장 금지 */
 export function formatWinProbability(p: number | null, calibrationStatus: string): string {

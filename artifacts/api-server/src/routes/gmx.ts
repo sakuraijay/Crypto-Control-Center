@@ -619,22 +619,106 @@ router.get("/gmx/tokens", async (_req, res) => {
  * 6I-1 §2 결함 수정: 이전의 random-walk synthetic fallback은 출처 없는 값 생성이자
  * 200 응답으로 실패를 은닉하는 fail-open이었으므로 완전 제거했다.
  */
+/** 6I-2 §4 — candle fetch 계측 (읽기 전용 관측치; 상태 API에서 노출) */
+export interface CandleFetchStats {
+  requests: number;
+  ok: number;
+  http429: number;
+  http5xx: number;
+  httpOther: number;
+  timeouts: number;
+  invalidPayload: number;
+  totalLatencyMs: number;
+  maxLatencyMs: number;
+  lastErrorKind: string | null;
+  last429AtMs: number | null;
+}
+const candleFetchStats: CandleFetchStats = {
+  requests: 0, ok: 0, http429: 0, http5xx: 0, httpOther: 0,
+  timeouts: 0, invalidPayload: 0, totalLatencyMs: 0, maxLatencyMs: 0,
+  lastErrorKind: null, last429AtMs: null,
+};
+export function getCandleFetchStats(): Readonly<CandleFetchStats> {
+  return candleFetchStats;
+}
+
+/** 응답 크기 상한 — 1500 캔들 × ~60byte 여유 포함 */
+const CANDLE_RESPONSE_MAX_BYTES = 512 * 1024;
+const CANDLE_PERIOD_ALLOWLIST = new Set(["1m", "5m", "15m", "1h", "4h", "1d"]);
+
+/**
+ * 6I-2 §5 — 검증된 GMX infrastructure endpoint 계약:
+ *  - host 고정(arbitrum-api.gmxinfra.io, HTTPS) · redirect 금지 · period allowlist
+ *  - 응답 크기 상한 · JSON schema 검증([t,o,h,l,c] 숫자 5개 이상) · 중복 timestamp 제거
+ *  - 최신→과거 역순 응답 → ascending 정렬 (t는 초 단위 open time)
+ *  - 실패 = null (합성 데이터 생성 금지) + 계측만 기록 (응답 원문/URL 로그 금지)
+ */
 export async function fetchGmxCandles(
   symbol: string, period: string, countBack: number,
 ): Promise<{ prices: number[][]; source: "gmx-official-api" } | null> {
   const count = Math.min(Math.max(1, Math.floor(countBack) || 500), 1500);
+  if (!CANDLE_PERIOD_ALLOWLIST.has(period)) {
+    candleFetchStats.invalidPayload++; candleFetchStats.lastErrorKind = "PERIOD_NOT_ALLOWED";
+    return null;
+  }
+  if (!/^[A-Z0-9.]{1,15}$/i.test(symbol)) {
+    candleFetchStats.invalidPayload++; candleFetchStats.lastErrorKind = "SYMBOL_INVALID";
+    return null;
+  }
+  candleFetchStats.requests++;
+  const startedAt = Date.now();
   try {
-    // 공식 GMX API — stats.gmx.io는 DNS 소멸(2026-08 관찰). 응답: {candles:[[t,o,h,l,c],...]} 최신→과거.
-    const url = `${GMX_API_BASE}/prices/candles?tokenSymbol=${symbol}&period=${period}&limit=${count}`;
-    const upstream = await fetch(url, { signal: AbortSignal.timeout(15_000) });
-    if (!upstream.ok) return null;
-    const data = await upstream.json() as { candles?: number[][] };
-    const candles = Array.isArray(data?.candles) ? data.candles : null;
-    if (!candles || candles.length === 0) return null;
-    // 오름차순 정렬(과거→최신) — 기존 consumers(backtest, intel)는 ascending 가정
-    const prices = [...candles].sort((a, b) => a[0] - b[0]);
-    return { prices, source: "gmx-official-api" };
-  } catch {
+    const url = `${GMX_API_BASE}/prices/candles?tokenSymbol=${encodeURIComponent(symbol)}&period=${period}&limit=${count}`;
+    const upstream = await fetch(url, { signal: AbortSignal.timeout(15_000), redirect: "error" });
+    const latency = Date.now() - startedAt;
+    candleFetchStats.totalLatencyMs += latency;
+    candleFetchStats.maxLatencyMs = Math.max(candleFetchStats.maxLatencyMs, latency);
+    if (!upstream.ok) {
+      if (upstream.status === 429) { candleFetchStats.http429++; candleFetchStats.last429AtMs = Date.now(); candleFetchStats.lastErrorKind = "HTTP_429"; }
+      else if (upstream.status >= 500 && upstream.status < 600) { candleFetchStats.http5xx++; candleFetchStats.lastErrorKind = "HTTP_5XX"; }
+      else { candleFetchStats.httpOther++; candleFetchStats.lastErrorKind = `HTTP_${upstream.status}`; }
+      return null;
+    }
+    const text = await upstream.text();
+    if (text.length > CANDLE_RESPONSE_MAX_BYTES) {
+      candleFetchStats.invalidPayload++; candleFetchStats.lastErrorKind = "RESPONSE_TOO_LARGE";
+      return null;
+    }
+    let data: unknown;
+    try { data = JSON.parse(text); } catch {
+      candleFetchStats.invalidPayload++; candleFetchStats.lastErrorKind = "NON_JSON";
+      return null;
+    }
+    const candles = (data as { candles?: unknown })?.candles;
+    if (!Array.isArray(candles) || candles.length === 0) {
+      candleFetchStats.invalidPayload++; candleFetchStats.lastErrorKind = "SCHEMA_MISMATCH";
+      return null;
+    }
+    // schema 검증 + 중복 timestamp 제거 (schema 위반=전체 거부, fail-closed)
+    const seen = new Set<number>();
+    const cleaned: number[][] = [];
+    for (const row of candles) {
+      if (!Array.isArray(row) || row.length < 5 || row.slice(0, 5).some(v => typeof v !== "number" || !Number.isFinite(v))) {
+        candleFetchStats.invalidPayload++; candleFetchStats.lastErrorKind = "SCHEMA_MISMATCH";
+        return null;
+      }
+      if (seen.has(row[0])) continue;   // 중복 candle timestamp 제거
+      seen.add(row[0]);
+      cleaned.push(row as number[]);
+    }
+    if (cleaned.length === 0) { candleFetchStats.invalidPayload++; candleFetchStats.lastErrorKind = "EMPTY_AFTER_DEDUPE"; return null; }
+    // 오름차순 정렬(과거→최신) — consumers(backtest, intel)는 ascending 가정
+    cleaned.sort((a, b) => a[0] - b[0]);
+    candleFetchStats.ok++;
+    candleFetchStats.lastErrorKind = null;
+    return { prices: cleaned, source: "gmx-official-api" };
+  } catch (e) {
+    const latency = Date.now() - startedAt;
+    candleFetchStats.totalLatencyMs += latency;
+    candleFetchStats.maxLatencyMs = Math.max(candleFetchStats.maxLatencyMs, latency);
+    const name = e instanceof Error ? e.name : "";
+    if (name === "TimeoutError" || name === "AbortError") { candleFetchStats.timeouts++; candleFetchStats.lastErrorKind = "TIMEOUT"; }
+    else { candleFetchStats.httpOther++; candleFetchStats.lastErrorKind = "NETWORK"; }
     return null;
   }
 }
