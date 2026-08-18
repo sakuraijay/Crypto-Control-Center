@@ -10,8 +10,15 @@
  *  - expiresAt 최대 1시간 · 서명 deadline 10분 상한 유지
  *  - LIVE 안전 게이트(잠금·주문 제출 비활성)는 본 변경과 무관하게 불변
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { Address } from 'viem';
+
+// CI는 db-free — ownerApprovalSession의 @workspace/db import를 stub (본 테스트는 상수·검증기만 사용)
+vi.mock('@workspace/db', () => ({
+  db: {},
+  subaccountApprovalSessionsTable: {},
+}));
+
 import { APPROVAL_LIMITS } from '../lib/ownerApprovalSession';
 import { validateGmxPreparedApproval } from '../lib/gmxApiApproval';
 import { requiredActionsBeforeOpen, WORST_PATH_ACTIONS, RESERVED_EMERGENCY_ACTIONS } from '../lib/actionBudget';
