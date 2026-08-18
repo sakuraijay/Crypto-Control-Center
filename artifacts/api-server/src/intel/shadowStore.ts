@@ -13,6 +13,7 @@ import { computeShadowOutcome } from './shadowOutcome';
 import { validateCandleSeries } from './candles';
 import { Candle, Timeframe } from './types';
 import { ShadowOutcomeRow } from './shadowMetrics';
+import { CalibrationBucketRaw } from './calibration';
 
 // 컬럼 정밀도 경계 직렬화 — serialize.ts(db-free) 참조. 초과=null 강등, 위장 금지.
 import { boundedNum } from './serialize';
@@ -79,6 +80,7 @@ export async function persistIntelCycle(record: IntelCycleRecord, lifecycle?: { 
         trendScore: c.trendScore, momentumScore: c.momentumScore,
         multiTimeframeAlignment: c.multiTimeframeAlignment, liquidityScore: c.liquidityScore,
         volatilityRisk: c.volatilityRisk, executionRisk: c.executionRisk,
+        calibrationBucket: c.calibrationBucket ?? null,   // 6I-3 — bucket 표본 관측치
       }),
       rank: c.rank,
       selected: record.selected !== null && record.selected.market === c.market && record.selected.direction === c.direction,
@@ -303,6 +305,37 @@ export async function getCompletedSampleCount(): Promise<{ count: number; lastAt
   }).from(shadowOutcomesTable).where(eq(shadowOutcomesTable.complete, true));
   const r = rows[0];
   return { count: r?.count ?? 0, lastAtMs: r?.lastAt ? Number(r.lastAt) : null };
+}
+
+/**
+ * 6I-3 §1 — regime×방향 bucket별 보정 원자료 (4h COMPLETE outcome만).
+ *  - decisive = firstTouch TARGET/STOP; NONE은 별도 카운트 (분모 제외)
+ *  - lookahead 방지: complete=true는 horizon 경과+폐쇄 캔들 판정만 존재 (shadowOutcome 계약)
+ *  - bucket 오염 방지: candidate의 regime/direction 정확 일치 group by
+ */
+export async function getCalibrationBucketStats(): Promise<CalibrationBucketRaw[]> {
+  const rows = await db.select({
+    regime: opportunityCandidatesTable.regime,
+    direction: opportunityCandidatesTable.direction,
+    targetCount: sql<number>`count(*) filter (where ${shadowOutcomesTable.firstTouch} = 'TARGET')::int`,
+    stopCount: sql<number>`count(*) filter (where ${shadowOutcomesTable.firstTouch} = 'STOP')::int`,
+    noneCount: sql<number>`count(*) filter (where ${shadowOutcomesTable.firstTouch} = 'NONE')::int`,
+    lastDecisiveAt: sql<string | null>`max(${shadowOutcomesTable.measuredAtMs}) filter (where ${shadowOutcomesTable.firstTouch} in ('TARGET','STOP'))`,
+  })
+    .from(shadowOutcomesTable)
+    .innerJoin(opportunityCandidatesTable, eq(shadowOutcomesTable.candidateId, opportunityCandidatesTable.id))
+    .where(eq(shadowOutcomesTable.complete, true))
+    .groupBy(opportunityCandidatesTable.regime, opportunityCandidatesTable.direction);
+  return rows
+    .filter(r => r.direction === 'LONG' || r.direction === 'SHORT')
+    .map(r => ({
+      regime: r.regime,
+      direction: r.direction as 'LONG' | 'SHORT',
+      targetCount: r.targetCount ?? 0,
+      stopCount: r.stopCount ?? 0,
+      noneCount: r.noneCount ?? 0,
+      lastDecisiveAtMs: r.lastDecisiveAt !== null && Number.isFinite(Number(r.lastDecisiveAt)) ? Number(r.lastDecisiveAt) : null,
+    }));
 }
 
 /** metrics 계산용 outcome+candidate join 로드 */

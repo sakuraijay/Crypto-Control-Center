@@ -10,9 +10,13 @@
  */
 import { runIntelCycle, IntelCycleRecord } from './intelCycle';
 import { createProductionFetchers, ProductionFetchersHandle, RequestBudgetExceededError, RateLimitBackoffError } from './dataSource';
-import { persistIntelCycle, getCompletedSampleCount, enrichShadowOutcomes, EnrichmentSummary } from './shadowStore';
+import { persistIntelCycle, getCompletedSampleCount, enrichShadowOutcomes, EnrichmentSummary, getCalibrationBucketStats } from './shadowStore';
 import { RankingGates } from './ranking';
 import { getCachedPrices, getCachedChange24h, fetchGmxCandles, getCandleFetchStats } from '../routes/gmx';
+import { calibrateBuckets, BucketCalibration } from './calibration';
+import { buildCandidateCostBreakdown } from './costEngine';
+import { createGmxCostReader, createProductionCostReaderClient, GmxCostReader } from './gmxCostReader';
+import type { CostBreakdownUsd } from './candidate';
 
 export type CycleLifecycleStatus = 'SUCCESS' | 'FAILED' | 'TIMEOUT' | 'BLOCKED' | 'SKIPPED_IN_FLIGHT' | 'SKIPPED_INTERVAL' | 'SKIPPED_SHUTDOWN' | 'SKIPPED_BACKOFF';
 
@@ -62,6 +66,50 @@ function getHandle(): ProductionFetchersHandle {
     getLast429AtMs: () => getCandleFetchStats().last429AtMs,
   });
   return handle;
+}
+
+let costReader: GmxCostReader | null = null;
+function getCostReader(): GmxCostReader {
+  costReader ??= createGmxCostReader({ client: createProductionCostReaderClient() });
+  return costReader;
+}
+
+/**
+ * 6I-3 — regime×방향 bucket 보정 조회 (DB 집계 → db-free 판정).
+ * 조회 실패 = null (전 bucket 미보정 취급, 전역 표본 대체 금지).
+ */
+async function loadCalibrationBuckets(nowMs: number): Promise<Map<string, BucketCalibration> | null> {
+  try {
+    const raws = await getCalibrationBucketStats();
+    return calibrateBuckets(raws, nowMs);
+  } catch (e) {
+    console.warn(`[Intel] bucket 보정 조회 실패 — 전 bucket 미보정 취급: ${e instanceof Error ? e.message : 'unknown'}`);
+    return null;
+  }
+}
+
+/**
+ * 6I-3 — 후보별 실측 비용 (시장·방향·명목 결속). 성분 확보 실패 = null 유지 (fail-closed).
+ */
+async function buildCandidateCost(args: { marketToken: string; symbol: string; isLong: boolean; notionalUsd: number; holdingHours: number }): Promise<CostBreakdownUsd | null> {
+  const nowMs = Date.now();
+  const h = getHandle();
+  const [feeParams, rates, ethTick] = await Promise.all([
+    getCostReader().readMarketFeeParams(args.marketToken, nowMs),
+    h.fetchers.fetchMarketCostInputs ? h.fetchers.fetchMarketCostInputs(args.marketToken) : Promise.resolve(null),
+    h.fetchers.fetchPrice('ETH'),
+  ]);
+  return buildCandidateCostBreakdown({
+    marketToken: args.marketToken,
+    isLong: args.isLong,
+    notionalUsd: args.notionalUsd,
+    holdingHours: args.holdingHours,
+    feeParams,
+    rates,
+    ethPriceUsd: ethTick?.price ?? null,
+    ethPriceObservedAtMs: ethTick?.observedAtMs ?? null,   // freshness=min 결속 (stale 은폐 방지)
+    nowMs,
+  });
 }
 
 /** intel 사이클 최소 간격 — 매매 사이클(60s)보다 낮은 빈도 (외부 조회 절약) */
@@ -125,6 +173,8 @@ export async function runIntelServiceCycle(input: { cycleNum: number; gates: Ran
     const cyclePromise = runIntelCycle({
       fetchers: h.fetchers,
       getCompletedSampleCount,
+      getCalibrationBuckets: loadCalibrationBuckets,
+      buildCandidateCost,
       persist: gatedPersist,
       gates: input.gates,
       nowMs,
@@ -245,6 +295,13 @@ export function __resetIntelServiceForTests(): void {
   state.lastAttempt = null; state.lastWindowKey = null; state.enrichInFlight = false;
   lastEnrichAtMs = 0;
   handle = null;
+  costReader = null;
+}
+
+/** 테스트 전용 — cost reader 주입 */
+export function __setIntelCostReaderForTests(r: GmxCostReader | null): void {
+  if (!(process.env.VITEST || process.env.NODE_ENV === 'test')) return;
+  costReader = r;
 }
 
 /** 테스트 전용 — fetchers handle 주입 */

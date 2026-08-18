@@ -7,7 +7,8 @@
  */
 import { Router, type IRouter } from 'express';
 import { getIntelServiceState, getIntelRuntimeStats } from '../intel/intelService';
-import { loadShadowOutcomeRows, getEnrichmentBacklog } from '../intel/shadowStore';
+import { loadShadowOutcomeRows, getEnrichmentBacklog, getCalibrationBucketStats } from '../intel/shadowStore';
+import { calibrateBuckets } from '../intel/calibration';
 import { computeShadowMetrics, computeShadowMaturity, summarizeCounterfactuals } from '../intel/shadowMetrics';
 import { db, marketIntelligenceSnapshotsTable, opportunityCandidatesTable } from '@workspace/db';
 import { desc, eq } from 'drizzle-orm';
@@ -104,23 +105,56 @@ router.get('/opportunities/latest', async (_req, res) => {
       decision: snap.decision,
       noTradeReasons: snap.noTradeReasons ? JSON.parse(snap.noTradeReasons) : [],
       dataQuality: snap.dataQuality,
-      candidates: candidates.map(c => ({
-        symbol: c.symbol, market: c.marketAddress, direction: c.direction, regime: c.regime,
-        dataQuality: c.dataQuality,
-        rawSignalScore: Number(c.rawSignalScore),
-        // 보정 확률 없음=null 그대로 노출 (가짜 % 금지)
-        winProbability: c.winProbability === null ? null : Number(c.winProbability),
-        calibrationStatus: c.calibrationStatus,
-        expectedNetValueUsd: c.expectedNetValueUsd === null ? null : Number(c.expectedNetValueUsd),
-        expectedRMultiple: c.expectedRMultiple === null ? null : Number(c.expectedRMultiple),
-        uncalibratedRankingScore: c.uncalibratedRankingScore === null ? null : Number(c.uncalibratedRankingScore),
-        totalExpectedCostUsd: c.totalExpectedCostUsd === null ? null : Number(c.totalExpectedCostUsd),
-        rank: c.rank, selected: c.selected, decision: c.decision,
-        rejectionReasons: c.rejectionReasons ? JSON.parse(c.rejectionReasons) : [],
-      })),
+      candidates: candidates.map(c => {
+        // 6I-3 — 저장된 비용 breakdown/bucket 관측치를 그대로 노출 (파싱 실패=null, 가짜 0 금지)
+        let costBreakdown: unknown = null;
+        try { costBreakdown = c.costBreakdownJson ? JSON.parse(c.costBreakdownJson) : null; } catch { costBreakdown = null; }
+        let calibrationBucket: unknown = null;
+        try {
+          const f = c.featureJson ? JSON.parse(c.featureJson) as { calibrationBucket?: unknown } : null;
+          calibrationBucket = f?.calibrationBucket ?? null;
+        } catch { calibrationBucket = null; }
+        return {
+          symbol: c.symbol, market: c.marketAddress, direction: c.direction, regime: c.regime,
+          dataQuality: c.dataQuality,
+          rawSignalScore: Number(c.rawSignalScore),
+          // 보정 확률 없음=null 그대로 노출 (가짜 % 금지)
+          winProbability: c.winProbability === null ? null : Number(c.winProbability),
+          calibrationStatus: c.calibrationStatus,
+          expectedNetValueUsd: c.expectedNetValueUsd === null ? null : Number(c.expectedNetValueUsd),
+          expectedRMultiple: c.expectedRMultiple === null ? null : Number(c.expectedRMultiple),
+          uncalibratedRankingScore: c.uncalibratedRankingScore === null ? null : Number(c.uncalibratedRankingScore),
+          totalExpectedCostUsd: c.totalExpectedCostUsd === null ? null : Number(c.totalExpectedCostUsd),
+          costBreakdown,
+          calibrationBucket,
+          rank: c.rank, selected: c.selected, decision: c.decision,
+          rejectionReasons: c.rejectionReasons ? JSON.parse(c.rejectionReasons) : [],
+        };
+      }),
     });
   } catch (e) {
     return res.status(500).json({ error: '후보 조회 실패', reason: e instanceof Error ? e.message : 'unknown' });
+  }
+});
+
+/**
+ * 6I-3 — regime×방향 bucket 승률 보정 상태 (DB 집계, 외부 호출 0회).
+ * 표본 미달 bucket은 winProbability=null + 사유 그대로 노출 (가짜 50% 금지).
+ */
+router.get('/shadow/calibration', async (_req, res) => {
+  try {
+    const nowMs = Date.now();
+    const raws = await getCalibrationBucketStats();
+    const buckets = [...calibrateBuckets(raws, nowMs).values()]
+      .sort((a, b) => b.decisiveSamples - a.decisiveSamples);
+    return res.json({
+      mode: 'SHADOW_ONLY',
+      atMs: nowMs,
+      requiredSamplesPerBucket: buckets[0]?.requiredSamples ?? 200,
+      buckets,
+    });
+  } catch (e) {
+    return res.status(500).json({ error: 'calibration 조회 실패', reason: e instanceof Error ? e.message : 'unknown' });
   }
 });
 

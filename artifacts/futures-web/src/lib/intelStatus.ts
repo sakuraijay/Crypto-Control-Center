@@ -61,6 +61,34 @@ export interface IntelStatus {
   lastError?: string | null;
 }
 
+/** 6I-3 — 후보 비용 breakdown (성분 null=실측 미확보, 0 위장 금지) */
+export interface CostBreakdownView {
+  entryFeeUsd: number | null;
+  estimatedExitFeeUsd: number | null;
+  fundingCostUsd: number | null;
+  borrowingCostUsd: number | null;
+  priceImpactUsd: number | null;
+  slippageUsd: number | null;
+  gasExecutionFeeUsd: number | null;
+  latencyRiskReserveUsd: number | null;
+  failureRiskReserveUsd: number | null;
+  holdingHoursAssumed: number | null;
+  costBasis: string | null;
+  costSource: string | null;
+  costSnapshotFetchedAtMs: number | null;
+}
+
+/** 6I-3 — regime×방향 bucket 보정 표본 관측치 */
+export interface CalibrationBucketView {
+  key: string;
+  decisiveSamples: number;
+  targetCount: number;
+  stopCount: number;
+  noneCount: number;
+  requiredSamples: number;
+  reason: string | null;
+}
+
 export interface OpportunityRow {
   symbol: string;
   direction: 'LONG' | 'SHORT';
@@ -72,6 +100,9 @@ export interface OpportunityRow {
   expectedNetValueUsd: number | null;
   expectedRMultiple: number | null;
   uncalibratedRankingScore: number | null;
+  totalExpectedCostUsd?: number | null;
+  costBreakdown?: CostBreakdownView | null;
+  calibrationBucket?: CalibrationBucketView | null;
   rank: number | null;
   selected: boolean;
   decision: string;
@@ -148,6 +179,47 @@ export function formatWinProbability(p: number | null, calibrationStatus: string
   if (p === null || calibrationStatus !== 'CALIBRATED') return '미보정 (표본 부족)';
   return `${(p * 100).toFixed(1)}%`;
 }
+
+/** 6I-3 — bucket 표본 진행 표시 (n/200) — 없으면 null 반환 (표시 생략) */
+export function formatBucketSamples(b: CalibrationBucketView | null | undefined): string | null {
+  if (!b) return null;
+  return `${b.decisiveSamples}/${b.requiredSamples} 표본`;
+}
+
+/** 6I-3 — 총비용 표시: null=산출 불가 (누락 성분 0 위장 금지) */
+export function formatTotalCost(v: number | null | undefined): string {
+  if (v === null || v === undefined) return '산출 불가';
+  return `$${v.toFixed(2)}`;
+}
+
+/** 6I-3 — 비용 breakdown 요약 문자열 (null 성분은 '미확보' 표기) */
+export function costComponentLines(c: CostBreakdownView | null | undefined): { label: string; value: string }[] {
+  if (!c) return [];
+  const f = (v: number | null) => (v === null ? '미확보' : `$${v.toFixed(4)}`);
+  return [
+    { label: '진입 수수료', value: f(c.entryFeeUsd) },
+    { label: '청산 수수료', value: f(c.estimatedExitFeeUsd) },
+    { label: 'Funding', value: f(c.fundingCostUsd) },
+    { label: 'Borrowing', value: f(c.borrowingCostUsd) },
+    { label: 'Price impact', value: f(c.priceImpactUsd) },
+    { label: 'Slippage', value: f(c.slippageUsd) },
+    { label: '실행 gas', value: f(c.gasExecutionFeeUsd) },
+    { label: '지연 예비비', value: f(c.latencyRiskReserveUsd) },
+    { label: '실패 예비비', value: f(c.failureRiskReserveUsd) },
+  ];
+}
+
+/** 6I-3 — bucket 보정 상태 응답 */
+export interface CalibrationResponse {
+  mode: 'SHADOW_ONLY';
+  atMs: number;
+  requiredSamplesPerBucket: number;
+  buckets: (CalibrationBucketView & {
+    bucketKey: string; regime: string; direction: 'LONG' | 'SHORT';
+    winProbability: number | null; status: string; lastDecisiveAtMs: number | null;
+  })[];
+}
+export const fetchCalibration = () => getJson<CalibrationResponse>('shadow/calibration');
 
 /** 순기대값 표시 — null=산출 불가 (0으로 위장 금지) */
 export function formatExpectedNetValue(v: number | null): string {

@@ -8,7 +8,8 @@
  */
 import { Candle, Timeframe, TIMEFRAME_MS } from './types';
 import { RawMarketRow } from './universe';
-import { usd30SumToNumber, rate30PerSecToPerHour } from './usd30';
+import { usd30SumToNumber, rate30PerSecToPerHour, parseBigIntStr } from './usd30';
+import type { MarketRateInputs } from './costEngine';
 
 export interface IntelFetchers {
   /** 공식 GMX markets 목록 + 유동성/OI 지표 (실패=null) */
@@ -21,6 +22,11 @@ export interface IntelFetchers {
   fetch24hChange(symbol: string): Promise<number | null>;
   /** funding/borrowing (시간당 비율) — 실측 없으면 null */
   fetchFundingBorrowing(marketAddress: string): Promise<{ fundingPerHour: number; borrowingPerHour: number; observedAtMs: number } | null>;
+  /**
+   * 6I-3 — 비용 산정용 per-side rate + OI(1e30 BigInt) 실측 (markets/info 캐시).
+   * 부분 파싱 실패/만료 = null (부분 데이터 위장 금지). 미구현 fetcher = 비용 UNAVAILABLE.
+   */
+  fetchMarketCostInputs?(marketAddress: string): Promise<MarketRateInputs | null>;
 }
 
 /** bounded concurrency 실행기 */
@@ -108,6 +114,8 @@ export function createProductionFetchers(deps: {
   const now = deps.nowFn ?? Date.now;
   let marketRowsCache: { at: number; value: { rows: RawMarketRow[]; complete: boolean; failureReason: string | null } } | null = null;
   let ratesCache: { at: number; value: Map<string, { fundingPerHour: number; borrowingPerHour: number }> } | null = null;
+  /** 6I-3 — per-side rate + OI(1e30) 비용 입력 캐시 (전 성분 파싱 성공 시에만 기록) */
+  let costInputsCache: { at: number; value: Map<string, Omit<MarketRateInputs, 'observedAtMs'>> } | null = null;
   const candleCache = new Map<string, CandleCacheEntry>();
   const inFlight = new Map<string, Promise<Candle[] | null>>();
   let cycleCandleRequests = 0;
@@ -186,6 +194,7 @@ export function createProductionFetchers(deps: {
         const list = Array.isArray(data) ? data : (data.markets ?? []);
         const ticks = deps.getCachedPrices();
         const rates = new Map<string, { fundingPerHour: number; borrowingPerHour: number }>();
+        const costInputs = new Map<string, Omit<MarketRateInputs, 'observedAtMs'>>();
         const rows: RawMarketRow[] = list.map(m => {
           const symbolRaw = (m['indexTokenSymbol'] ?? m['name'] ?? '') as string;
           const symbol = String(symbolRaw).split('/')[0].trim();
@@ -200,6 +209,18 @@ export function createProductionFetchers(deps: {
           if (f !== null && b !== null) {
             rates.set(marketToken.toLowerCase(), { fundingPerHour: f, borrowingPerHour: b });
           }
+          // 6I-3 비용 입력 — 전 성분 파싱 성공 시에만 기록 (부분 데이터 위장 금지)
+          const fS = rate30PerSecToPerHour(m['fundingRateShort']);
+          const bS = rate30PerSecToPerHour(m['borrowingRateShort']);
+          const oiL = parseBigIntStr(m['openInterestLong']);
+          const oiS = parseBigIntStr(m['openInterestShort']);
+          if (f !== null && fS !== null && b !== null && bS !== null && oiL !== null && oiS !== null && oiL >= 0n && oiS >= 0n && b >= 0 && bS >= 0) {
+            costInputs.set(marketToken.toLowerCase(), {
+              fundingLongPerHour: f, fundingShortPerHour: fS,
+              borrowingLongPerHour: b, borrowingShortPerHour: bS,
+              openInterestLong30: oiL, openInterestShort30: oiS,
+            });
+          }
           return {
             marketToken,
             indexToken: typeof m['indexToken'] === 'string' ? m['indexToken'] as string : null,
@@ -213,6 +234,7 @@ export function createProductionFetchers(deps: {
           };
         });
         ratesCache = { at: nowMs, value: rates };
+        costInputsCache = { at: nowMs, value: costInputs };
         const value = { rows, complete: true, failureReason: null };
         marketRowsCache = { at: nowMs, value };
         return value;
@@ -242,6 +264,14 @@ export function createProductionFetchers(deps: {
       const r = ratesCache.value.get(marketAddress.toLowerCase());
       if (!r) return null;
       return { fundingPerHour: r.fundingPerHour, borrowingPerHour: r.borrowingPerHour, observedAtMs: ratesCache.at };
+    },
+
+    async fetchMarketCostInputs(marketAddress) {
+      // 만료/부재 = null (stale 비용 입력 위장 금지)
+      if (!costInputsCache || now() - costInputsCache.at > RATES_CACHE_TTL_MS) return null;
+      const c = costInputsCache.value.get(marketAddress.toLowerCase());
+      if (!c) return null;
+      return { ...c, observedAtMs: costInputsCache.at };
     },
   };
 

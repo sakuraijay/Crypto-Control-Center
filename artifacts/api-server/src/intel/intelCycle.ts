@@ -18,11 +18,22 @@ import {
 } from './candidate';
 import { rankAndSelect, RankingGates, RankingResult } from './ranking';
 import { IntelFetchers, mapBounded } from './dataSource';
+import { BucketCalibration, bucketKeyOf, emptyBucket } from './calibration';
 
 export interface IntelCycleDeps {
   fetchers: IntelFetchers;
   /** 완료 shadow 표본 수 조회 (보정 상태 판정용) */
   getCompletedSampleCount(): Promise<{ count: number; lastAtMs: number | null }>;
+  /**
+   * 6I-3 — regime×방향 bucket 보정 조회. 미제공/실패(null)=전 bucket 미보정 취급
+   * (fail-closed: 승률 null 유지, 전역 표본수 대체 금지)
+   */
+  getCalibrationBuckets?(nowMs: number): Promise<Map<string, BucketCalibration> | null>;
+  /**
+   * 6I-3 — 후보별 실측 비용 breakdown (시장·방향·명목 결속). 미제공/실패(null)=
+   * 비용 UNAVAILABLE 유지 (0 대체 금지 → ranking에서 DATA_UNAVAILABLE 강등)
+   */
+  buildCandidateCost?(args: { marketToken: string; symbol: string; isLong: boolean; notionalUsd: number; holdingHours: number }): Promise<CostBreakdownUsd | null>;
   /** 저장 — 실패 시 throw (사이클 BLOCKED) */
   persist(result: IntelCycleRecord): Promise<void>;
   gates: RankingGates;
@@ -57,6 +68,10 @@ export const CANDIDATE_ASSUMPTIONS = Object.freeze({
   candleCount: 96,                   // 24h
   candleMinCount: 40,
   concurrency: 3,
+  /** funding/borrowing 비용 산정 보유시간 가정 — 4h (shadow outcome horizon과 일치) */
+  holdingHours: 4,
+  /** 비용 조회 bounded concurrency (RPC 폭주 방지) */
+  costConcurrency: 2,
 });
 
 function buildSnapshot(m: ScannedMarket, candles: Candle[] | null, price: { price: number; observedAtMs: number } | null, change24h: number | null, nowMs: number): MarketSnapshot {
@@ -109,7 +124,8 @@ function buildSnapshot(m: ScannedMarket, candles: Candle[] | null, price: { pric
 
 function buildCandidates(
   snap: MarketSnapshot, regime: RegimeResult, direction: CandidateDirection,
-  calibration: { status: ProbabilityCalibrationStatus },
+  calibration: { status: ProbabilityCalibrationStatus; winProbability?: number | null; bucket?: BucketCalibration | null },
+  measuredCost?: CostBreakdownUsd | null,
 ): OpportunityCandidate {
   const A = CANDIDATE_ASSUMPTIONS;
   const trend = snap.trendShort.value !== null && snap.trendMedium.value !== null
@@ -128,17 +144,20 @@ function buildCandidates(
   const grossWin = A.shadowNotionalUsd * A.takeProfitDistanceFraction;
   const grossLoss = A.shadowNotionalUsd * A.stopDistanceFraction;
 
-  // 비용 — 실측 비용 snapshot이 shadow 후보 생성 시점엔 없음 → 명시적 UNAVAILABLE.
+  // 비용 — 6I-3: 실측 breakdown이 확보된 경우에만 사용. 미확보=명시적 UNAVAILABLE.
   // (0 대체 금지 — decision은 ranking에서 DATA_UNAVAILABLE/SHADOW_ONLY로 강등된다.)
-  const cost: CostBreakdownUsd = {
+  const cost: CostBreakdownUsd = measuredCost ?? {
     entryFeeUsd: null, estimatedExitFeeUsd: null, fundingCostUsd: null, borrowingCostUsd: null,
     priceImpactUsd: null, slippageUsd: null, gasExecutionFeeUsd: null,
     latencyRiskReserveUsd: null, failureRiskReserveUsd: null,
-    holdingHoursAssumed: 4, costBasis: 'UNAVAILABLE — 실측 비용 snapshot 미확보', costSource: null,
+    holdingHoursAssumed: A.holdingHours, costBasis: 'UNAVAILABLE — 실측 비용 snapshot 미확보', costSource: null,
     costSnapshotFetchedAtMs: null,
   };
   const total = totalCostUsd(cost);
-  const winProbability = null; // 보정 표본 확보 전 — 가짜 50% 금지
+  // 6I-3: bucket CALIBRATED일 때만 실측 승률 — 그 외 null (가짜 50%/전역 평균 금지)
+  const winProbability = calibration.status === 'CALIBRATED' && calibration.winProbability != null
+    && Number.isFinite(calibration.winProbability) && calibration.winProbability >= 0 && calibration.winProbability <= 1
+    ? calibration.winProbability : null;
   const env = computeExpectedNetValueUsd({
     calibratedWinProbability: winProbability, calibrationStatus: calibration.status,
     expectedGrossWinUsd: grossWin, expectedGrossLossUsd: grossLoss, cost,
@@ -167,6 +186,17 @@ function buildCandidates(
     costToGrossEdgeRatio: costRatio,
     uncalibratedRankingScore: computeUncalibratedRankingScore({ rawSignalScore, costToGrossEdgeRatio: costRatio ?? 1, volatilityRisk, executionRisk }),
     rejectionReasons: [], decision: 'SHADOW_ONLY',
+    calibrationBucket: calibration.bucket
+      ? {
+        key: calibration.bucket.bucketKey,
+        decisiveSamples: calibration.bucket.decisiveSamples,
+        targetCount: calibration.bucket.targetCount,
+        stopCount: calibration.bucket.stopCount,
+        noneCount: calibration.bucket.noneCount,
+        requiredSamples: calibration.bucket.requiredSamples,
+        reason: calibration.bucket.reason,
+      }
+      : null,
   };
 }
 
@@ -205,11 +235,46 @@ export async function runIntelCycle(deps: IntelCycleDeps): Promise<IntelCycleRec
     // 5. 후보 — 시장별 LONG/SHORT 독립 평가
     const sample = await deps.getCompletedSampleCount();
     const calStatus = deriveCalibrationStatus({ completedSamples: sample.count, lastSampleAtMs: sample.lastAtMs, nowMs });
+
+    // 6I-3: bucket 보정 조회 (미제공/실패 = null → 전역 status로만 표기, p는 null 유지)
+    let buckets: Map<string, BucketCalibration> | null = null;
+    if (deps.getCalibrationBuckets) {
+      try { buckets = await deps.getCalibrationBuckets(nowMs); } catch { buckets = null; }
+    }
+    const calibrationFor = (regime: string, direction: CandidateDirection) => {
+      if (buckets === null) return { status: calStatus, winProbability: null, bucket: null };
+      const b = buckets.get(bucketKeyOf(regime, direction)) ?? emptyBucket(regime, direction, nowMs);
+      return { status: b.status, winProbability: b.winProbability, bucket: b };
+    };
+
+    // 6I-3: 후보별 실측 비용 (시장·방향·명목 결속, bounded concurrency)
+    const costMap = new Map<string, CostBreakdownUsd | null>();
+    if (deps.buildCandidateCost) {
+      const jobs = snaps.flatMap(s => (['LONG', 'SHORT'] as const).map(direction => ({ s, direction })));
+      await mapBounded(jobs, CANDIDATE_ASSUMPTIONS.costConcurrency, async ({ s, direction }) => {
+        let c: CostBreakdownUsd | null = null;
+        try {
+          c = await deps.buildCandidateCost!({
+            marketToken: s.marketAddress ?? '', symbol: s.symbol,
+            isLong: direction === 'LONG',
+            notionalUsd: CANDIDATE_ASSUMPTIONS.shadowNotionalUsd,
+            holdingHours: CANDIDATE_ASSUMPTIONS.holdingHours,
+          });
+        } catch { c = null; } // 비용 조회 실패 = UNAVAILABLE (0 대체 금지)
+        costMap.set(`${s.marketAddress ?? s.symbol}:${direction}`, c);
+      });
+    }
+
     const candidates: OpportunityCandidate[] = [];
     for (const s of snaps) {
       const regime = regimes.get(s.marketAddress ?? s.symbol)!;
-      candidates.push(buildCandidates(s, regime, 'LONG', { status: calStatus }));
-      candidates.push(buildCandidates(s, regime, 'SHORT', { status: calStatus }));
+      for (const direction of ['LONG', 'SHORT'] as const) {
+        candidates.push(buildCandidates(
+          s, regime, direction,
+          calibrationFor(regime.regime, direction),
+          costMap.get(`${s.marketAddress ?? s.symbol}:${direction}`) ?? null,
+        ));
+      }
     }
 
     // 6·7. ranking + NO_TRADE

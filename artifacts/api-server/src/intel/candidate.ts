@@ -76,6 +76,16 @@ export interface OpportunityCandidate {
   uncalibratedRankingScore: number | null;
   rejectionReasons: string[];
   decision: CandidateDecision;
+  /** 6I-3 — regime×방향 bucket 보정 관측치 (API/UI fail-closed 표기용, 선택적) */
+  calibrationBucket?: {
+    key: string;
+    decisiveSamples: number;
+    targetCount: number;
+    stopCount: number;
+    noneCount: number;
+    requiredSamples: number;
+    reason: string | null;
+  } | null;
 }
 
 const fin = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);

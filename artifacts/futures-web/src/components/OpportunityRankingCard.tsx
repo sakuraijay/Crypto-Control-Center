@@ -11,6 +11,7 @@ import { Badge } from '@/components/ui/badge';
 import {
   fetchOpportunitiesLatest, OpportunitiesLatest,
   formatWinProbability, formatExpectedNetValue, INTEL_NOTICE_NO_GUARANTEE,
+  formatBucketSamples, formatTotalCost, costComponentLines,
 } from '@/lib/intelStatus';
 
 export function OpportunityRankingCard() {
@@ -82,7 +83,22 @@ export function OpportunityRankingCard() {
                   <span>승률: <span className="text-foreground" data-testid={`text-prob-${c.symbol}-${c.direction}`}>{formatWinProbability(c.winProbability, c.calibrationStatus)}</span></span>
                   <span>순기대값: <span className="text-foreground font-mono">{formatExpectedNetValue(c.expectedNetValueUsd)}</span></span>
                   <span>연구 점수: <span className="text-foreground font-mono">{c.uncalibratedRankingScore === null ? '—' : c.uncalibratedRankingScore.toFixed(1)}</span></span>
+                  <span
+                    title={costComponentLines(c.costBreakdown).map(l => `${l.label}: ${l.value}`).join('\n') || undefined}
+                  >
+                    총비용: <span className="text-foreground font-mono" data-testid={`text-cost-${c.symbol}-${c.direction}`}>{formatTotalCost(c.totalExpectedCostUsd)}</span>
+                  </span>
+                  {formatBucketSamples(c.calibrationBucket) !== null && (
+                    <span title={c.calibrationBucket?.reason ?? undefined}>
+                      Bucket: <span className="text-foreground font-mono" data-testid={`text-bucket-${c.symbol}-${c.direction}`}>{formatBucketSamples(c.calibrationBucket)}</span>
+                    </span>
+                  )}
                 </div>
+                {c.costBreakdown?.costBasis && c.totalExpectedCostUsd === null && (
+                  <div className="text-[10px] text-muted-foreground truncate" title={c.costBreakdown.costBasis}>
+                    비용: {c.costBreakdown.costBasis}
+                  </div>
+                )}
                 {c.rejectionReasons.length > 0 && (
                   <div className="text-[10px] text-muted-foreground truncate" title={c.rejectionReasons.join('; ')}>
                     사유: {c.rejectionReasons[0]}{c.rejectionReasons.length > 1 ? ` 외 ${c.rejectionReasons.length - 1}건` : ''}
