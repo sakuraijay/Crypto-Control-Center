@@ -17,6 +17,8 @@ export interface ShadowOutcomeInput {
   horizonMs: number;                // 1h=3.6e6, 4h=1.44e7
   /** decidedAt 이후 캔들 (검증된 시리즈) — 부족하면 incomplete */
   candlesAfter: Candle[];
+  /** 캔들 간격(ms) — 폐쇄 캔들 판정용. 기본 15m */
+  candleIntervalMs?: number;
   nowMs: number;
 }
 
@@ -48,12 +50,16 @@ export function computeShadowOutcome(input: ShadowOutcomeInput): ShadowOutcomeRe
   const horizonEnd = input.decidedAtMs + input.horizonMs;
   if (input.nowMs < horizonEnd) return incomplete('horizon 미경과 — enrichment는 경과 후 별도 실행');
 
-  // lookahead 방지 — 결정 시각 이전/동시 캔들 절대 사용 금지
-  const after = input.candlesAfter.filter(c => c.t > input.decidedAtMs && c.t <= horizonEnd);
+  // lookahead 방지 — 결정 시각 이전/동시 캔들 금지 + "폐쇄된" 캔들만 사용.
+  // 캔들 t는 open time이므로 close time(t+interval)이 horizonEnd와 nowMs를 모두
+  // 넘지 않아야 한다 — horizon 경계에 걸친/진행 중 캔들의 high/low 주입 차단.
+  const interval = input.candleIntervalMs ?? 900_000;
+  const closedBy = Math.min(horizonEnd, input.nowMs);
+  const after = input.candlesAfter.filter(c => c.t > input.decidedAtMs && c.t + interval <= closedBy);
   if (after.length === 0) return incomplete('미래 데이터 미확보 — 0 기록 금지 (incomplete)');
-  // 시리즈가 horizon을 실제로 커버하는지 — 마지막 캔들이 horizon 근처여야 함
-  const lastT = after[after.length - 1].t;
-  if (horizonEnd - lastT > input.horizonMs * 0.25) {
+  // 시리즈가 horizon을 실제로 커버하는지 — 마지막 폐쇄 캔들의 close time 기준
+  const lastClose = after[after.length - 1].t + interval;
+  if (horizonEnd - lastClose > input.horizonMs * 0.25) {
     return incomplete('horizon 커버리지 부족 — incomplete');
   }
 

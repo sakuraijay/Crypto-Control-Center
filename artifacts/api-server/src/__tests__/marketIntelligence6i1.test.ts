@@ -14,6 +14,7 @@ import {
 } from '../intel/candidate';
 import { rankAndSelect, RANKING_THRESHOLDS, RankingGates, regimeAllowsDirection } from '../intel/ranking';
 import { computeShadowOutcome } from '../intel/shadowOutcome';
+import { boundedNum } from '../intel/shadowStore';
 import { computeShadowMetrics, MIN_METRIC_SAMPLES, ShadowOutcomeRow } from '../intel/shadowMetrics';
 import { runIntelCycle, __resetIntelCycleLockForTests, CANDIDATE_ASSUMPTIONS } from '../intel/intelCycle';
 import { IntelFetchers, pricesToCandles } from '../intel/dataSource';
@@ -474,12 +475,55 @@ describe('6I-1 §12 Shadow outcome', () => {
     expect(r.hypotheticalGrossPnlUsd).toBeCloseTo(-10); // 1% × $1000
   });
 
+  it('lookahead 방지 — horizon 경계에 걸친/미폐쇄 캔들은 제외된다', () => {
+    const horizonEnd = base.decidedAtMs + H1;
+    const closed = mkCandles(3, { start: base.decidedAtMs + 900_000, stepMs: 900_000, base: 100, drift: 0.001 });
+    // open time은 horizonEnd 이내지만 close time이 horizonEnd를 넘는 폭등 캔들 — 반영 금지
+    const straddling: Candle = { t: horizonEnd - 300_000, o: 100, h: 150, l: 100, c: 150, v: 1 };
+    const r = computeShadowOutcome({ ...base, candlesAfter: [...closed, straddling] });
+    expect(r.complete).toBe(true);
+    expect(r.maxFavorableExcursionPct!).toBeLessThan(5); // straddling h=150 미반영
+    expect(r.firstTouch).toBe('NONE');
+  });
+
+  it('lookahead 방지 — nowMs 기준 진행 중(미폐쇄) 캔들은 제외된다', () => {
+    const decidedAt = NOW - H1 - 900_000;
+    const closed = mkCandles(3, { start: decidedAt + 900_000, stepMs: 900_000, base: 100, drift: 0.001 });
+    // close time이 nowMs를 넘는 진행 중 캔들
+    const inProgress: Candle = { t: NOW - 300_000, o: 100, h: 150, l: 50, c: 150, v: 1 };
+    const r = computeShadowOutcome({ ...base, decidedAtMs: decidedAt, candlesAfter: [...closed, inProgress] });
+    if (r.complete) {
+      expect(r.maxFavorableExcursionPct!).toBeLessThan(5);
+      expect(r.maxAdverseExcursionPct!).toBeLessThan(5);
+    } else {
+      expect(r.hypotheticalNetPnlUsd).toBeNull();
+    }
+  });
+
   it('비용 미상이면 net PnL도 null (0 대체 금지)', () => {
     const after = mkCandles(8, { start: base.decidedAtMs + 900_000, stepMs: 900_000, base: 100 });
     const r = computeShadowOutcome({ ...base, totalCostUsd: null, candlesAfter: after });
     expect(r.complete).toBe(true);
     expect(r.hypotheticalGrossPnlUsd).not.toBeNull();
     expect(r.hypotheticalNetPnlUsd).toBeNull();
+  });
+});
+
+describe('6I-1 §12 boundedNum 영속화 직렬화', () => {
+  it('경계값 반올림 overflow — 반올림 결과가 상한을 넘으면 null 강등', () => {
+    // 999999999999.9999995 → toFixed(6) 반올림 시 1e12 도달 → null (pg overflow 방지)
+    expect(boundedNum(999999999999.9999995, 1e12, 6)).toBeNull();
+    expect(boundedNum(1e12, 1e12, 6)).toBeNull();
+    expect(boundedNum(-1e12, 1e12, 6)).toBeNull();
+  });
+  it('정상 범위 값은 고정 소수 표기로 직렬화 (지수 표기 금지)', () => {
+    expect(boundedNum(1.05e-7, 1e10, 8)).toBe('0.00000011');
+    expect(boundedNum(1906.46, 1e10, 8)).toBe('1906.46000000');
+  });
+  it('NaN/Infinity/null = null', () => {
+    expect(boundedNum(NaN, 1e12, 6)).toBeNull();
+    expect(boundedNum(Infinity, 1e12, 6)).toBeNull();
+    expect(boundedNum(null, 1e12, 6)).toBeNull();
   });
 });
 
