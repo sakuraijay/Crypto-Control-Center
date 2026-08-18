@@ -97,11 +97,20 @@ export function DailyTargetCard({ className }: { className?: string }) {
   // breakdown: 미실현 변화분 = Daily PnL − 당일 실현 (합계가 equity 변화와 일치)
   const unrealizedDelta = dailyPnlOk ? dailyPnlServer - realized : null;
 
+  // HALTED는 엔진 상태 기반 — 데이터/목표 가용성과 무관하게 항상 표시해야 한다.
+  const isHalted = engineState === 'RISK_LOCKED' || engineState === 'EMERGENCY_STOP';
+  const haltedBadge = isHalted ? (
+    <span className="inline-flex items-center gap-1 self-start rounded border border-[var(--color-short)]/30 bg-[var(--color-short)]/15 px-1.5 py-0.5 text-[10px] font-bold text-[var(--color-short)] animate-pulse">
+      <ShieldAlert className="h-3 w-3" /> TRADING HALTED
+    </span>
+  ) : null;
+
   // PAPER 데이터 미로드/실패 시 $0로 표시하지 않는다 (mock/추정치 금지)
   if (dataStatus !== 'ok') {
     return (
       <div className={cn('rounded-xl border border-border bg-card p-5 flex flex-col gap-2', className)}>
         <span className="text-xs font-bold tracking-widest text-muted-foreground uppercase">Daily PnL</span>
+        {haltedBadge}
         <p className="text-sm text-muted-foreground">
           {dataStatus === 'loading'
             ? '로드 중 — PAPER 거래 데이터 조회 중…'
@@ -119,6 +128,7 @@ export function DailyTargetCard({ className }: { className?: string }) {
     return (
       <div className={cn('rounded-xl border border-border bg-card p-5 flex flex-col gap-2', className)}>
         <span className="text-xs font-bold tracking-widest text-muted-foreground uppercase">Daily PnL</span>
+        {haltedBadge}
         <p className="text-sm text-muted-foreground">
           {periodPnl.status === 'loading'
             ? '로드 중 — 서버 RiskPolicy 파생 목표 조회 중…'
@@ -133,7 +143,6 @@ export function DailyTargetCard({ className }: { className?: string }) {
   const tradingCap     = derived.dailyRiskCapitalUsd;      // min(startOfDayEquity, $1,000)
   const dailyLossLimit = derived.dailyMaxLossUsd;          // -3% (예: $30)
 
-  const isHalted   = engineState === 'RISK_LOCKED' || engineState === 'EMERGENCY_STOP';
   const dailyState = deriveDailyState(realized, totalPnL, dailyTarget, isHalted);
   const stateMeta  = STATE_META[dailyState];
   const StateIcon  = stateMeta.icon;
