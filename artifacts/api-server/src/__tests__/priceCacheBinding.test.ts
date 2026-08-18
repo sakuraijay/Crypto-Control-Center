@@ -6,8 +6,35 @@
  *  §3 계측: 폐기는 priceTickRejectStats에 집계 (침묵 금지).
  *  §4 루트 /healthz: JSON 전용 — readiness 전 503, 후 200 (SPA HTML 아님).
  */
-import { describe, it, expect } from 'vitest';
+import { vi, describe, it, expect } from 'vitest';
 import request from 'supertest';
+
+// CI는 db-free — app import 체인(routes → @workspace/db)이 DATABASE_URL을 요구하므로 mock.
+vi.mock('@workspace/db', () => {
+  function chain() {
+    const c: Record<string, unknown> = {};
+    for (const m of ['from','where','limit','offset','orderBy','set','values',
+                     'onConflictDoNothing','onConflictDoUpdate','returning']) c[m] = () => c;
+    (c as { then(r: (v: unknown) => unknown): Promise<unknown> }).then = (resolve) => Promise.resolve([]).then(resolve);
+    return c;
+  }
+  const t = (cols: string[]) => Object.fromEntries([...cols.map((k) => [k, k]), ['$inferSelect', {}]]);
+  return {
+    db: { select: vi.fn(chain), insert: vi.fn(chain), update: vi.fn(chain), delete: vi.fn(chain) },
+    tradesTable: t(['id','symbol','side','action','size','price','pnl','strategy','timestamp','closeTime','sizeInUsd','managedBy','openDecisionId','closesTradeId','closeKind','stopPriceUsd','takeProfitPriceUsd','leverage','estEntryCostUsd','estExitCostUsd','fundingRatePerHour','borrowingRatePerHour','costFetchedAt','testMode','collateralUsd']),
+    workerStateTable: t(['key','value','updatedAt']),
+    aiDecisionsTable: t(['id','fullJson','timestamp','direction','symbol','confidence']),
+    liveApprovalsTable: t(['id','status','decisionJson','createdAt','expiresAt','retryCount','executionOutcome','approvedAt','rejectedAt','rejectionReason','lastRetriedAt','lastError','testMode']),
+    strategyConfigTable: t(['id','configJson','updatedAt']),
+    executionIntentsTable: t(['id','status','createdAt']),
+    subaccountApprovalSessionsTable: t(['id','status','createdAt']),
+    relayTasksTable: t(['id','status','createdAt']),
+    relayNoncesTable: t(['id']),
+    protectionOrdersTable: t(['id','status','createdAt']),
+    marketIntelligenceTable: t(['id','cycleId','createdAt']),
+    shadowDecisionsTable: t(['id','createdAt']),
+  };
+});
 import { bindAndConvertTick, priceTickRejectStats, PRICE_SANE_MIN_USD, PRICE_SANE_MAX_USD, PRICE_SOURCE_PIN } from '../routes/gmx';
 import app from '../app';
 import { markReady, markNotReady } from '../lib/readiness';
