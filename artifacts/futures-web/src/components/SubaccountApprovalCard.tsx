@@ -161,7 +161,7 @@ export function SubaccountApprovalCard() {
         </span>
         <span className="text-muted-foreground">Subaccount (signer)</span>
         <span className="font-mono truncate">
-          {fetchErrorState ? '확인 불가 (조회 실패)' : auth?.signerAddress ?? '미초기화'}
+          {fetchErrorState ? '확인 불가 (조회 실패)' : auth?.signerAddress ?? '미확인 (프로비저닝 필요)'}
         </span>
         <span className="text-muted-foreground">Relay router</span>
         <span className="font-mono truncate">
@@ -169,6 +169,19 @@ export function SubaccountApprovalCard() {
         </span>
         <span className="text-muted-foreground">Chain</span>
         <span>Arbitrum One (42161)</span>
+        {/* #125 — PAPER·잠금 상태 공개 주소 경로 표시: 개인키 미복호화·주문 제출 비활성 */}
+        {!fetchErrorState && auth?.signerAddressSource === 'stored_public' && (<>
+          <span className="text-muted-foreground">Signer 보안 상태</span>
+          <span data-testid="text-signer-public-mode" className="text-[var(--color-long)]">
+            공개 signer 주소 확인됨 (저장값) · 개인키 미복호화 · 서명 능력 없음
+          </span>
+        </>)}
+        {!fetchErrorState && auth && auth.orderSubmissionEnabled === false && (<>
+          <span className="text-muted-foreground">주문 제출</span>
+          <span data-testid="text-order-submission-disabled">
+            비활성 (GMX_API_ORDER_SUBMISSION_ENABLED=false) — Owner Approval을 PAPER·잠금 상태에서 먼저 완료할 수 있습니다
+          </span>
+        </>)}
         {oc && (<>
           <span className="text-muted-foreground">온체인 만료</span>
           <span>{formatUnixSeconds(oc.expiresAt)}</span>

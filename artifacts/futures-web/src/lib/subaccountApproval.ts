@@ -43,6 +43,10 @@ export interface SubaccountAuthResponse {
   chainId: number;
   mainAccount: string | null;
   signerAddress: string | null;
+  // #125 — 주소 출처·보안 상태 (stored_public = 저장된 공개 주소, 개인키 미복호화)
+  signerAddressSource?: 'runtime' | 'stored_public' | null;
+  privateKeyDecrypted?: boolean;
+  orderSubmissionEnabled?: boolean;
   relayRouter: string | null;
   relayConfigured: boolean;
   configReasons: string[];

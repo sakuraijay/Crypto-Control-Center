@@ -10,7 +10,7 @@
  */
 
 import { Router } from 'express';
-import { getSignerAddress, getSignerEthBalance, isSignerInitialized, getSignerCreatedAt, isDelegatedSignerEnabled, provisionDelegatedSigner } from '../lib/delegatedSigner';
+import { getSignerAddress, getSignerEthBalance, isSignerInitialized, getSignerCreatedAt, isDelegatedSignerEnabled, provisionDelegatedSigner, getStoredPublicSignerAddress } from '../lib/delegatedSigner';
 import { resolveGmxLiveRelayConfig, ARBITRUM_ONE_CHAIN_ID } from '../lib/gmxLiveConfig';
 import { deriveSubaccountAuthState, isAuthStateLiveEligible, type SubaccountAuthState } from '../lib/subaccountAuthState';
 import { readSubaccountAuthorization, RELAY_ROUTER_NONCE_ABI, type SubaccountAuthOnchain, type DataStoreClient } from '../lib/gmxDataStore';
@@ -82,7 +82,9 @@ router.post('/executor/signer/provision', requireOperatorAuth, async (_req, res)
 // 서버 사이너 주소 + 잔고 정보. 개인키 절대 미포함.
 router.get('/executor/signer', async (_req, res) => {
   try {
-    const address   = getSignerAddress();
+    // #125 — 런타임 주소 우선, 없으면 저장된 공개 주소(검증됨) 표시 (복호화 0회)
+    const resolved  = await resolveApprovalSignerAddress();
+    const address   = resolved.address;
     const createdAt = getSignerCreatedAt();
     const initialized = isSignerInitialized();
     const rpcUrl    = process.env.GMX_RPC_URL ?? '';
@@ -96,19 +98,39 @@ router.get('/executor/signer', async (_req, res) => {
       ok:           true,
       initialized,
       address,
+      addressSource: resolved.source,                 // 'runtime' | 'stored_public' | null
+      privateKeyDecrypted: initialized,               // stored_public 경로에서는 false
+      orderSubmissionEnabled: process.env.GMX_API_ORDER_SUBMISSION_ENABLED === 'true',
       createdAt,
       ethFormatted:  ethBalance.ethFormatted,
       // #124-A — GMX API v2 경로에서 signer는 broadcast하지 않으므로 gas 불필요 (0 ETH)
       readyForGas:   true,
       signerGasModel: 'GMX_API_V2_ZERO_ETH',
-      fundingNote:  initialized && address
+      fundingNote:  address
         ? 'GMX API v2 signer gas: 0 ETH — delegated signer에 ETH를 전송할 필요가 없습니다 (EIP-712 서명만 수행, broadcast 없음).'
-        : '사이너가 초기화되지 않았습니다.',
+        : '사이너 주소를 확인할 수 없습니다 — 프로비저닝(서명키 준비) 1회가 필요합니다.',
     });
   } catch (e: unknown) {
     return res.status(500).json({ ok: false, error: (e as Error).message });
   }
 });
+
+// ── #125 — Owner Approval용 signer 공개 주소 resolver ──────────────────────────
+// 런타임 초기화 주소(강한 게이트 통과 시)가 있으면 그대로, 없으면 DB에 저장된
+// 공개 주소를 EXPECTED_CANARY_SIGNER와 결속 검증해 사용한다 (복호화·서명 0회).
+// PAPER + LIVE 잠금 상태에서도 Owner Approval prepare/canonical readback이
+// 가능해지지만, 실제 delegated 서명 경로(개인키 접근)는 기존 강한 게이트 그대로다.
+type ApprovalSignerResolution =
+  | { address: string; source: 'runtime' | 'stored_public' }
+  | { address: null; source: null; reason: string };
+
+async function resolveApprovalSignerAddress(): Promise<ApprovalSignerResolution> {
+  const runtime = getSignerAddress();
+  if (isSignerInitialized() && runtime) return { address: runtime, source: 'runtime' };
+  const stored = await getStoredPublicSignerAddress(EXPECTED_CANARY_SIGNER);
+  if (stored.ok) return { address: stored.address, source: 'stored_public' };
+  return { address: null, source: null, reason: stored.reason };
+}
 
 // ── subaccount-auth 공통 헬퍼 ───────────────────────────────────────────────────
 
@@ -163,7 +185,9 @@ router.get('/executor/subaccount-auth', async (_req, res) => {
   try {
     const relay = resolveGmxLiveRelayConfig();
     const mainAccount = getConfiguredMainAccount();
-    const signerAddress = getSignerAddress();
+    // #125 — 런타임 주소 우선, 없으면 저장된 공개 주소(검증됨)로 canonical readback 허용
+    const signerRes = await resolveApprovalSignerAddress();
+    const signerAddress = signerRes.address;
     const nowSec = BigInt(Math.floor(Date.now() / 1000));
 
     // canonical 조회는 구성·주소가 전부 준비된 경우에만 시도 (그 외 UNVERIFIED)
@@ -179,7 +203,9 @@ router.get('/executor/subaccount-auth', async (_req, res) => {
 
     const state: SubaccountAuthState = deriveSubaccountAuthState({
       relayConfigured:        relay.ok,
-      signerInitialized:      isSignerInitialized(),
+      // #125 — 저장된 공개 주소로도 canonical 판정 가능 (readback은 eth_call만).
+      // 실제 서명 능력(isSignerInitialized)은 LIVE 게이트에서 별도 검증된다.
+      signerInitialized:      signerAddress !== null,
       delegatedSignerEnabled: isDelegatedSignerEnabled(),
       onchain:                canonical.onchain,
       onchainError:           canonical.onchainError,
@@ -207,6 +233,10 @@ router.get('/executor/subaccount-auth', async (_req, res) => {
       chainId: ARBITRUM_ONE_CHAIN_ID,
       mainAccount,
       signerAddress,
+      // #125 — 주소 출처·보안 상태 명시 (UI 표시용)
+      signerAddressSource: signerRes.source,             // 'runtime' | 'stored_public' | null
+      privateKeyDecrypted: isSignerInitialized(),        // stored_public 경로에서는 항상 false
+      orderSubmissionEnabled: process.env.GMX_API_ORDER_SUBMISSION_ENABLED === 'true',
       relayRouter: relay.ok && relay.config ? relay.config.subaccountGelatoRelayRouter : null,
       relayConfigured: relay.ok,
       configReasons: relay.ok ? [] : relay.reasons,
@@ -249,10 +279,13 @@ router.post('/executor/subaccount-approval/prepare', requireOperatorAuth, async 
     if (!mainAccount) {
       return res.status(503).json({ ok: false, error: 'GMX_WALLET_ADDRESS 미설정 — main account 확인 불가' });
     }
-    const signerAddress = getSignerAddress();
-    if (!isSignerInitialized() || !signerAddress) {
-      return res.status(503).json({ ok: false, error: 'delegated signer 미초기화 — prepare 불가' });
+    // #125 — 런타임 미초기화(PAPER·LIVE 잠금)여도 저장된 공개 주소로 prepare 가능.
+    // 공개 주소 경로는 복호화·서명·nonce/task/intent 생성·외부 호출 0회 (fail-closed).
+    const signerRes = await resolveApprovalSignerAddress();
+    if (signerRes.address === null) {
+      return res.status(503).json({ ok: false, error: `delegated signer 주소 확인 불가 — prepare 불가: ${signerRes.reason}` });
     }
+    const signerAddress = signerRes.address;
     // #124-C — 서버 측 강제: 구성된 signer가 canary 예상 주소와 정확 일치할 때만 prepare 허용.
     // (UI 게이트는 방어층일 뿐 보안 통제가 아님 — 직접 API 호출 우회 차단)
     if (!isExpectedCanarySigner(signerAddress)) {

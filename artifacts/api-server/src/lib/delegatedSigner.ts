@@ -33,6 +33,9 @@ import { eq } from 'drizzle-orm';
 // ── worker_state 키 ────────────────────────────────────────────────────────────
 const SIGNER_KEY_STATE_KEY = 'delegatedSignerEncryptedKey';
 const SIGNER_META_KEY      = 'delegatedSignerMeta';
+/** #125 — 프로비저닝 시점에 파생된 공개 주소를 평문으로 별도 저장 (공개 정보).
+ *  이후 조회는 이 행만 읽으며 암호문 조회·복호화·키 객체 생성이 0회다. */
+const SIGNER_PUBLIC_ADDRESS_KEY = 'delegatedSignerPublicAddress';
 
 // ── AES-256-GCM 상수 ──────────────────────────────────────────────────────────
 const KEY_LEN   = 32; // 256-bit
@@ -321,8 +324,11 @@ export async function provisionDelegatedSigner(
       throw new Error('[DelegatedSigner] DB 조회 실패 — 기존 signer 존재 여부 불명, 신규 생성 금지 (fail-closed)');
     case 'corrupt':
       throw new Error('[DelegatedSigner] signer 데이터 손상 감지 — 신규 생성·overwrite 금지 (fail-closed)');
-    case 'found':
-      return { created: false, address: deriveAddress(loaded.encryptedKey), createdAt: loaded.createdAt };
+    case 'found': {
+      const address = deriveAddress(loaded.encryptedKey);
+      await savePublicAddressIfConsistent(address); // #125 — 공개 주소 backfill (write-once)
+      return { created: false, address, createdAt: loaded.createdAt };
+    }
     case 'absent': {
       const rawKey    = randomBytes(32);
       const plainHex  = rawKey.toString('hex');
@@ -336,9 +342,101 @@ export async function provisionDelegatedSigner(
         throw new Error('[DelegatedSigner] provisioning 검증 실패 — 저장 후 재조회 불일치 (fail-closed)');
       }
       const created = winner.encryptedKey === encrypted; // salt 랜덤 → 동일성 비교로 승자 판별
-      return { created, address: deriveAddress(winner.encryptedKey), createdAt: winner.createdAt };
+      const address = deriveAddress(winner.encryptedKey);
+      await savePublicAddressIfConsistent(address); // #125 — 공개 주소 영속 (write-once)
+      return { created, address, createdAt: winner.createdAt };
     }
   }
+}
+
+// ── #125 — 공개 signer 주소 안전 경로 (복호화 0회) ────────────────────────────
+
+const EVM_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
+
+/**
+ * 프로비저닝이 파생한 공개 주소를 write-once로 영속한다.
+ *  - insert onConflictDoNothing → 재조회 검증 (기존 저장값과 불일치 = fail-closed, overwrite 금지)
+ *  - 공개 주소는 비밀이 아니다 — 평문 저장이 보안 계약을 약화시키지 않는다.
+ */
+async function savePublicAddressIfConsistent(address: string): Promise<void> {
+  try {
+    await db
+      .insert(workerStateTable)
+      .values({ key: SIGNER_PUBLIC_ADDRESS_KEY, value: address, updatedAt: new Date() })
+      .onConflictDoNothing();
+    const rows = await db
+      .select()
+      .from(workerStateTable)
+      .where(eq(workerStateTable.key, SIGNER_PUBLIC_ADDRESS_KEY));
+    if (rows.length !== 1 || String(rows[0].value).toLowerCase() !== address.toLowerCase()) {
+      throw new Error('[DelegatedSigner] 공개 주소 영속 검증 실패 — 저장값과 파생 주소 불일치 (fail-closed)');
+    }
+  } catch (e: unknown) {
+    if (e instanceof Error && e.message.startsWith('[DelegatedSigner]')) throw e;
+    // DB 원문 오류 메시지(연결 문자열 등) 노출 금지 — 고정 문구로 대체
+    throw new Error('[DelegatedSigner] 공개 주소 저장 실패 (fail-closed)');
+  }
+}
+
+export type StoredPublicSignerAddressResult =
+  | { ok: true; address: string }
+  | { ok: false; reason: string };
+
+/**
+ * #125 — 저장된 공개 signer 주소를 검증해 반환하는 최소권한 경로.
+ *
+ * 보장 (adversarial 테스트로 고정):
+ *  - 개인키·암호문 복호화 0회, 서명 객체(privateKeyToAccount/WalletClient) 생성 0회
+ *  - nonce 할당·relay task·execution intent 생성 0회, 외부 네트워크 호출 0회
+ *  - 모듈 런타임 상태(_initialized/_privateKeyHex/_signerAddress) 불변
+ *  - 암호문 행은 존재 여부만 확인 (value는 사용하지 않는다)
+ *
+ * Fail-closed:
+ *  - DELEGATED_SIGNER_ENABLED !== 'true' / DB 오류 / 행 없음·중복 / 형식 손상 /
+ *    암호화 키 행 부재(고아 주소) / expectedAddress 불일치 → { ok: false }
+ */
+export async function getStoredPublicSignerAddress(
+  expectedAddress: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<StoredPublicSignerAddressResult> {
+  if (env.DELEGATED_SIGNER_ENABLED !== 'true') {
+    return { ok: false, reason: "DELEGATED_SIGNER_ENABLED !== 'true' — 공개 주소 조회 차단 (fail-closed)" };
+  }
+  if (!EVM_ADDRESS_RE.test(expectedAddress)) {
+    return { ok: false, reason: '예상 주소 형식 오류 — 공개 주소 조회 차단 (fail-closed)' };
+  }
+  let addrRows: { value: string }[];
+  let keyRows: { value: string }[];
+  try {
+    addrRows = await db
+      .select()
+      .from(workerStateTable)
+      .where(eq(workerStateTable.key, SIGNER_PUBLIC_ADDRESS_KEY));
+    keyRows = await db
+      .select()
+      .from(workerStateTable)
+      .where(eq(workerStateTable.key, SIGNER_KEY_STATE_KEY));
+  } catch {
+    return { ok: false, reason: 'DB 조회 실패 — 공개 주소 확인 불가 (fail-closed)' };
+  }
+  if (addrRows.length === 0) {
+    return { ok: false, reason: '저장된 공개 signer 주소 없음 — 프로비저닝(POST /executor/signer/provision) 1회 실행 필요' };
+  }
+  if (addrRows.length > 1) {
+    return { ok: false, reason: '공개 주소 행 중복 감지 — 조회 차단 (fail-closed)' };
+  }
+  const stored = addrRows[0]?.value;
+  if (typeof stored !== 'string' || !EVM_ADDRESS_RE.test(stored)) {
+    return { ok: false, reason: '저장된 공개 주소 손상 — 조회 차단 (fail-closed)' };
+  }
+  // 고아 주소 방지: 암호화 키 행이 정확히 1개 존재해야 한다 (value는 검사하지 않음 — 복호화 0회)
+  if (keyRows.length !== 1) {
+    return { ok: false, reason: '암호화 signer 키 행 부재/중복 — 공개 주소 고아 상태 (fail-closed)' };
+  }
+  if (stored.toLowerCase() !== expectedAddress.toLowerCase()) {
+    return { ok: false, reason: '저장된 공개 주소가 예상 canary signer와 불일치 — 차단 (fail-closed)' };
+  }
+  return { ok: true, address: stored };
 }
 
 // ── 공개 API ──────────────────────────────────────────────────────────────────
