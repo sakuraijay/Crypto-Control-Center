@@ -416,6 +416,78 @@ const MIGRATIONS: { name: string; sql: string }[] = [
       ALTER TABLE protection_orders ADD COLUMN IF NOT EXISTS ambiguous_reason text;
     `,
   },
+  {
+    name: "0026_market_intelligence_shadow",
+    sql: `
+      -- 6I-1 §12 — Market Intelligence·Opportunity·Shadow 영속화 (additive, idempotent).
+      CREATE TABLE IF NOT EXISTS market_intelligence_snapshots (
+        id text PRIMARY KEY,
+        cycle_id text NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        universe_count integer NOT NULL,
+        shortlist_count integer NOT NULL,
+        regime_json text NOT NULL,
+        data_quality text NOT NULL,
+        degraded_reason text,
+        decision text NOT NULL,
+        no_trade_reasons text,
+        snapshot_hash text NOT NULL,
+        full_json text
+      );
+      CREATE INDEX IF NOT EXISTS idx_mi_snapshots_created ON market_intelligence_snapshots (created_at);
+
+      CREATE TABLE IF NOT EXISTS opportunity_candidates (
+        id text PRIMARY KEY,
+        snapshot_id text NOT NULL,
+        cycle_id text NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        decided_at_ms numeric(16,0) NOT NULL,
+        symbol text NOT NULL,
+        market_address text NOT NULL,
+        direction text NOT NULL,
+        regime text NOT NULL,
+        data_quality text NOT NULL,
+        raw_signal_score numeric(10,4) NOT NULL,
+        win_probability numeric(8,6),
+        calibration_status text NOT NULL,
+        expected_entry_price numeric(18,8),
+        stop_price numeric(18,8),
+        take_profit_price numeric(18,8),
+        final_notional_usd numeric(18,4),
+        expected_net_value_usd numeric(18,6),
+        expected_r_multiple numeric(10,4),
+        uncalibrated_ranking_score numeric(10,4),
+        total_expected_cost_usd numeric(18,6),
+        cost_breakdown_json text,
+        feature_json text,
+        rank integer,
+        selected boolean NOT NULL DEFAULT false,
+        decision text NOT NULL,
+        rejection_reasons text
+      );
+      CREATE INDEX IF NOT EXISTS idx_oc_snapshot ON opportunity_candidates (snapshot_id);
+      CREATE INDEX IF NOT EXISTS idx_oc_created ON opportunity_candidates (created_at);
+      CREATE INDEX IF NOT EXISTS idx_oc_decided_at ON opportunity_candidates (decided_at_ms);
+
+      CREATE TABLE IF NOT EXISTS shadow_outcomes (
+        id text PRIMARY KEY,
+        candidate_id text NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        measured_at_ms numeric(16,0),
+        outcome_1h_net_usd numeric(18,6),
+        outcome_4h_net_usd numeric(18,6),
+        gross_pnl_4h_usd numeric(18,6),
+        total_cost_usd numeric(18,6),
+        max_favorable_excursion_pct numeric(10,4),
+        max_adverse_excursion_pct numeric(10,4),
+        first_touch text,
+        complete boolean NOT NULL DEFAULT false,
+        incomplete_reason text
+      );
+      -- candidate당 outcome 1행 — 중복 enrichment 방지 (idempotent)
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_shadow_outcome_candidate ON shadow_outcomes (candidate_id);
+    `,
+  },
   // Add future migrations here in chronological order.
 ];
 

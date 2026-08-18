@@ -50,6 +50,7 @@ import {
   type PersistedRiskEngineState,
 } from "../lib/riskEngineState";
 import { manilaDayStartIso, manilaWeekStartIso, msUntilNextManilaDay } from "../lib/manilaTime";
+import { runIntelServiceCycle } from "../intel/intelService";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -1355,6 +1356,20 @@ class WorkerManager {
           },
         );
       }
+
+      // ── 6I-1 §14 — Market Intelligence 사이클 (SHADOW_ONLY, 비치명 격리) ──
+      // 주문 실행 경로를 호출하지 않는다. 실패해도 매매 루프에 영향 없음.
+      void runIntelServiceCycle({
+        cycleNum,
+        gates: {
+          riskEngineAllowsEntry: riskEval?.entryAllowed === true,
+          riskEngineBlockReason: riskEval ? (riskEval.blockReasons[0] ?? null) : 'RiskEngine 평가 없음',
+          openPositionExists: paperState.positions.length > 0,
+          dailyEntryLimitReached:
+            (limits.maxTradesPerHour ?? 0) > 0 && paperState.tradesInLastHour >= (limits.maxTradesPerHour ?? 0),
+          nowMs: Date.now(),
+        },
+      });
 
       this.lastCycleAt = new Date();
       this.lastCycleResult = {

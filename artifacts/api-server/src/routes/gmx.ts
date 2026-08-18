@@ -613,47 +613,41 @@ router.get("/gmx/tokens", async (_req, res) => {
 });
 
 /**
- * GET /api/gmx/candles?symbol=ETH&period=1h&countBack=500
- * OHLCV candle data for backtesting via GMX stats API.
- * Falls back to synthetic data (random walk) in dev if stats API is unavailable.
+ * 내부 재사용 — GMX stats 캔들 조회. 실패/빈 응답 = null (합성 데이터 생성 금지).
+ * 6I-1 §2 결함 수정: 이전의 random-walk synthetic fallback은 출처 없는 값 생성이자
+ * 200 응답으로 실패를 은닉하는 fail-open이었으므로 완전 제거했다.
  */
-router.get("/gmx/candles", async (req, res) => {
-  const { symbol = "ETH", period = "1h", countBack = "500" } = req.query as Record<string, string>;
-  const count = Math.min(Number(countBack) || 500, 1500);
-
+export async function fetchGmxCandles(
+  symbol: string, period: string, countBack: number,
+): Promise<{ prices: number[][]; source: "gmx-stats" } | null> {
+  const count = Math.min(Math.max(1, Math.floor(countBack) || 500), 1500);
   try {
     const url = `${STATS_API}/api/candleSticks?tokenSymbol=${symbol}&period=${period}&preferredChainId=42161&countBack=${count}`;
     const upstream = await fetch(url, { signal: AbortSignal.timeout(15_000) });
-    if (upstream.ok) {
-      const data = await upstream.json() as { prices?: number[][] } | number[][];
-      const prices = Array.isArray(data) ? data : ((data as { prices?: number[][] }).prices ?? null);
-      if (prices && prices.length > 0) {
-        res.setHeader("Cache-Control", "public, max-age=300");
-        return res.json({ prices, source: "gmx-stats" });
-      }
-    }
-  } catch { /* fall through to synthetic */ }
-
-  // Synthetic fallback — random walk from current oracle price
-  const seed = priceCache?.data.find(p => p.tokenSymbol === symbol)?.priceUsd ?? 2000;
-  const msPerBar: Record<string, number> = {
-    "1m": 60_000, "5m": 300_000, "15m": 900_000,
-    "1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000,
-  };
-  const ms = msPerBar[period] ?? 3_600_000;
-  const nowSec = Math.floor(Date.now() / 1000);
-  let price = seed;
-  const prices: number[][] = [];
-  for (let i = count - 1; i >= 0; i--) {
-    const t = nowSec - i * (ms / 1000);
-    price = price * (1 + (Math.random() * 0.012 - 0.006));
-    const h = price * (1 + Math.random() * 0.004);
-    const l = price * (1 - Math.random() * 0.004);
-    const c = price + (Math.random() * 0.008 - 0.004) * price;
-    prices.push([t, price, h, l, c, Math.random() * 1e7]);
+    if (!upstream.ok) return null;
+    const data = await upstream.json() as { prices?: number[][] } | number[][];
+    const prices = Array.isArray(data) ? data : ((data as { prices?: number[][] }).prices ?? null);
+    if (!prices || prices.length === 0) return null;
+    return { prices, source: "gmx-stats" };
+  } catch {
+    return null;
   }
-  res.setHeader("Cache-Control", "no-cache");
-  return res.json({ prices, source: "synthetic" });
+}
+
+/**
+ * GET /api/gmx/candles?symbol=ETH&period=1h&countBack=500
+ * OHLCV candle data for backtesting via GMX stats API.
+ * 실패 시 502 — 합성(random walk) 데이터 생성 금지 (6I-1 §3: 출처 없는 값 생성 금지).
+ */
+router.get("/gmx/candles", async (req, res) => {
+  const { symbol = "ETH", period = "1h", countBack = "500" } = req.query as Record<string, string>;
+  const result = await fetchGmxCandles(symbol, period, Number(countBack) || 500);
+  if (!result) {
+    res.setHeader("Cache-Control", "no-cache");
+    return res.status(502).json({ error: "candles unavailable", reason: "GMX stats API 실패 — 합성 데이터 대체 금지" });
+  }
+  res.setHeader("Cache-Control", "public, max-age=300");
+  return res.json(result);
 });
 
 export default router;

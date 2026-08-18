@@ -30,6 +30,9 @@ import { AiMarketRankingCard } from '@/components/dashboard/AiMarketRankingCard'
 import { ExecutorStatusWidget } from '@/components/dashboard/ExecutorStatusWidget';
 import { GmxOnchainCard } from '@/components/dashboard/GmxOnchainCard';
 import { RiskPolicyCard } from '@/components/RiskPolicyCard';
+import { MarketIntelligenceCard } from '@/components/MarketIntelligenceCard';
+import { OpportunityRankingCard } from '@/components/OpportunityRankingCard';
+import { ShadowReviewCard } from '@/components/ShadowReviewCard';
 import { RiskExecutionStatusCard } from '@/components/RiskExecutionStatusCard';
 import { cn } from '@/lib/utils';
 
@@ -199,6 +202,13 @@ export default function Dashboard() {
       {/* ── $1,000 최종 운용 정책 (6H-1) ── */}
       <RiskPolicyCard />
       <RiskExecutionStatusCard />
+
+      {/* ── 6I-1 Market Intelligence / Opportunity Ranking / Shadow Review ── */}
+      <div className="grid grid-cols-3 gap-5">
+        <MarketIntelligenceCard />
+        <OpportunityRankingCard />
+        <ShadowReviewCard />
+      </div>
 
       {/* ── Data grid: charts/tables left, signals/logs right ────────────── */}
       <div className="grid grid-cols-3 gap-5">

@@ -11,6 +11,7 @@ import livetestRouter from "./livetest";
 import relayRouter from "./relay";
 import gmxapiRouter from "./gmxapi";
 import riskRouter from "./risk";
+import intelRouter from "./intel";
 
 const router: IRouter = Router();
 
@@ -26,5 +27,6 @@ router.use(livetestRouter);
 router.use(relayRouter);
 router.use(gmxapiRouter);
 router.use(riskRouter);
+router.use(intelRouter);
 
 export default router;
