@@ -53,6 +53,9 @@ export interface SubaccountAuthResponse {
   onchain: SubaccountAuthOnchainSummary | null;
   onchainError: string | null;
   readySession: ReadySessionSummary | null;
+  /** #125 — 순수 canonical 판정 (서명 능력 무관) */
+  authEligible?: boolean;
+  /** 실제 LIVE 적격 (canonical + 런타임 signer 서명 능력) */
   liveEligible: boolean;
   liveBlockedReason: string | null;
   error?: string;

@@ -255,6 +255,38 @@ describe('#125 PAPER·잠금 상태 canonical readback (stored_public 경로)', 
     expect(isSignerInitialized()).toBe(false);
   });
 
+  it('온체인 AUTHORIZED여도 stored_public 경로는 liveEligible=false (서명 능력 없음)', async () => {
+    seedStoredPublicAddress();
+    const calls: { functionName: string }[] = [];
+    // 유효한 온체인 위임: listed + 미래 만료 + 잔여 액션 + disabled 아님
+    __setCanonicalClientFactoryForTests(() => ({
+      readContract: async (args: { functionName: string; args: readonly unknown[] }) => {
+        calls.push({ functionName: args.functionName });
+        switch (args.functionName) {
+          case 'containsAddress': return true;
+          case 'getUint':
+            // 호출 순서 고정(Promise.all 배열 순): expiresAt → maxAllowed → used
+            return [9_999_999_999n, 10n, 0n][calls.filter((c) => c.functionName === 'getUint').length - 1] ?? 0n;
+          case 'getBytes32': return ('0x' + '11'.repeat(32));
+          case 'getBool': return false;
+          case 'subaccountApprovalNonces': return 0n;
+          default: throw new Error(`unexpected fn: ${args.functionName}`);
+        }
+      },
+      getBlockTimestamp: async () => 1_700_000_000n,
+    }));
+
+    const res = await request(app).get('/api/executor/subaccount-auth');
+    expect(res.status).toBe(200);
+    expect(res.body.state).toBe('AUTHORIZED');       // 순수 canonical 판정
+    expect(res.body.authEligible).toBe(true);
+    expect(res.body.liveEligible).toBe(false);       // 서명 능력 없음 → LIVE 부적격
+    expect(String(res.body.liveBlockedReason)).toContain('서명 능력 없음');
+    expect(res.body.privateKeyDecrypted).toBe(false);
+    expect(isSignerInitialized()).toBe(false);       // 실행 게이트 입력값도 여전히 false
+    expect(createDecipheriv).not.toHaveBeenCalled();
+  });
+
   it('저장 주소 없음 → canonical 조회 스킵 (외부 호출 0회) + 주소 null', async () => {
     const canonical = makeCanonicalMock();
     __setCanonicalClientFactoryForTests(() => canonical.client);

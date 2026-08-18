@@ -256,8 +256,15 @@ router.get('/executor/subaccount-auth', async (_req, res) => {
       expiresAt: oc ? oc.expiresAt.toString() : null,
       remainingActions: oc ? oc.remaining.toString() : null,
       readySession,          // 서명·암호문 절대 미포함 (요약만)
-      liveEligible: isAuthStateLiveEligible(state),
-      liveBlockedReason: isAuthStateLiveEligible(state) ? null : `인증 상태 ${state} — LIVE 실행 차단`,
+      // #125 리뷰 지적 — authEligible(순수 canonical 판정)과 liveEligible(실제 서명 능력 포함)을 구분.
+      // stored_public 경로는 서명 능력이 없으므로 canonical이 AUTHORIZED여도 LIVE 부적격.
+      authEligible: isAuthStateLiveEligible(state),
+      liveEligible: isAuthStateLiveEligible(state) && isSignerInitialized(),
+      liveBlockedReason: !isAuthStateLiveEligible(state)
+        ? `인증 상태 ${state} — LIVE 실행 차단`
+        : !isSignerInitialized()
+          ? '런타임 signer 미초기화(공개 주소 경로) — 서명 능력 없음, LIVE 실행 차단'
+          : null,
     });
   } catch (e: unknown) {
     return res.status(500).json({ ok: false, error: (e as Error).message });
