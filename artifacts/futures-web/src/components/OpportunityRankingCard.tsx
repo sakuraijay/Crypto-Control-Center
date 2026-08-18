@@ -64,8 +64,8 @@ export function OpportunityRankingCard() {
             {data.decision === 'NO_TRADE' && <span className="text-muted-foreground"> — NO_TRADE는 정상 결과입니다</span>}
           </div>
           <div className="space-y-2 max-h-72 overflow-y-auto">
-            {data.candidates.slice(0, 10).map(c => (
-              <div key={`${c.symbol}-${c.direction}`} className="border rounded p-2 text-xs space-y-1" data-testid={`row-candidate-${c.symbol}-${c.direction}`}>
+            {data.candidates.slice(0, 10).map((c, i) => (
+              <div key={`${c.symbol}-${c.direction}-${i}`} className="border rounded p-2 text-xs space-y-1" data-testid={`row-candidate-${c.symbol}-${c.direction}`}>
                 <div className="flex items-center justify-between">
                   <span className="font-mono font-semibold">
                     {c.rank !== null ? `#${c.rank} ` : ''}{c.symbol} {c.direction}
