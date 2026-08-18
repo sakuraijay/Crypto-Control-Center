@@ -14,18 +14,8 @@ import { validateCandleSeries } from './candles';
 import { Candle, Timeframe } from './types';
 import { ShadowOutcomeRow } from './shadowMetrics';
 
-/**
- * 컬럼 정밀도 경계 직렬화 — pg `numeric field overflow` 방지.
- * 경계 초과 값은 null(UNAVAILABLE)로 강등한다 — 반올림·클램프로 가짜 값을 만들지 않는다.
- * maxAbs = 10^(precision-scale) (해당 컬럼이 표현 가능한 정수부 상한).
- */
-export const boundedNum = (v: number | null | undefined, maxAbs: number, scale: number): string | null => {
-  if (v === null || v === undefined || !Number.isFinite(v)) return null;
-  const s = v.toFixed(scale);
-  // 반올림 결과가 경계를 넘으면 null 강등 (경계값 반올림 overflow 방지)
-  if (Math.abs(Number(s)) >= maxAbs) return null;
-  return s;
-};
+// 컬럼 정밀도 경계 직렬화 — serialize.ts(db-free) 참조. 초과=null 강등, 위장 금지.
+import { boundedNum } from './serialize';
 const numOrNull = (v: number | null | undefined): string | null =>
   boundedNum(v, 1e12, 6);                        // numeric(18,6) USD 컬럼 기본
 const priceOrNull = (v: number | null | undefined): string | null =>

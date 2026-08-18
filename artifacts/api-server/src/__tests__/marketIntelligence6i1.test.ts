@@ -14,7 +14,7 @@ import {
 } from '../intel/candidate';
 import { rankAndSelect, RANKING_THRESHOLDS, RankingGates, regimeAllowsDirection } from '../intel/ranking';
 import { computeShadowOutcome } from '../intel/shadowOutcome';
-import { boundedNum } from '../intel/shadowStore';
+import { boundedNum } from '../intel/serialize';
 import { computeShadowMetrics, MIN_METRIC_SAMPLES, ShadowOutcomeRow } from '../intel/shadowMetrics';
 import { runIntelCycle, __resetIntelCycleLockForTests, CANDIDATE_ASSUMPTIONS } from '../intel/intelCycle';
 import { IntelFetchers, pricesToCandles } from '../intel/dataSource';
