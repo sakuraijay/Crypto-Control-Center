@@ -14,8 +14,24 @@ import { validateCandleSeries } from './candles';
 import { Candle, Timeframe } from './types';
 import { ShadowOutcomeRow } from './shadowMetrics';
 
+/**
+ * 컬럼 정밀도 경계 직렬화 — pg `numeric field overflow` 방지.
+ * 경계 초과 값은 null(UNAVAILABLE)로 강등한다 — 반올림·클램프로 가짜 값을 만들지 않는다.
+ * maxAbs = 10^(precision-scale) (해당 컬럼이 표현 가능한 정수부 상한).
+ */
+const boundedNum = (v: number | null | undefined, maxAbs: number, scale: number): string | null =>
+  v === null || v === undefined || !Number.isFinite(v) || Math.abs(v) >= maxAbs
+    ? null
+    : v.toFixed(scale);
 const numOrNull = (v: number | null | undefined): string | null =>
-  v === null || v === undefined || !Number.isFinite(v) ? null : String(v);
+  boundedNum(v, 1e12, 6);                        // numeric(18,6) USD 컬럼 기본
+const priceOrNull = (v: number | null | undefined): string | null =>
+  boundedNum(v, 1e10, 8);                        // numeric(18,8) 가격 컬럼
+const scoreOrNull = (v: number | null | undefined): string | null =>
+  boundedNum(v, 1e6, 4);                         // numeric(10,4) 점수/배수 컬럼
+const probOrNull = (v: number | null | undefined): string | null =>
+  v !== null && v !== undefined && Number.isFinite(v) && v >= 0 && v <= 1
+    ? v.toFixed(6) : null;                       // numeric(8,6) 확률(0..1만 유효)
 const parseNum = (v: string | null): number | null => {
   if (v === null) return null;
   const n = Number(v);
@@ -51,16 +67,16 @@ export async function persistIntelCycle(record: IntelCycleRecord): Promise<void>
       direction: c.direction,
       regime: c.regime,
       dataQuality: c.dataQuality,
-      rawSignalScore: String(c.rawSignalScore),
-      winProbability: numOrNull(c.winProbability),
+      rawSignalScore: (Number.isFinite(c.rawSignalScore) ? Math.max(0, Math.min(100, c.rawSignalScore)) : 0).toFixed(4),
+      winProbability: probOrNull(c.winProbability),
       calibrationStatus: c.probabilityCalibrationStatus,
-      expectedEntryPrice: numOrNull(c.expectedEntryPrice),
-      stopPrice: numOrNull(c.stopPrice),
-      takeProfitPrice: numOrNull(c.takeProfitPrice),
-      finalNotionalUsd: numOrNull(c.finalNotionalUsd),
+      expectedEntryPrice: priceOrNull(c.expectedEntryPrice),
+      stopPrice: priceOrNull(c.stopPrice),
+      takeProfitPrice: priceOrNull(c.takeProfitPrice),
+      finalNotionalUsd: boundedNum(c.finalNotionalUsd, 1e14, 4),
       expectedNetValueUsd: numOrNull(c.expectedNetValueUsd),
-      expectedRMultiple: numOrNull(c.expectedRMultiple),
-      uncalibratedRankingScore: numOrNull(c.uncalibratedRankingScore),
+      expectedRMultiple: scoreOrNull(c.expectedRMultiple),
+      uncalibratedRankingScore: scoreOrNull(c.uncalibratedRankingScore),
       totalExpectedCostUsd: numOrNull(c.totalExpectedCostUsd),
       costBreakdownJson: JSON.stringify(c.cost),
       featureJson: JSON.stringify({
@@ -154,8 +170,8 @@ export async function enrichShadowOutcomes(deps: {
         outcome4hNetUsd: numOrNull(o4h.hypotheticalNetPnlUsd),
         grossPnl4hUsd: numOrNull(o4h.hypotheticalGrossPnlUsd),
         totalCostUsd: numOrNull(o4h.hypotheticalTotalCostUsd),
-        maxFavorableExcursionPct: numOrNull(o4h.maxFavorableExcursionPct),
-        maxAdverseExcursionPct: numOrNull(o4h.maxAdverseExcursionPct),
+        maxFavorableExcursionPct: scoreOrNull(o4h.maxFavorableExcursionPct),
+        maxAdverseExcursionPct: scoreOrNull(o4h.maxAdverseExcursionPct),
         firstTouch: o4h.firstTouch,
         complete,
         incompleteReason: complete ? null : (o4h.incompleteReason ?? o1h.incompleteReason),
@@ -167,8 +183,8 @@ export async function enrichShadowOutcomes(deps: {
           outcome4hNetUsd: numOrNull(o4h.hypotheticalNetPnlUsd),
           grossPnl4hUsd: numOrNull(o4h.hypotheticalGrossPnlUsd),
           totalCostUsd: numOrNull(o4h.hypotheticalTotalCostUsd),
-          maxFavorableExcursionPct: numOrNull(o4h.maxFavorableExcursionPct),
-          maxAdverseExcursionPct: numOrNull(o4h.maxAdverseExcursionPct),
+          maxFavorableExcursionPct: scoreOrNull(o4h.maxFavorableExcursionPct),
+          maxAdverseExcursionPct: scoreOrNull(o4h.maxAdverseExcursionPct),
           firstTouch: o4h.firstTouch,
           complete,
           incompleteReason: complete ? null : (o4h.incompleteReason ?? o1h.incompleteReason),

@@ -238,7 +238,7 @@ export async function runIntelCycle(deps: IntelCycleDeps): Promise<IntelCycleRec
     try {
       await deps.persist(record);
     } catch (e) {
-      return { ...record, decision: 'BLOCKED', selected: null, blockedReason: `저장 실패: ${e instanceof Error ? e.message : 'unknown'}` };
+      return { ...record, decision: 'BLOCKED', selected: null, blockedReason: `저장 실패: ${e instanceof Error ? `${e.message}${e.cause instanceof Error ? ` — cause: ${e.cause.message}` : ''}` : 'unknown'}` };
     }
     return record;
   } finally {

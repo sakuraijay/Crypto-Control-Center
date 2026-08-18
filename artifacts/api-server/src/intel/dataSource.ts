@@ -55,6 +55,17 @@ function toUsdNumber(v: unknown): number | null {
   return null;
 }
 
+/** per-second rate 파싱 — 1e30 스케일 문자열 전용, 비정상=null (음수 funding 허용) */
+function toRateNumber(v: unknown): number | null {
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  if (typeof v === 'string' && /^-?\d+$/.test(v)) {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return null;
+    return n / 1e30;
+  }
+  return null;
+}
+
 /**
  * 프로덕션 fetcher 구현 — 전부 read-only.
  * markets 목록: /markets + /prices/tickers 결합. 유동성 지표는 markets/info 계열이
@@ -66,32 +77,47 @@ export function createProductionFetchers(deps: {
   fetchGmxCandles: (symbol: string, period: string, countBack: number) => Promise<{ prices: number[][] } | null>;
 }): IntelFetchers {
   let marketRowsCache: { at: number; value: { rows: RawMarketRow[]; complete: boolean; failureReason: string | null } } | null = null;
+  let ratesCache: { at: number; value: Map<string, { fundingPerHour: number; borrowingPerHour: number }> } | null = null;
 
   return {
     async fetchMarketRows(nowMs) {
       if (marketRowsCache && nowMs - marketRowsCache.at < 60_000) return marketRowsCache.value;
       try {
-        const r = await fetch(`${GMX_API}/markets`, { signal: AbortSignal.timeout(10_000) });
+        // /markets/info — 유동성·OI·funding/borrowing 실측 포함 (전부 1e30 스케일 문자열)
+        const r = await fetch(`${GMX_API}/markets/info`, { signal: AbortSignal.timeout(10_000) });
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const data = await r.json() as { markets?: Record<string, unknown>[] } | Record<string, unknown>[];
         const list = Array.isArray(data) ? data : (data.markets ?? []);
         const ticks = deps.getCachedPrices();
+        const rates = new Map<string, { fundingPerHour: number; borrowingPerHour: number }>();
         const rows: RawMarketRow[] = list.map(m => {
           const symbolRaw = (m['indexTokenSymbol'] ?? m['name'] ?? '') as string;
           const symbol = String(symbolRaw).split('/')[0].trim();
           const tick = ticks?.find(t => t.tokenSymbol === symbol) ?? null;
+          const liqLong = toUsdNumber(m['availableLiquidityLong']);
+          const liqShort = toUsdNumber(m['availableLiquidityShort']);
+          const oiLong = toUsdNumber(m['openInterestLong']);
+          const oiShort = toUsdNumber(m['openInterestShort']);
+          const marketToken = String(m['marketToken'] ?? '');
+          // funding/borrowing: per-second 1e30 스케일 → 시간당 비율. 파싱 실패=미기록(UNAVAILABLE)
+          const f = toRateNumber(m['fundingRateLong']);
+          const b = toRateNumber(m['borrowingRateLong']);
+          if (f !== null && b !== null) {
+            rates.set(marketToken.toLowerCase(), { fundingPerHour: f * 3600, borrowingPerHour: b * 3600 });
+          }
           return {
-            marketToken: String(m['marketToken'] ?? ''),
+            marketToken,
             indexToken: typeof m['indexToken'] === 'string' ? m['indexToken'] as string : null,
             symbol,
             isListed: m['isListed'] !== false,
             isDisabled: m['isDisabled'] === true,
-            liquidityUsd: toUsdNumber(m['poolValueUsd'] ?? m['liquidity'] ?? m['gmLiquidityUsd']),
-            openInterestUsd: toUsdNumber(m['openInterestUsd'] ?? m['totalOpenInterestUsd']),
+            liquidityUsd: liqLong !== null && liqShort !== null ? liqLong + liqShort : null,
+            openInterestUsd: oiLong !== null && oiShort !== null ? oiLong + oiShort : null,
             lastPriceAtMs: tick ? (tick.updatedAt ?? nowMs) : null,
             impactDataAvailable: tick !== null,
           };
         });
+        ratesCache = { at: nowMs, value: rates };
         const value = { rows, complete: true, failureReason: null };
         marketRowsCache = { at: nowMs, value };
         return value;
@@ -119,10 +145,12 @@ export function createProductionFetchers(deps: {
       return typeof v === 'number' && Number.isFinite(v) ? v : null;
     },
 
-    async fetchFundingBorrowing(_marketAddress) {
-      // 실측 funding/borrowing per-market 조회 모듈 부재 (6I-1 §2 감사 확인).
-      // 값 조작 금지 — 가용해질 때까지 UNAVAILABLE.
-      return null;
+    async fetchFundingBorrowing(marketAddress) {
+      // /markets/info에서 실측 캐시 (fetchMarketRows가 채움). 만료/부재=UNAVAILABLE (0 위장 금지).
+      if (!ratesCache || Date.now() - ratesCache.at > 120_000) return null;
+      const r = ratesCache.value.get(marketAddress.toLowerCase());
+      if (!r) return null;
+      return { fundingPerHour: r.fundingPerHour, borrowingPerHour: r.borrowingPerHour, observedAtMs: ratesCache.at };
     },
   };
 }

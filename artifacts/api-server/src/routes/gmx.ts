@@ -15,7 +15,8 @@ import { Router } from "express";
 
 const router = Router();
 const GMX_API  = "https://arbitrum-api.gmxinfra.io";
-const STATS_API = "https://stats.gmx.io";
+// 공식 GMX API — stats.gmx.io는 DNS 소멸(2026-08 관찰)로 candles를 이 API로 전환
+const GMX_API_BASE = "https://arbitrum-api.gmxinfra.io";
 const POLL_MS  = 3_000;
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -131,13 +132,14 @@ async function refreshChange24h(): Promise<void> {
   await Promise.allSettled(
     SUPPORTED_SYMBOLS.map(async (sym) => {
       try {
-        // countBack=2 gives [yesterday, today] daily candles
-        const url = `${STATS_API}/api/candleSticks?tokenSymbol=${sym}&period=1d&preferredChainId=42161&countBack=2`;
+        // limit=2 gives [today, yesterday] daily candles (공식 API, 최신→과거)
+        const url = `${GMX_API_BASE}/prices/candles?tokenSymbol=${sym}&period=1d&limit=2`;
         const r = await fetch(url, { signal: AbortSignal.timeout(8_000) });
         if (!r.ok) { failed.add(sym); return; }
-        const data = await r.json() as { prices?: number[][] } | number[][];
-        const prices = Array.isArray(data) ? data : ((data as { prices?: number[][] }).prices ?? null);
-        if (!prices || prices.length < 2) { failed.add(sym); return; }
+        const data = await r.json() as { candles?: number[][] };
+        const raw = Array.isArray(data?.candles) ? data.candles : null;
+        if (!raw || raw.length < 2) { failed.add(sym); return; }
+        const prices = [...raw].sort((a, b) => a[0] - b[0]);
         const prevClose = prices[prices.length - 2]?.[4];
         const currClose = prices[prices.length - 1]?.[4];
         if (!prevClose || !currClose || prevClose === 0) { failed.add(sym); return; }
@@ -619,16 +621,19 @@ router.get("/gmx/tokens", async (_req, res) => {
  */
 export async function fetchGmxCandles(
   symbol: string, period: string, countBack: number,
-): Promise<{ prices: number[][]; source: "gmx-stats" } | null> {
+): Promise<{ prices: number[][]; source: "gmx-official-api" } | null> {
   const count = Math.min(Math.max(1, Math.floor(countBack) || 500), 1500);
   try {
-    const url = `${STATS_API}/api/candleSticks?tokenSymbol=${symbol}&period=${period}&preferredChainId=42161&countBack=${count}`;
+    // 공식 GMX API — stats.gmx.io는 DNS 소멸(2026-08 관찰). 응답: {candles:[[t,o,h,l,c],...]} 최신→과거.
+    const url = `${GMX_API_BASE}/prices/candles?tokenSymbol=${symbol}&period=${period}&limit=${count}`;
     const upstream = await fetch(url, { signal: AbortSignal.timeout(15_000) });
     if (!upstream.ok) return null;
-    const data = await upstream.json() as { prices?: number[][] } | number[][];
-    const prices = Array.isArray(data) ? data : ((data as { prices?: number[][] }).prices ?? null);
-    if (!prices || prices.length === 0) return null;
-    return { prices, source: "gmx-stats" };
+    const data = await upstream.json() as { candles?: number[][] };
+    const candles = Array.isArray(data?.candles) ? data.candles : null;
+    if (!candles || candles.length === 0) return null;
+    // 오름차순 정렬(과거→최신) — 기존 consumers(backtest, intel)는 ascending 가정
+    const prices = [...candles].sort((a, b) => a[0] - b[0]);
+    return { prices, source: "gmx-official-api" };
   } catch {
     return null;
   }
