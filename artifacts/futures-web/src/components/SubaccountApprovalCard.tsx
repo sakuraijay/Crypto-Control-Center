@@ -14,9 +14,10 @@ import { useWallet } from '@/lib/context';
 import {
   fetchSubaccountAuthDetailed, mapAuthFetchToDisplayState, postPrepareApproval, postApprovalSignature,
   mapAuthStateToView, canRequestOwnerSignature, canPrepareApproval, mapSignError, formatUnixSeconds,
-  APPROVAL_GRANTS, APPROVAL_DENIALS,
+  APPROVAL_GRANTS, APPROVAL_DENIALS, CANARY_REQUESTED_MAX_ALLOWED_COUNT,
   type SubaccountAuthResponse, type PrepareResponse,
 } from '@/lib/subaccountApproval';
+import { isExpectedCanarySigner, EXPECTED_CANARY_SIGNER } from '@/lib/canaryAllowance';
 
 
 type Phase = 'idle' | 'preparing' | 'awaiting_signature' | 'submitting' | 'done';
@@ -56,14 +57,23 @@ export function SubaccountApprovalCard() {
     mainAccount: auth?.mainAccount ?? null,
   });
   // §5 — Prepare는 모든 조건 충족 전 비활성 (PIN만으로 진행 불가, fail-closed)
-  const prepareGate = canPrepareApproval({ guard, auth, fetchErrorState });
+  const baseGate = canPrepareApproval({ guard, auth, fetchErrorState });
+  // #124-C — 서버 signer가 canary 예상 주소(0xc564…DdbF6)와 정확 일치할 때만 Prepare 허용
+  const signerMatch = isExpectedCanarySigner(auth?.signerAddress);
+  const prepareGate: typeof baseGate = !signerMatch
+    ? { ok: false, reasons: [...(baseGate.ok ? [] : baseGate.reasons), `서버 signer 주소가 canary 예상 주소(${EXPECTED_CANARY_SIGNER})와 불일치 — Prepare 차단`] }
+    : baseGate;
 
   const handlePrepare = useCallback(async () => {
     setMessage(null);
     if (!prepareGate.ok) { setMessage({ tone: 'error', text: prepareGate.reasons.join(' · ') }); return; }
     if (pin.trim().length < 6) { setMessage({ tone: 'error', text: '운영자 PIN(6자 이상)을 입력하세요.' }); return; }
     setPhase('preparing');
-    const r = await postPrepareApproval({ pin: pin.trim(), walletAddress: wallet.address! });
+    const r = await postPrepareApproval({
+      pin: pin.trim(), walletAddress: wallet.address!,
+      // #124-C — canary 세션 요청 8회 (서버가 1~10 clamp; expiry는 서버 고정 최대 1시간)
+      maxAllowedCount: CANARY_REQUESTED_MAX_ALLOWED_COUNT,
+    });
     if (!r.ok || !r.sessionId || !r.typedData) {
       setPhase('idle');
       setMessage({ tone: 'error', text: r.error ?? 'prepare 실패' });
@@ -133,6 +143,15 @@ export function SubaccountApprovalCard() {
         </button>
       </div>
       <p className="text-[11px] text-muted-foreground leading-relaxed">{view.description}</p>
+
+      {/* #124-C — 두 계약 구분 명시 (혼동 방지, 자동 확대·허위 24h 표시 금지) */}
+      <div className="p-2 rounded border border-border bg-secondary/40 text-[10px] leading-relaxed" data-testid="text-contract-clarity">
+        <div className="font-semibold mb-0.5">두 가지 계약을 혼동하지 마세요</div>
+        <ul className="list-disc pl-4 space-y-0.5 text-muted-foreground">
+          <li><b>서버 approval 세션 (이 카드에서 서명)</b>: 실행 {CANARY_REQUESTED_MAX_ALLOWED_COUNT}회 요청 · 만료 <b>최대 1시간</b>(서버 고정, 24시간 아님) · 서명 deadline 10분.</li>
+          <li><b>온체인 canonical delegation</b>: 아래 "온체인" 항목의 <b>readback 값만</b> 신뢰하세요. 이 카드는 온체인 값을 변경·확대하지 않습니다.</li>
+        </ul>
+      </div>
 
       {/* 온체인/구성 요약 — fetch 실패 시 '미설정'으로 오표시하지 않는다 (§2) */}
       <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[10px]">

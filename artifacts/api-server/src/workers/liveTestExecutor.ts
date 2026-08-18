@@ -1287,6 +1287,7 @@ export async function executeLiveTestOrder(params: LiveOrderParams): Promise<Liv
     leverage:          params.leverage,
     delegation,
     signerEthWei:      ethBalance.ethWei,
+    submitPath:        'gmx_api_v2', // #124-A — 제출은 GMX API v2 HTTP, signer gas 0 ETH
     openPositionCount: params.openPositionCount,
     accumLossUsd:      params.accumLossUsd,
     dbOk:              params.dbOk,
@@ -1568,6 +1569,7 @@ export async function closeLiveTestPosition(params: ClosePositionParams): Promis
     orderType: 'close', collateralToken: USDC_ADDRESS,
     sizeUsd: params.sizeUsd, collateralUsd: 0, leverage: 1,
     delegation, signerEthWei: ethBalance.ethWei,
+    submitPath: 'gmx_api_v2', // #124-A — 제출은 GMX API v2 HTTP, signer gas 0 ETH
     openPositionCount: 1, accumLossUsd: params.accumLossUsd,
     dbOk: params.dbOk, rpcOk: Boolean(rpcUrl), reconciled: _reconciled,
   };

@@ -186,6 +186,25 @@ export async function getUsdcAllowance(mainAddress: string): Promise<bigint> {
 }
 
 /**
+ * 지정 spender에 대한 USDC allowance 조회 (#124-B canary 카드용).
+ * 조회 실패는 null 반환 (0으로 위장 금지 — 표시 fail-closed).
+ */
+export async function getUsdcAllowanceForSpender(mainAddress: string, spender: string): Promise<bigint | null> {
+  try {
+    const client = getPublicClient();
+    const result = await client.readContract({
+      address:      USDC_ADDRESS as `0x${string}`,
+      abi:          ERC20_APPROVE_ABI,
+      functionName: 'allowance',
+      args:         [mainAddress as `0x${string}`, spender as `0x${string}`],
+    });
+    return result as bigint;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * SubaccountRouter 컨트랙트가 올바르게 배포되어 있는지 검증.
  * 알려진 주소로 view 호출을 시도하고 결과 형태를 확인.
  * 서버 시작 시 한 번 호출.

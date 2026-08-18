@@ -160,6 +160,14 @@ export interface GateInput {
   delegation:          DelegationStatus;
   /** 현재 서버 지갑 ETH 잔고 (wei) */
   signerEthWei:        bigint;
+  /**
+   * 주문 제출 경로 (#124-A):
+   *  - 'gmx_api_v2'      — 공식 GMX API v2 HTTP 제출. delegated signer는 EIP-712 digest
+   *                        로컬 서명만 하고 온체인 broadcast를 하지 않으므로 signer ETH 불필요 (0 ETH).
+   *  - 'legacy_broadcast' — 과거 직접 writeContract 경로. signer가 가스를 지불하므로 MIN_ETH 요구 유지.
+   * 미지정 시 fail-closed 기본값 'legacy_broadcast' (ETH 요구 유지).
+   */
+  submitPath?:         'gmx_api_v2' | 'legacy_broadcast';
   /** 현재 열린 포지션 수 (온체인 기준) */
   openPositionCount:   number;
   /** 누적 실현 손실 (USD, DB 기준) */
@@ -231,11 +239,17 @@ export function checkLiveTestGate(input: GateInput): GateResult {
     return { allowed: false, reason: `[LIVE TEST] 허용 액션 소진 (remaining=${input.delegation.remainingActions}/${LIVE_TEST_CAPS.maxActions})`, checks };
   }
 
-  // 7. 서버 지갑 ETH 잔고 (최소 0.003 ETH — execution fee 2회분)
-  const MIN_ETH = 3_000_000_000_000_000n; // 0.003 ETH
-  checks.signerHasGas = input.signerEthWei >= MIN_ETH;
-  if (!checks.signerHasGas) {
-    return { allowed: false, reason: `[LIVE TEST] 사이너 지갑 ETH 부족 (${input.signerEthWei}wei < ${MIN_ETH}wei) — 0.005 ETH 이상 충전 필요`, checks };
+  // 7. 서버 지갑 ETH 잔고 — 제출 경로별 분기 (#124-A)
+  //    GMX API v2: signer는 digest 서명만, broadcast는 GMX API relay가 수행 → signer gas 0 ETH.
+  //    legacy broadcast: signer가 직접 가스 지불 → 최소 0.003 ETH (execution fee 2회분) 유지.
+  if ((input.submitPath ?? 'legacy_broadcast') === 'gmx_api_v2') {
+    checks.signerHasGas = true; // 구조적으로 불필요 — GMX API v2 signer gas: 0 ETH
+  } else {
+    const MIN_ETH = 3_000_000_000_000_000n; // 0.003 ETH
+    checks.signerHasGas = input.signerEthWei >= MIN_ETH;
+    if (!checks.signerHasGas) {
+      return { allowed: false, reason: `[LIVE TEST] (legacy broadcast 경로) 사이너 지갑 ETH 부족 (${input.signerEthWei}wei < ${MIN_ETH}wei) — 0.005 ETH 이상 충전 필요`, checks };
+    }
   }
 
   // 8. 동시 포지션 수 상한 (open 주문에만 적용)

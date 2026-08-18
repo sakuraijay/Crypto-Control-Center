@@ -25,7 +25,8 @@ import {
   APPROVAL_LIMITS,
 } from '../lib/ownerApprovalSession';
 import type { Address, Hex } from 'viem';
-import { checkDelegationStatus, buildAddSubaccountTx, buildUsdcApproveTx, buildRemoveSubaccountTx, getUsdcAllowance } from '../lib/gmxSubaccount';
+import { checkDelegationStatus, buildAddSubaccountTx, buildUsdcApproveTx, buildRemoveSubaccountTx, getUsdcAllowance, getUsdcAllowanceForSpender } from '../lib/gmxSubaccount';
+import { buildCanaryAllowanceInfo, resolveSdkSyntheticsRouter, isExpectedCanarySigner, EXPECTED_CANARY_SIGNER } from '../lib/canaryAllowanceInfo';
 import { checkLiveTestGate, isLiveTestExecutionLocked, LIVE_TEST_CAPS, delegationTimeRemainingSeconds } from '../lib/liveTestGate';
 import { USDC_ADDRESS } from '../lib/gmxContracts';
 import {
@@ -97,10 +98,11 @@ router.get('/executor/signer', async (_req, res) => {
       address,
       createdAt,
       ethFormatted:  ethBalance.ethFormatted,
-      readyForGas:   ethBalance.readyForGas,
-      // 사이너에게 자금 보내는 방법 안내 (주소만 제공, 개인키 절대 미포함)
+      // #124-A — GMX API v2 경로에서 signer는 broadcast하지 않으므로 gas 불필요 (0 ETH)
+      readyForGas:   true,
+      signerGasModel: 'GMX_API_V2_ZERO_ETH',
       fundingNote:  initialized && address
-        ? `0.02 ETH 이상을 ${address} 주소로 전송하면 주문 실행 가능합니다.`
+        ? 'GMX API v2 signer gas: 0 ETH — delegated signer에 ETH를 전송할 필요가 없습니다 (EIP-712 서명만 수행, broadcast 없음).'
         : '사이너가 초기화되지 않았습니다.',
     });
   } catch (e: unknown) {
@@ -250,6 +252,14 @@ router.post('/executor/subaccount-approval/prepare', requireOperatorAuth, async 
     const signerAddress = getSignerAddress();
     if (!isSignerInitialized() || !signerAddress) {
       return res.status(503).json({ ok: false, error: 'delegated signer 미초기화 — prepare 불가' });
+    }
+    // #124-C — 서버 측 강제: 구성된 signer가 canary 예상 주소와 정확 일치할 때만 prepare 허용.
+    // (UI 게이트는 방어층일 뿐 보안 통제가 아님 — 직접 API 호출 우회 차단)
+    if (!isExpectedCanarySigner(signerAddress)) {
+      return res.status(409).json({
+        ok: false,
+        error: `구성된 signer가 canary 예상 주소(${EXPECTED_CANARY_SIGNER})와 일치하지 않습니다 — prepare 차단 (fail-closed)`,
+      });
     }
 
     // 요청 지갑 주소는 GMX_WALLET_ADDRESS와 정확히 일치해야 함
@@ -414,7 +424,9 @@ router.get('/executor/livetest/status', async (req, res) => {
       signerAddress,
       mainAddress:           mainAddress || null,
       signerEth:             ethBalance.ethFormatted,
-      signerReadyForGas:     ethBalance.readyForGas,
+      // #124-A — GMX API v2 경로에서 signer gas는 0 ETH (EIP-712 서명만, broadcast 없음)
+      signerReadyForGas:     true,
+      signerGasModel:        'GMX_API_V2_ZERO_ETH',
       usdcAllowanceWei:      usdcAllowance,
       usdcApproved:          BigInt(usdcAllowance) >= 15_000_000n, // ≥ 15 USDC
       delegation,
@@ -430,7 +442,8 @@ router.get('/executor/livetest/status', async (req, res) => {
         subaccountRouterConfigured,
         orderVaultConfigured,
         executionUnlocked:           !executionLocked,
-        signerHasGas:                ethBalance.readyForGas,
+        // #124-A — GMX API v2 제출 경로에서는 signer가 broadcast하지 않으므로 gas 불필요 (0 ETH)
+        signerHasGas:                true,
         usdcApproved:                BigInt(usdcAllowance) >= 15_000_000n,
         delegationActive:            delegation?.isAuthorized ?? false,
         noEmergencyStop:             !emergencyStop,
@@ -468,16 +481,8 @@ router.get('/executor/livetest/setup-txs', (req, res) => {
         tx:          buildAddSubaccountTx(signerAddress, maxActions, validHours),
         note:        `SubaccountRouter를 호출합니다. 유효기간: ${validHours}시간, 허용액션: ${maxActions}회. MetaMask에서 확인.`,
       },
-      {
-        step:        3,
-        description: `ETH 전송 — 사이너 지갑에 가스비 충전`,
-        tx: {
-          to:    signerAddress,
-          data:  '0x',
-          value: '0x' + (20_000_000_000_000_000n).toString(16), // 0.02 ETH
-        },
-        note:        `${signerAddress}로 0.02 ETH 이상을 전송하세요 (가스 + 실행 수수료).`,
-      },
+      // #124-A — signer ETH 충전 단계 제거: GMX API v2 경로에서 signer는 EIP-712 서명만
+      // 수행하고 온체인 broadcast를 하지 않으므로 signer gas는 0 ETH.
     ];
 
     return res.json({
@@ -485,12 +490,37 @@ router.get('/executor/livetest/setup-txs', (req, res) => {
       signerAddress,
       hardCaps:     LIVE_TEST_CAPS,
       txs,
+      signerGasModel: 'GMX_API_V2_ZERO_ETH', // GMX API v2 signer gas: 0 ETH
       postSetupSteps: [
-        '위 3단계 완료 후 Replit Secrets에 LIVE_TEST_EXECUTION_LOCKED=false 설정',
+        '위 단계 완료 후 Replit Secrets에 LIVE_TEST_EXECUTION_LOCKED=false 설정',
         'WORKER_ENGINE_MODE=LIVE 확인',
         '/executor/livetest/status에서 모든 체크리스트 통과 확인',
       ],
     });
+  } catch (e: unknown) {
+    return res.status(500).json({ ok: false, error: (e as Error).message });
+  }
+});
+
+// ── GET /executor/allowance/canary ───────────────────────────────────────────
+// Controlled Canary USDC allowance 카드용 authoritative 파라미터 (#124-B).
+// pinned SDK(SyntheticsRouter)·canonical USDC 교차검증 통과 시에만 verified=true.
+// 서버는 approve 트랜잭션을 생성·서명·제출하지 않는다 (read-only).
+router.get('/executor/allowance/canary', async (_req, res) => {
+  try {
+    const mainAddress = getConfiguredMainAccount();
+    const sdkRouter = resolveSdkSyntheticsRouter();
+    let allowanceUnits: bigint | null = null;
+    if (mainAddress && sdkRouter) {
+      allowanceUnits = await getUsdcAllowanceForSpender(mainAddress, sdkRouter);
+    }
+    const info = buildCanaryAllowanceInfo({
+      sdkRouter,
+      usdcAddress: USDC_ADDRESS,
+      mainAddress: mainAddress || null,
+      allowanceUnits,
+    });
+    return res.json({ ok: true, ...info });
   } catch (e: unknown) {
     return res.status(500).json({ ok: false, error: (e as Error).message });
   }

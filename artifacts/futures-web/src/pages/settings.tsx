@@ -4,6 +4,7 @@ import { SubaccountApprovalCard } from '@/components/SubaccountApprovalCard';
 import { RelayStatusCard } from '@/components/RelayStatusCard';
 import { ReadinessRefreshCard } from '@/components/ReadinessRefreshCard';
 import { SignerProvisionCard } from '@/components/SignerProvisionCard';
+import { CanaryAllowanceCard } from '@/components/CanaryAllowanceCard';
 import { GmxApiStatusCard } from '@/components/GmxApiStatusCard';
 import type { ReadinessSnapshotView } from '@/lib/relayStatus';
 import { formatConfidencePct } from '@/lib/formatConfidence';
@@ -820,6 +821,8 @@ export default function Settings() {
 
           {/* Canary P0 — signer 공개주소 프로비저닝 (LIVE 잠금 유지) */}
           <SignerProvisionCard />
+          {/* #124-B — Canary 전용 USDC allowance 카드 (정확히 15 USDC, unlimited 금지) */}
+          <CanaryAllowanceCard />
           {/* Step 4b — MetaMask owner approval (2단계) */}
           <SubaccountApprovalCard />
           {/* 6E-10 §3 — 인증된 Readiness POST 응답의 snapshot만 두 카드에 공유.
@@ -930,8 +933,9 @@ export default function Settings() {
             <div className="flex-1 min-w-0">
               <div className="font-semibold mb-0.5">Owner Approval 서명 (MetaMask)</div>
               <p className="text-muted-foreground">
-                위 Owner Approval 카드에서 Prepare → 서버가 반환한 파라미터(최대 2회 실행·1시간 만료·10분 deadline) 검토 → 서명.
-                파라미터는 서버가 고정하며 UI에서 조정할 수 없습니다.
+                위 Owner Approval 카드에서 Prepare → 서버가 반환한 파라미터(실행 8회 요청·만료 최대 1시간·10분 deadline) 검토 → 서명.
+                expiry는 서버가 최대 1시간으로 고정하며 UI에서 확대할 수 없습니다 (24시간 아님).
+                delegated signer에는 ETH가 필요 없습니다 — GMX API v2 signer gas: 0 ETH.
               </p>
             </div>
           </div>

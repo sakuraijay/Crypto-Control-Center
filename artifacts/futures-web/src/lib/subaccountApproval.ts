@@ -226,13 +226,19 @@ export interface PrepareResponse {
   error?: string;
 }
 
+/** Canary 세션 요청 실행 횟수 (#124-C) — 서버가 1~10 범위로 clamp (자동 확대 없음) */
+export const CANARY_REQUESTED_MAX_ALLOWED_COUNT = 8;
+
 export async function postPrepareApproval(params: {
-  pin: string; walletAddress: string;
+  pin: string; walletAddress: string; maxAllowedCount?: number;
 }): Promise<PrepareResponse> {
   try {
     const res = await postApiJson('executor/subaccount-approval/prepare', {
       headers: { 'x-operator-pin': params.pin },
-      body: { walletAddress: params.walletAddress },
+      body: {
+        walletAddress: params.walletAddress,
+        ...(params.maxAllowedCount !== undefined ? { maxAllowedCount: params.maxAllowedCount } : {}),
+      },
     });
     const body = await readApiJson(res);
     if (body.kind === 'route_mismatch') return { ok: false, error: API_ROUTE_MISMATCH_MESSAGE };
