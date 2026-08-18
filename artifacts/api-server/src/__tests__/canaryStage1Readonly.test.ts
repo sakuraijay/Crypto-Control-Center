@@ -10,6 +10,13 @@
  * 이 테스트는 실제 네트워크를 사용하지 않는다 — fetch mock이 호출 횟수를 검증.
  */
 import { describe, it, expect, vi } from 'vitest';
+
+// CI db-free 규칙 — delegatedSigner가 모듈 로드 시 @workspace/db를 import하므로 mock 필수
+vi.mock('@workspace/db', () => ({
+  db: {},
+  workerStateTable: {},
+}));
+
 import {
   createGmxApiTransport,
   GMX_API_READONLY_FLAG,
