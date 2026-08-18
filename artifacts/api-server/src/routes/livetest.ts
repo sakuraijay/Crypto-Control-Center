@@ -10,7 +10,7 @@
  */
 
 import { Router } from 'express';
-import { getSignerAddress, getSignerEthBalance, isSignerInitialized, getSignerCreatedAt, isDelegatedSignerEnabled } from '../lib/delegatedSigner';
+import { getSignerAddress, getSignerEthBalance, isSignerInitialized, getSignerCreatedAt, isDelegatedSignerEnabled, provisionDelegatedSigner } from '../lib/delegatedSigner';
 import { resolveGmxLiveRelayConfig, ARBITRUM_ONE_CHAIN_ID } from '../lib/gmxLiveConfig';
 import { deriveSubaccountAuthState, isAuthStateLiveEligible, type SubaccountAuthState } from '../lib/subaccountAuthState';
 import { readSubaccountAuthorization, RELAY_ROUTER_NONCE_ABI, type SubaccountAuthOnchain, type DataStoreClient } from '../lib/gmxDataStore';
@@ -47,6 +47,35 @@ export function __setGmxApiTransportForTests(t: GmxApiTransport | null): void {
 function getGmxApiTransportForApproval(): GmxApiTransport {
   return injectedGmxApiTransport ?? createGmxApiTransport(process.env);
 }
+
+// ── POST /executor/signer/provision ──────────────────────────────────────────
+// Canary P0 — 활성화 데드락 해소: LIVE 잠금을 풀지 않고 signer만 명시적 1회
+// 생성/조회한다 (운영자 PIN + application/json 필수 — requireOperatorAuth).
+// 이 API는 서명·prepare/submit POST·Owner Approval·nonce/task/intent 생성·
+// DB 거래행 생성·자금 이동을 절대 수행하지 않는다. 외부 네트워크 호출 0회.
+// 응답에는 공개주소만 포함된다 (개인키·암호문·PIN·Secret 절대 금지).
+router.post('/executor/signer/provision', requireOperatorAuth, async (_req, res) => {
+  try {
+    if (isEmergencyStopActive()) {
+      return res.status(409).json({ ok: false, error: 'Emergency Stop 활성 — 프로비저닝 차단 (fail-closed)' });
+    }
+    const result = await provisionDelegatedSigner();
+    return res.json({
+      ok: true,
+      created: result.created,
+      signerAddress: result.address,
+      createdAt: result.createdAt,
+      liveExecutionLocked: isLiveTestExecutionLocked(),
+      notice: 'LIVE 실행은 여전히 잠겨 있습니다 — 이 작업은 signer 키 생성/조회만 수행했으며 서명·주문·자금 이동은 일어나지 않았습니다.',
+    });
+  } catch (e: unknown) {
+    // delegatedSigner의 고정 fail-closed 문구만 노출 (DB 원문 오류·Secret 미포함)
+    const msg = e instanceof Error && e.message.startsWith('[DelegatedSigner]')
+      ? e.message
+      : '프로비저닝 실패 (fail-closed)';
+    return res.status(409).json({ ok: false, error: msg });
+  }
+});
 
 // ── GET /executor/signer ────────────────────────────────────────────────────────
 // 서버 사이너 주소 + 잔고 정보. 개인키 절대 미포함.

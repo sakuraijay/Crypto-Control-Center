@@ -3,6 +3,7 @@ import { useAppContext, useAuthContext, useTradingContext, useWallet } from '@/l
 import { SubaccountApprovalCard } from '@/components/SubaccountApprovalCard';
 import { RelayStatusCard } from '@/components/RelayStatusCard';
 import { ReadinessRefreshCard } from '@/components/ReadinessRefreshCard';
+import { SignerProvisionCard } from '@/components/SignerProvisionCard';
 import { GmxApiStatusCard } from '@/components/GmxApiStatusCard';
 import type { ReadinessSnapshotView } from '@/lib/relayStatus';
 import { formatConfidencePct } from '@/lib/formatConfidence';
@@ -817,6 +818,8 @@ export default function Settings() {
             </div>
           </div>
 
+          {/* Canary P0 — signer 공개주소 프로비저닝 (LIVE 잠금 유지) */}
+          <SignerProvisionCard />
           {/* Step 4b — MetaMask owner approval (2단계) */}
           <SubaccountApprovalCard />
           {/* 6E-10 §3 — 인증된 Readiness POST 응답의 snapshot만 두 카드에 공유.

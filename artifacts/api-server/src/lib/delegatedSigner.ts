@@ -225,6 +225,122 @@ async function saveToDb(encryptedKey: string, createdAt: string): Promise<void> 
     });
 }
 
+// ── 운영자 프로비저닝 (Canary P0 — 활성화 데드락 해소) ─────────────────────────
+
+/**
+ * signer 프로비저닝(명시적 1회 키 생성/조회) 허용 조건 — 최소권한 별도 경로.
+ *
+ * 데드락 배경: isSignerStorageAccessAllowed(6단계 §4)는 relay 제출·LIVE mode·
+ * WORKER_ENGINE_MODE=LIVE·잠금 해제까지 요구하므로, Owner Approval에 필요한
+ * signer 공개주소를 그 전에 확보할 수 없다. 이 게이트는 **정반대로 잠금 상태를
+ * 요구**한다 — 제출·서명이 구조적으로 불가능한 상태에서만 키 생성/조회를 허용.
+ *
+ * 주의: 이 게이트는 프로비저닝(DB 키 생성/조회) 전용이다. 런타임 서명 경로
+ * (signDigestWithDelegatedSigner)와 startup 초기화의 강한 게이트
+ * (isSignerStorageAccessAllowed)는 그대로 유지되며 절대 완화하지 않는다.
+ */
+export function isSignerProvisioningAllowed(env: NodeJS.ProcessEnv = process.env): {
+  allowed: boolean;
+  missing: string[];
+} {
+  const missing: string[] = [];
+  if (env.GMX_API_READONLY_ENABLED !== 'true') missing.push("GMX_API_READONLY_ENABLED !== 'true'");
+  if (env.DELEGATED_SIGNER_ENABLED !== 'true') missing.push("DELEGATED_SIGNER_ENABLED !== 'true'");
+  if (env.WORKER_ENGINE_MODE === 'LIVE') missing.push('WORKER_ENGINE_MODE=LIVE — PAPER 모드에서만 프로비저닝 허용');
+  if (env.LIVE_TEST_EXECUTION_LOCKED !== 'true') missing.push("LIVE_TEST_EXECUTION_LOCKED !== 'true' — 잠금 상태에서만 프로비저닝 허용");
+  if (env.GMX_API_ORDER_SUBMISSION_ENABLED === 'true') missing.push('GMX_API_ORDER_SUBMISSION_ENABLED=true — 제출 활성 상태에서 프로비저닝 금지');
+  if (env.GMX_RELAY_NETWORK_ENABLED === 'true') missing.push('GMX_RELAY_NETWORK_ENABLED=true — relay 제출 네트워크 활성 상태에서 프로비저닝 금지');
+  if (env.GMX_RELAY_SUBMISSION_ENABLED === 'true') missing.push('GMX_RELAY_SUBMISSION_ENABLED=true — relay 제출 활성 상태에서 프로비저닝 금지');
+  if (env.GMX_RELAY_MODE === 'LIVE') missing.push('GMX_RELAY_MODE=LIVE — LIVE mode에서 프로비저닝 금지');
+  return { allowed: missing.length === 0, missing };
+}
+
+export type SignerProvisionResult = {
+  created: boolean;
+  /** 공개주소만 — 개인키·암호문은 어떤 경로로도 반환하지 않는다 */
+  address: string;
+  createdAt: string;
+};
+
+/** 프로비저닝 저장 — insert-if-absent (onConflictDoNothing). 동시 요청이 와도
+ *  DB 단일 PK(worker_state.key)가 승자를 하나로 고정한다. */
+async function saveToDbIfAbsent(encryptedKey: string, createdAt: string): Promise<void> {
+  const now = new Date();
+  try {
+    await db
+      .insert(workerStateTable)
+      .values({ key: SIGNER_KEY_STATE_KEY, value: encryptedKey, updatedAt: now })
+      .onConflictDoNothing();
+    await db
+      .insert(workerStateTable)
+      .values({ key: SIGNER_META_KEY, value: JSON.stringify({ createdAt }), updatedAt: now })
+      .onConflictDoNothing();
+  } catch {
+    // DB 원문 오류 메시지(연결 문자열 등) 노출 금지 — 고정 문구로 대체
+    throw new Error('[DelegatedSigner] provisioning 저장 실패 (fail-closed)');
+  }
+}
+
+/**
+ * 운영자 명시적 프로비저닝 — LIVE 잠금을 풀지 않고 signer를 1회 생성/조회한다.
+ *
+ * 계약:
+ *  - idempotent: 기존 signer가 있으면 새 키를 만들지 않고 동일 공개주소만 반환
+ *  - 신규 생성은 loadFromDb()='absent'일 때만, 기존 SESSION_SECRET AES-256-GCM
+ *    암호화 저장 계약(encryptPrivateKey/saveToDbIfAbsent) 사용
+ *  - 동시성: insert onConflictDoNothing 후 재조회 — DB 승자의 키만 유효
+ *  - 모듈 런타임 상태(_initialized/_privateKeyHex)는 절대 변경하지 않는다 →
+ *    서명·prepare/submit·Owner Approval·nonce/task/intent·자금 이동 0회 유지
+ *  - 개인키·암호문·SESSION_SECRET은 반환·로그 출력 금지 (공개주소만)
+ */
+export async function provisionDelegatedSigner(
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<SignerProvisionResult> {
+  const gate = isSignerProvisioningAllowed(env);
+  if (!gate.allowed) {
+    throw new Error(`[DelegatedSigner] 프로비저닝 차단 (fail-closed): ${gate.missing.join(', ')}`);
+  }
+
+  // SESSION_SECRET 존재·최소 길이 사전 검증 (값은 출력하지 않음)
+  getSessionSecret();
+
+  const deriveAddress = (encryptedKey: string): string => {
+    let plainHex: string;
+    try {
+      plainHex = decryptPrivateKey(encryptedKey);
+    } catch {
+      throw new Error('[DelegatedSigner] 기존 signer 복호화 실패 — 신규 생성·overwrite 금지 (fail-closed)');
+    }
+    // 요청 로컬 범위에서만 사용 — 모듈 상태에 저장하지 않는다
+    return privateKeyToAccount(`0x${plainHex}` as `0x${string}`).address;
+  };
+
+  const loaded = await loadFromDb();
+  switch (loaded.status) {
+    case 'db_error':
+      throw new Error('[DelegatedSigner] DB 조회 실패 — 기존 signer 존재 여부 불명, 신규 생성 금지 (fail-closed)');
+    case 'corrupt':
+      throw new Error('[DelegatedSigner] signer 데이터 손상 감지 — 신규 생성·overwrite 금지 (fail-closed)');
+    case 'found':
+      return { created: false, address: deriveAddress(loaded.encryptedKey), createdAt: loaded.createdAt };
+    case 'absent': {
+      const rawKey    = randomBytes(32);
+      const plainHex  = rawKey.toString('hex');
+      const createdAt = new Date().toISOString();
+      const encrypted = encryptPrivateKey(plainHex);
+      await saveToDbIfAbsent(encrypted, createdAt);
+
+      // 재조회로 DB 승자를 확정 — 동시 요청 시에도 키는 정확히 1개
+      const winner = await loadFromDb();
+      if (winner.status !== 'found') {
+        throw new Error('[DelegatedSigner] provisioning 검증 실패 — 저장 후 재조회 불일치 (fail-closed)');
+      }
+      const created = winner.encryptedKey === encrypted; // salt 랜덤 → 동일성 비교로 승자 판별
+      return { created, address: deriveAddress(winner.encryptedKey), createdAt: winner.createdAt };
+    }
+  }
+}
+
 // ── 공개 API ──────────────────────────────────────────────────────────────────
 
 /**
