@@ -7,6 +7,7 @@ import { GmxApiStatusCard } from '@/components/GmxApiStatusCard';
 import type { ReadinessSnapshotView } from '@/lib/relayStatus';
 import { formatConfidencePct } from '@/lib/formatConfidence';
 import { deriveLiveTestDisplay } from '@/lib/liveTestDisplay';
+import { BetaRcStatusCard } from '@/components/dashboard/BetaRcStatusCard';
 import { useAiEngine } from '@/lib/context/AiEngineContext';
 import { useStrategyContext } from '@/lib/context/StrategyContext';
 import { Card } from '@/components/ui/card';
@@ -1294,6 +1295,9 @@ export default function Settings() {
         <h2 className="font-semibold flex items-center gap-2 border-b border-border pb-2 text-lg">
           <Cpu className="w-5 h-5 text-primary" /> System Status
         </h2>
+
+        {/* ── Beta RC 상태 (읽기 전용 관제 — 실행 능력 없음) ── */}
+        <BetaRcStatusCard />
 
         {/* ── Offline banner (2+ consecutive failures) ── */}
         {isOffline && (

@@ -29,6 +29,7 @@ import { SystemHealthBanner } from '@/components/dashboard/SystemHealthBanner';
 import { AiMarketRankingCard } from '@/components/dashboard/AiMarketRankingCard';
 import { ExecutorStatusWidget } from '@/components/dashboard/ExecutorStatusWidget';
 import { GmxOnchainCard } from '@/components/dashboard/GmxOnchainCard';
+import { BetaRcStatusCard } from '@/components/dashboard/BetaRcStatusCard';
 import { RiskPolicyCard } from '@/components/RiskPolicyCard';
 import { MarketIntelligenceCard } from '@/components/MarketIntelligenceCard';
 import { OpportunityRankingCard } from '@/components/OpportunityRankingCard';
@@ -198,6 +199,9 @@ export default function Dashboard() {
 
       {/* ── GMX 온체인 계정 (Read-only) ──────────────────────────────────── */}
       <GmxOnchainCard />
+
+      {/* ── Beta RC 상태 (읽기 전용 관제) ── */}
+      <BetaRcStatusCard />
 
       {/* ── $1,000 최종 운용 정책 (6H-1) ── */}
       <RiskPolicyCard />
