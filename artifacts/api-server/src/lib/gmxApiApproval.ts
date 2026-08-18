@@ -87,8 +87,10 @@ export function validateGmxPreparedApproval(input: GmxPreparedApprovalValidation
   else if (expiresAt - now > BigInt(APPROVAL_LIMITS.MAX_EXPIRY_SECONDS)) reasons.push('expiry가 canary 상한(1h) 초과');
   if (deadline === null || deadline <= now) reasons.push('deadline 없음/과거');
   else if (deadline - now > BigInt(APPROVAL_LIMITS.SIGNATURE_DEADLINE_SECONDS)) reasons.push('deadline이 canary 상한(10분) 초과');
-  if (maxAllowedCount === null || maxAllowedCount < APPROVAL_LIMITS.MIN_MAX_ALLOWED_COUNT) reasons.push('maxAllowedCount 없음/0');
-  else if (maxAllowedCount > APPROVAL_LIMITS.DEFAULT_MAX_ALLOWED_COUNT) reasons.push('maxAllowedCount가 canary 정책(2) 초과');
+  // canonical 정확 일치 강제 — 8이 아닌 어떤 값(2/6/9/…)도 변조로 간주 (fail-closed)
+  if (maxAllowedCount === null || maxAllowedCount !== APPROVAL_LIMITS.CANONICAL_MAX_ALLOWED_COUNT) {
+    reasons.push(`maxAllowedCount ≠ canonical(${APPROVAL_LIMITS.CANONICAL_MAX_ALLOWED_COUNT}) — 변조 의심`);
+  }
   if (desChainId === null || desChainId !== BigInt(GMX_API_CHAIN_ID)) reasons.push('desChainId ≠ 42161');
   if (typeof m.actionType !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(m.actionType)) reasons.push('actionType 형식 오류');
   if (typeof m.integrationId !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(m.integrationId)) reasons.push('integrationId 형식 오류');

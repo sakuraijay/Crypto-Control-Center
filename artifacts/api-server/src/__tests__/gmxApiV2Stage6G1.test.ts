@@ -330,7 +330,7 @@ describe('6G-1 §5 — validateGmxPreparedApproval', () => {
         types: { SubaccountApproval: [{ name: 'subaccount', type: 'address' }] },
         message: {
           subaccount: SUB, shouldAdd: true, expiresAt: String(NOW + 3600n),
-          maxAllowedCount: '2', actionType: `0x${'aa'.repeat(32)}`, nonce: '7',
+          maxAllowedCount: '8', actionType: `0x${'aa'.repeat(32)}`, nonce: '7',
           desChainId: '42161', deadline: String(NOW + 600n), integrationId: `0x${'bb'.repeat(32)}`,
           ...msgOverrides,
         },
@@ -356,6 +356,9 @@ describe('6G-1 §5 — validateGmxPreparedApproval', () => {
       [{ shouldAdd: false }, undefined],
       [{ desChainId: '1' }, undefined],
       [{ maxAllowedCount: '5' }, undefined],
+      [{ maxAllowedCount: '2' }, undefined],
+      [{ maxAllowedCount: '6' }, undefined],
+      [{ maxAllowedCount: '9' }, undefined],
       [{ actionType: '0x1234' }, undefined],
     ];
     for (const [m, d] of cases) {

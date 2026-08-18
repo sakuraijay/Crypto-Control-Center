@@ -63,7 +63,7 @@ export function RiskExecutionStatusCard() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch(apiUrl('/api/executor/status'));
+      const res = await fetch(apiUrl('/executor/status'));
       if (!res.ok) throw new Error(String(res.status));
       const j = await res.json() as StatusSlice;
       setData({

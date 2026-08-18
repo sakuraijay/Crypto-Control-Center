@@ -484,6 +484,10 @@ export async function getReadyApprovalForSubmit(params: {
   if (params.canonicalNonce !== null && BigInt(row.approvalNonce) !== params.canonicalNonce) {
     return { ok: false, reason: 'approval nonce가 canonical과 불일치' };
   }
+  // canonical 8 불변식 — 레거시(≠8) 세션의 서명은 복호화·제출 자체를 차단 (fail-closed)
+  if (BigInt(row.maxAllowedCount) !== APPROVAL_LIMITS.CANONICAL_MAX_ALLOWED_COUNT) {
+    return { ok: false, reason: 'approval maxAllowedCount ≠ canonical(8) — 레거시 세션, 새로 준비 필요' };
+  }
   if (!row.encryptedSignature) return { ok: false, reason: 'approval 서명 미저장' };
 
   let signature: string;

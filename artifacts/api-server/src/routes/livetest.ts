@@ -316,8 +316,10 @@ router.post('/executor/subaccount-approval/prepare', requireOperatorAuth, async 
       return res.status(502).json({ ok: false, error: `canonical nonce 조회 실패 — prepare 중단: ${sanitizeRpcError(e)}` });
     }
 
-    const expiry = typeof req.body?.expirySeconds === 'number' ? req.body.expirySeconds : undefined;
-    const maxCount = typeof req.body?.maxAllowedCount === 'number' ? req.body.maxAllowedCount : undefined;
+    // canonical 강제 — 클라이언트 body의 expirySeconds/maxAllowedCount는 신뢰하지 않는다.
+    // maxAllowedCount=8(감사 예산 6 + 비상 2), expiry=최대 1시간, deadline=10분 고정.
+    const expiry = APPROVAL_LIMITS.DEFAULT_EXPIRY_SECONDS;
+    const maxCount = Number(APPROVAL_LIMITS.CANONICAL_MAX_ALLOWED_COUNT);
     const nowSec = BigInt(Math.floor(Date.now() / 1000));
 
     // 6G-1 §5 — 공식 GMX API prepareSubaccountApproval이 권위 원천.

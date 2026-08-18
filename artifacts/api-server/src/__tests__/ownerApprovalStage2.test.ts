@@ -179,13 +179,13 @@ describe('encryptSensitiveHex — capability 암호화 회귀', () => {
 // ── prepare ──────────────────────────────────────────────────────────────────
 
 describe('prepareApprovalSession', () => {
-  it('기본값: expiry 1h, maxAllowedCount 2, deadline 10분, 서버 고정 필드', async () => {
+  it('기본값: expiry 1h, maxAllowedCount canonical 8, deadline 10분, 서버 고정 필드', async () => {
     const r = await prepare();
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const s = r.prepared.summary;
     expect(BigInt(s.expiresAt)).toBe(NOW + 3600n);
-    expect(s.maxAllowedCount).toBe('2');
+    expect(s.maxAllowedCount).toBe('8');
     expect(BigInt(s.deadline)).toBe(NOW + 600n);
     expect(s.actionType).toBe(SUBACCOUNT_ORDER_ACTION);
     expect(s.chainId).toBe(42161);
@@ -214,7 +214,7 @@ describe('prepareApprovalSession', () => {
     expect(store.rows.filter((x) => x.status === SESSION_STATUS.PREPARED)).toHaveLength(0);
   });
 
-  it('허용 범위 밖 요청은 클램프 (expiry ≤1h, count 1–10)', async () => {
+  it('허용 범위 밖 요청: expiry는 클램프(≤1h), count는 클라이언트 무시 → canonical 8', async () => {
     const r = await prepareApprovalSession({
       mainAccount: owner.address, subaccount: signer.address, verifyingContract: ROUTER,
       canonicalNonce: 0n, nowSec: NOW,
@@ -223,7 +223,19 @@ describe('prepareApprovalSession', () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(BigInt(r.prepared.summary.expiresAt)).toBe(NOW + BigInt(APPROVAL_LIMITS.MAX_EXPIRY_SECONDS));
-    expect(r.prepared.summary.maxAllowedCount).toBe(APPROVAL_LIMITS.MAX_MAX_ALLOWED_COUNT.toString());
+    // 클라이언트 요청값(999)은 신뢰하지 않는다 — 항상 canonical 8
+    expect(r.prepared.summary.maxAllowedCount).toBe(APPROVAL_LIMITS.CANONICAL_MAX_ALLOWED_COUNT.toString());
+  });
+
+  it('클라이언트가 2/6/9를 요청해도 서버는 canonical 8 생성 (임의값 불신)', async () => {
+    for (const req of [2, 6, 9]) {
+      const r = await prepareApprovalSession({
+        mainAccount: owner.address, subaccount: signer.address, verifyingContract: ROUTER,
+        canonicalNonce: 0n, nowSec: NOW, requestedMaxAllowedCount: req,
+      });
+      expect(r.ok).toBe(true);
+      if (r.ok) expect(r.prepared.summary.maxAllowedCount).toBe('8');
+    }
   });
 
   it('새 prepare는 기존 PREPARED/READY 세션을 INVALIDATED로 대체', async () => {
@@ -282,6 +294,38 @@ describe('submitApprovalSignature', () => {
     if (!r.ok) expect(r.reason).toContain('서명');
     expect(store.rows[0].status).toBe(SESSION_STATUS.PREPARED);
     expect(store.rows[0].encryptedSignature).toBeNull();
+  });
+
+  it('레거시 세션(maxAllowedCount=2) → 서명 저장 거부 + INVALIDATED (canonical 8 불변식)', async () => {
+    const p = await prepare();
+    const sig = await signPrepared(p);
+    if (!p.ok) return;
+    store.rows[0].maxAllowedCount = '2';   // 정책 변경(2→8) 이전 생성 세션 시뮬레이션
+    const r = await submitApprovalSignature({
+      sessionId: p.prepared.sessionId, signature: sig as Hex,
+      canonicalNonce: 5n, expectedOwner: owner.address, nowSec: NOW,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain('canonical');
+    expect(store.rows[0].status).toBe(SESSION_STATUS.INVALIDATED);
+    expect(store.rows[0].encryptedSignature).toBeNull();
+  });
+
+  it('레거시 READY 세션(maxAllowedCount=2) → getActiveReadySession이 즉시 무효화 후 null', async () => {
+    const p = await prepare();
+    const sig = await signPrepared(p);
+    if (!p.ok) return;
+    const ok = await submitApprovalSignature({
+      sessionId: p.prepared.sessionId, signature: sig as Hex,
+      canonicalNonce: 5n, expectedOwner: owner.address, nowSec: NOW,
+    });
+    expect(ok.ok).toBe(true);
+    store.rows[0].maxAllowedCount = '2';   // READY 상태의 레거시 값 시뮬레이션
+    const active = await getActiveReadySession({
+      expectedOwner: owner.address, expectedSubaccount: signer.address, canonicalNonce: 5n,
+    });
+    expect(active).toBeNull();
+    expect(store.rows[0].status).toBe(SESSION_STATUS.INVALIDATED);
   });
 
   it('canonical nonce 변경 → 세션 INVALIDATED, 저장 거부', async () => {

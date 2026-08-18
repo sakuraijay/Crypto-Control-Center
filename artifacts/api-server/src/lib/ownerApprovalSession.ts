@@ -39,8 +39,15 @@ export const APPROVAL_LIMITS = {
   DEFAULT_EXPIRY_SECONDS: 3600,
   MIN_EXPIRY_SECONDS: 300,
   MAX_EXPIRY_SECONDS: 3600,
-  /** maxAllowedCount: 기본 2, 최소 1, 최대 10 */
-  DEFAULT_MAX_ALLOWED_COUNT: 2n,
+  /**
+   * maxAllowedCount: canonical 8 (운영자 승인 — 2026-08-18).
+   * 근거: action budget 감사(actionBudget.requiredActionsBeforeOpen()=6:
+   * 최악 경로 5 + 비상 예약 1) + 비상 정리 여유 2회 = 8.
+   * 서버 prepare는 클라이언트 요청값을 신뢰하지 않고 항상 이 값을 생성하며,
+   * GMX API echo가 정확히 8이 아니면 변조로 간주해 fail-closed 거부한다.
+   */
+  CANONICAL_MAX_ALLOWED_COUNT: 8n,
+  DEFAULT_MAX_ALLOWED_COUNT: 8n,
   MIN_MAX_ALLOWED_COUNT: 1n,
   MAX_MAX_ALLOWED_COUNT: 10n,
   /** 서명 deadline(초): prepare 시점 + 10분 (짧게 유지) */
@@ -139,11 +146,8 @@ export async function prepareApprovalSession(params: {
     APPROVAL_LIMITS.MIN_EXPIRY_SECONDS,
     APPROVAL_LIMITS.MAX_EXPIRY_SECONDS,
   );
-  const maxAllowedCount = clampBigint(
-    BigInt(Math.floor(params.requestedMaxAllowedCount ?? Number(APPROVAL_LIMITS.DEFAULT_MAX_ALLOWED_COUNT))),
-    APPROVAL_LIMITS.MIN_MAX_ALLOWED_COUNT,
-    APPROVAL_LIMITS.MAX_MAX_ALLOWED_COUNT,
-  );
+  // canonical 강제 — 클라이언트 requestedMaxAllowedCount는 신뢰하지 않는다 (무시).
+  const maxAllowedCount = APPROVAL_LIMITS.CANONICAL_MAX_ALLOWED_COUNT;
 
   const message: SubaccountApprovalMessage = params.externalMessage ?? {
     subaccount: params.subaccount,
@@ -258,6 +262,11 @@ export async function submitApprovalSignature(params: {
   }
   if (row.status !== SESSION_STATUS.PREPARED) {
     return { ok: false, reason: `세션 상태 ${row.status} — PREPARED 세션에만 서명을 제출할 수 있습니다` };
+  }
+  // canonical 8 불변식 — 정책 변경(2→8) 이전에 생성된 레거시 세션 서명 차단 (fail-closed)
+  if (BigInt(row.maxAllowedCount) !== APPROVAL_LIMITS.CANONICAL_MAX_ALLOWED_COUNT) {
+    await markInvalid(row.id, `maxAllowedCount ${row.maxAllowedCount} ≠ canonical ${APPROVAL_LIMITS.CANONICAL_MAX_ALLOWED_COUNT}`);
+    return { ok: false, reason: '세션 maxAllowedCount가 canonical 정책(8)과 다릅니다 — 새로 준비하세요' };
   }
   if (BigInt(row.deadline) <= params.nowSec) {
     await markInvalid(row.id, '서명 deadline 경과');
@@ -413,6 +422,11 @@ export async function getActiveReadySession(params: {
   }
   if (params.canonicalNonce !== null && BigInt(row.approvalNonce) !== params.canonicalNonce) {
     await markInvalid(row.id, 'canonical nonce 변경');
+    return null;
+  }
+  // canonical 8 불변식 — 레거시(≠8) READY 세션은 즉시 무효화 (fail-closed)
+  if (BigInt(row.maxAllowedCount) !== APPROVAL_LIMITS.CANONICAL_MAX_ALLOWED_COUNT) {
+    await markInvalid(row.id, `maxAllowedCount ${row.maxAllowedCount} ≠ canonical ${APPROVAL_LIMITS.CANONICAL_MAX_ALLOWED_COUNT}`);
     return null;
   }
 

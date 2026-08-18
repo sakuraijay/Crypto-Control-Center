@@ -24,6 +24,7 @@ import {
 } from 'lucide-react';
 import { useGmxAccount } from '@/lib/context/GmxAccountContext';
 import { RiskPolicyCard } from '@/components/RiskPolicyCard';
+import { classifyWorkerCycleStatus, WORKER_CYCLE_STATUS_LABEL } from '@/lib/workerCycleStatus';
 import { cn } from '@/lib/utils';
 import { format } from 'date-fns';
 // sendTestNotification is handled by AiEngineContext to keep permission state in sync.
@@ -802,7 +803,7 @@ export default function Settings() {
               {/* 최신 서버 규칙 표기 (§4) */}
               <div className="grid grid-cols-2 gap-x-4 gap-y-1 mt-2 text-[10px]" data-testid="text-server-approval-rules">
                 <span className="text-muted-foreground">최대 실행 횟수 (maxAllowedCount)</span>
-                <span className="font-mono">기본 2회 (허용 범위 1~10회)</span>
+                <span className="font-mono">canonical 8회 (서버 고정 — 감사 예산 6 + 비상 여유 2)</span>
                 <span className="text-muted-foreground">승인 만료 (expiresAt)</span>
                 <span className="font-mono">최대 1시간</span>
                 <span className="text-muted-foreground">서명 유효기한 (deadline)</span>
@@ -2096,13 +2097,18 @@ export default function Settings() {
                     : gmx.status === 'unavailable' ? '연결 불가'
                     : '연결됨',
               },
-              {
-                label: 'AI Worker 실행 중',
-                pass: health?.workerRunning === true,
-                note: health
-                  ? (health.workerRunning ? '실행 중' : '중단됨')
-                  : 'API 응답 없음',
-              },
+              // workerRunning은 사이클 순간 lock 지표(유휴 시 false) — liveness 판정은
+              // lastCycleAt 최근성(5분) + cycleCount 기준 (active/stale/unknown)
+              (() => {
+                const ws = health
+                  ? classifyWorkerCycleStatus({ lastCycleAt: health.lastCycleAt, cycleCount: health.cycleCount })
+                  : 'unknown';
+                return {
+                  label: 'AI Worker 사이클',
+                  pass: ws === 'active',
+                  note: health ? WORKER_CYCLE_STATUS_LABEL[ws] : 'API 응답 없음',
+                };
+              })(),
               {
                 label: 'Strategy 서버 동기화',
                 pass: syncStatus === 'saved' || syncStatus === 'idle',

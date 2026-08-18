@@ -179,7 +179,7 @@ export function RelayStatusCard({ snapshot = null }: RelayStatusCardProps = {}) 
       {/* header */}
       <div className="flex items-center gap-2 flex-wrap">
         <Radio className="w-4 h-4 text-muted-foreground" />
-        <span className="font-semibold text-sm">Gelato Relay (DRY-RUN 전용)</span>
+        <span className="font-semibold text-sm">Legacy relay diagnostics — 구조적 비활성</span>
         <span className={cn('text-[9px] px-1.5 py-0.5 rounded-full border font-bold', toneCls[modeView.tone])} data-testid="badge-relay-mode">
           {modeView.label}
         </span>

@@ -86,7 +86,7 @@ export function RiskPolicyCard() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch(apiUrl('/api/risk/policy'));
+      const res = await fetch(apiUrl('/risk/policy'));
       if (!res.ok) throw new Error(String(res.status));
       setData(await res.json() as RiskPolicyResponse);
       setError(false);
