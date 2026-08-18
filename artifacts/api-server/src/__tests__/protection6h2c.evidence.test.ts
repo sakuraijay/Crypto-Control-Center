@@ -11,10 +11,8 @@ import {
   collectProtectionEvidence, analyzeProtectionAnomalies,
   type EvidenceClient,
 } from '../lib/protectionEvidence';
-import {
-  EVENT_LOG_2_TOPIC0, ORDER_EVENT_NAME_HASH,
-  type RawLog,
-} from '../lib/gmxOrderEvents';
+import { ORDER_EVENT_NAME_HASH, type RawLog } from '../lib/gmxOrderEvents';
+import { mkEventLog2, stopCreatedFields, mkReceiptFor } from './helpers/eventLog2Fixture';
 import {
   evaluateActionBudget, CANARY_ACTION_PATHS, WORST_PATH_ACTIONS,
   RESERVED_EMERGENCY_ACTIONS, requiredActionsBeforeOpen, MIN_SAFE_ACTION_BUDGET,
@@ -79,53 +77,76 @@ describe('§3 indexTokenDecimals — SDK+온체인 교차검증', () => {
   });
 });
 
-// ── §4 증거 수집기 ────────────────────────────────────────────────────────────
+// ── §4 증거 수집기 (6H-2D: 의미 결속 + receipt + finality 완비 fixture) ────────
 const EMITTER = '0xC8ee91A54287DB53897056e12D9819156D3822Fb';
 const KEY = '0x' + 'ab'.repeat(32);
-const mkLog = (name: keyof typeof ORDER_EVENT_NAME_HASH, key = KEY, addr = EMITTER): RawLog => ({
-  address: addr,
-  topics: [EVENT_LOG_2_TOPIC0, ORDER_EVENT_NAME_HASH[name], key],
-  transactionHash: '0x' + 'cd'.repeat(32),
-  blockNumber: '123',
+const ACCOUNT = ('0x' + 'aa'.repeat(20)) as `0x${string}`;   // main wallet (receiver)
+const SUBACCT = ('0x' + 'bb'.repeat(20)) as `0x${string}`;   // subaccount signer
+const EXPECTED_ACCOUNTS = [ACCOUNT, SUBACCT];
+
+const stopFields = (over: Partial<Parameters<typeof stopCreatedFields>[0]> = {}) => stopCreatedFields({
+  account: SUBACCT, receiver: ACCOUNT, market: ETH_MARKET as `0x${string}`,
+  isLong: true, sizeDeltaUsd: 100, triggerPriceUsd: 2000, decimals: 18, ...over,
 });
-const mkClient = (logs: RawLog[] | null): EvidenceClient => ({ getOrderLogs: async () => logs });
-const baseRow = { requestId: null, orderKey: KEY, marketAddress: ETH_MARKET, isLong: true, emitterAddress: null };
+const mkLog = (name: keyof typeof ORDER_EVENT_NAME_HASH, key = KEY, addr = EMITTER): RawLog =>
+  mkEventLog2({
+    name, orderKey: key, emitter: addr, account: SUBACCT,
+    fields: name === 'OrderCreated' ? stopFields() : {},
+  });
+
+/** 완전한 클라이언트 — receipt success + finality 충족 (latest = 123 + 100) */
+const mkClient = (logs: RawLog[] | null): EvidenceClient => ({
+  getOrderLogs: async () => logs,
+  getReceipt: async (txHash: string) => {
+    const found = (logs ?? []).find(l => l.transactionHash === txHash);
+    return found ? mkReceiptFor(found) : null;
+  },
+  getLatestBlockNumber: async () => 223n,
+});
+const baseRow = {
+  requestId: null, orderKey: KEY, marketAddress: ETH_MARKET, isLong: true, emitterAddress: null,
+  purpose: 'INITIAL_STOP', sizeDeltaUsd: 100, triggerPriceUsd: 2000, decimalsUsed: 18,
+};
+const baseArgs = { configuredEmitter: EMITTER, expectedAccounts: EXPECTED_ACCOUNTS, expectedReceiver: ACCOUNT };
 
 describe('§4 collectProtectionEvidence', () => {
   it('emitter 미설정 → null (판정 금지)', async () => {
-    expect(await collectProtectionEvidence({ row: baseRow, client: mkClient([]), configuredEmitter: null, positionExists: true })).toBeNull();
+    expect(await collectProtectionEvidence({ row: baseRow, client: mkClient([]), ...baseArgs, configuredEmitter: null, positionExists: true })).toBeNull();
   });
   it('조회 실패 → null (차단 유지)', async () => {
-    expect(await collectProtectionEvidence({ row: baseRow, client: mkClient(null), configuredEmitter: EMITTER, positionExists: true })).toBeNull();
+    expect(await collectProtectionEvidence({ row: baseRow, client: mkClient(null), ...baseArgs, positionExists: true })).toBeNull();
     const throwing: EvidenceClient = { getOrderLogs: async () => { throw new Error('rpc'); } };
-    expect(await collectProtectionEvidence({ row: baseRow, client: throwing, configuredEmitter: EMITTER, positionExists: true })).toBeNull();
+    expect(await collectProtectionEvidence({ row: baseRow, client: throwing, ...baseArgs, positionExists: true })).toBeNull();
   });
-  it('OrderCreated+Executed 결속 → 증거 필드 채움', async () => {
+  it('OrderCreated+Executed 결속 (의미결속·receipt·finality 완비) → 증거 필드 채움', async () => {
     const b = await collectProtectionEvidence({
       row: baseRow, client: mkClient([mkLog('OrderCreated'), mkLog('OrderExecuted')]),
-      configuredEmitter: EMITTER, positionExists: true,
+      ...baseArgs, positionExists: true,
     });
     expect(b).not.toBeNull();
+    expect(b!.semanticOk).toBe(true);
     expect(b!.onchainOrderKey).toBe(KEY);
     expect(b!.onchainExecuted).toBe(true);
     expect(b!.createdTxHash).toBeTruthy();
     expect(b!.resolutionTxHash).toBeTruthy();
     expect(b!.matchedEmitter?.toLowerCase()).toBe(EMITTER.toLowerCase());
+    expect(b!.receiptStatus).toBe('success');
+    expect(b!.finalityOk).toBe(true);
   });
   it('위조 emitter 로그는 무시 (허용집합 밖)', async () => {
     const forged = mkLog('OrderExecuted', KEY, '0x' + '99'.repeat(20));
     const b = await collectProtectionEvidence({
-      row: baseRow, client: mkClient([forged]), configuredEmitter: EMITTER, positionExists: true,
+      row: baseRow, client: mkClient([forged]), ...baseArgs, positionExists: true,
     });
     expect(b!.onchainExecuted).toBe(false);
     expect(b!.onchainOrderKey).toBeNull();
   });
-  it('레코드 영속 emitter는 허용집합에 합집합', async () => {
+  it('레코드 영속 emitter는 허용집합에 합집합 (created+cancelled)', async () => {
     const stored = '0x' + '77'.repeat(20);
     const b = await collectProtectionEvidence({
       row: { ...baseRow, emitterAddress: stored },
-      client: mkClient([mkLog('OrderCancelled', KEY, stored)]),
-      configuredEmitter: EMITTER, positionExists: false,
+      client: mkClient([mkLog('OrderCreated', KEY, stored), mkLog('OrderCancelled', KEY, stored)]),
+      ...baseArgs, positionExists: false,
     });
     expect(b!.onchainCancelled).toBe(true);
   });
@@ -133,16 +154,17 @@ describe('§4 collectProtectionEvidence', () => {
     const other = '0x' + 'ef'.repeat(32);
     const b = await collectProtectionEvidence({
       row: baseRow, client: mkClient([mkLog('OrderCreated'), mkLog('OrderCreated', other)]),
-      configuredEmitter: EMITTER, positionExists: true,
+      ...baseArgs, positionExists: true,
     });
     expect(b!.ambiguous).toBe(true);
+    expect(b!.onchainOrderKey).toBeNull();
   });
   it('orderKey 부재 → 온체인 조회 생략, API status 보조만', async () => {
     let called = 0;
     const client: EvidenceClient = { getOrderLogs: async () => { called++; return []; } };
     const b = await collectProtectionEvidence({
       row: { ...baseRow, orderKey: null, requestId: 'req-1' }, client,
-      configuredEmitter: EMITTER,
+      ...baseArgs,
       fetchApiStatus: async () => 'submitted',
       positionExists: true,
     });

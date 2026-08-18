@@ -84,6 +84,32 @@ export function requiredActionsBeforeOpen(): number {
  */
 export const MIN_SAFE_ACTION_BUDGET = requiredActionsBeforeOpen();
 
+// ── 6H-2D §6 — 예산 정책 메타 (autoCancel 미사용 근거 명시) ────────────────────
+
+/** 예산 계산 기준 버전 — 재감사 회차 추적용 */
+export const ACTION_BUDGET_VERSION = '6H-2D';
+
+/**
+ * autoCancel 예산 정책: autoCancel=false(미사용).
+ * 전량 청산 시 프로토콜 자동취소의 보장 범위·subaccount action 소비 여부를 로컬
+ * 공식 소스로 증명할 수 없어, stop 정리는 항상 명시적 cancelOrder 1 action을
+ * 예산에 예약한다. 자동취소 가정으로 예산을 축소하지 않는다 (지시서 §2·§6).
+ */
+export const AUTO_CANCEL_BUDGET_POLICY =
+  'autoCancel=false(미사용) — 자동취소 미증명, cancelOrder 1 action 명시 예약 유지';
+
+/** 최악 소비 경로 이름 (동적 파생) */
+export function worstCasePathName(): string {
+  const worst = CANARY_ACTION_PATHS.reduce((a, b) => (b.total > a.total ? b : a));
+  return worst.path;
+}
+
+/**
+ * Owner approval 권장 count — 필요 최소(현재 6)에 재시도·예상 밖 정리 여유 +2.
+ * 최소 6 미만 설정 = OPEN 차단, 10 초과 요구가 계산되면 Canary 차단 표시 (§7).
+ */
+export const RECOMMENDED_OWNER_APPROVAL_COUNT = requiredActionsBeforeOpen() + 2;
+
 export interface ActionBudgetInput {
   /** canonical snapshot remaining (온체인 조회값 문자열). null/파싱불가 = 차단 */
   remaining: string | null;

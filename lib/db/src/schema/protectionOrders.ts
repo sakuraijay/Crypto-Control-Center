@@ -60,6 +60,19 @@ export const protectionOrdersTable = pgTable("protection_orders", {
   evidenceBlockNumber: text("evidence_block_number"),
   // ── 6H-2C §6 — 제출 시점 action budget 스냅샷 (JSON, 사후 감사용) ──────────
   actionBudgetSnapshot: text("action_budget_snapshot"),
+  // ── 6H-2D §2·§3·§4 — autoCancel 인코딩값·의미 결속·receipt 증거 ─────────────
+  /** 서명된 typed data의 autoCancel 인코딩값 (게이트 통과 시에만 기록) */
+  autoCancelEncoded:   boolean("auto_cancel_encoded"),
+  /** 온체인 이벤트 의미 결속(account/market/orderType/isLong 등) 검증 결과 */
+  semanticBindingOk:   boolean("semantic_binding_ok"),
+  /** 의미 결속 불일치/검증불가 사유 (sanitized 요약) */
+  semanticMismatches:  text("semantic_mismatches"),
+  /** 판정 근거 tx receipt status ('success'|'reverted') */
+  receiptStatus:       text("receipt_status"),
+  /** 판정 근거 receipt block number */
+  receiptBlockNumber:  text("receipt_block_number"),
+  /** ambiguous 판정 사유 (전이 금지 근거) */
+  ambiguousReason:     text("ambiguous_reason"),
 });
 
 export type ProtectionOrderRow = typeof protectionOrdersTable.$inferSelect;

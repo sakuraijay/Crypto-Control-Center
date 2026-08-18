@@ -15,7 +15,7 @@
  */
 import {
   buildProtectionId, planProtection, transitionProtection, markProtectionActive,
-  getProtection, listBlockingProtections, judgeProtection,
+  getProtection, listBlockingProtections, judgeProtection, recordProtectionEvidenceFields,
   type ProtectionPurpose, type ProtectionStatus,
 } from '../lib/protectionOrders';
 import { manilaDayKey } from '../lib/profitProtection';
@@ -229,15 +229,36 @@ export async function runEmergencyClose(input: EmergencyCloseInput): Promise<Sto
 
 // ── §9 — reconciliation 적용 + startup coverage 점검 ─────────────────────────
 
+export interface ProtectionEvidenceRowInput {
+  id: string;
+  requestId: string | null;
+  orderKey: string | null;
+  marketAddress: string;
+  isLong: boolean;
+  /** 6H-2D §3 — 의미 결속 기대값 전달 */
+  purpose: string | null;
+  sizeDeltaUsd: number | null;
+  triggerPriceUsd: number | null;
+  decimalsUsed: number | null;
+  emitterAddress: string | null;
+}
+
 export interface ProtectionEvidenceFetch {
   /** requestId/orderKey 기반 증거 수집 (온체인 이벤트 + GMX status). 실패 = null */
-  (row: { requestId: string | null; orderKey: string | null; marketAddress: string; isLong: boolean }): Promise<{
+  (row: ProtectionEvidenceRowInput): Promise<{
     apiStatus: string | null;
     onchainOrderKey: string | null;
     onchainExecuted: boolean;
     onchainCancelled: boolean;
     onchainFrozen: boolean;
     positionExists: boolean | null;
+    /** 6H-2D §5 — 모호 증거 = 전이 금지 + 차단 (명시 결선) */
+    ambiguous?: boolean;
+    ambiguousReasons?: string[];
+    semanticOk?: boolean | null;
+    semanticMismatches?: string[];
+    receiptStatus?: 'success' | 'reverted' | null;
+    receiptBlockNumber?: string | null;
   } | null>;
 }
 
@@ -246,19 +267,50 @@ export interface ReconcileProtectionsSummary {
   transitioned: number;
   emergencyCloseRequired: string[]; // positionKey 목록
   blockNewOpens: boolean;
+  /** 6H-2D §5 — ambiguous 증거 건수 + 사유 (reconciliation complete=false 근거) */
+  ambiguousCount: number;
+  ambiguousReasons: string[];
 }
 
 /** 활성 보호 주문 전수 재판정 — 증거 수집 실패 = 전이 없음 + 신규 OPEN 차단 */
 export async function reconcileProtections(fetchEvidence: ProtectionEvidenceFetch): Promise<ReconcileProtectionsSummary> {
   const listed = await listBlockingProtections();
-  if (!listed.ok) return { checked: 0, transitioned: 0, emergencyCloseRequired: [], blockNewOpens: true };
+  if (!listed.ok) return { checked: 0, transitioned: 0, emergencyCloseRequired: [], blockNewOpens: true, ambiguousCount: 0, ambiguousReasons: ['보호 주문 목록 조회 실패'] };
   let transitioned = 0;
   const emergency: string[] = [];
   let block = false;
+  let ambiguousCount = 0;
+  const ambiguousReasons: string[] = [];
   for (const row of listed.rows) {
     let ev: Awaited<ReturnType<ProtectionEvidenceFetch>> = null;
-    try { ev = await fetchEvidence({ requestId: row.requestId, orderKey: row.orderKey, marketAddress: row.marketAddress, isLong: row.isLong }); } catch { ev = null; }
+    try {
+      ev = await fetchEvidence({
+        id: row.id, requestId: row.requestId, orderKey: row.orderKey,
+        marketAddress: row.marketAddress, isLong: row.isLong,
+        purpose: row.purpose ?? null,
+        sizeDeltaUsd: row.sizeDeltaUsd == null ? null : Number(row.sizeDeltaUsd),
+        triggerPriceUsd: row.triggerPriceUsd == null ? null : Number(row.triggerPriceUsd),
+        decimalsUsed: row.decimalsUsed ?? null,
+        emitterAddress: row.emitterAddress ?? null,
+      });
+    } catch { ev = null; }
     if (!ev) { block = true; continue; }
+    // ── 6H-2D §5 — ambiguous 명시 게이트: 어떤 전이도 금지 + 차단 + durable 기록 ──
+    if (ev.ambiguous) {
+      block = true;
+      ambiguousCount += 1;
+      const reason = (ev.ambiguousReasons ?? []).join('; ') || '모호 증거';
+      ambiguousReasons.push(`${row.id}: ${reason}`);
+      await recordProtectionEvidenceFields(row.id, { ambiguousReason: reason.slice(0, 500) });
+      continue;
+    }
+    // 의미 결속 명시 불일치 = 위조/오결속 의심 — 전이 금지 + 차단 (§3)
+    if (ev.semanticOk === false) {
+      block = true;
+      const mm = (ev.semanticMismatches ?? []).join('; ') || '의미 결속 불일치';
+      await recordProtectionEvidenceFields(row.id, { semanticBindingOk: false, semanticMismatches: mm.slice(0, 500) });
+      continue;
+    }
     const j = judgeProtection({
       currentStatus: row.status as ProtectionStatus,
       apiStatus: ev.apiStatus,
@@ -277,7 +329,12 @@ export async function reconcileProtections(fetchEvidence: ProtectionEvidenceFetc
       if (res.ok) transitioned += 1; else block = true;
     }
   }
-  return { checked: listed.rows.length, transitioned, emergencyCloseRequired: [...new Set(emergency)], blockNewOpens: block };
+  return {
+    checked: listed.rows.length, transitioned,
+    emergencyCloseRequired: [...new Set(emergency)],
+    blockNewOpens: block,
+    ambiguousCount, ambiguousReasons,
+  };
 }
 
 export interface StartupCoverageInput {

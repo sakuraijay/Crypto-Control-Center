@@ -303,7 +303,12 @@ export function buildCloseOrderParams(input: BuildOrderInput): CreateOrderParams
  *  - triggerPrice > 0 필수 (0이면 즉시 거부 — market 주문으로 오인 금지)
  *  - initialCollateralDeltaAmount는 감소 주문 담보 인출량 (0 허용)
  *  - receiver/cancellationReceiver = main account 강제, swapPath 금지
- *  - autoCancel=true: 포지션 전체 청산 시 GMX가 잔여 stop 자동 취소 (공식 SDK Order 필드)
+ *  - autoCancel=false (6H-2D §2 감사): 전량 청산 시 프로토콜 자동취소의 보장 범위·
+ *    action 소비 여부를 로컬 공식 소스(SDK/컴파일 ABI)로 증명할 수 없어 사용하지
+ *    않는다. 잔여 stop 정리는 명시적 cancelOrder 1 action으로 예산에 예약한다
+ *    (actionBudget.ts). 예산 축소 목적의 true 설정 금지 — 지시서 §2.
+ *    참고: 이 빌더는 legacy 오프라인 경로 전용(LEGACY_DISABLED)이며, 실제 GMX API
+ *    경로의 autoCancel 인코딩값은 prepare typed data에서 검증한다(gmxApiExecution).
  */
 export function buildStopLossOrderParams(
   input: BuildOrderInput & { triggerPrice: bigint },
@@ -335,7 +340,7 @@ export function buildStopLossOrderParams(
     decreasePositionSwapType: DECREASE_POSITION_SWAP_TYPE.NoSwap,
     isLong: input.isLong,
     shouldUnwrapNativeToken: false,
-    autoCancel: true,
+    autoCancel: false,
     referralCode: ZERO_BYTES32,
     dataList: [],
   };

@@ -404,6 +404,18 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         ON protection_orders (position_key, purpose);
     `,
   },
+  {
+    name: "0025_protection_semantics",
+    sql: `
+      -- 6H-2D §2·§3·§4 — autoCancel 인코딩값·의미 결속·receipt 증거 (additive, idempotent).
+      ALTER TABLE protection_orders ADD COLUMN IF NOT EXISTS auto_cancel_encoded boolean;
+      ALTER TABLE protection_orders ADD COLUMN IF NOT EXISTS semantic_binding_ok boolean;
+      ALTER TABLE protection_orders ADD COLUMN IF NOT EXISTS semantic_mismatches text;
+      ALTER TABLE protection_orders ADD COLUMN IF NOT EXISTS receipt_status text;
+      ALTER TABLE protection_orders ADD COLUMN IF NOT EXISTS receipt_block_number text;
+      ALTER TABLE protection_orders ADD COLUMN IF NOT EXISTS ambiguous_reason text;
+    `,
+  },
   // Add future migrations here in chronological order.
 ];
 

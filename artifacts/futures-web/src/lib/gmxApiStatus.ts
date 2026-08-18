@@ -66,6 +66,11 @@ export interface GmxApiStatusView {
     budgetShortfall?: number | null;
     budgetBasis?: string[];
     reasons: string[];
+    // ── 6H-2D §6 — 예산 정책 메타 ──
+    version?: string;
+    autoCancelPolicy?: string;
+    worstCasePath?: string;
+    recommendedOwnerApprovalCount?: number;
   };
   // ── 6H-2C §10 — decimals·증거 수집기·reconciliation 관측값 ──
   decimalsCache?: Array<{
@@ -79,6 +84,11 @@ export interface GmxApiStatusView {
     uncoveredCount: number | null; staleActiveCount: number | null;
     oversizedCount: number | null; multipleActiveCount: number | null;
     keyMismatchCount: number | null;
+    // ── 6H-2D §5·§9 — ambiguous·finality·실행 소스 ──
+    ambiguousCount?: number;
+    ambiguousReasons?: string[];
+    lastSource?: 'startup' | 'periodic' | null;
+    confirmationDepth?: number;
   };
   uncoveredStopCount?: number | null;
   executionEligibleCostMaxAgeMs?: number;

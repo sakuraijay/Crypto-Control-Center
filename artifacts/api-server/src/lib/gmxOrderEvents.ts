@@ -33,7 +33,7 @@
  *  - 위조 topic0, 예상 밖 emitter, 복수 orderKey → 전부 무시/ambiguous → UNRESOLVED 유지.
  */
 
-import { keccak256, toHex, toEventSelector, type AbiEvent } from 'viem';
+import { keccak256, toHex, toEventSelector, decodeEventLog, type AbiEvent } from 'viem';
 
 // ── EventEmitter 주소 설정 ────────────────────────────────────────────────────
 
@@ -176,6 +176,71 @@ export interface RawLog {
   topics:           string[];
   transactionHash?: string | null;
   blockNumber?:     bigint | string | number | null;
+  /** 비인덱스 payload (EventLogData ABI 인코딩) — 의미 결속 검증에 필요 */
+  data?:            string | null;
+}
+
+// ── 6H-2D §3 — EventLogData 디코딩 (의미 결속 검증용) ─────────────────────────
+
+export interface DecodedEventData {
+  addressItems: Map<string, string>;
+  uintItems:    Map<string, bigint>;
+  boolItems:    Map<string, boolean>;
+  bytes32Items: Map<string, string>;
+  addressArrayItems: Map<string, string[]>;
+  /** 같은 key 중복 출현 감지 (위조/혼입 방어) */
+  duplicateKeys: string[];
+}
+
+type ItemsShape<T> = { items: readonly { key: string; value: T }[]; arrayItems: readonly { key: string; value: readonly T[] }[] };
+
+function intoMap<T>(items: readonly { key: string; value: T }[], dups: string[]): Map<string, T> {
+  const m = new Map<string, T>();
+  for (const it of items ?? []) {
+    if (m.has(it.key)) dups.push(it.key);
+    m.set(it.key, it.value);
+  }
+  return m;
+}
+
+/**
+ * EventLog2 로그의 eventData(EventUtils.EventLogData)를 공식 ABI로 디코딩.
+ * data 부재/디코딩 실패 = null — 호출측은 "검증 불가 = 성공 가정 금지"로 처리해야 한다.
+ */
+export function decodeEventLog2Data(log: RawLog): DecodedEventData | null {
+  if (!log.data || log.data === '0x') return null;
+  try {
+    const decoded = decodeEventLog({
+      abi: [EVENT_LOG_2_ABI],
+      data: log.data as `0x${string}`,
+      topics: log.topics as [`0x${string}`, ...`0x${string}`[]],
+    });
+    const ev = (decoded.args as unknown as { eventData?: Record<string, ItemsShape<unknown>> }).eventData;
+    if (!ev) return null;
+    const dups: string[] = [];
+    const addr = ev.addressItems as ItemsShape<string> | undefined;
+    const uint = ev.uintItems as ItemsShape<bigint> | undefined;
+    const bool = ev.boolItems as ItemsShape<boolean> | undefined;
+    const b32  = ev.bytes32Items as ItemsShape<string> | undefined;
+    return {
+      addressItems: intoMap(addr?.items ?? [], dups),
+      uintItems:    intoMap(uint?.items ?? [], dups),
+      boolItems:    intoMap(bool?.items ?? [], dups),
+      bytes32Items: intoMap(b32?.items ?? [], dups),
+      addressArrayItems: intoMap(
+        (addr?.arrayItems ?? []).map(a => ({ key: a.key, value: [...a.value] })), dups,
+      ),
+      duplicateKeys: dups,
+    };
+  } catch { return null; }
+}
+
+/** topic2 (= account) 위치: topics[3] — [sig, eventNameHash, topic1(key), topic2(account)] */
+export function accountTopicOf(log: RawLog): string | null {
+  const t = log.topics?.[3];
+  if (!t || !/^0x[0-9a-fA-F]{64}$/.test(t)) return null;
+  // bytes32로 캐스팅된 address — 하위 20바이트
+  return ('0x' + t.slice(26)).toLowerCase();
 }
 
 function isAllowedEmitter(addr: string, allowed: string[]): boolean {

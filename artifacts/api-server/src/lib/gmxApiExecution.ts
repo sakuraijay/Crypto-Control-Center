@@ -287,7 +287,40 @@ export function verifyOrderSemanticBinding(
     }
   }
 
+  // ── 6H-2D §2 — autoCancel 인코딩값 결속 ──────────────────────────────────────
+  // 정책: 우리는 autoCancel을 사용하지 않는다 (기대값 false).
+  //  - 전량 청산 시 프로토콜 자동취소의 보장 범위·action 소비 여부가 로컬 공식
+  //    소스로 증명 불가 → 예산은 항상 명시적 cancel 1 action을 예약한다.
+  //  - STOP_LOSS typed data에 autoCancel 필드 부재 = 의미 결속 불가 → 서명 금지
+  //    (CreateOrder typehash에 bool autoCancel이 포함되므로 반드시 존재해야 함).
+  //  - true로 인코딩되어 오면 우리 의도(미사용)와 다름 → 서명 금지.
+  const autoCancels: unknown[] = [];
+  collectFieldValues(message, 'autoCancel', autoCancels);
+  if (req.kind === 'STOP_LOSS' && autoCancels.length === 0) {
+    return { ok: false, reason: 'typed data에 autoCancel 부재 — 인코딩값 결속 불가, 서명 금지 (fail-closed)' };
+  }
+  for (const a of autoCancels) {
+    const isBool = typeof a === 'boolean' || String(a) === 'true' || String(a) === 'false';
+    if (!isBool) return { ok: false, reason: 'typed data autoCancel이 boolean이 아님 — 서명 금지' };
+    const b = typeof a === 'boolean' ? a : String(a) === 'true';
+    if (b !== false) {
+      return { ok: false, reason: 'typed data autoCancel=true — 정책(미사용, 기대 false)과 불일치, 서명 금지' };
+    }
+  }
+
   return { ok: true };
+}
+
+/**
+ * 6H-2D §2 — typed data message에서 autoCancel 인코딩값 추출 (durable 기록용).
+ * verifyOrderSemanticBinding 통과 후에만 의미가 있다 (통과 시 전부 false 보장).
+ */
+export function extractAutoCancelEncoded(message: unknown): boolean | null {
+  const vals: unknown[] = [];
+  collectFieldValues(message, 'autoCancel', vals);
+  if (vals.length === 0) return null;
+  const first = vals[0];
+  return typeof first === 'boolean' ? first : String(first) === 'true';
 }
 
 /**

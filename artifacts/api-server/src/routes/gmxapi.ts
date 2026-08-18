@@ -37,7 +37,10 @@ import {
 import { getDecimalsCacheSnapshot } from '../lib/indexTokenDecimals';
 import { resolveGmxEventEmitterAddress } from '../lib/gmxOrderEvents';
 import { listActiveProtections, PROTECTION_BLOCKING_SET } from '../lib/protectionOrders';
-import { evaluateActionBudget } from '../lib/actionBudget';
+import {
+  evaluateActionBudget, ACTION_BUDGET_VERSION, AUTO_CANCEL_BUDGET_POLICY,
+  worstCasePathName, RECOMMENDED_OWNER_APPROVAL_COUNT,
+} from '../lib/actionBudget';
 import { EXECUTION_ELIGIBLE_MAX_AGE_MS } from '../lib/costSnapshot';
 import { listUncovered } from '../lib/stopLossPlan';
 import { loadStopCoverage } from '../workers/liveTestExecutor';
@@ -256,6 +259,13 @@ async function buildGmxApiStatusSnapshot() {
   if (!protectionRecon.complete || protectionRecon.blockNewOpens) {
     blockedReasons.push('보호 주문 reconciliation 미완료/불일치 — 신규 OPEN 차단');
   }
+  // ── 6H-2D §5·§7 — ambiguous 증거·예산 상한 차단 사유 ──
+  if (protectionRecon.ambiguousCount > 0) {
+    blockedReasons.push(`모호(ambiguous) 온체인 증거 ${protectionRecon.ambiguousCount}건 — 전이 금지·수동 조사 필요`);
+  }
+  if (actionBudget.requiredActions > 10) {
+    blockedReasons.push(`필요 action 예산 ${actionBudget.requiredActions} > 10 — 경로 재감사 전 Canary 금지 (§7)`);
+  }
 
   // readyForControlledCanary — 전 항목 파생값의 논리곱 (fail-closed; 어느 하나
   // null/false면 false). 현 단계는 submissionEnabled=false라 항상 false.
@@ -268,7 +278,8 @@ async function buildGmxApiStatusSnapshot() {
     stopExecutionAvailable && uncoveredStopCount === 0 && settlementComplete &&
     legacyZeroFeeCount === 0 && unsettledLiveTradeCount === 0 &&
     blockingProtectionCount === 0 && (staleStopCount ?? 1) === 0 && actionBudget.sufficient &&
-    priceConversionVerified && protectionRecon.complete && !protectionRecon.blockNewOpens;
+    priceConversionVerified && protectionRecon.complete && !protectionRecon.blockNewOpens &&
+    protectionRecon.ambiguousCount === 0 && actionBudget.requiredActions <= 10;
 
   return {
     transportGen: GMX_API_TRANSPORT_GEN,
@@ -326,6 +337,11 @@ async function buildGmxApiStatusSnapshot() {
       budgetShortfall: actionBudget.budgetShortfall,
       budgetBasis: actionBudget.budgetBasis,
       reasons: actionBudget.reasons,
+      // ── 6H-2D §6 — 예산 정책 메타 ──
+      version: ACTION_BUDGET_VERSION,
+      autoCancelPolicy: AUTO_CANCEL_BUDGET_POLICY,
+      worstCasePath: worstCasePathName(),
+      recommendedOwnerApprovalCount: RECOMMENDED_OWNER_APPROVAL_COUNT,
     },
     // ── 6H-2C §10 — decimals·증거 수집기·reconciliation 관측값 ────────────────
     decimalsCache,
@@ -340,6 +356,11 @@ async function buildGmxApiStatusSnapshot() {
       oversizedCount: protectionRecon.anomalies?.oversizedCount ?? null,
       multipleActiveCount: protectionRecon.anomalies?.multipleActiveCount ?? null,
       keyMismatchCount: protectionRecon.anomalies?.keyMismatchCount ?? null,
+      // ── 6H-2D §5·§9 — ambiguous·finality·실행 소스 관측값 ──
+      ambiguousCount: protectionRecon.ambiguousCount,
+      ambiguousReasons: protectionRecon.ambiguousReasons,
+      lastSource: protectionRecon.lastSource,
+      confirmationDepth: protectionRecon.confirmationDepth,
     },
     executionEligibleCostMaxAgeMs: EXECUTION_ELIGIBLE_MAX_AGE_MS,
     uncoveredStopCount,

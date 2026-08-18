@@ -194,6 +194,7 @@ beforeEach(async () => {
   __setProtectionReconStateForTests({
     lastRunAtMs: Date.now(), complete: true, anomalies: null, blockNewOpens: false,
     lastPositionsFetchOkAtMs: Date.now(),
+    ambiguousCount: 0, ambiguousReasons: [], lastSource: 'periodic', confirmationDepth: 15,
   });
   // 6H-2A §7 — stop 능력 게이트는 별도 테스트에서 검증; 여기서는 통과 상태로 주입
   __setStopExecutionAvailabilityForTests(true);

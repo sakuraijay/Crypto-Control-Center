@@ -86,7 +86,7 @@ import {
   type DecimalsEvidence,
 } from '../lib/indexTokenDecimals';
 import {
-  collectProtectionEvidence, analyzeProtectionAnomalies,
+  collectProtectionEvidence, analyzeProtectionAnomalies, EVIDENCE_CONFIRMATION_DEPTH,
   type ProtectionAnomalies, type EvidenceClient,
 } from '../lib/protectionEvidence';
 import {
@@ -316,7 +316,7 @@ async function applyIntentResolutionsToAuditLog(resolutions: IntentResolution[])
 export async function reconcileOnRestart(): Promise<void> {
   // 6H-2B — 보호 주문 제출 함수 결선 + startup coverage/재판정 (fail-closed)
   wireProtectionExecution();
-  try { await runProtectionPass(); } catch { /* 차단은 capability/게이트가 담당 */ }
+  try { await runProtectionPass('startup'); } catch { /* 차단은 capability/게이트가 담당 */ }
   try {
     // durable execution intents를 감사로그보다 먼저 reconcile —
     // 감사로그에 상태불명 항목이 있어 조기 반환하더라도 PREPARED intent가
@@ -831,6 +831,9 @@ export function wireProtectionExecution(): void {
       })(),
     });
     if (res.finalStatus === 'TASK_ACCEPTED' && res.submitted) {
+      // 6H-2D §2 — 서명 게이트(verifyOrderSemanticBinding)가 autoCancel=false를
+      // 강제하므로, 수락된 주문의 인코딩값은 false임이 보장된다 → durable 기록.
+      await recordProtectionEvidenceFields(req.protectionId, { autoCancelEncoded: false });
       return { status: 'ACCEPTED', requestId: res.gmxRequestId, typedDataDigest: null };
     }
     if (res.finalStatus === 'UNRESOLVED') {
@@ -854,15 +857,28 @@ export interface ProtectionReconState {
   anomalies: ProtectionAnomalies | null;
   blockNewOpens: boolean;
   lastPositionsFetchOkAtMs: number | null;
+  // ── 6H-2D §5 — ambiguous 증거·실행 소스 추적 ──
+  ambiguousCount: number;
+  ambiguousReasons: string[];
+  lastSource: 'startup' | 'periodic' | null;
+  confirmationDepth: number;
 }
 let _protectionRecon: ProtectionReconState = {
   lastRunAtMs: null, complete: false, anomalies: null, blockNewOpens: true,
   lastPositionsFetchOkAtMs: null,
+  ambiguousCount: 0, ambiguousReasons: [], lastSource: null,
+  confirmationDepth: EVIDENCE_CONFIRMATION_DEPTH,
 };
 export function getProtectionReconState(): ProtectionReconState { return _protectionRecon; }
-/** 테스트 주입 — sticky: 이후 runProtectionPass가 덮어쓰지 않는다 (null로 해제) */
+/**
+ * 테스트 주입 — sticky: 이후 runProtectionPass가 덮어쓰지 않는다 (null로 해제).
+ * 6H-2D §6 — 테스트 런타임 밖에서 호출되면 즉시 throw (프로덕션 오용 차단).
+ */
 let _protectionReconOverride: ProtectionReconState | null = null;
 export function __setProtectionReconStateForTests(s: ProtectionReconState | null): void {
+  if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
+    throw new Error('__setProtectionReconStateForTests는 테스트 런타임 전용 — 프로덕션 호출 금지');
+  }
   _protectionReconOverride = s;
   if (s) _protectionRecon = s;
 }
@@ -894,13 +910,38 @@ function createEvidenceClient(): EvidenceClient | null {
               orderKey,
             ],
           }],
-        } as never) as Array<{ address: string; topics: string[]; transactionHash?: string; blockNumber?: string }>;
+        } as never) as Array<{ address: string; topics: string[]; transactionHash?: string; blockNumber?: string; data?: string }>;
         return (raw ?? []).map(l => ({
           address: l.address, topics: l.topics,
           transactionHash: l.transactionHash ?? null,
           blockNumber: l.blockNumber ? String(BigInt(l.blockNumber)) : null,
+          data: l.data ?? null,
         }));
       } catch { return null; }
+    },
+    // ── 6H-2D §4 — receipt·finality (read-only) ──
+    async getReceipt(txHash: string) {
+      try {
+        const rc = await client.getTransactionReceipt({ hash: txHash as `0x${string}` });
+        if (!rc) return null;
+        return {
+          status: rc.status === 'success' ? 'success' as const : 'reverted' as const,
+          blockNumber: rc.blockNumber != null ? String(rc.blockNumber) : null,
+          logs: (rc.logs ?? []).map(l => ({
+            address: l.address, topics: l.topics as string[],
+            transactionHash: l.transactionHash ?? null,
+            blockNumber: l.blockNumber != null ? String(l.blockNumber) : null,
+            data: l.data ?? null,
+          })),
+        };
+      } catch (e) {
+        // viem은 미존재 receipt에 throw — 미존재는 null(전이 없음), 그 외도 null (fail-closed)
+        if ((e as Error)?.name === 'TransactionReceiptNotFoundError') return null;
+        return null;
+      }
+    },
+    async getLatestBlockNumber(): Promise<bigint | null> {
+      try { return await client.getBlockNumber(); } catch { return null; }
     },
   };
 }
@@ -916,7 +957,7 @@ export async function countInFlightReservedActions(): Promise<number | null> {
   } catch { return null; }
 }
 
-export async function runProtectionPass(): Promise<void> {
+export async function runProtectionPass(source: 'startup' | 'periodic' = 'periodic'): Promise<void> {
   wireProtectionExecution();
   if (_protectionReconOverride) { _protectionRecon = _protectionReconOverride; return; }
   try {
@@ -953,6 +994,10 @@ export async function runProtectionPass(): Promise<void> {
     const configuredEmitter = emitterCfg.ok ? emitterCfg.address : null;
     const positionsOk = positions !== null;
     if (positionsOk) _protectionRecon.lastPositionsFetchOkAtMs = Date.now();
+    // 6H-2D §3 — 의미 결속 기대 account/receiver (main + subaccount 서명자)
+    const mainWallet = (process.env.GMX_WALLET_ADDRESS ?? '').trim();
+    const signerAddr = getSignerAddress() ?? '';
+    const expectedAccounts = [mainWallet, signerAddr].filter(a => /^0x[0-9a-fA-F]{40}$/.test(a));
     const summary = await reconcileProtections(async (row) => {
       if (!evClient || !configuredEmitter) return null; // 수집기 미구성 — 판정 금지
       const posExists = positions === null ? null : positions.some(
@@ -960,6 +1005,8 @@ export async function runProtectionPass(): Promise<void> {
       );
       return collectProtectionEvidence({
         row, client: evClient, configuredEmitter, positionExists: posExists,
+        expectedAccounts,
+        expectedReceiver: /^0x[0-9a-fA-F]{40}$/.test(mainWallet) ? mainWallet : null,
       });
     });
 
@@ -976,13 +1023,17 @@ export async function runProtectionPass(): Promise<void> {
     }
     _protectionRecon = {
       lastRunAtMs: Date.now(),
-      complete: positionsOk && active.ok && !summary.blockNewOpens,
+      complete: positionsOk && active.ok && !summary.blockNewOpens && summary.ambiguousCount === 0,
       anomalies,
       blockNewOpens: summary.blockNewOpens || anomalies.blockNewOpens,
       lastPositionsFetchOkAtMs: _protectionRecon.lastPositionsFetchOkAtMs,
+      ambiguousCount: summary.ambiguousCount,
+      ambiguousReasons: summary.ambiguousReasons.slice(0, 10),
+      lastSource: source,
+      confirmationDepth: EVIDENCE_CONFIRMATION_DEPTH,
     };
   } catch (e) {
-    _protectionRecon = { ..._protectionRecon, lastRunAtMs: Date.now(), complete: false, blockNewOpens: true };
+    _protectionRecon = { ..._protectionRecon, lastRunAtMs: Date.now(), complete: false, blockNewOpens: true, lastSource: source };
     console.error(`[LiveTestExecutor] 보호 주문 pass 오류 (fail-closed 유지): ${(e as Error).message}`);
   }
 }

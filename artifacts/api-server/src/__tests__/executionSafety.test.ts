@@ -193,6 +193,7 @@ beforeEach(async () => {
   __setProtectionReconStateForTests({
     lastRunAtMs: Date.now(), complete: true, anomalies: null, blockNewOpens: false,
     lastPositionsFetchOkAtMs: Date.now(),
+    ambiguousCount: 0, ambiguousReasons: [], lastSource: 'periodic', confirmationDepth: 15,
   });
   // 6H-2B §7 — OPEN 직전 동기 action 예산 게이트 통과용 canonical snapshot (6H-2C: remaining ≥ 6 + inFlight)
   const { recordCanonicalSnapshot } = await import('../lib/relayActivationStatus');

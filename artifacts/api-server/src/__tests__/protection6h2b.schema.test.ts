@@ -65,14 +65,14 @@ describe('§2 buildStopLossOrderParams', () => {
     sizeDeltaUsd: 10n ** 31n, initialCollateralDeltaAmount: 0n,
     acceptablePrice: 123n, executionFee: 1n, isLong: true,
   };
-  it('정상 stop: orderType=6, triggerPrice 반영, receiver=main, autoCancel=true', () => {
+  it('정상 stop: orderType=6, triggerPrice 반영, receiver=main, autoCancel=false (6H-2D 정책)', () => {
     const p = buildStopLossOrderParams({ ...base, triggerPrice: 999n });
     expect(p.orderType).toBe(6n);
     expect(p.numbers.triggerPrice).toBe(999n);
     expect(p.addresses.receiver).toBe(MAIN);
     expect(p.addresses.cancellationReceiver).toBe(MAIN);
     expect(p.addresses.swapPath).toEqual([]);
-    expect(p.autoCancel).toBe(true);
+    expect(p.autoCancel).toBe(false);
   });
   it('triggerPrice=0 → 거부 (market 주문 오인 금지)', () => {
     expect(() => buildStopLossOrderParams({ ...base, triggerPrice: 0n })).toThrow();
@@ -131,10 +131,10 @@ describe('§2 STOP_LOSS prepare body·semantic binding', () => {
     const r = verifyOrderSemanticBinding(msg, stopReq);
     expect(r.ok).toBe(false);
   });
-  it('일치하는 stop typed data → 통과 (orderType=6 인정)', () => {
+  it('일치하는 stop typed data → 통과 (orderType=6 인정, autoCancel=false 필수)', () => {
     const msg = {
       sizeDeltaUsd: '10000000000000000000000000000000', isLong: true, market: MARKET,
-      triggerPrice: '1980000000000000', orderType: 6,
+      triggerPrice: '1980000000000000', orderType: 6, autoCancel: false,
     };
     expect(verifyOrderSemanticBinding(msg, stopReq).ok).toBe(true);
   });

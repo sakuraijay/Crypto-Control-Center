@@ -238,6 +238,11 @@ export function GmxApiStatusCard() {
               tone={(s.actionBudget.budgetShortfall ?? 1) > 0 ? 'error' : 'ok'}
               value={`예약 ${s.actionBudget.reservedEmergencyActions ?? '—'} · 진행중 ${s.actionBudget.inFlightReservedActions ?? '조회실패'} · 부족 ${s.actionBudget.budgetShortfall ?? '조회실패'}`} />
           )}
+          {/* ── 6H-2D §6 — autoCancel 정책·예산 버전 ── */}
+          {s.actionBudget?.autoCancelPolicy && (
+            <Row label="autoCancel 정책 (§2)" tone="muted"
+              value={`${s.actionBudget.autoCancelPolicy} · 기준 ${s.actionBudget.version ?? '—'} · 최악 경로 「${s.actionBudget.worstCasePath ?? '—'}」 · 권장 Owner count ${s.actionBudget.recommendedOwnerApprovalCount ?? '—'}`} />
+          )}
           {/* ── 6H-2C §10 — decimals·증거 수집기·reconciliation ── */}
           <Row label="Decimals 소스 (검증 캐시)"
             tone={(s.decimalsCache?.length ?? 0) > 0 && s.decimalsCache!.every(d => !d.stale) ? 'ok' : 'muted'}
@@ -255,6 +260,12 @@ export function GmxApiStatusCard() {
             <Row label="보호 reconciliation (§5)"
               tone={s.protectionReconciliation.complete && !s.protectionReconciliation.blockNewOpens ? 'ok' : 'warn'}
               value={`${s.protectionReconciliation.lastRunAtMs ? new Date(s.protectionReconciliation.lastRunAtMs).toLocaleTimeString() : '미실행'} · ${s.protectionReconciliation.complete ? '완료' : '미완료'}${s.protectionReconciliation.blockNewOpens ? ' · OPEN 차단' : ''} · 무stop ${s.protectionReconciliation.uncoveredCount ?? '—'} / 고아 ${s.protectionReconciliation.staleActiveCount ?? '—'} / 초과 ${s.protectionReconciliation.oversizedCount ?? '—'} / 다중 ${s.protectionReconciliation.multipleActiveCount ?? '—'}`} />
+          )}
+          {/* ── 6H-2D §5·§9 — ambiguous 증거·finality ── */}
+          {s.protectionReconciliation && (
+            <Row label="모호 증거 / finality (§5)"
+              tone={(s.protectionReconciliation.ambiguousCount ?? 0) > 0 ? 'error' : 'ok'}
+              value={`ambiguous ${s.protectionReconciliation.ambiguousCount ?? '—'}건${(s.protectionReconciliation.ambiguousReasons?.length ?? 0) > 0 ? ` (${s.protectionReconciliation.ambiguousReasons!.slice(0, 2).join('; ')})` : ''} · 확정 깊이 ${s.protectionReconciliation.confirmationDepth ?? '—'}블록 · 실행 ${s.protectionReconciliation.lastSource ?? '—'}`} />
           )}
           <Row label="Stop 미확보 포지션"
             tone={(s.uncoveredStopCount ?? 1) > 0 ? 'error' : 'ok'}

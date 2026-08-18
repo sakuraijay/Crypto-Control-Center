@@ -171,10 +171,13 @@ export async function markProtectionActive(
   return transitionProtection(id, from, 'ACTIVE', { orderKey, evidence });
 }
 
-/** §3 — 상태 전이 없이 decimals/budget 증거만 durable 기록 (제출 직전 호출) */
+/** §3 — 상태 전이 없이 decimals/budget/의미결속 증거만 durable 기록 (제출 직전·재판정 시 호출) */
 export async function recordProtectionEvidenceFields(id: string, patch: {
   decimalsUsed?: number; decimalsSource?: string; decimalsTokenAddress?: string;
   decimalsVerifiedAt?: Date; actionBudgetSnapshot?: string; emitterAddress?: string;
+  // ── 6H-2D §2·§3·§4 ──
+  autoCancelEncoded?: boolean; semanticBindingOk?: boolean; semanticMismatches?: string;
+  receiptStatus?: string; receiptBlockNumber?: string; ambiguousReason?: string;
 }): Promise<boolean> {
   try {
     const rows = await db.update(protectionOrdersTable)
