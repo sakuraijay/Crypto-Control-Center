@@ -15,6 +15,7 @@ import { RankingGates } from './ranking';
 import { getCachedPrices, getCachedChange24h, fetchGmxCandles, getCandleFetchStats } from '../routes/gmx';
 import { calibrateBuckets, BucketCalibration } from './calibration';
 import { buildCandidateCostBreakdown } from './costEngine';
+import { lookupSdkIndexToken, ARBITRUM_CHAIN_ID } from '../lib/indexTokenDecimals';
 import { createGmxCostReader, createProductionCostReaderClient, GmxCostReader } from './gmxCostReader';
 import type { CostBreakdownUsd } from './candidate';
 
@@ -94,11 +95,15 @@ async function loadCalibrationBuckets(nowMs: number): Promise<Map<string, Bucket
 async function buildCandidateCost(args: { marketToken: string; symbol: string; isLong: boolean; notionalUsd: number; holdingHours: number }): Promise<CostBreakdownUsd | null> {
   const nowMs = Date.now();
   const h = getHandle();
-  const [feeParams, rates, ethTick] = await Promise.all([
+  const [feeParams, rates, ethTick, impactInputs, indexTick] = await Promise.all([
     getCostReader().readMarketFeeParams(args.marketToken, nowMs),
     h.fetchers.fetchMarketCostInputs ? h.fetchers.fetchMarketCostInputs(args.marketToken) : Promise.resolve(null),
     h.fetchers.fetchPrice('ETH'),
+    h.fetchers.fetchMarketImpactInputs ? h.fetchers.fetchMarketImpactInputs(args.marketToken) : Promise.resolve(null),
+    h.fetchers.fetchPrice(args.symbol),
   ]);
+  // 6I-5 — index token 결속: SDK registry (조회 전용, 외부 호출 0회). 실패 = impact null.
+  const sdkIdx = lookupSdkIndexToken(ARBITRUM_CHAIN_ID, args.marketToken);
   return buildCandidateCostBreakdown({
     marketToken: args.marketToken,
     isLong: args.isLong,
@@ -108,6 +113,13 @@ async function buildCandidateCost(args: { marketToken: string; symbol: string; i
     rates,
     ethPriceUsd: ethTick?.price ?? null,
     ethPriceObservedAtMs: ethTick?.observedAtMs ?? null,   // freshness=min 결속 (stale 은폐 방지)
+    impact: {
+      inputs: impactInputs,
+      indexTokenDecimals: sdkIdx.ok ? sdkIdx.sdkDecimals : null,
+      sdkIndexTokenAddress: sdkIdx.ok ? sdkIdx.indexTokenAddress : null,
+      indexPriceUsd: indexTick?.price ?? null,
+      indexPriceObservedAtMs: indexTick?.observedAtMs ?? null,
+    },
     nowMs,
   });
 }

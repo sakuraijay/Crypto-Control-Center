@@ -43,6 +43,27 @@ export interface CostBreakdownUsd {
     feeParamsAtMs: number | null;
     ratesAtMs: number | null;
     ethPriceAtMs: number | null;
+    /** 6I-5 — impact 입력(markets/info) 관측 시각. impact null이면 null */
+    impactAtMs?: number | null;
+  } | null;
+  /**
+   * 6I-5 — SDK 계약 impact 산출 상세 (source pin·exponent raw·factor raw·VI/cap
+   * 적용 여부·관측 시각). 산출 실패 시 null — 실패 reason은 costBasis에 명시.
+   */
+  impactDetail?: {
+    entryImpactUsd: number;
+    exitImpactUsd: number;
+    impactCostUsd: number;
+    rebateCountedUsd: number;
+    exponentPositiveRaw: string;
+    exponentNegativeRaw: string;
+    factorPositiveRaw: string;
+    factorNegativeRaw: string;
+    virtualInventoryConfigured: boolean;
+    virtualInventoryApplied: boolean;
+    capsEvaluated: string[];
+    sourcePin: string;
+    observedAtMs: number;
   } | null;
 }
 

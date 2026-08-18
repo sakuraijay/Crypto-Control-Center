@@ -19,6 +19,9 @@
  */
 import { CostBreakdownUsd } from './candidate';
 import { usd30ToNumber } from './usd30';
+import {
+  computeRoundTripImpactSdk, type ImpactMarketInputs, type ImpactComputationDetail,
+} from './impactEngine';
 
 /** GMX PRECISION (1e30) */
 const P30 = 10n ** 30n;
@@ -78,6 +81,19 @@ export interface MarketRateInputs {
   sourcePin: string;
 }
 
+/** 6I-5 — SDK 계약 impact 계산 입력 (전부 확보 실패 시 null 전파) */
+export interface CandidateImpactInput {
+  /** 공식 /v1/markets/info 실측 (dataSource) — 실패 = null */
+  inputs: ImpactMarketInputs | null;
+  /** SDK registry index token decimals — 확보 실패 = null */
+  indexTokenDecimals: number | null;
+  /** SDK registry indexTokenAddress (교차검증용) — 실패 = null */
+  sdkIndexTokenAddress: string | null;
+  /** oracle index 가격 — 실패 = null */
+  indexPriceUsd: number | null;
+  indexPriceObservedAtMs: number | null;
+}
+
 export interface CandidateCostInput {
   marketToken: string;
   isLong: boolean;
@@ -85,6 +101,8 @@ export interface CandidateCostInput {
   holdingHours: number;
   feeParams: MarketFeeParams | null;   // 조회 실패 = null
   rates: MarketRateInputs | null;      // 조회 실패 = null
+  /** 6I-5 — impact 입력 (미제공/부분 실패 = impact null) */
+  impact?: CandidateImpactInput | null;
   ethPriceUsd: number | null;          // oracle 캐시 실패 = null
   /** ETH 가격 관측 시각 — freshness 결속. 미상(null)이면 gas 성분 산출 금지 (stale 은폐 방지) */
   ethPriceObservedAtMs: number | null;
@@ -164,6 +182,7 @@ export function buildCandidateCostBreakdown(input: CandidateCostInput): CostBrea
   let entryFee: number | null = null;
   let exitFee: number | null = null;
   let impact: number | null = null;
+  let impactDetail: ImpactComputationDetail | null = null;
   let gas: number | null = null;
   let funding: number | null = null;
   let borrowing: number | null = null;
@@ -180,17 +199,37 @@ export function buildCandidateCostBreakdown(input: CandidateCostInput): CostBrea
       ? computeExecutionFeeUsd(fp, input.ethPriceUsd)
       : null;
     if (gas !== null) basisParts.push('gas=DataStore 추정 파라미터×실측 gasPrice×oracle ETH가');
-    if (rates !== null) {
-      impact = computeRoundTripImpactUsd({
-        isLong: input.isLong, notionalUsd,
-        oiLong30: rates.openInterestLong30, oiShort30: rates.openInterestShort30,
-        negativeImpactFactor: fp.negativeImpactFactor, impactExponentFactor: fp.impactExponentFactor,
+    // 6I-5 — SDK 1.7.0 공식 계약 impact (임의 exponent·VI·cap 지원). 입력 부분 실패 = null.
+    const im = input.impact ?? null;
+    if (im === null) {
+      basisParts.push('impact=입력 미제공 (markets/info·decimals·index가 미확보) — fail-closed');
+    } else if (im.inputs === null) {
+      basisParts.push('impact=markets/info 미확보 — fail-closed');
+    } else if (im.indexTokenDecimals === null || im.sdkIndexTokenAddress === null) {
+      basisParts.push('impact=SDK registry index token 결속 실패 — fail-closed');
+    } else if (im.sdkIndexTokenAddress.toLowerCase() !== im.inputs.indexTokenAddress.toLowerCase()) {
+      basisParts.push('impact=불일치: API indexToken ≠ SDK registry — fail-closed');
+    } else if (im.indexPriceUsd === null || im.indexPriceObservedAtMs === null) {
+      basisParts.push('impact=index 가격 미확보 — fail-closed');
+    } else {
+      const r = computeRoundTripImpactSdk({
+        inputs: im.inputs,
+        indexTokenDecimals: im.indexTokenDecimals,
+        indexPriceUsd: im.indexPriceUsd,
+        isLong: input.isLong,
+        notionalUsd,
+        crossCheck: { negativeImpactFactor: fp.negativeImpactFactor, impactExponentFactor: fp.impactExponentFactor },
       });
-      if (impact !== null) {
-        basisParts.push(`impact=공식 f=factor·d² (악화분만, rebate 0 clamp); impactKeySchema=${IMPACT_EXPONENT_KEY_SCHEMA_PIN}`);
-      } else if (fp.impactExponentFactor !== IMPACT_EXPONENT_2_0) {
-        // raw exponent 지원 여부 명시 — 2.0e30 전용, float pow/virtual inventory/cap 미지원 (fail-closed)
-        basisParts.push(`impact=미지원 raw exponent(≠2.0e30) — float pow·virtual inventory·cap 미지원, fail-closed; impactKeySchema=${IMPACT_EXPONENT_KEY_SCHEMA_PIN}`);
+      if (r.ok) {
+        impact = r.detail.impactCostUsd;
+        impactDetail = r.detail;
+        basisParts.push(
+          `impact=SDK1.7.0 getPriceImpactForPosition (exponent neg=${r.detail.exponentNegativeRaw}/pos=${r.detail.exponentPositiveRaw}, ` +
+          `VI ${r.detail.virtualInventoryConfigured ? (r.detail.virtualInventoryApplied ? '적용' : '구성·미적용') : '미구성'}, ` +
+          `rebate=min(공식 cap, 정책 0USD)); impactKeySchema=${IMPACT_EXPONENT_KEY_SCHEMA_PIN}`,
+        );
+      } else {
+        basisParts.push(`impact=산출 거부(${r.reason}) — fail-closed; impactKeySchema=${IMPACT_EXPONENT_KEY_SCHEMA_PIN}`);
       }
     }
   }
@@ -223,6 +262,12 @@ export function buildCandidateCostBreakdown(input: CandidateCostInput): CostBrea
   if (fp !== null && (entryFee !== null || gas !== null || impact !== null)) observed.push(fp.observedAtMs);
   if (rates !== null && (funding !== null || borrowing !== null || impact !== null)) observed.push(rates.observedAtMs);
   if (gas !== null && input.ethPriceObservedAtMs !== null && fin(input.ethPriceObservedAtMs)) observed.push(input.ethPriceObservedAtMs);
+  // 6I-5 — impact 성분의 관측 시각(markets/info + index가) 포함 (stale 은폐 금지)
+  if (impact !== null && impactDetail !== null) {
+    observed.push(impactDetail.observedAtMs);
+    const ipAt = input.impact?.indexPriceObservedAtMs;
+    if (ipAt !== null && ipAt !== undefined && fin(ipAt)) observed.push(ipAt);
+  }
   const fetchedAtMs = observed.length > 0 ? Math.min(...observed) : null;
 
   const missing: string[] = [];
@@ -255,6 +300,9 @@ export function buildCandidateCostBreakdown(input: CandidateCostInput): CostBrea
       feeParamsAtMs: fp !== null ? fp.observedAtMs : null,
       ratesAtMs: rates !== null ? rates.observedAtMs : null,
       ethPriceAtMs: input.ethPriceObservedAtMs !== null && fin(input.ethPriceObservedAtMs) ? input.ethPriceObservedAtMs : null,
+      impactAtMs: impactDetail !== null ? impactDetail.observedAtMs : null,
     },
+    // 6I-5 — impact 산출 상세 (source pin·exponent·factor·VI/cap 적용 여부·관측 시각)
+    impactDetail,
   };
 }

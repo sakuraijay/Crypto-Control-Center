@@ -10,6 +10,7 @@ import { Candle, Timeframe, TIMEFRAME_MS } from './types';
 import { RawMarketRow } from './universe';
 import { usd30SumToNumber, rate30PerHourToNumber, rate30PerSecToPerHour, parseBigIntStr } from './usd30';
 import type { MarketRateInputs } from './costEngine';
+import { parseMarketsImpactInfo, IMPACT_SOURCE_PIN, type ImpactMarketInputs } from './impactEngine';
 
 export interface IntelFetchers {
   /** 공식 GMX markets 목록 + 유동성/OI 지표 (실패=null) */
@@ -27,6 +28,11 @@ export interface IntelFetchers {
    * 부분 파싱 실패/만료 = null (부분 데이터 위장 금지). 미구현 fetcher = 비용 UNAVAILABLE.
    */
   fetchMarketCostInputs?(marketAddress: string): Promise<MarketRateInputs | null>;
+  /**
+   * 6I-5 — 공식 /v1/markets/info impact 입력 (OI·factor·exponent·VI·pool·cap, 전부 BigInt).
+   * 부분 파싱 실패/만료 = null (부분 데이터 위장 금지). read-only GET 전용.
+   */
+  fetchMarketImpactInputs?(marketAddress: string): Promise<ImpactMarketInputs | null>;
 }
 
 /** bounded concurrency 실행기 */
@@ -69,6 +75,8 @@ export const GMX_OFFICIAL_API = 'https://arbitrum.gmxapi.io';
 export const COST_TICKERS_PATH = '/v1/markets/tickers';
 export const COST_SOURCE_PIN =
   'arbitrum.gmxapi.io/v1/markets/tickers@sdk1.7.0(MarketTicker per-hour 1e30, 음수=지불)';
+/** 6I-5 — 공식 impact 입력 endpoint (SDK fetchApiMarketsInfo와 동일) */
+export const IMPACT_INFO_PATH = '/v1/markets/info';
 
 /** markets/info 캐시 TTL — 경량 universe scan은 수분 단위면 충분 */
 export const MARKETS_CACHE_TTL_MS = 4 * 60_000;
@@ -93,6 +101,10 @@ export interface DataSourceStats {
   tickersRequests: number;
   tickersCacheHits: number;
   tickersSchemaRejects: number;   // 스키마/단위 계약 위반으로 버린 record 수 (누적)
+  /** 6I-5 — 공식 /v1/markets/info impact 입력 계측 */
+  impactInfoRequests: number;
+  impactInfoCacheHits: number;
+  impactInfoSchemaRejects: number;
 }
 
 /**
@@ -174,6 +186,9 @@ export function createProductionFetchers(deps: {
   /** 6I-4 — 공식 /v1/markets/tickers 비용 입력 캐시 (계약 검증 통과 record만 기록) */
   let tickersCache: { at: number; value: Map<string, Omit<MarketRateInputs, 'observedAtMs' | 'sourcePin'>> } | null = null;
   let tickersInFlight: Promise<void> | null = null;
+  /** 6I-5 — /v1/markets/info impact 입력 캐시 (계약 검증 통과 record만) */
+  let impactCache: { at: number; value: Map<string, Omit<ImpactMarketInputs, 'observedAtMs' | 'sourcePin'>> } | null = null;
+  let impactInFlight: Promise<void> | null = null;
   const candleCache = new Map<string, CandleCacheEntry>();
   const inFlight = new Map<string, Promise<Candle[] | null>>();
   let cycleCandleRequests = 0;
@@ -184,6 +199,7 @@ export function createProductionFetchers(deps: {
     marketsRequests: 0, marketsCacheHits: 0, budgetExceededCount: 0, backoffSkips: 0,
     lastCycleCandleRequests: 0,
     tickersRequests: 0, tickersCacheHits: 0, tickersSchemaRejects: 0,
+    impactInfoRequests: 0, impactInfoCacheHits: 0, impactInfoSchemaRejects: 0,
   };
 
   async function fetchCandlesCached(symbol: string, timeframe: Timeframe, count: number): Promise<Candle[] | null> {
@@ -345,6 +361,47 @@ export function createProductionFetchers(deps: {
       const c = tickersCache.value.get(marketAddress.toLowerCase());
       if (!c) return null;
       return { ...c, observedAtMs: tickersCache.at, sourcePin: COST_SOURCE_PIN };
+    },
+
+    async fetchMarketImpactInputs(marketAddress) {
+      const nowMs = now();
+      if (!impactCache || nowMs - impactCache.at >= RATES_CACHE_TTL_MS) {
+        if (nowMs < backoffUntilMs) { stats.backoffSkips++; return null; }
+        let flight = impactInFlight;
+        if (!flight) {
+          flight = (async () => {
+            stats.impactInfoRequests++;
+            try {
+              // read-only GET — method/body 없음 (주문·서명 경로 아님)
+              const r = await fetch(`${GMX_OFFICIAL_API}${IMPACT_INFO_PATH}`, {
+                signal: AbortSignal.timeout(10_000), redirect: 'error',
+              });
+              if (!r.ok) {
+                if (r.status === 429) backoffUntilMs = now() + RATE_LIMIT_BACKOFF_MS;
+                return; // 실패 = 캐시 미갱신 (만료 캐시는 아래에서 null 처리)
+              }
+              const { entries, rejects } = parseMarketsImpactInfo(await r.json());
+              stats.impactInfoSchemaRejects += rejects.count;
+              if (rejects.count > 0) {
+                console.warn(`[Intel] markets/info impact 계약 위반 record ${rejects.count}건 폐기: ${rejects.reasons.join(' | ')}`);
+              }
+              impactCache = { at: now(), value: entries };
+            } catch {
+              // 네트워크/파싱 실패 = 캐시 미갱신 (오류 상세는 외부 URL 포함 가능 — 로그 미출력)
+            }
+          })().finally(() => { impactInFlight = null; });
+          impactInFlight = flight;
+        } else {
+          stats.impactInfoCacheHits++; // in-flight 병합
+        }
+        await flight.catch(() => undefined);
+      } else {
+        stats.impactInfoCacheHits++;
+      }
+      if (!impactCache || now() - impactCache.at >= RATES_CACHE_TTL_MS) return null;
+      const c = impactCache.value.get(marketAddress.toLowerCase());
+      if (!c) return null;
+      return { ...c, observedAtMs: impactCache.at, sourcePin: IMPACT_SOURCE_PIN };
     },
   };
 

@@ -21,6 +21,7 @@ import {
   buildCandidateCostBreakdown, IMPACT_EXPONENT_2_0, MarketFeeParams, MarketRateInputs,
 } from '../intel/costEngine';
 import { totalCostUsd, computeExpectedNetValueUsd, CostBreakdownUsd } from '../intel/candidate';
+import { impactInputFixture } from './fixtures/impactFixture';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const golden = JSON.parse(readFileSync(join(HERE, 'fixtures', 'gmxMarketsTickersGolden.json'), 'utf8')) as {
@@ -129,6 +130,7 @@ describe('6I-4 §3 비용 breakdown 골든 — 부호 규약·완전 산출·결
   const input = (over?: object) => ({
     marketToken: SOL, isLong: true, notionalUsd: 1_000, holdingHours: 4,
     feeParams: feeParams(), rates: solRates(), ethPriceUsd: 3_000, ethPriceObservedAtMs: NOW - 30_000, nowMs: NOW,
+    impact: impactInputFixture({ nowMs: NOW }),   // 6I-5 — SDK 계약 impact 입력
     ...over,
   });
 
@@ -144,6 +146,7 @@ describe('6I-4 §3 비용 breakdown 골든 — 부호 규약·완전 산출·결
     expect(c.sourcePin).toBe(COST_SOURCE_PIN);
     expect(c.componentObservedAtMs).toEqual({
       feeParamsAtMs: NOW - 60_000, ratesAtMs: NOW - 90_000, ethPriceAtMs: NOW - 30_000,
+      impactAtMs: NOW - 20_000,   // 6I-5 — markets/info 관측 시각
     });
     expect(c.costSnapshotFetchedAtMs).toBe(NOW - 90_000); // min = rates
   });

@@ -15,6 +15,7 @@ import {
   calibrateBucket, calibrateBuckets, bucketKeyOf, emptyBucket, CalibrationBucketRaw,
 } from '../intel/calibration';
 import { MIN_CALIBRATION_SAMPLES, MIN_CALIBRATING_SAMPLES, totalCostUsd } from '../intel/candidate';
+import { impactInputFixture } from './fixtures/impactFixture';
 import {
   buildCandidateCostBreakdown, computeRoundTripImpactUsd, computeExecutionFeeUsd,
   IMPACT_EXPONENT_2_0, INTEL_COST_POLICY, MarketFeeParams, MarketRateInputs,
@@ -129,7 +130,9 @@ describe('6I-3 §2 실측 비용 breakdown', () => {
   });
   const input = (over?: object) => ({
     marketToken: ADDR(1), isLong: true, notionalUsd: 1_000, holdingHours: 4,
-    feeParams: fee(), rates: rates(), ethPriceUsd: 3_000, ethPriceObservedAtMs: NOW - 30_000, nowMs: NOW, ...over,
+    feeParams: fee(), rates: rates(), ethPriceUsd: 3_000, ethPriceObservedAtMs: NOW - 30_000, nowMs: NOW,
+    impact: impactInputFixture({ nowMs: NOW }),   // 6I-5 — SDK 계약 impact 입력
+    ...over,
   });
 
   it('전 성분 실측 확보 → 전부 non-null, totalCostUsd 산출 가능', () => {
@@ -152,11 +155,11 @@ describe('6I-3 §2 실측 비용 breakdown', () => {
     expect(c.costSnapshotFetchedAtMs).toBe(NOW - 120_000); // rates가 더 오래됨
   });
 
-  it('rates 조회 실패 → funding/borrowing/impact null → totalCost null (부분합 위장 금지)', () => {
+  it('rates 조회 실패 → funding/borrowing null → totalCost null (부분합 위장 금지; impact는 markets/info 기반이라 독립)', () => {
     const c = buildCandidateCostBreakdown(input({ rates: null }));
     expect(c.fundingCostUsd).toBeNull();
     expect(c.borrowingCostUsd).toBeNull();
-    expect(c.priceImpactUsd).toBeNull();
+    expect(c.priceImpactUsd).not.toBeNull();   // 6I-5: impact OI 소스는 markets/info (tickers 아님)
     expect(totalCostUsd(c)).toBeNull();
     expect(c.costBasis).toContain('UNAVAILABLE');
   });

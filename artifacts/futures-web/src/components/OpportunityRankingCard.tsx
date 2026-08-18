@@ -11,7 +11,7 @@ import { Badge } from '@/components/ui/badge';
 import {
   fetchOpportunitiesLatest, OpportunitiesLatest,
   formatWinProbability, formatExpectedNetValue, INTEL_NOTICE_NO_GUARANTEE,
-  formatBucketSamples, formatTotalCost, costComponentLines, formatComponentObservedAt,
+  formatBucketSamples, formatTotalCost, costComponentLines, formatComponentObservedAt, formatImpactDetail,
 } from '@/lib/intelStatus';
 
 export function OpportunityRankingCard() {
@@ -97,6 +97,15 @@ export function OpportunityRankingCard() {
                 {c.costBreakdown?.costBasis && c.totalExpectedCostUsd === null && (
                   <div className="text-[10px] text-muted-foreground truncate" title={c.costBreakdown.costBasis}>
                     비용: {c.costBreakdown.costBasis}
+                  </div>
+                )}
+                {c.costBreakdown?.impactDetail && (
+                  <div
+                    className="text-[10px] text-muted-foreground truncate"
+                    title={`caps: ${c.costBreakdown.impactDetail.capsEvaluated.join(' | ') || '—'}\n출처: ${c.costBreakdown.impactDetail.sourcePin}\nfactor neg=${c.costBreakdown.impactDetail.factorNegativeRaw} pos=${c.costBreakdown.impactDetail.factorPositiveRaw}`}
+                    data-testid={`text-impact-detail-${c.symbol}-${c.direction}`}
+                  >
+                    {formatImpactDetail(c.costBreakdown.impactDetail)}
                   </div>
                 )}
                 {c.costBreakdown?.sourcePin && (

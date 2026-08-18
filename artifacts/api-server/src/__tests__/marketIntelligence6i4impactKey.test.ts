@@ -27,6 +27,7 @@ import {
   type MarketRateInputs,
 } from '../intel/costEngine';
 import { totalCostUsd } from '../intel/candidate';
+import { impactInputFixture } from './fixtures/impactFixture';
 
 // SDK CJS require (ESM 빌드는 vitest 해석 불가 — 6H-2C 패턴)
 const require = createRequire(import.meta.url);
@@ -114,6 +115,15 @@ const input = (fpOver: Partial<MarketFeeParams> = {}, fp: MarketFeeParams | null
   ethPriceUsd: 3000,
   ethPriceObservedAtMs: NOW - 45_000,
   nowMs: NOW,
+  // 6I-5 — SDK 계약 impact 입력 (교차검증: feeParams와 factorNeg/exponentNeg 일치)
+  impact: impactInputFixture({
+    nowMs: NOW,
+    inputsOver: {
+      positionImpactFactorNegative: fp?.negativeImpactFactor ?? 10n ** 20n,
+      positionImpactExponentFactorNegative: fp?.impactExponentFactor ?? IMPACT_EXPONENT_2_0,
+      positionImpactExponentFactorPositive: fp?.impactExponentFactor ?? IMPACT_EXPONENT_2_0,
+    },
+  }),
 });
 
 describe('6I-4 impact fixture — exponent=2e30 → non-null 연쇄 (§B)', () => {
@@ -135,18 +145,20 @@ describe('6I-4 impact fixture — exponent=2e30 → non-null 연쇄 (§B)', () =
 });
 
 describe('6I-4 adversarial fail-closed (§C)', () => {
-  it('exponent=0 (미설정 슬롯 시나리오) → impact null + 미지원 reason', () => {
+  it('exponent=0 (미설정 슬롯 시나리오) → impact null + 범위 밖 reason (fail-closed)', () => {
     const c = buildCandidateCostBreakdown(input({ impactExponentFactor: 0n }));
     expect(c.priceImpactUsd).toBeNull();
     expect(totalCostUsd(c)).toBeNull();
-    expect(c.costBasis).toContain('미지원 raw exponent');
+    expect(c.costBasis).toContain('범위 밖');
     expect(c.costBasis).toContain(IMPACT_EXPONENT_KEY_SCHEMA_PIN);
   });
 
-  it('exponent=2.2e30 → impact null (float pow 근사 금지, 명시적 미지원)', () => {
+  it('exponent=2.2e30 → 6I-5부터 지원 (SDK float pow 계약) — non-null 산출', () => {
     const c = buildCandidateCostBreakdown(input({ impactExponentFactor: 22n * 10n ** 29n }));
-    expect(c.priceImpactUsd).toBeNull();
-    expect(c.costBasis).toContain('미지원 raw exponent(≠2.0e30)');
+    expect(c.priceImpactUsd).not.toBeNull();
+    expect(c.priceImpactUsd!).toBeGreaterThanOrEqual(0);
+    expect(c.costBasis).toContain('SDK1.7.0 getPriceImpactForPosition');
+    // legacy 2.0 전용 헬퍼는 여전히 임의 exponent 거부 (근사 금지 계약 유지)
     expect(computeRoundTripImpactUsd({
       isLong: true, notionalUsd: 1000, oiLong30: 0n, oiShort30: 0n,
       negativeImpactFactor: 10n ** 20n, impactExponentFactor: 22n * 10n ** 29n,

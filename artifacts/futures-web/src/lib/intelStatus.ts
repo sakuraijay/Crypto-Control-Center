@@ -83,6 +83,24 @@ export interface CostBreakdownView {
     feeParamsAtMs: number | null;
     ratesAtMs: number | null;
     ethPriceAtMs: number | null;
+    /** 6I-5 — impact 입력(markets/info) 관측 시각 */
+    impactAtMs?: number | null;
+  } | null;
+  /** 6I-5 — SDK 계약 impact 산출 상세 (exponent raw·VI/cap 적용·source pin·관측 시각) */
+  impactDetail?: {
+    entryImpactUsd: number;
+    exitImpactUsd: number;
+    impactCostUsd: number;
+    rebateCountedUsd: number;
+    exponentPositiveRaw: string;
+    exponentNegativeRaw: string;
+    factorPositiveRaw: string;
+    factorNegativeRaw: string;
+    virtualInventoryConfigured: boolean;
+    virtualInventoryApplied: boolean;
+    capsEvaluated: string[];
+    sourcePin: string;
+    observedAtMs: number;
   } | null;
 }
 
@@ -205,7 +223,20 @@ export function formatTotalCost(v: number | null | undefined): string {
 export function formatComponentObservedAt(t: CostBreakdownView['componentObservedAtMs']): string | undefined {
   if (!t) return undefined;
   const f = (v: number | null) => (v === null ? '—' : new Date(v).toLocaleTimeString());
-  return `관측 시각 — 수수료/impact 계수: ${f(t.feeParamsAtMs)} · rate/OI: ${f(t.ratesAtMs)} · ETH가: ${f(t.ethPriceAtMs)}`;
+  return `관측 시각 — 수수료/impact 계수: ${f(t.feeParamsAtMs)} · rate/OI: ${f(t.ratesAtMs)} · ETH가: ${f(t.ethPriceAtMs)} · impact 입력: ${f(t.impactAtMs ?? null)}`;
+}
+
+/** exponent raw(1e30 스케일 문자열) → 사람이 읽는 지수 (예: "1.8257") */
+export function formatExponentRaw(raw: string): string {
+  const n = Number(raw) / 1e30;
+  return Number.isFinite(n) ? n.toFixed(4) : raw;
+}
+
+/** 6I-5 — impact 산출 상세 요약 (exponent·VI·cap·관측 시각). null=산출 실패(사유는 costBasis) */
+export function formatImpactDetail(d: CostBreakdownView['impactDetail']): string | null {
+  if (!d) return null;
+  const vi = d.virtualInventoryConfigured ? (d.virtualInventoryApplied ? 'VI 적용' : 'VI 구성·미적용') : 'VI 미구성';
+  return `impact: exponent ${formatExponentRaw(d.exponentNegativeRaw)}(neg)/${formatExponentRaw(d.exponentPositiveRaw)}(pos) · ${vi} · rebate 계상 $${d.rebateCountedUsd.toFixed(4)} · 관측 ${new Date(d.observedAtMs).toLocaleTimeString()}`;
 }
 
 export function costComponentLines(c: CostBreakdownView | null | undefined): { label: string; value: string }[] {
