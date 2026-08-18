@@ -33,10 +33,15 @@ export function positionImpactFactorKey(market: Address, isPositive: boolean): H
     [KEY_POSITION_IMPACT_FACTOR, market, isPositive],
   ));
 }
-export function positionImpactExponentFactorKey(market: Address): Hex {
+/**
+ * SDK 1.7.0 (@gmx-io/sdk configs/dataStore) 계약: exponent 키는 positive/negative 분리 —
+ * hashData(["bytes32","address","bool"], [KEY, market, isPositive]).
+ * 과거 bool 미포함 해시는 미설정 슬롯을 읽어 getUint=0 → 전 시장 impact null 회귀를 유발했다.
+ */
+export function positionImpactExponentFactorKey(market: Address, isPositive: boolean): Hex {
   return keccak256(encodeAbiParameters(
-    [{ type: 'bytes32' }, { type: 'address' }],
-    [KEY_POSITION_IMPACT_EXPONENT_FACTOR, market],
+    [{ type: 'bytes32' }, { type: 'address' }, { type: 'bool' }],
+    [KEY_POSITION_IMPACT_EXPONENT_FACTOR, market, isPositive],
   ));
 }
 
@@ -90,7 +95,7 @@ export function createGmxCostReader(deps: {
         const [feeNeg, impactNeg, impactExp, gasBase, gasMult, incGas, decGas, gasPriceWei] = await Promise.all([
           getUint(positionFeeFactorKey(m, false)),
           getUint(positionImpactFactorKey(m, false)),
-          getUint(positionImpactExponentFactorKey(m)),
+          getUint(positionImpactExponentFactorKey(m, false)), // 비용(악화) 방향 = negative 측
           getUint(KEY_ESTIMATED_GAS_FEE_BASE_AMOUNT_V2_1),
           getUint(KEY_ESTIMATED_GAS_FEE_MULTIPLIER_FACTOR),
           getUint(KEY_INCREASE_ORDER_GAS_LIMIT),

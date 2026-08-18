@@ -25,6 +25,13 @@ const P30 = 10n ** 30n;
 /** exponent 2.0 (1e30 스케일) — 이 값일 때만 impact 산출 (근사 금지) */
 export const IMPACT_EXPONENT_2_0 = 2n * P30;
 
+/**
+ * 6I-4 수정 — impact exponent DataStore 키 스킴 pin (API/UI basis 노출용, 민감정보 없음).
+ * SDK 1.7.0 positionImpactExponentFactorKey와 byte-for-byte 동일 스킴 (골든 테스트로 강제).
+ */
+export const IMPACT_EXPONENT_KEY_SCHEMA_PIN =
+  'POSITION_IMPACT_EXPONENT_FACTOR(bytes32,address,bool isPositive=false)@sdk1.7.0';
+
 /** §2 frozen 정책 예비비 — 실측이 아닌 명시적 보수 정책 상수 */
 export const INTEL_COST_POLICY = Object.freeze({
   /** 지연 위험 예비비 — 명목 대비 5bp */
@@ -41,7 +48,7 @@ export interface MarketFeeParams {
   positionFeeFactorNegative: bigint;
   /** POSITION_IMPACT_FACTOR(market, isPositive=false) — 1e30 */
   negativeImpactFactor: bigint;
-  /** POSITION_IMPACT_EXPONENT_FACTOR(market) — 1e30 */
+  /** POSITION_IMPACT_EXPONENT_FACTOR(market, isPositive=false) — negative 측, 1e30 */
   impactExponentFactor: bigint;
   /** 주문 keeper 실행비 추정 파라미터 (전역 키) */
   estimatedGasFeeBaseAmount: bigint;          // ESTIMATED_GAS_FEE_BASE_AMOUNT_V2_1
@@ -179,7 +186,12 @@ export function buildCandidateCostBreakdown(input: CandidateCostInput): CostBrea
         oiLong30: rates.openInterestLong30, oiShort30: rates.openInterestShort30,
         negativeImpactFactor: fp.negativeImpactFactor, impactExponentFactor: fp.impactExponentFactor,
       });
-      if (impact !== null) basisParts.push('impact=공식 f=factor·d² (악화분만, rebate 0 clamp)');
+      if (impact !== null) {
+        basisParts.push(`impact=공식 f=factor·d² (악화분만, rebate 0 clamp); impactKeySchema=${IMPACT_EXPONENT_KEY_SCHEMA_PIN}`);
+      } else if (fp.impactExponentFactor !== IMPACT_EXPONENT_2_0) {
+        // raw exponent 지원 여부 명시 — 2.0e30 전용, float pow/virtual inventory/cap 미지원 (fail-closed)
+        basisParts.push(`impact=미지원 raw exponent(≠2.0e30) — float pow·virtual inventory·cap 미지원, fail-closed; impactKeySchema=${IMPACT_EXPONENT_KEY_SCHEMA_PIN}`);
+      }
     }
   }
 
