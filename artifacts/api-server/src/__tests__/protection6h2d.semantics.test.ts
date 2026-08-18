@@ -3,7 +3,20 @@
  * ambiguous 결선 · 테스트 override 보안 · 예산 정책 메타.
  * 실 RPC/네트워크 0회 — 전부 로컬 fixture 주입.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+
+// CI db-free 규칙 — @workspace/db 최상위 import 차단 (DATABASE_URL 미설정 환경)
+vi.mock('@workspace/db', () => {
+  const chain: Record<string, unknown> = {};
+  for (const m of ['select', 'insert', 'update', 'delete', 'from', 'where', 'values', 'set', 'limit', 'orderBy', 'offset', 'returning', 'onConflictDoUpdate', 'onConflictDoNothing']) {
+    chain[m] = vi.fn().mockReturnValue(chain);
+  }
+  (chain as { then?: unknown }).then = undefined; // thenable 오인 방지
+  return new Proxy({ db: chain }, {
+    get: (t, prop) => (prop in t ? (t as Record<string | symbol, unknown>)[prop] : {}),
+  });
+});
+
 import { verifyOrderSemanticBinding, extractAutoCancelEncoded, type GmxOrderRequest } from '../lib/gmxApiExecution';
 import { collectProtectionEvidence, EVIDENCE_CONFIRMATION_DEPTH, type EvidenceClient } from '../lib/protectionEvidence';
 import { decodeEventLog2Data, accountTopicOf, type RawLog } from '../lib/gmxOrderEvents';
