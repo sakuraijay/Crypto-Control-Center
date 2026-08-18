@@ -513,6 +513,129 @@ const MIGRATIONS: { name: string; sql: string }[] = [
       ALTER TABLE shadow_outcomes ADD COLUMN IF NOT EXISTS completed_at timestamptz;
     `,
   },
+  {
+    name: "0028_paper_reset_1000",
+    sql: `
+      -- 운영자 승인("Production PAPER $1,000 기준값 초기화 승인") 기반 일회성 guarded reset.
+      -- docs/production-reset-plan-6h1.md의 트랜잭션을 embedded migration으로 이식.
+      -- 동작:
+      --   1) advisory xact lock으로 동시 기동 직렬화 (lock 획득 후 모든 가드 평가 — TOCTOU 제거)
+      --   2) APPLIED 감사 기록 존재 → 완전 no-op (재기동 반복 초기화 구조적 불가)
+      --   3) legacy 지문(Production 2026-08-18 관측값) 전부 일치 + 활동 0건 + stopCoverage 미해결 없음
+      --      → 단일 트랜잭션 적용 (감사 백업 → 적용, 각 단계 행 수 검증)
+      --   4) 지문 불일치 → skip 로그(관찰용, 비영구)만 갱신 후 no-op — 다음 기동에 재평가 (재시도 가능)
+      -- 지문이 일치하는데 활동 흔적(포지션/미정산/승인대기/intent/relay/보호주문)·stopCoverage 미해결이
+      -- 있거나 행 수가 예상과 다르면 RAISE EXCEPTION → 전체 롤백 + 서버 기동 중단(readiness 닫힘).
+      -- trades/ai_decisions/live_approvals/SHADOW 표본은 접촉하지 않는다.
+      DO $reset1000$
+      DECLARE
+        v_audit text; v_sc_rows int;
+        v_capital text; v_lev text; v_daily text; v_weekly text; v_maxpos text;
+        v_hwm text; v_bd text; v_bw text; v_risk text; v_stopcov text;
+        v_open int; v_unsettled int; v_pending int; v_intents int; v_relay int; v_prot int;
+        v_rc int;
+      BEGIN
+        -- 1) 직렬화 — 다중 인스턴스 동시 기동 시 reset 전체가 한 번에 하나만 진행
+        PERFORM pg_advisory_xact_lock(hashtext('paper_reset_1000'));
+
+        -- 2) terminal 가드: APPLIED 기록이 있을 때만 영구 no-op (SKIP은 terminal이 아님)
+        SELECT value INTO v_audit FROM worker_state WHERE key = 'paperReset1000Audit';
+        IF v_audit IS NOT NULL AND (v_audit::json->>'outcome') = 'APPLIED' THEN RETURN; END IF;
+
+        -- 외부 writer TOCTOU 차단 — 이미 실행 중인 worker/타 인스턴스가 count 확인과 커밋 사이에
+        -- 활동 레코드를 쓰지 못하도록 관련 테이블을 트랜잭션 종료까지 write-conflict lock으로 고정
+        LOCK TABLE trades, live_approvals, execution_intents, relay_tasks, protection_orders,
+                   worker_state, strategy_config IN SHARE ROW EXCLUSIVE MODE;
+
+        SELECT count(*) INTO v_sc_rows FROM strategy_config;
+        SELECT limits->>'tradingCapital', limits->>'maxLeverage',
+               limits->>'dailyLossLimitUSDT', limits->>'weeklyLossLimitUSDT',
+               limits->>'maxSimultaneousPositions'
+          INTO v_capital, v_lev, v_daily, v_weekly, v_maxpos
+          FROM strategy_config LIMIT 1;
+        SELECT value INTO v_hwm  FROM worker_state WHERE key = 'equityHwm';
+        SELECT value INTO v_bd   FROM worker_state WHERE key = 'equityBaselineDaily';
+        SELECT value INTO v_bw   FROM worker_state WHERE key = 'equityBaselineWeekly';
+        SELECT value INTO v_risk FROM worker_state WHERE key = 'riskEngineStateV1';
+
+        -- 3) legacy 지문 — Production에서 읽기 전용 감사로 확인된 정확한 이전 값 전부 일치해야 적용
+        -- coalesce 필수: 키 부재(NULL)로 조건이 NULL이 되면 skip 분기를 건너뛰는 3치 논리 함정 방지
+        IF NOT coalesce((v_sc_rows = 1
+            AND v_capital = '24.5' AND v_lev = '10'
+            AND v_daily = '500' AND v_weekly = '1500' AND v_maxpos = '5'
+            AND v_hwm = '10000'
+            AND v_bd  LIKE '%"equity":24.5%'
+            AND v_bw  LIKE '%"equity":10000%'
+            AND v_risk LIKE '%"riskOperatingState":"HARD_STOPPED"%'), false) THEN
+          -- 4) 불일치 → 관찰 로그만 갱신하고 no-op. terminal 아님 — 다음 기동에 재평가되므로
+          --    일시적 불일치(직렬화 차이·배포 타이밍)가 정당한 적용 기회를 영구 차단하지 않는다.
+          INSERT INTO worker_state (key, value) VALUES ('paperReset1000SkipLog',
+            json_build_object('outcome', 'SKIPPED_FINGERPRINT_MISMATCH', 'at', now(),
+              'observed', json_build_object('scRows', v_sc_rows, 'tradingCapital', v_capital,
+                'maxLeverage', v_lev, 'equityHwm', v_hwm))::text)
+          ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
+          RETURN;
+        END IF;
+
+        -- 사전 조건: 활동 흔적 전부 0건 (지문 일치인데 위반이면 fail-closed — 롤백+기동 중단)
+        SELECT count(*) INTO v_open      FROM trades WHERE action = 'OPEN' AND (close_time IS NULL OR close_time = 0);
+        SELECT count(*) INTO v_unsettled FROM trades WHERE test_mode = true AND settlement_status = 'UNSETTLED';
+        SELECT count(*) INTO v_pending   FROM live_approvals WHERE status = 'PENDING';
+        SELECT count(*) INTO v_intents   FROM execution_intents;
+        SELECT count(*) INTO v_relay     FROM relay_tasks;
+        SELECT count(*) INTO v_prot      FROM protection_orders;
+        IF v_open <> 0 OR v_unsettled <> 0 OR v_pending <> 0 OR v_intents <> 0 OR v_relay <> 0 OR v_prot <> 0 THEN
+          RAISE EXCEPTION 'paper_reset_1000 사전 조건 위반: open=% unsettled=% pending=% intents=% relay=% protection=%',
+            v_open, v_unsettled, v_pending, v_intents, v_relay, v_prot;
+        END IF;
+
+        -- stopCoverage fail-closed — 미해결(PENDING/FAILED_CLOSING/UNRESOLVED) 잔존 시 reset 금지
+        -- (계획 문서 6H-2 조항: non-COVERED 기록이 있으면 신규 OPEN이 차단되므로 원인 조사 먼저)
+        SELECT value INTO v_stopcov FROM worker_state WHERE key = 'stopCoverage';
+        IF v_stopcov IS NOT NULL AND (v_stopcov LIKE '%PENDING%'
+            OR v_stopcov LIKE '%FAILED_CLOSING%' OR v_stopcov LIKE '%UNRESOLVED%') THEN
+          RAISE EXCEPTION 'paper_reset_1000 사전 조건 위반: stopCoverage 미해결 잔존 — 조사 전 reset 금지';
+        END IF;
+
+        -- durable audit backup — 변경 전 원본 값 보존 (민감정보 없음: 설정/파생 상태 값만)
+        INSERT INTO worker_state (key, value) VALUES ('paperReset1000Audit',
+          json_build_object('outcome', 'APPLIED', 'at', now(),
+            'before', json_build_object(
+              'tradingCapital', v_capital, 'maxLeverage', v_lev,
+              'dailyLossLimitUSDT', v_daily, 'weeklyLossLimitUSDT', v_weekly,
+              'maxSimultaneousPositions', v_maxpos, 'equityHwm', v_hwm,
+              'equityBaselineDaily', v_bd::json, 'equityBaselineWeekly', v_bw::json,
+              'riskEngineStateV1', v_risk::json,
+              'stopCoverage', v_stopcov))::text)
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
+
+        -- 적용 — 각 단계 행 수 검증, 불일치 시 예외로 전체 롤백
+        UPDATE strategy_config SET
+          limits = jsonb_set(jsonb_set(jsonb_set(jsonb_set(jsonb_set(limits,
+            '{tradingCapital}', '1000'),
+            '{maxLeverage}', '3'),
+            '{dailyLossLimitUSDT}', '30'),
+            '{weeklyLossLimitUSDT}', '80'),
+            '{maxSimultaneousPositions}', '1'),
+          updated_at = now();
+        GET DIAGNOSTICS v_rc = ROW_COUNT;
+        IF v_rc <> 1 THEN RAISE EXCEPTION 'strategy_config UPDATE rows=% (expected 1)', v_rc; END IF;
+
+        UPDATE worker_state SET value = '1000', updated_at = now() WHERE key = 'equityHwm';
+        GET DIAGNOSTICS v_rc = ROW_COUNT;
+        IF v_rc <> 1 THEN RAISE EXCEPTION 'equityHwm UPDATE rows=% (expected 1)', v_rc; END IF;
+
+        DELETE FROM worker_state WHERE key = 'riskEngineStateV1';
+        GET DIAGNOSTICS v_rc = ROW_COUNT;
+        IF v_rc <> 1 THEN RAISE EXCEPTION 'riskEngineStateV1 DELETE rows=% (expected 1)', v_rc; END IF;
+
+        DELETE FROM worker_state WHERE key IN ('equityBaselineDaily','equityBaselineWeekly');
+        GET DIAGNOSTICS v_rc = ROW_COUNT;
+        IF v_rc <> 2 THEN RAISE EXCEPTION 'baseline DELETE rows=% (expected 2)', v_rc; END IF;
+      END
+      $reset1000$;
+    `,
+  },
   // Add future migrations here in chronological order.
 ];
 
