@@ -111,9 +111,27 @@ export function DailyTargetCard({ className }: { className?: string }) {
     );
   }
 
-  const dailyTarget    = limits.dailyTargetUSDT  ?? 500;
-  const tradingCap     = limits.tradingCapital    ?? 10_000;
-  const dailyLossLimit = limits.dailyLossLimitUSDT ?? 500;
+  // ── 목표는 오직 서버 authoritative RiskPolicy 파생값 ─────────────────────
+  // legacy strategy_config 저장값(구형 $500 등)은 목표 표시·판단에 사용하지
+  // 않는다. 파생값을 못 받으면 500/0 같은 가짜 값 대신 Unavailable을 표시한다.
+  const derived = periodPnl.data?.riskDerivedTargets ?? null;
+  if (derived === null) {
+    return (
+      <div className={cn('rounded-xl border border-border bg-card p-5 flex flex-col gap-2', className)}>
+        <span className="text-xs font-bold tracking-widest text-muted-foreground uppercase">Daily PnL</span>
+        <p className="text-sm text-muted-foreground">
+          {periodPnl.status === 'loading'
+            ? '로드 중 — 서버 RiskPolicy 파생 목표 조회 중…'
+            : 'Unavailable — 서버 RiskPolicy 파생 목표 조회 실패 (fail-closed · 대체값 표시 안 함)'}
+        </p>
+      </div>
+    );
+  }
+
+  const dailyTarget    = derived.primaryProfitTargetUsd;   // +5% (예: $50 @ $1,000)
+  const dailyCap       = derived.absoluteProfitCapUsd;     // +10% 절대 상한 (예: $100)
+  const tradingCap     = derived.dailyRiskCapitalUsd;      // min(startOfDayEquity, $1,000)
+  const dailyLossLimit = derived.dailyMaxLossUsd;          // -3% (예: $30)
 
   const isHalted   = engineState === 'RISK_LOCKED' || engineState === 'EMERGENCY_STOP';
   const dailyState = deriveDailyState(realized, totalPnL, dailyTarget, isHalted);
@@ -244,7 +262,10 @@ export function DailyTargetCard({ className }: { className?: string }) {
         <div className="flex items-center justify-between text-[9px] text-muted-foreground font-mono">
           <span>$0</span>
           <span className="text-muted-foreground/60">─── target ───▶</span>
-          <span>${dailyTarget.toLocaleString()}</span>
+          <span>
+            ${dailyTarget.toLocaleString()}
+            <span className="text-muted-foreground/50"> · 상한 ${dailyCap.toLocaleString()}</span>
+          </span>
         </div>
       </div>
 

@@ -231,7 +231,8 @@ export default function Settings() {
   }), [health, lastSuccessAt, limits.liveTestMode]);
   // ── 핵심 리스크 한도 draft 상태 ──────────────────────────────────────────
   const [drawdownDraft,  setDrawdownDraft]  = useState(() => limits.maxDrawdownPercent  ?? 15);
-  const [dailyLossDraft, setDailyLossDraft] = useState(() => limits.dailyLossLimitUSDT ?? 500);
+  // 정책 기본값 $30 (-3% @ $1,000) — 구형 $500 fallback 금지
+  const [dailyLossDraft, setDailyLossDraft] = useState(() => limits.dailyLossLimitUSDT ?? 30);
   // ── 알림 서버 로그 + VAPID / Web Push 상태 ──────────────────────────────────
   const [notifLog, setNotifLog] = useState<Array<{ ts: string; channel: string; status: string; msg: string }>>([]);
   const [vapidReady,      setVapidReady]      = useState<boolean | null>(null); // null = loading

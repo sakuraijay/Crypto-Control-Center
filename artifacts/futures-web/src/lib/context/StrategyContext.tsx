@@ -110,6 +110,24 @@ const DEFAULT_LIMITS: RiskLimits = {
   testMaxLeverage:   2,
 };
 
+// ── 정책 파생 soft KPI 결속 (서버 riskPolicy.ts와 정합) ──────────────────────
+/** 정책 파생 일일 1차 목표 — $1,000 기준 +5% = $50 */
+export const POLICY_DAILY_TARGET_USD = 50;
+/** 정책 파생 일일 절대 수익 상한 — $1,000 기준 +10% = $100 */
+export const POLICY_DAILY_TARGET_CAP_USD = 100;
+
+/**
+ * clampDailyTargetWeb — dailyTargetUSDT를 정책 범위 [0, $100]로 강제.
+ * legacy 저장값(예: 구형 $500)·비정상 값은 정책 기본값/상한으로 교정되어
+ * localStorage·서버 응답 어느 경로로도 정책 초과값이 상태에 남지 않는다.
+ */
+export function clampDailyTargetWeb(value: unknown): number {
+  if (value === null || value === undefined || typeof value === 'boolean') return POLICY_DAILY_TARGET_USD;
+  const n = typeof value === 'string' ? parseFloat(value) : Number(value);
+  if (!Number.isFinite(n)) return POLICY_DAILY_TARGET_USD;
+  return Math.min(POLICY_DAILY_TARGET_CAP_USD, Math.max(0, n));
+}
+
 /** Server sync state for the debounced PUT /api/data/strategy call. */
 export type StrategySyncStatus = 'idle' | 'saving' | 'saved' | 'error';
 
@@ -148,7 +166,9 @@ export function StrategyProvider({ children }: { children: ReactNode }) {
     if ('startingCapital' in raw && !('tradingCapital' in raw)) {
       raw.tradingCapital = raw.startingCapital;
     }
-    return { ...DEFAULT_LIMITS, ...raw };
+    const merged = { ...DEFAULT_LIMITS, ...raw };
+    merged.dailyTargetUSDT = clampDailyTargetWeb(merged.dailyTargetUSDT);
+    return merged;
   });
 
   // 구형 localStorage 위임 설정 정리 (일회성 — 남아 있으면 잘못된 "위임 준비 완료" 복원 위험)
@@ -184,6 +204,8 @@ export function StrategyProvider({ children }: { children: ReactNode }) {
           }
           // Merge with defaults in case server row pre-dates new fields
           const merged = { ...DEFAULT_LIMITS, ...raw };
+          // stale strategy_config(legacy $500 등)은 정책 상한으로 클램프 — 무시
+          merged.dailyTargetUSDT = clampDailyTargetWeb(merged.dailyTargetUSDT);
           setLimits(merged);
           localStorage.setItem('futures_limits', JSON.stringify(merged));
         }

@@ -12,6 +12,7 @@ import { Router } from "express";
 import { db, tradesTable, strategyConfigTable, workerStateTable } from "@workspace/db";
 import { and, desc, eq } from "drizzle-orm";
 import { getPaperCostBinding } from "../lib/paperCostCache";
+import { clampDailyTargetUSDT } from "../lib/riskPolicy";
 import { accrueHoldingCostsFromEntryRates, computePaperNetPnl } from "../lib/holdingCosts";
 
 const router = Router();
@@ -335,7 +336,17 @@ router.delete("/data/trades", async (_req, res) => {
 router.get("/data/strategy", async (_req, res) => {
   try {
     const rows = await db.select().from(strategyConfigTable).limit(1);
-    res.json(rows[0] ?? null);
+    const row = rows[0] ?? null;
+    // 읽기 경로에서도 legacy dailyTargetUSDT(예: 구형 $500)를 정책 상한으로
+    // 클램프해 반환한다 — DB 실데이터는 변경하지 않는다 (destructive update 금지).
+    if (row && row.limits && typeof row.limits === 'object') {
+      const lim = row.limits as Record<string, unknown>;
+      if ('dailyTargetUSDT' in lim) {
+        res.json({ ...row, limits: { ...lim, dailyTargetUSDT: clampDailyTargetUSDT(lim.dailyTargetUSDT) } });
+        return;
+      }
+    }
+    res.json(row);
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch strategy config" });
   }
@@ -420,6 +431,12 @@ function clampRiskLimits(limits: unknown): unknown {
   if ('tradingCapital' in clamped) {
     const v = safeNum(clamped.tradingCapital);
     clamped.tradingCapital = v !== undefined ? Math.min(1_000, Math.max(10, v)) : undefined;
+  }
+
+  // dailyTargetUSDT (soft KPI): $0 ≤ x ≤ 정책 절대 상한 $100 (+10% @ $1,000)
+  // legacy $500 등 정책 초과값은 저장 자체를 차단한다 (표시 원본은 riskDerivedTargets).
+  if ('dailyTargetUSDT' in clamped) {
+    clamped.dailyTargetUSDT = clampDailyTargetUSDT(clamped.dailyTargetUSDT);
   }
 
   // maxSimultaneousPositions: 정확히 1로 강제

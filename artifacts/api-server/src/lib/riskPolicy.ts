@@ -86,6 +86,32 @@ export function deriveDailyTargets(dailyRiskCapitalUsd: number): DerivedRiskTarg
   };
 }
 
+// ── 소프트 KPI(dailyTargetUSDT) 정책 결속 ─────────────────────────────────────
+// dailyTargetUSDT는 모니터링 전용 soft KPI지만, 정책 파생 상한(+10% = $100 @
+// $1,000 기준)을 초과해 저장·표시되는 것은 금지한다. 화면·API·worker의 목표
+// 표시는 항상 riskDerivedTargets(=deriveDailyTargets)를 원본으로 삼고, legacy
+// 저장값(예: 구형 $500)은 실행·표시·목표 판단에 사용하지 않는다.
+
+/** 정책 파생 일일 1차 목표 달러값 — $1,000 기준 +5% = $50 */
+export const POLICY_DAILY_TARGET_USD =
+  RISK_POLICY.maxRiskCapitalUsd * RISK_POLICY.primaryProfitTargetPercent / 100;
+
+/** 정책 파생 일일 절대 수익 상한 달러값 — $1,000 기준 +10% = $100 */
+export const POLICY_DAILY_TARGET_CAP_USD =
+  RISK_POLICY.maxRiskCapitalUsd * RISK_POLICY.absoluteProfitCapPercent / 100;
+
+/**
+ * clampDailyTargetUSDT — soft KPI 저장값을 정책 범위로 강제.
+ * 유한하지 않은 값 → undefined (worker/web 기본값으로 폴백, 0 대체 금지).
+ * 음수 → 0, 정책 상한($100) 초과(legacy $500 포함) → 상한으로 클램프.
+ */
+export function clampDailyTargetUSDT(value: unknown): number | undefined {
+  if (value === null || value === undefined || typeof value === 'boolean') return undefined;
+  const n = typeof value === 'string' ? parseFloat(value) : Number(value);
+  if (!Number.isFinite(n)) return undefined;
+  return Math.min(POLICY_DAILY_TARGET_CAP_USD, Math.max(0, n));
+}
+
 /** 주간 최대손실 달러값 — weeklyRiskCapital 기준 */
 export function deriveWeeklyMaxLossUsd(weeklyRiskCapitalUsd: number): number {
   return weeklyRiskCapitalUsd * RISK_POLICY.weeklyMaxLossPercent / 100;

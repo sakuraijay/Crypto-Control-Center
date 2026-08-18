@@ -42,7 +42,7 @@ import {
   parseBaseline, rollBaseline, computePeriodPnl,
   type EquityBaseline,
 } from "../lib/equityBaselines";
-import { RISK_POLICY, deriveDailyTargets, type DerivedRiskTargets } from "../lib/riskPolicy";
+import { RISK_POLICY, deriveDailyTargets, clampDailyTargetUSDT, type DerivedRiskTargets } from "../lib/riskPolicy";
 import { dailyRiskCapital, weeklyRiskCapital, positionSizingCapital } from "../lib/riskCapital";
 import { evaluateRiskState, type RiskEvaluationResult, type RiskOperatingState } from "../lib/riskStateMachine";
 import {
@@ -834,7 +834,13 @@ class WorkerManager {
           ? JSON.parse(row.limits as string)
           : row.limits
       ) as Partial<RiskLimits>;
-      return { ...DEFAULT_LIMITS, ...raw };
+      const merged = { ...DEFAULT_LIMITS, ...raw };
+      // legacy 저장값(예: 구형 $500)은 읽기 경로에서도 정책 상한으로 클램프 —
+      // lastLimitsUsed/status에 legacy 값이 그대로 노출되지 않게 한다 (DB 무변경).
+      if ('dailyTargetUSDT' in merged) {
+        merged.dailyTargetUSDT = clampDailyTargetUSDT(merged.dailyTargetUSDT);
+      }
+      return merged;
     } catch (err) {
       console.warn('[AIWorker] loadStrategyLimits 실패 — DEFAULT_LIMITS 사용:', (err as Error).message);
       return DEFAULT_LIMITS;

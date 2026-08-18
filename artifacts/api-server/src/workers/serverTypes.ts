@@ -100,6 +100,11 @@ export interface RiskLimits {
   weeklyLossLimitUSDT?: number;
   /** Rolling 24-hour loss limit (USDT). When exceeded the engine immediately returns CASH. 0 = disabled. */
   rolling24hLossLimitUSDT?: number;
+  /**
+   * 일일 PnL 소프트 KPI (모니터링 전용 — 실행·목표 판단에 사용 금지).
+   * 항상 정책 파생 상한(POLICY_DAILY_TARGET_CAP_USD)으로 클램프되어 노출된다.
+   */
+  dailyTargetUSDT?: number;
   cooldownMinutes?: number;
   maxTradesPerHour?: number;
   // ── LIVE TEST MODE ────────────────────────────────────────────────────────

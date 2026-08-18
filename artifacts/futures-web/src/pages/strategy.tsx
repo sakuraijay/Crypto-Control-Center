@@ -1,4 +1,5 @@
 import { useStrategyContext } from '@/lib/context';
+import { POLICY_DAILY_TARGET_USD, POLICY_DAILY_TARGET_CAP_USD } from '@/lib/context/StrategyContext';
 import { useWallet } from '@/lib/context/WalletContext';
 import { Card } from '@/components/ui/card';
 import { Switch } from '@/components/ui/switch';
@@ -215,7 +216,7 @@ export default function Strategy() {
           <Card className="p-0 overflow-hidden divide-y divide-border">
             {([
               { key: 'tradingCapital',   label: 'Trading Capital (시드머니)', prefix: '$', step: 1000, max: 1_000_000 },
-              { key: 'dailyTargetUSDT',  label: '일일 PnL KPI (소프트 목표)', prefix: '$', step: 50,   max: 100_000  },
+              { key: 'dailyTargetUSDT',  label: '일일 PnL KPI (소프트 목표)', prefix: '$', step: 10,   max: 100 },
             ] as const).map(item => (
               <div key={item.key} className="flex flex-col px-4 py-3 hover:bg-muted/30 transition-colors gap-1.5">
                 <div className="flex items-center justify-between">
@@ -277,9 +278,15 @@ export default function Strategy() {
                 </div>
                 {/* KPI independence notice — shown only for dailyTargetUSDT */}
                 {item.key === 'dailyTargetUSDT' && (
-                  <div className="flex items-start gap-1 text-[9px] text-muted-foreground/70">
-                    <Info className="w-2.5 h-2.5 shrink-0 mt-0.5" />
-                    이 값에 미달해도 AI는 추가 매매·레버리지 확대 없음
+                  <div className="flex flex-col gap-0.5">
+                    <div className="flex items-start gap-1 text-[9px] text-muted-foreground/70">
+                      <Info className="w-2.5 h-2.5 shrink-0 mt-0.5" />
+                      이 값에 미달해도 AI는 추가 매매·레버리지 확대 없음
+                    </div>
+                    <div className="flex items-start gap-1 text-[9px] text-muted-foreground/70">
+                      <Info className="w-2.5 h-2.5 shrink-0 mt-0.5" />
+                      확정 RiskPolicy 파생값(읽기 전용): 1차 목표 +5% = ${POLICY_DAILY_TARGET_USD} · 절대 상한 +10% = ${POLICY_DAILY_TARGET_CAP_USD} — 이 상한을 초과해 저장할 수 없습니다
+                    </div>
                   </div>
                 )}
               </div>

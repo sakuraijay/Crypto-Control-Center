@@ -7,12 +7,19 @@
  *  - 정상               → 서명 포함 달러 포맷
  */
 import { describe, expect, it } from 'vitest';
-import { derivePeriodPnlStatus, formatPeriodPnl, type PeriodPnlData } from '../hooks/usePeriodPnl';
+import {
+  derivePeriodPnlStatus, formatPeriodPnl, parseRiskDerivedTargets,
+  type PeriodPnlData, type RiskDerivedTargets,
+} from '../hooks/usePeriodPnl';
+import {
+  clampDailyTargetWeb, POLICY_DAILY_TARGET_USD, POLICY_DAILY_TARGET_CAP_USD,
+} from '../lib/context/StrategyContext';
 
 const data = (over: Partial<PeriodPnlData> = {}): PeriodPnlData => ({
   dailyPnlUsd: 12.5, weeklyPnlUsd: -30, dailyBaseline: null, weeklyBaseline: null,
   dailyRealizedPnlUsd: 10, weeklyRealizedPnlUsd: -25, currentEquityUsd: 10_012.5,
   periodPnlUpdatedAt: new Date().toISOString(),
+  riskDerivedTargets: null,
   ...over,
 });
 
@@ -61,5 +68,69 @@ describe('formatPeriodPnl', () => {
 
   it('loading → "…"', () => {
     expect(formatPeriodPnl(null, 'loading')).toBe('…');
+  });
+});
+
+// ── #126 RiskPolicy 표시·저장 정합성 ─────────────────────────────────────────
+
+const validTargets = (over: Partial<RiskDerivedTargets> = {}): RiskDerivedTargets => ({
+  dailyRiskCapitalUsd: 1_000,
+  primaryProfitTargetUsd: 50,
+  absoluteProfitCapUsd: 100,
+  protectedProfitFloorUsd: 35,
+  defensiveModeLossUsd: 20,
+  dailyMaxLossUsd: 30,
+  ...over,
+});
+
+describe('parseRiskDerivedTargets — authoritative 파생값만 채택 (가짜 값 금지)', () => {
+  it('$1,000 기준 정상 응답 → $50 / $100 채택', () => {
+    const t = parseRiskDerivedTargets(validTargets());
+    expect(t?.primaryProfitTargetUsd).toBe(50);
+    expect(t?.absoluteProfitCapUsd).toBe(100);
+  });
+
+  it('$900 기준 → $45 / $90 그대로 채택 (서버 계산 신뢰)', () => {
+    const t = parseRiskDerivedTargets(validTargets({
+      dailyRiskCapitalUsd: 900, primaryProfitTargetUsd: 45, absoluteProfitCapUsd: 90,
+      protectedProfitFloorUsd: 31.5, defensiveModeLossUsd: 18, dailyMaxLossUsd: 27,
+    }));
+    expect(t?.primaryProfitTargetUsd).toBe(45);
+    expect(t?.absoluteProfitCapUsd).toBe(90);
+  });
+
+  it('필드 부재/null/비숫자/NaN → null (500·0 같은 대체값 생성 금지 → 카드 Unavailable)', () => {
+    expect(parseRiskDerivedTargets(null)).toBeNull();
+    expect(parseRiskDerivedTargets(undefined)).toBeNull();
+    expect(parseRiskDerivedTargets({})).toBeNull();
+    expect(parseRiskDerivedTargets({ ...validTargets(), primaryProfitTargetUsd: 'x' })).toBeNull();
+    expect(parseRiskDerivedTargets({ ...validTargets(), dailyMaxLossUsd: NaN })).toBeNull();
+    const missing: Record<string, unknown> = { ...validTargets() };
+    delete missing.absoluteProfitCapUsd;
+    expect(parseRiskDerivedTargets(missing)).toBeNull();
+  });
+
+  it('API 실패 시 데이터 riskDerivedTargets=null → 상태와 무관하게 카드가 목표를 표시할 수 없음', () => {
+    // derivePeriodPnlStatus는 별개 게이트 — targets 없으면 카드는 Unavailable 분기
+    expect(data().riskDerivedTargets).toBeNull();
+  });
+});
+
+describe('clampDailyTargetWeb — stale strategy_config(legacy $500) 무시', () => {
+  it('legacy 500 → 정책 상한 $100 (500은 상태에 남지 않음)', () => {
+    expect(clampDailyTargetWeb(500)).toBe(POLICY_DAILY_TARGET_CAP_USD);
+    expect(clampDailyTargetWeb('500')).toBe(100);
+  });
+
+  it('정상 범위 값 통과, 음수 → 0', () => {
+    expect(clampDailyTargetWeb(50)).toBe(50);
+    expect(clampDailyTargetWeb(0)).toBe(0);
+    expect(clampDailyTargetWeb(-10)).toBe(0);
+  });
+
+  it('비정상 값 → 정책 기본 목표 $50 (가짜 0/500 금지)', () => {
+    expect(clampDailyTargetWeb(undefined)).toBe(POLICY_DAILY_TARGET_USD);
+    expect(clampDailyTargetWeb('abc')).toBe(50);
+    expect(clampDailyTargetWeb(NaN)).toBe(50);
   });
 });

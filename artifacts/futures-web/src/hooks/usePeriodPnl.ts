@@ -19,6 +19,36 @@ export interface PeriodPnlBaseline {
   recordedAt: string;
 }
 
+/** 서버 authoritative RiskPolicy 파생 목표 (/api/executor/status.riskDerivedTargets) */
+export interface RiskDerivedTargets {
+  dailyRiskCapitalUsd: number;
+  primaryProfitTargetUsd: number;
+  absoluteProfitCapUsd: number;
+  protectedProfitFloorUsd: number;
+  defensiveModeLossUsd: number;
+  dailyMaxLossUsd: number;
+}
+
+/**
+ * parseRiskDerivedTargets — 서버 값 검증 파서 (순수 함수 — 테스트 대상).
+ * 6개 필드 전부 유한한 숫자일 때만 채택, 아니면 null (가짜 0/기본값 대체 금지).
+ */
+export function parseRiskDerivedTargets(v: unknown): RiskDerivedTargets | null {
+  if (!v || typeof v !== 'object') return null;
+  const o = v as Record<string, unknown>;
+  const keys = [
+    'dailyRiskCapitalUsd', 'primaryProfitTargetUsd', 'absoluteProfitCapUsd',
+    'protectedProfitFloorUsd', 'defensiveModeLossUsd', 'dailyMaxLossUsd',
+  ] as const;
+  const out: Partial<RiskDerivedTargets> = {};
+  for (const k of keys) {
+    const n = o[k];
+    if (typeof n !== 'number' || !Number.isFinite(n)) return null;
+    out[k] = n;
+  }
+  return out as RiskDerivedTargets;
+}
+
 export interface PeriodPnlData {
   dailyPnlUsd: number | null;
   weeklyPnlUsd: number | null;
@@ -29,6 +59,8 @@ export interface PeriodPnlData {
   currentEquityUsd: number | null;
   /** 서버 기간 PnL 마지막 갱신 시각 (ISO). null = 미갱신 */
   periodPnlUpdatedAt: string | null;
+  /** authoritative RiskPolicy 파생 목표. null = 서버 미제공 → 표시 Unavailable */
+  riskDerivedTargets: RiskDerivedTargets | null;
 }
 
 /** 서버 갱신 시각이 이보다 오래되면 stale → unavailable (사이클 60s + 여유) */
@@ -92,6 +124,7 @@ export function usePeriodPnl(): PeriodPnlState {
         weeklyRealizedPnlUsd: (body.weeklyRealizedPnlUsd as number | null) ?? null,
         currentEquityUsd:     (body.currentEquityUsd     as number | null) ?? null,
         periodPnlUpdatedAt:   (body.periodPnlUpdatedAt   as string | null) ?? null,
+        riskDerivedTargets:   parseRiskDerivedTargets(body.riskDerivedTargets),
       };
       setState({ status: derivePeriodPnlStatus(true, data), data });
     } catch {
