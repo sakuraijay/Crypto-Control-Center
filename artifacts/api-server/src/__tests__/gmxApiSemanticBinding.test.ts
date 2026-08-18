@@ -125,10 +125,11 @@ describe('verifyOrderSemanticBinding — adversarial (Critical)', () => {
     if (!r.ok) expect(r.reason).toMatch(/부재/);
   });
 
-  it('CLOSE 요청은 MarketDecrease(4)만 허용', () => {
+  it('CLOSE 요청은 MarketDecrease(4)만 허용 (6H-2D: autoCancel=false 필수)', () => {
     const closeReq: GmxOrderRequest = { ...req, kind: 'CLOSE', collateralUsd: 0 };
     const m = goodMessage();
     (m.params as Record<string, unknown>).orderType = 4;
+    (m.params as Record<string, unknown>).autoCancel = false;
     delete (m.params as Record<string, Record<string, unknown>>).numbers.initialCollateralDeltaAmount;
     expect(verifyOrderSemanticBinding(m, closeReq).ok).toBe(true);
     (m.params as Record<string, unknown>).orderType = 2;

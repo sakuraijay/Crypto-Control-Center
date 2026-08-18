@@ -296,14 +296,16 @@ export function verifyOrderSemanticBinding(
   //  - true로 인코딩되어 오면 우리 의도(미사용)와 다름 → 서명 금지.
   const autoCancels: unknown[] = [];
   collectFieldValues(message, 'autoCancel', autoCancels);
-  if (req.kind === 'STOP_LOSS' && autoCancels.length === 0) {
+  // STOP_LOSS·CLOSE(EMERGENCY_CLOSE 포함) 모두 인코딩값 존재 필수 — 부재=결속 불가.
+  if ((req.kind === 'STOP_LOSS' || req.kind === 'CLOSE') && autoCancels.length === 0) {
     return { ok: false, reason: 'typed data에 autoCancel 부재 — 인코딩값 결속 불가, 서명 금지 (fail-closed)' };
   }
   for (const a of autoCancels) {
-    const isBool = typeof a === 'boolean' || String(a) === 'true' || String(a) === 'false';
-    if (!isBool) return { ok: false, reason: 'typed data autoCancel이 boolean이 아님 — 서명 금지' };
-    const b = typeof a === 'boolean' ? a : String(a) === 'true';
-    if (b !== false) {
+    // strict boolean만 — 문자열 'false'/'true' 등 비boolean 표현은 전부 차단
+    if (typeof a !== 'boolean') {
+      return { ok: false, reason: 'typed data autoCancel이 strict boolean이 아님 — 서명 금지' };
+    }
+    if (a !== false) {
       return { ok: false, reason: 'typed data autoCancel=true — 정책(미사용, 기대 false)과 불일치, 서명 금지' };
     }
   }
@@ -319,8 +321,11 @@ export function extractAutoCancelEncoded(message: unknown): boolean | null {
   const vals: unknown[] = [];
   collectFieldValues(message, 'autoCancel', vals);
   if (vals.length === 0) return null;
-  const first = vals[0];
-  return typeof first === 'boolean' ? first : String(first) === 'true';
+  // strict boolean만 유효한 관측값 — 그 외는 검증 불가(null), false 위장 금지
+  if (!vals.every(v => typeof v === 'boolean')) return null;
+  const set = new Set(vals as boolean[]);
+  if (set.size !== 1) return null; // 상충 관측 = 검증 불가
+  return vals[0] as boolean;
 }
 
 /**
@@ -579,7 +584,11 @@ export interface ExecuteViaGmxApiInput {
   nowMs?: number;
 }
 
-export type ExecuteViaGmxApiResult = GmxSubmitFlowResult & { preBlocked: boolean };
+export type ExecuteViaGmxApiResult = GmxSubmitFlowResult & {
+  preBlocked: boolean;
+  /** 서명 게이트 통과 시 typed data에서 실제 추출된 autoCancel 인코딩값. null = 미관측/검증불가 */
+  autoCancelEncoded: boolean | null;
+};
 
 /**
  * OPEN/CLOSE 공통 GMX API v2 실행 경로 (§5 순서).
@@ -591,8 +600,10 @@ export async function executeViaGmxApi(input: ExecuteViaGmxApiInput): Promise<Ex
   const blocked = (reasons: string[]): ExecuteViaGmxApiResult => ({
     submitted: false, prepareCalls: 0, signCalls: 0, submitCalls: 0,
     finalStatus: null, taskRowId: null, gmxRequestId: null,
-    blockReasons: reasons, preBlocked: true,
+    blockReasons: reasons, preBlocked: true, autoCancelEncoded: null,
   });
+  // 6H-2D §2 — 서명 결속 검증 시점의 실제 인코딩값을 캡처 (durable 기록용)
+  const autoCancelHolder: { value: boolean | null } = { value: null };
 
   // 요청 무결성 (주소 형식 — checksum 정규화 실패 = 차단)
   try {
@@ -631,7 +642,7 @@ export async function executeViaGmxApi(input: ExecuteViaGmxApiInput): Promise<Ex
     // gate 사전 평가 — 미충족이면 allowance 조회·approval 복호화 0회
     const preGate = evaluateActivationGate(input.activation);
     if (!preGate.networkEligible) {
-      return { ...(await runGmxApiSubmitFlow(makeFlowInput(input, null))), preBlocked: false };
+      return { ...(await runGmxApiSubmitFlow(makeFlowInput(input, null, autoCancelHolder))), preBlocked: false, autoCancelEncoded: autoCancelHolder.value };
     }
 
     if (req.kind === 'OPEN') {
@@ -654,8 +665,8 @@ export async function executeViaGmxApi(input: ExecuteViaGmxApiInput): Promise<Ex
     approval = ap.approval;
   }
 
-  const flowResult = await runGmxApiSubmitFlow(makeFlowInput(input, approval));
-  return { ...flowResult, preBlocked: false };
+  const flowResult = await runGmxApiSubmitFlow(makeFlowInput(input, approval, autoCancelHolder));
+  return { ...flowResult, preBlocked: false, autoCancelEncoded: autoCancelHolder.value };
 }
 
 /** prepare 요청 body의 결정적 hash — durable task 생성 시 payload hash (6G-3 §3) */
@@ -672,7 +683,11 @@ export function hashPrepareRequestBody(body: Record<string, unknown>): string {
   return keccak256(toHex(JSON.stringify(sortDeep(body))));
 }
 
-function makeFlowInput(input: ExecuteViaGmxApiInput, approval: StoredApprovalForSubmit | null) {
+function makeFlowInput(
+  input: ExecuteViaGmxApiInput,
+  approval: StoredApprovalForSubmit | null,
+  autoCancelHolder?: { value: boolean | null },
+) {
   const { transport, req } = input;
   return {
     transport,
@@ -706,6 +721,10 @@ function makeFlowInput(input: ExecuteViaGmxApiInput, approval: StoredApprovalFor
     expected: buildExpectedValidation(req),
     verifyTypedDataBinding: async (view: PreparedOrderView) => {
       const b = verifyOrderTypedDataBinding(view, req);
+      if (b.ok && autoCancelHolder) {
+        // 게이트 통과 시에만 실제 인코딩값 추출 (strict boolean만 유효)
+        autoCancelHolder.value = extractAutoCancelEncoded(view.typedData?.message ?? null);
+      }
       return b.ok ? { ok: true } : { ok: false, reason: b.reason };
     },
     signTypedData: (view: PreparedOrderView) => signPreparedOrderView(view, req),

@@ -57,9 +57,23 @@ const passingMsg = (autoCancel: unknown) => {
 };
 
 describe('§2 autoCancel typed data 게이트', () => {
-  it('STOP_LOSS: autoCancel=false → 서명 허용', () => {
+  it('STOP_LOSS: autoCancel=false (strict boolean만) → 서명 허용', () => {
     expect(verifyOrderSemanticBinding(passingMsg(false), stopReq).ok).toBe(true);
-    expect(verifyOrderSemanticBinding(passingMsg('false'), stopReq).ok).toBe(true);
+  });
+  it("문자열 'false'/'true' 등 비boolean 표현 → 전부 서명 금지 (strict boolean)", () => {
+    expect(verifyOrderSemanticBinding(passingMsg('false'), stopReq).ok).toBe(false);
+    expect(verifyOrderSemanticBinding(passingMsg('true'), stopReq).ok).toBe(false);
+    expect(verifyOrderSemanticBinding(passingMsg(0), stopReq).ok).toBe(false);
+  });
+  it('CLOSE(EMERGENCY_CLOSE 경로): autoCancel 부재 → 서명 금지, false → 허용', () => {
+    const closeReq: GmxOrderRequest = { ...stopReq, kind: 'CLOSE', triggerPriceGmx: undefined, acceptablePriceGmx: '1990' + '0'.repeat(12) };
+    const closeMsg = (autoCancel: unknown) => {
+      const m = { order: { sizeDeltaUsd: (100n * 10n ** 30n).toString(), isLong: true, market: ETH_MARKET, orderType: '4', swapPath: [], ...(autoCancel === undefined ? {} : { autoCancel }) } };
+      return m;
+    };
+    expect(verifyOrderSemanticBinding(closeMsg(undefined), closeReq).ok).toBe(false);
+    expect(verifyOrderSemanticBinding(closeMsg(false), closeReq).ok).toBe(true);
+    expect(verifyOrderSemanticBinding(closeMsg(true), closeReq).ok).toBe(false);
   });
   it('STOP_LOSS: autoCancel 부재 → 서명 금지 (결속 불가)', () => {
     const r = verifyOrderSemanticBinding(passingMsg(undefined), stopReq);
@@ -72,10 +86,12 @@ describe('§2 autoCancel typed data 게이트', () => {
     expect(verifyOrderSemanticBinding(passingMsg(1), stopReq).ok).toBe(false);
     expect(verifyOrderSemanticBinding(passingMsg({}), stopReq).ok).toBe(false);
   });
-  it('extractAutoCancelEncoded — 기록용 추출', () => {
+  it('extractAutoCancelEncoded — strict boolean만 관측값, 그 외 null', () => {
     expect(extractAutoCancelEncoded(passingMsg(false))).toBe(false);
     expect(extractAutoCancelEncoded(passingMsg(true))).toBe(true);
     expect(extractAutoCancelEncoded(passingMsg(undefined))).toBeNull();
+    expect(extractAutoCancelEncoded(passingMsg('false'))).toBeNull(); // 문자열=검증불가
+    expect(extractAutoCancelEncoded(passingMsg(1))).toBeNull();
   });
 });
 
@@ -210,6 +226,41 @@ describe('§4 receipt·finality 게이팅', () => {
     };
     const b2 = await collectProtectionEvidence({ row: baseRow, client: noLatest, ...baseArgs });
     expect(b2!.onchainOrderKey).toBeNull();
+  });
+  it('receipt.logs가 배열이 아님 / log blockNumber 부재 → 확정 금지 (성공 가정 금지)', async () => {
+    const log = mkCreated();
+    const nonArrayLogs: EvidenceClient = {
+      getOrderLogs: async () => [log],
+      getReceipt: async () => ({ status: 'success', blockNumber: '123', logs: null as unknown as RawLog[] }),
+      getLatestBlockNumber: async () => 9999n,
+    };
+    const b1 = await collectProtectionEvidence({ row: baseRow, client: nonArrayLogs, ...baseArgs });
+    expect(b1!.onchainOrderKey).toBeNull();
+    const noLogBn = { ...log, blockNumber: null as unknown as string };
+    const noBnClient: EvidenceClient = {
+      getOrderLogs: async () => [noLogBn],
+      getReceipt: async () => ({ status: 'success', blockNumber: '123', logs: [noLogBn] }),
+      getLatestBlockNumber: async () => 9999n,
+    };
+    const b2 = await collectProtectionEvidence({ row: baseRow, client: noBnClient, ...baseArgs });
+    expect(b2!.onchainOrderKey).toBeNull();
+  });
+  it('terminal 로그 선택은 정확한 eventNameHash 결속 — 동일 tx의 다른 EventLog2로 대체 불가', async () => {
+    // Cancelled txHash와 동일한 tx에 created-류 로그만 있고 실제 Cancelled 로그가
+    // receipt에 없는 위조 상황: terminal 전이 금지되어야 한다.
+    const created = mkCreated();
+    const cancelled = mkEventLog2({ name: 'OrderCancelled', orderKey: KEY, emitter: EMITTER, account: SUBACCT, txHash: '0x' + 'f1'.repeat(32) });
+    const decoy = mkEventLog2({ name: 'OrderCreated', orderKey: KEY, emitter: EMITTER, account: SUBACCT, txHash: '0x' + 'f1'.repeat(32), fields: goodFields() });
+    const c: EvidenceClient = {
+      getOrderLogs: async () => [created, cancelled, decoy],
+      // cancelled tx의 receipt에는 decoy(created-류)만 존재 — Cancelled 로그 부재
+      getReceipt: async (tx) => tx === cancelled.transactionHash
+        ? { status: 'success', blockNumber: '123', logs: [decoy] }
+        : mkReceiptFor(created),
+      getLatestBlockNumber: async () => 9999n,
+    };
+    const b = await collectProtectionEvidence({ row: { ...baseRow }, client: c, ...baseArgs, positionExists: false });
+    expect(b!.onchainCancelled).toBe(false);
   });
   it('Executed+Cancelled 동시 관측 → ambiguous, terminal 전이 금지', async () => {
     const logs = [

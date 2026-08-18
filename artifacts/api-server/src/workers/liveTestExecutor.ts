@@ -716,6 +716,9 @@ async function fetchOnchainErc20Decimals(tokenAddress: string): Promise<number |
 /** 테스트 주입용 override (null = 실 경로) */
 let _decimalsResolverOverride: ((marketAddress: string) => Promise<DecimalsEvidence | null>) | null = null;
 export function __setDecimalsResolverForTests(fn: ((m: string) => Promise<DecimalsEvidence | null>) | null): void {
+  if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
+    throw new Error('__setDecimalsResolverForTests는 테스트 런타임 전용 — 프로덕션 호출 금지');
+  }
   _decimalsResolverOverride = fn;
 }
 
@@ -831,9 +834,11 @@ export function wireProtectionExecution(): void {
       })(),
     });
     if (res.finalStatus === 'TASK_ACCEPTED' && res.submitted) {
-      // 6H-2D §2 — 서명 게이트(verifyOrderSemanticBinding)가 autoCancel=false를
-      // 강제하므로, 수락된 주문의 인코딩값은 false임이 보장된다 → durable 기록.
-      await recordProtectionEvidenceFields(req.protectionId, { autoCancelEncoded: false });
+      // 6H-2D §2 — 서명 결속 시점에 typed data에서 실제 추출된 인코딩값만 기록.
+      // strict boolean 관측이 없으면 기록하지 않는다 (false 위장 금지).
+      if (typeof res.autoCancelEncoded === 'boolean') {
+        await recordProtectionEvidenceFields(req.protectionId, { autoCancelEncoded: res.autoCancelEncoded });
+      }
       return { status: 'ACCEPTED', requestId: res.gmxRequestId, typedDataDigest: null };
     }
     if (res.finalStatus === 'UNRESOLVED') {
@@ -885,7 +890,12 @@ export function __setProtectionReconStateForTests(s: ProtectionReconState | null
 
 /** 테스트 주입용 evidence client override */
 let _evidenceClientOverride: EvidenceClient | null = null;
-export function __setEvidenceClientForTests(c: EvidenceClient | null): void { _evidenceClientOverride = c; }
+export function __setEvidenceClientForTests(c: EvidenceClient | null): void {
+  if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
+    throw new Error('__setEvidenceClientForTests는 테스트 런타임 전용 — 프로덕션 호출 금지');
+  }
+  _evidenceClientOverride = c;
+}
 
 /** §4 — orderKey 결속 EventLog2 로그 조회 클라이언트 (read-only eth_getLogs) */
 function createEvidenceClient(): EvidenceClient | null {

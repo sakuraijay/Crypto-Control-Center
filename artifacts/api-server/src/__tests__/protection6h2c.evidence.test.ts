@@ -98,8 +98,10 @@ const mkLog = (name: keyof typeof ORDER_EVENT_NAME_HASH, key = KEY, addr = EMITT
 const mkClient = (logs: RawLog[] | null): EvidenceClient => ({
   getOrderLogs: async () => logs,
   getReceipt: async (txHash: string) => {
-    const found = (logs ?? []).find(l => l.transactionHash === txHash);
-    return found ? mkReceiptFor(found) : null;
+    const inTx = (logs ?? []).filter(l => l.transactionHash === txHash);
+    if (inTx.length === 0) return null;
+    // 실제 receipt처럼 해당 tx의 모든 로그 포함
+    return { status: 'success' as const, blockNumber: inTx[0].blockNumber == null ? null : String(inTx[0].blockNumber), logs: inTx };
   },
   getLatestBlockNumber: async () => 223n,
 });

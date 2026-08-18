@@ -233,21 +233,22 @@ async function verifyReceiptAndFinality(
   out.receiptBlockNumber = rc.blockNumber;
   if (rc.status === 'reverted') { ambiguousReasons.push(`${label} receipt reverted — 전이 금지`); return false; }
   if (!rc.blockNumber) { return null; } // blockNumber 부재 — 확정 금지
-  // log block과 receipt block 모순 = 차단
+  // log blockNumber 부재 = receipt block과의 일치를 증명할 수 없음 → 확정 금지
   const logBn = log.blockNumber == null ? null : BigInt(String(log.blockNumber));
-  if (logBn !== null && BigInt(rc.blockNumber) !== logBn) {
+  if (logBn === null) { return null; }
+  if (BigInt(rc.blockNumber) !== logBn) {
     ambiguousReasons.push(`${label} log block(${logBn}) ≠ receipt block(${rc.blockNumber})`);
     return false;
   }
-  // receipt logs에 동일 (emitter, topic0, nameHash, orderKey) 로그가 존재해야 함
-  if (Array.isArray(rc.logs)) {
-    const present = rc.logs.some(l =>
-      l.address?.toLowerCase() === log.address.toLowerCase() &&
-      l.topics?.[0]?.toLowerCase() === log.topics?.[0]?.toLowerCase() &&
-      l.topics?.[1]?.toLowerCase() === log.topics?.[1]?.toLowerCase() &&
-      l.topics?.[2]?.toLowerCase() === log.topics?.[2]?.toLowerCase());
-    if (!present) { ambiguousReasons.push(`${label} 로그가 receipt에 없음 — 위조/불일치`); return false; }
-  }
+  // receipt logs에 동일 (emitter, topic0, nameHash, orderKey) 로그가 존재해야 함.
+  // logs가 배열이 아니면 포함 검증 자체가 불가 → 확정 금지 (성공 가정 금지)
+  if (!Array.isArray(rc.logs)) { return null; }
+  const present = rc.logs.some(l =>
+    l.address?.toLowerCase() === log.address.toLowerCase() &&
+    l.topics?.[0]?.toLowerCase() === log.topics?.[0]?.toLowerCase() &&
+    l.topics?.[1]?.toLowerCase() === log.topics?.[1]?.toLowerCase() &&
+    l.topics?.[2]?.toLowerCase() === log.topics?.[2]?.toLowerCase());
+  if (!present) { ambiguousReasons.push(`${label} 로그가 receipt에 없음 — 위조/불일치`); return false; }
   // finality — 최신 block 확인 실패 = terminal 확정 금지
   if (latest === null) { return null; }
   const confirmations = Number(latest - BigInt(rc.blockNumber));
@@ -335,9 +336,14 @@ export async function collectProtectionEvidence(args: CollectArgs): Promise<Prot
   let resolutionFinal: boolean | null = null;
   let resolutionAccountOk = false;
   if (resolution) {
+    // terminal 로그 선택은 resolution kind의 정확한 eventNameHash까지 결속 —
+    // 동일 tx의 다른 EventLog2로 대체 검증되는 것을 차단
+    const resKindName = `Order${resolution.kind.charAt(0).toUpperCase()}${resolution.kind.slice(1)}` as keyof typeof ORDER_EVENT_NAME_HASH;
+    const resNameHash: string | undefined = ORDER_EVENT_NAME_HASH[resKindName];
     const resLog = logs.find(l =>
       isAllowed(l.address, emitters) &&
       l.topics?.[0]?.toLowerCase() === EVENT_LOG_2_TOPIC0.toLowerCase() &&
+      l.topics?.[1]?.toLowerCase() === resNameHash?.toLowerCase() &&
       l.topics?.[2]?.toLowerCase() === args.row.orderKey!.toLowerCase() &&
       l.transactionHash === resolution.txHash) ?? null;
     if (resLog) {
