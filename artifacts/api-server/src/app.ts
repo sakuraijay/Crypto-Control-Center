@@ -37,6 +37,17 @@ app.get("/", (_req, res) => {
   res.redirect(302, "/futures-web/");
 });
 
+// #119/P1 — 루트 /healthz: 배포 헬스체크 전용 JSON 엔드포인트.
+// 정적 SPA fallback보다 먼저 등록되어 HTML이 아닌 JSON만 반환한다.
+// readiness 전에는 503 (마이그레이션 미완료 = 트래픽 수신 불가), 이후 200.
+app.get("/healthz", (_req, res) => {
+  if (!isReady()) {
+    res.status(503).json({ status: "starting", ready: false });
+    return;
+  }
+  res.status(200).json({ status: "ok", ready: true });
+});
+
 // 준비(readiness) 게이트: 마이그레이션 완료 전에는 healthz를 제외한
 // API 요청에 503을 반환한다. 포트는 즉시 열리므로 헬스체크·업타임
 // 모니터는 연결 거부 대신 정상 응답을 받는다.
