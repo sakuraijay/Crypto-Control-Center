@@ -11,7 +11,7 @@ import { Badge } from '@/components/ui/badge';
 import {
   fetchOpportunitiesLatest, OpportunitiesLatest,
   formatWinProbability, formatExpectedNetValue, INTEL_NOTICE_NO_GUARANTEE,
-  formatBucketSamples, formatTotalCost, costComponentLines,
+  formatBucketSamples, formatTotalCost, costComponentLines, formatComponentObservedAt,
 } from '@/lib/intelStatus';
 
 export function OpportunityRankingCard() {
@@ -97,6 +97,15 @@ export function OpportunityRankingCard() {
                 {c.costBreakdown?.costBasis && c.totalExpectedCostUsd === null && (
                   <div className="text-[10px] text-muted-foreground truncate" title={c.costBreakdown.costBasis}>
                     비용: {c.costBreakdown.costBasis}
+                  </div>
+                )}
+                {c.costBreakdown?.sourcePin && (
+                  <div
+                    className="text-[10px] text-muted-foreground truncate"
+                    title={formatComponentObservedAt(c.costBreakdown.componentObservedAtMs)}
+                    data-testid={`text-source-pin-${c.symbol}-${c.direction}`}
+                  >
+                    출처: {c.costBreakdown.sourcePin}
                   </div>
                 )}
                 {c.rejectionReasons.length > 0 && (

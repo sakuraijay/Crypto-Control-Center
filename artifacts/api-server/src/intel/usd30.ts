@@ -59,6 +59,24 @@ export function usd30SumToNumber(a: unknown, b: unknown): number | null {
  * funding은 음수 허용. 변환은 micro(1e-6 단위 정밀) 경계에서 1회.
  * |시간당| ≥ 1 (100%/h)는 비정상 rate로 null.
  */
+/**
+ * per-HOUR 1e30 스케일 rate 문자열 → 시간당 비율 Number (공식 API v1 MarketTicker 계약).
+ * @gmx-io/sdk@1.7.0 getMarketTicker: fundingRateLong 등 = factorPerSecond×3600 (이미 시간당).
+ * 부호 유지 (음수=지불). |시간당| ≥ 1 (100%/h)는 단위 계약 위반으로 null (근사·clamp 금지).
+ */
+export function rate30PerHourToNumber(v: unknown): number | null {
+  const b = parseBigIntStr(v);
+  if (b === null) return null;
+  const abs = b < 0n ? -b : b;
+  if (abs >= 10n ** USD_SCALE) return null;          // |rate/h| ≥ 1 = 계약 위반 (clamp 금지)
+  // BigInt→Number는 double 유효자리(~15~17자리) 전체 보존 — 이후 1e30 나눗셈은 지수 조정만
+  return Number(b) / 1e30;
+}
+
+/**
+ * per-second 1e30 rate → 시간당. 온체인 factorPerSecond(DataStore) 전용 —
+ * 공식 API v1 ticker 필드는 이미 시간당이므로 이 함수를 쓰면 안 된다 (rate30PerHourToNumber 사용).
+ */
 export function rate30PerSecToPerHour(v: unknown): number | null {
   const b = parseBigIntStr(v);
   if (b === null) return null;

@@ -36,6 +36,14 @@ export interface CostBreakdownUsd {
   /** 비용 스냅샷 출처 — PAPER estimate는 LIVE 사용 금지 */
   costSource: string | null;
   costSnapshotFetchedAtMs: number | null;
+  /** 6I-4 — rate 출처 pin (endpoint+SDK 버전+단위 계약). 미확보=null */
+  sourcePin?: string | null;
+  /** 6I-4 — 성분별 관측 시각 (stale 감사용) */
+  componentObservedAtMs?: {
+    feeParamsAtMs: number | null;
+    ratesAtMs: number | null;
+    ethPriceAtMs: number | null;
+  } | null;
 }
 
 export interface OpportunityCandidate {

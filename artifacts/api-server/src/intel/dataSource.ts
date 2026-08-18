@@ -8,7 +8,7 @@
  */
 import { Candle, Timeframe, TIMEFRAME_MS } from './types';
 import { RawMarketRow } from './universe';
-import { usd30SumToNumber, rate30PerSecToPerHour, parseBigIntStr } from './usd30';
+import { usd30SumToNumber, rate30PerHourToNumber, rate30PerSecToPerHour, parseBigIntStr } from './usd30';
 import type { MarketRateInputs } from './costEngine';
 
 export interface IntelFetchers {
@@ -53,6 +53,23 @@ export function pricesToCandles(prices: number[][]): Candle[] {
 
 const GMX_API = 'https://arbitrum-api.gmxinfra.io';
 
+/**
+ * 6I-4 — 비용 입력 공식 소스 pin.
+ * @gmx-io/sdk@1.7.0 configs/api.ts API_URLS.production[ARBITRUM] = https://arbitrum.gmxapi.io,
+ * utils/markets/api.ts fetchApiMarketsTickers = GET /v1/markets/tickers → MarketTicker.
+ * 단위 계약 (SDK utils/markets/utils.ts getMarketTicker 실측):
+ *  - fundingRateLong/Short  = getFundingFactorPerPeriod(marketInfo, isLong, 3600) — per-HOUR, 1e30,
+ *    부호: 음수=해당 사이드 지불, 양수=수취
+ *  - borrowingRateLong/Short = factorPerSecond×3600 — per-HOUR, 1e30, 항상 ≥0 (비용)
+ *  - longInterestUsd/shortInterestUsd = 1e30 USD
+ * legacy gmxinfra /markets/info 의 rate 필드는 이 계약과 불일치(부호·스케일 상이 실측 확인) —
+ * 비용 입력으로 사용 금지.
+ */
+export const GMX_OFFICIAL_API = 'https://arbitrum.gmxapi.io';
+export const COST_TICKERS_PATH = '/v1/markets/tickers';
+export const COST_SOURCE_PIN =
+  'arbitrum.gmxapi.io/v1/markets/tickers@sdk1.7.0(MarketTicker per-hour 1e30, 음수=지불)';
+
 /** markets/info 캐시 TTL — 경량 universe scan은 수분 단위면 충분 */
 export const MARKETS_CACHE_TTL_MS = 4 * 60_000;
 /** funding/borrowing 캐시 TTL */
@@ -72,6 +89,47 @@ export interface DataSourceStats {
   budgetExceededCount: number;
   backoffSkips: number;
   lastCycleCandleRequests: number;
+  /** 6I-4 — 공식 tickers 비용 입력 계측 */
+  tickersRequests: number;
+  tickersCacheHits: number;
+  tickersSchemaRejects: number;   // 스키마/단위 계약 위반으로 버린 record 수 (누적)
+}
+
+/**
+ * 6I-4 — /v1/markets/tickers 응답 record → 비용 입력 파서 (순수 함수, 테스트 대상).
+ * 계약 위반(필드 누락·정수 문자열 아님·|rate/h|≥1·borrowing<0·OI<0·주소 비정상)은
+ * 해당 record 폐기 (rejects에 사유 집계). 부분 채택·근사·clamp 금지.
+ */
+export function parseMarketsTickers(raw: unknown): {
+  entries: Map<string, Omit<MarketRateInputs, 'observedAtMs' | 'sourcePin'>>;
+  rejects: { count: number; reasons: string[] };
+} {
+  const entries = new Map<string, Omit<MarketRateInputs, 'observedAtMs' | 'sourcePin'>>();
+  const reasons: string[] = [];
+  let count = 0;
+  const reject = (why: string) => { count++; if (reasons.length < 8) reasons.push(why); };
+  if (!Array.isArray(raw)) return { entries, rejects: { count: 1, reasons: ['응답이 배열이 아님'] } };
+  for (const rec of raw) {
+    if (rec === null || typeof rec !== 'object') { reject('record가 객체 아님'); continue; }
+    const m = rec as Record<string, unknown>;
+    const addr = typeof m['marketTokenAddress'] === 'string' ? m['marketTokenAddress'] : '';
+    if (!/^0x[0-9a-fA-F]{40}$/.test(addr)) { reject('marketTokenAddress 비정상'); continue; }
+    const fL = rate30PerHourToNumber(m['fundingRateLong']);
+    const fS = rate30PerHourToNumber(m['fundingRateShort']);
+    const bL = rate30PerHourToNumber(m['borrowingRateLong']);
+    const bS = rate30PerHourToNumber(m['borrowingRateShort']);
+    if (fL === null || fS === null || bL === null || bS === null) { reject(`${addr}: rate 파싱/단위 계약 위반`); continue; }
+    if (bL < 0 || bS < 0) { reject(`${addr}: borrowing 음수 (계약 위반)`); continue; }
+    const oiL = parseBigIntStr(m['longInterestUsd']);
+    const oiS = parseBigIntStr(m['shortInterestUsd']);
+    if (oiL === null || oiS === null || oiL < 0n || oiS < 0n) { reject(`${addr}: OI 파싱 실패/음수`); continue; }
+    entries.set(addr.toLowerCase(), {
+      fundingLongPerHour: fL, fundingShortPerHour: fS,
+      borrowingLongPerHour: bL, borrowingShortPerHour: bS,
+      openInterestLong30: oiL, openInterestShort30: oiS,
+    });
+  }
+  return { entries, rejects: { count, reasons } };
 }
 
 /** 예산 초과를 사이클에 알리는 전용 오류 */
@@ -113,9 +171,9 @@ export function createProductionFetchers(deps: {
 }): ProductionFetchersHandle {
   const now = deps.nowFn ?? Date.now;
   let marketRowsCache: { at: number; value: { rows: RawMarketRow[]; complete: boolean; failureReason: string | null } } | null = null;
-  let ratesCache: { at: number; value: Map<string, { fundingPerHour: number; borrowingPerHour: number }> } | null = null;
-  /** 6I-3 — per-side rate + OI(1e30) 비용 입력 캐시 (전 성분 파싱 성공 시에만 기록) */
-  let costInputsCache: { at: number; value: Map<string, Omit<MarketRateInputs, 'observedAtMs'>> } | null = null;
+  /** 6I-4 — 공식 /v1/markets/tickers 비용 입력 캐시 (계약 검증 통과 record만 기록) */
+  let tickersCache: { at: number; value: Map<string, Omit<MarketRateInputs, 'observedAtMs' | 'sourcePin'>> } | null = null;
+  let tickersInFlight: Promise<void> | null = null;
   const candleCache = new Map<string, CandleCacheEntry>();
   const inFlight = new Map<string, Promise<Candle[] | null>>();
   let cycleCandleRequests = 0;
@@ -125,6 +183,7 @@ export function createProductionFetchers(deps: {
     candleRequests: 0, candleCacheHits: 0, candleCacheMisses: 0, candleDeduped: 0,
     marketsRequests: 0, marketsCacheHits: 0, budgetExceededCount: 0, backoffSkips: 0,
     lastCycleCandleRequests: 0,
+    tickersRequests: 0, tickersCacheHits: 0, tickersSchemaRejects: 0,
   };
 
   async function fetchCandlesCached(symbol: string, timeframe: Timeframe, count: number): Promise<Candle[] | null> {
@@ -193,34 +252,15 @@ export function createProductionFetchers(deps: {
         const data = await r.json() as { markets?: Record<string, unknown>[] } | Record<string, unknown>[];
         const list = Array.isArray(data) ? data : (data.markets ?? []);
         const ticks = deps.getCachedPrices();
-        const rates = new Map<string, { fundingPerHour: number; borrowingPerHour: number }>();
-        const costInputs = new Map<string, Omit<MarketRateInputs, 'observedAtMs'>>();
         const rows: RawMarketRow[] = list.map(m => {
           const symbolRaw = (m['indexTokenSymbol'] ?? m['name'] ?? '') as string;
           const symbol = String(symbolRaw).split('/')[0].trim();
           const tick = ticks?.find(t => t.tokenSymbol === symbol) ?? null;
           const marketToken = String(m['marketToken'] ?? '');
           // 1e30 문자열 → BigInt 합산 → 1회 변환 (usd30.ts). 실패=null (0 위장 금지)
+          // 주의: 이 endpoint의 rate 필드는 공식 SDK 계약과 불일치 (6I-4 실측) — 비용 입력 사용 금지.
           const liquidityUsd = usd30SumToNumber(m['availableLiquidityLong'], m['availableLiquidityShort']);
           const openInterestUsd = usd30SumToNumber(m['openInterestLong'], m['openInterestShort']);
-          // funding/borrowing: per-second 1e30 → 시간당. 파싱 실패=미기록(UNAVAILABLE)
-          const f = rate30PerSecToPerHour(m['fundingRateLong']);
-          const b = rate30PerSecToPerHour(m['borrowingRateLong']);
-          if (f !== null && b !== null) {
-            rates.set(marketToken.toLowerCase(), { fundingPerHour: f, borrowingPerHour: b });
-          }
-          // 6I-3 비용 입력 — 전 성분 파싱 성공 시에만 기록 (부분 데이터 위장 금지)
-          const fS = rate30PerSecToPerHour(m['fundingRateShort']);
-          const bS = rate30PerSecToPerHour(m['borrowingRateShort']);
-          const oiL = parseBigIntStr(m['openInterestLong']);
-          const oiS = parseBigIntStr(m['openInterestShort']);
-          if (f !== null && fS !== null && b !== null && bS !== null && oiL !== null && oiS !== null && oiL >= 0n && oiS >= 0n && b >= 0 && bS >= 0) {
-            costInputs.set(marketToken.toLowerCase(), {
-              fundingLongPerHour: f, fundingShortPerHour: fS,
-              borrowingLongPerHour: b, borrowingShortPerHour: bS,
-              openInterestLong30: oiL, openInterestShort30: oiS,
-            });
-          }
           return {
             marketToken,
             indexToken: typeof m['indexToken'] === 'string' ? m['indexToken'] as string : null,
@@ -233,8 +273,6 @@ export function createProductionFetchers(deps: {
             impactDataAvailable: tick !== null,
           };
         });
-        ratesCache = { at: nowMs, value: rates };
-        costInputsCache = { at: nowMs, value: costInputs };
         const value = { rows, complete: true, failureReason: null };
         marketRowsCache = { at: nowMs, value };
         return value;
@@ -259,19 +297,54 @@ export function createProductionFetchers(deps: {
     },
 
     async fetchFundingBorrowing(marketAddress) {
-      // /markets/info에서 실측 캐시 (fetchMarketRows가 채움). 만료/부재=UNAVAILABLE (0 위장 금지).
-      if (!ratesCache || now() - ratesCache.at > RATES_CACHE_TTL_MS) return null;
-      const r = ratesCache.value.get(marketAddress.toLowerCase());
-      if (!r) return null;
-      return { fundingPerHour: r.fundingPerHour, borrowingPerHour: r.borrowingPerHour, observedAtMs: ratesCache.at };
+      // 6I-4 — 공식 tickers 비용 입력에서 파생 (LONG 사이드 rate). 확보 실패 = null.
+      const c = await fetchers.fetchMarketCostInputs!(marketAddress);
+      if (!c) return null;
+      return { fundingPerHour: c.fundingLongPerHour, borrowingPerHour: c.borrowingLongPerHour, observedAtMs: c.observedAtMs };
     },
 
     async fetchMarketCostInputs(marketAddress) {
-      // 만료/부재 = null (stale 비용 입력 위장 금지)
-      if (!costInputsCache || now() - costInputsCache.at > RATES_CACHE_TTL_MS) return null;
-      const c = costInputsCache.value.get(marketAddress.toLowerCase());
+      const nowMs = now();
+      // 캐시 fresh → 조회 (만료 캐시 반환 금지 — TTL 경계 포함 stale 위장 금지)
+      if (!tickersCache || nowMs - tickersCache.at >= RATES_CACHE_TTL_MS) {
+        // 429 backoff 중 신규 외부 요청 차단 (fail-closed)
+        if (nowMs < backoffUntilMs) { stats.backoffSkips++; return null; }
+        let flight = tickersInFlight;
+        if (!flight) {
+          flight = (async () => {
+            stats.tickersRequests++;
+            try {
+              // read-only GET — method/body 없음 (주문·서명 경로 아님)
+              const r = await fetch(`${GMX_OFFICIAL_API}${COST_TICKERS_PATH}`, {
+                signal: AbortSignal.timeout(10_000), redirect: 'error',
+              });
+              if (!r.ok) {
+                if (r.status === 429) backoffUntilMs = now() + RATE_LIMIT_BACKOFF_MS;
+                return; // 실패 = 캐시 미갱신 (만료 캐시는 아래에서 null 처리)
+              }
+              const { entries, rejects } = parseMarketsTickers(await r.json());
+              stats.tickersSchemaRejects += rejects.count;
+              if (rejects.count > 0) {
+                console.warn(`[Intel] tickers 계약 위반 record ${rejects.count}건 폐기: ${rejects.reasons.join(' | ')}`);
+              }
+              // 전 record 위반(빈 결과)이라도 관측 사실은 기록 — 개별 조회는 부재로 null
+              tickersCache = { at: now(), value: entries };
+            } catch {
+              // 네트워크/파싱 실패 = 캐시 미갱신 (오류 상세는 외부 URL 포함 가능 — 로그 미출력)
+            }
+          })().finally(() => { tickersInFlight = null; });
+          tickersInFlight = flight;
+        } else {
+          stats.tickersCacheHits++; // in-flight 병합
+        }
+        await flight.catch(() => undefined);
+      } else {
+        stats.tickersCacheHits++;
+      }
+      if (!tickersCache || now() - tickersCache.at >= RATES_CACHE_TTL_MS) return null;
+      const c = tickersCache.value.get(marketAddress.toLowerCase());
       if (!c) return null;
-      return { ...c, observedAtMs: costInputsCache.at };
+      return { ...c, observedAtMs: tickersCache.at, sourcePin: COST_SOURCE_PIN };
     },
   };
 

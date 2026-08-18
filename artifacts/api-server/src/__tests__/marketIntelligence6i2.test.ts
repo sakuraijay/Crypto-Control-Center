@@ -87,6 +87,7 @@ function stubHandle(over?: Partial<ProductionFetchersHandle['fetchers']> & { del
       candleRequests: 0, candleCacheHits: 0, candleCacheMisses: 0, candleDeduped: 0,
       marketsRequests: 0, marketsCacheHits: 0, budgetExceededCount: 0, backoffSkips: 0,
       lastCycleCandleRequests: 0,
+      tickersRequests: 0, tickersCacheHits: 0, tickersSchemaRejects: 0,
     },
     beginCycle: () => {},
     noteRateLimited: () => {},

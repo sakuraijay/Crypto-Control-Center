@@ -76,6 +76,14 @@ export interface CostBreakdownView {
   costBasis: string | null;
   costSource: string | null;
   costSnapshotFetchedAtMs: number | null;
+  /** 6I-4 — rate 출처 pin (endpoint+SDK 버전+단위 계약) */
+  sourcePin?: string | null;
+  /** 6I-4 — 성분별 관측 시각 (stale 감사용) */
+  componentObservedAtMs?: {
+    feeParamsAtMs: number | null;
+    ratesAtMs: number | null;
+    ethPriceAtMs: number | null;
+  } | null;
 }
 
 /** 6I-3 — regime×방향 bucket 보정 표본 관측치 */
@@ -193,6 +201,13 @@ export function formatTotalCost(v: number | null | undefined): string {
 }
 
 /** 6I-3 — 비용 breakdown 요약 문자열 (null 성분은 '미확보' 표기) */
+/** 6I-4 — 성분별 관측 시각 tooltip 문자열 (미확보=—, 위장 금지) */
+export function formatComponentObservedAt(t: CostBreakdownView['componentObservedAtMs']): string | undefined {
+  if (!t) return undefined;
+  const f = (v: number | null) => (v === null ? '—' : new Date(v).toLocaleTimeString());
+  return `관측 시각 — 수수료/impact 계수: ${f(t.feeParamsAtMs)} · rate/OI: ${f(t.ratesAtMs)} · ETH가: ${f(t.ethPriceAtMs)}`;
+}
+
 export function costComponentLines(c: CostBreakdownView | null | undefined): { label: string; value: string }[] {
   if (!c) return [];
   const f = (v: number | null) => (v === null ? '미확보' : `$${v.toFixed(4)}`);

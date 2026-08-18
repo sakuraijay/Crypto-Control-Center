@@ -53,16 +53,22 @@ export interface MarketFeeParams {
   observedAtMs: number;
 }
 
-/** /markets/info 실측 rate·OI (dataSource 반환) */
+/**
+ * 6I-4 — 공식 /v1/markets/tickers 실측 rate·OI (dataSource 반환).
+ * 단위 계약 (@gmx-io/sdk@1.7.0 MarketTicker): rate = per-HOUR 비율 (1e30 → Number 변환 완료),
+ * funding 부호: 음수=해당 사이드 지불, 양수=수취. borrowing ≥0 (항상 비용). OI = 1e30 USD.
+ */
 export interface MarketRateInputs {
-  fundingLongPerHour: number;    // 부호 있음 (규약 미단정 — 절대값 사용)
-  fundingShortPerHour: number;
+  fundingLongPerHour: number;    // 부호 있음 (음수=LONG 지불)
+  fundingShortPerHour: number;   // 부호 있음 (음수=SHORT 지불)
   borrowingLongPerHour: number;  // ≥0
   borrowingShortPerHour: number;
   /** OI (1e30 BigInt) — impact imbalance 산정용 */
   openInterestLong30: bigint;
   openInterestShort30: bigint;
   observedAtMs: number;
+  /** 출처 pin (endpoint+SDK 버전+단위 계약) — API/UI 노출용 */
+  sourcePin: string;
 }
 
 export interface CandidateCostInput {
@@ -180,13 +186,17 @@ export function buildCandidateCostBreakdown(input: CandidateCostInput): CostBrea
   if (rates !== null && fin(input.holdingHours) && input.holdingHours > 0 && fin(notionalUsd) && notionalUsd > 0) {
     const fRate = input.isLong ? rates.fundingLongPerHour : rates.fundingShortPerHour;
     const bRate = input.isLong ? rates.borrowingLongPerHour : rates.borrowingShortPerHour;
-    if (fin(fRate)) {
-      funding = Math.abs(fRate) * input.holdingHours * notionalUsd;   // 부호 규약 미단정 — |rate| 상한 (보수)
-      basisParts.push('funding=|markets/info rate|×보유시간 (보수 상한)');
+    if (fin(fRate) && Math.abs(fRate) < 1) {
+      // 공식 부호 계약: 음수=지불(비용), 양수=수취(rebate). 수취는 보수적으로 0 계상 —
+      // 문서화된 정책이며 단위 추측/clamp가 아님 (funding rebate를 수익으로 넣지 않는다).
+      funding = fRate < 0 ? -fRate * input.holdingHours * notionalUsd : 0;
+      basisParts.push(fRate < 0
+        ? 'funding=공식 per-hour rate(음수=지불)×보유시간'
+        : 'funding=0 (양수 rate=수취 — rebate 미계상, 보수 정책)');
     }
-    if (fin(bRate) && bRate >= 0) {
+    if (fin(bRate) && bRate >= 0 && bRate < 1) {
       borrowing = bRate * input.holdingHours * notionalUsd;
-      basisParts.push('borrowing=markets/info rate×보유시간');
+      basisParts.push('borrowing=공식 per-hour rate×보유시간');
     }
   }
 
@@ -227,5 +237,12 @@ export function buildCandidateCostBreakdown(input: CandidateCostInput): CostBrea
       : basisParts.join('; '),
     costSource: 'GMX_MEASURED_READONLY',
     costSnapshotFetchedAtMs: fetchedAtMs,
+    // 6I-4 — 출처 pin + 성분별 관측 시각 (API/UI 노출: stale·출처 감사 가능)
+    sourcePin: rates !== null ? rates.sourcePin : null,
+    componentObservedAtMs: {
+      feeParamsAtMs: fp !== null ? fp.observedAtMs : null,
+      ratesAtMs: rates !== null ? rates.observedAtMs : null,
+      ethPriceAtMs: input.ethPriceObservedAtMs !== null && fin(input.ethPriceObservedAtMs) ? input.ethPriceObservedAtMs : null,
+    },
   };
 }

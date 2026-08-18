@@ -124,6 +124,7 @@ describe('6I-3 §2 실측 비용 breakdown', () => {
     borrowingLongPerHour: 0.00003, borrowingShortPerHour: 0.00001,
     openInterestLong30: 10_000_000n * P30, openInterestShort30: 9_000_000n * P30,
     observedAtMs: NOW - 120_000,
+    sourcePin: 'test-pin',
     ...over,
   });
   const input = (over?: object) => ({
@@ -135,7 +136,7 @@ describe('6I-3 §2 실측 비용 breakdown', () => {
     const c = buildCandidateCostBreakdown(input());
     expect(c.entryFeeUsd).toBeCloseTo(0.5);   // 5bp × $1000
     expect(c.estimatedExitFeeUsd).toBeCloseTo(0.5);
-    expect(c.fundingCostUsd).toBeCloseTo(0.00002 * 4 * 1000); // |rate| 보수 상한
+    expect(c.fundingCostUsd).toBeCloseTo(0.00002 * 4 * 1000); // 음수 rate=LONG 지불 → 비용
     expect(c.borrowingCostUsd).toBeCloseTo(0.00003 * 4 * 1000);
     expect(c.priceImpactUsd).not.toBeNull();
     expect(c.slippageUsd).toBe(0);            // MECHANISM_ZERO — 근거 있는 0

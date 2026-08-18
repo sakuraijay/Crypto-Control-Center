@@ -1,0 +1,46 @@
+{
+  "_meta": {
+    "source": "GET https://arbitrum.gmxapi.io/v1/markets/tickers",
+    "recordedAtUtc": "2026-08-18",
+    "contract": "@gmx-io/sdk@1.7.0 MarketTicker — funding/borrowing rate = per-HOUR factor, 1e30 PRECISION; 부호: 음수=해당 사이드가 지불, 양수=수취 (getFundingFactorPerPeriod(marketInfo,isLong,3600) / getBorrowingFactorPerPeriod×3600, applyFactor(sizeUsd,factor)=sizeUsd×factor/1e30); longInterestUsd/shortInterestUsd = 1e30 USD",
+    "note": "실 프로덕션 응답에서 필드 축약 없이 발췌 (비용 산정에 쓰는 필드만 유지). SOL=LONG 지불/SHORT 수취, BTC=LONG 수취/SHORT 지불, borrowing 0 케이스 포함."
+  },
+  "records": [
+    {
+      "symbol": "SOL/USD [SOL-USDC]",
+      "marketTokenAddress": "0x09400D9DB990D5ed3f35D7be61DfAEB900Af03C9",
+      "fundingRateLong": "-20133947528265847430278800",
+      "fundingRateShort": "22076886797965905200535600",
+      "borrowingRateLong": "5620640986927989572868000",
+      "borrowingRateShort": "0",
+      "netRateLong": "-25754588515193837003146800",
+      "netRateShort": "22076886797965905200535600",
+      "longInterestUsd": "853279964187529952923764658438425616",
+      "shortInterestUsd": "1336787774196693558428241085100565400"
+    },
+    {
+      "symbol": "BTC/USD [BTC-USDC]",
+      "marketTokenAddress": "0x47c031236e19d024b42f8AE6780E44A573170703",
+      "fundingRateLong": "22456740280369188417447600",
+      "fundingRateShort": "-17291895863200309999998000",
+      "borrowingRateLong": "0",
+      "borrowingRateShort": "8117267712209197716956400",
+      "netRateLong": "22456740280369188417447600",
+      "netRateShort": "-25409163575409507716954400",
+      "longInterestUsd": "10918129510872589182176754566386748245",
+      "shortInterestUsd": "13702320450158451525489006573499243577"
+    },
+    {
+      "symbol": "ETH/USD [WETH-USDC]",
+      "marketTokenAddress": "0x70d95587d40A2caf56bd97485aB3Eec10Bee6336",
+      "fundingRateLong": "-17117886164581655883759600",
+      "fundingRateShort": "17117699866943353942701600",
+      "borrowingRateLong": "0",
+      "borrowingRateShort": "16295996924937746347521600",
+      "netRateLong": "-17117886164581655883759600",
+      "netRateShort": "821702942005607595180000",
+      "longInterestUsd": "16645619846024299392709191258628565410",
+      "shortInterestUsd": "17832476332096392250258948488808915426"
+    }
+  ]
+}
