@@ -52,6 +52,8 @@ export interface Position {
   trailingStopPct?: number;
   /** Internal: best price seen in-profit direction — used to ratchet trailing SL. */
   _trailingHighWater?: number;
+  /** 'SERVER' = 서버 Worker가 관리(SL/TP/청산 전부 서버 권위) — 브라우저는 표시만 */
+  managedBy?: 'SERVER' | null;
 }
 
 // ── Watchlist ─────────────────────────────────────────────────────────────────
@@ -88,6 +90,8 @@ export interface Trade {
   leverage?: number;
   /** Collateral in USD at open — persisted to DB alongside leverage. */
   collateralUsd?: number;
+  /** 'SERVER' = 서버 권위 PAPER 실행기가 기록·관리하는 행 (클라이언트 수정 불가) */
+  managedBy?: 'SERVER' | null;
 }
 
 // ── Strategy Log ──────────────────────────────────────────────────────────────

@@ -66,6 +66,22 @@ export const tradesTable = pgTable("trades", {
   costFetchedAt:         timestamp("cost_fetched_at", { withTimezone: true }),
   /** ESTIMATED 순 PnL = gross − 추정 진입/청산/보유 비용 (SETTLED 아님) */
   netPnlEstimatedUsd:    numeric("net_pnl_estimated_usd", { precision: 18, scale: 8 }),
+
+  // ── 서버 권위 PAPER 실행 필드 (0029 — additive, nullable) ─────────────────
+  /** 'SERVER' = 서버 Worker가 체결·관리·정산하는 행. null = 클라이언트/legacy */
+  managedBy:             text("managed_by"),
+  /** OPEN을 생성한 서버 AI 결정 id — UNIQUE partial index로 결정당 1회 보장 */
+  openDecisionId:        text("open_decision_id"),
+  /** CLOSE 행이 청산한 OPEN 행 id — FULL은 UNIQUE partial index로 중복 청산 차단 */
+  closesTradeId:         text("closes_trade_id"),
+  /** 'FULL' | 'REDUCE70' */
+  closeKind:             text("close_kind"),
+  /** 청산 사유 ('STOP_LOSS'|'TAKE_PROFIT'|'CASH_TRANSITION'|'RISK_CLOSE_ALL'|...) */
+  closeReason:           text("close_reason"),
+  /** 서버 관리 stop trigger (USD) — OPEN 행에만 */
+  stopPriceUsd:          numeric("stop_price_usd",        { precision: 18, scale: 8 }),
+  /** 서버 관리 take-profit (USD, null = TP 없음) — OPEN 행에만 */
+  takeProfitPriceUsd:    numeric("take_profit_price_usd", { precision: 18, scale: 8 }),
 });
 
 export const insertTradeSchema = createInsertSchema(tradesTable).omit({ createdAt: true });

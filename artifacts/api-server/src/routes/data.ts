@@ -55,6 +55,41 @@ router.post("/data/trades/batch", async (req, res) => {
     }>;
     if (!Array.isArray(rows) || rows.length === 0) { res.json({ count: 0 }); return; }
 
+    // ── Task #111 — 서버 권위 격리 (batch도 단건 POST와 동일한 fail-closed 가드) ──
+    try {
+      for (const r of rows) {
+        const existing = await db.select().from(tradesTable)
+          .where(eq(tradesTable.id, String(r.id ?? ""))).limit(1);
+        if (existing[0]?.managedBy === "SERVER") {
+          return res.status(409).json({
+            ok: false, code: "SERVER_MANAGED_ROW",
+            error: "서버 Worker가 관리하는 거래 행 포함 — batch 저장 거부",
+          });
+        }
+        const actionStr = String(r.action ?? "CLOSE");
+        if (actionStr === "CLOSE" || actionStr === "CLOSE_ALL") {
+          const openServer = await db.select().from(tradesTable)
+            .where(and(
+              eq(tradesTable.symbol, String(r.symbol ?? "")),
+              eq(tradesTable.action, "OPEN"),
+              eq(tradesTable.closeTime, 0),
+              eq(tradesTable.managedBy, "SERVER"),
+            )).limit(1);
+          if (openServer.length > 0) {
+            return res.status(409).json({
+              ok: false, code: "SERVER_MANAGED_POSITION",
+              error: "서버 관리 미청산 포지션에 대한 클라이언트 CLOSE 포함 — batch 저장 거부",
+            });
+          }
+        }
+      }
+    } catch {
+      return res.status(503).json({
+        ok: false, code: "SERVER_GUARD_UNKNOWN",
+        error: "서버 관리 상태 확인 실패 — 안전을 위해 batch 저장을 거부합니다 (재시도 가능)",
+      });
+    }
+
     await db
       .insert(tradesTable)
       .values(rows.map(r => ({
@@ -97,6 +132,42 @@ router.post("/data/trades/batch", async (req, res) => {
 router.post("/data/trades", async (req, res) => {
   try {
     const r = req.body;
+
+    // ── Task #111 — 서버 권위 격리: 클라이언트 POST가 서버 관리 상태를 덮어쓸 수 없다 ──
+    // 1) 동일 id의 서버 관리 행 upsert 거부
+    try {
+      const existing = await db.select().from(tradesTable)
+        .where(eq(tradesTable.id, String(r.id ?? ""))).limit(1);
+      if (existing[0]?.managedBy === "SERVER") {
+        return res.status(409).json({
+          ok: false, code: "SERVER_MANAGED_ROW",
+          error: "서버 Worker가 관리하는 거래 행 — 클라이언트 수정 불가",
+        });
+      }
+      // 2) 서버 관리 미청산 포지션에 대한 클라이언트 CLOSE 거부 (중복 청산 차단)
+      const actionStr = String(r.action ?? "CLOSE");
+      if (actionStr === "CLOSE" || actionStr === "CLOSE_ALL") {
+        const openServer = await db.select().from(tradesTable)
+          .where(and(
+            eq(tradesTable.symbol, String(r.symbol ?? "")),
+            eq(tradesTable.action, "OPEN"),
+            eq(tradesTable.closeTime, 0),
+            eq(tradesTable.managedBy, "SERVER"),
+          )).limit(1);
+        if (openServer.length > 0) {
+          return res.status(409).json({
+            ok: false, code: "SERVER_MANAGED_POSITION",
+            error: "해당 심볼의 미청산 포지션은 서버 Worker가 관리 — 서버가 SL/TP/CASH 규칙으로 청산합니다",
+          });
+        }
+      }
+    } catch (guardErr) {
+      // 격리 판정 실패 = 불확실 → fail-closed (서버 권위 보호 우선)
+      return res.status(503).json({
+        ok: false, code: "SERVER_GUARD_UNKNOWN",
+        error: "서버 관리 상태 확인 실패 — 안전을 위해 저장을 거부합니다 (재시도 가능)",
+      });
+    }
     const sizeVal        = String(r.sizeInUsd ?? r.size ?? 0);
     const sizeInUsdVal   = r.sizeInUsd != null ? String(r.sizeInUsd) : null;
     const collateral     = r.collateralToken ?? "USDC";
@@ -234,6 +305,23 @@ router.post("/data/trades", async (req, res) => {
 /** DELETE /api/data/trades — clear all trades (emergency reset) */
 router.delete("/data/trades", async (_req, res) => {
   try {
+    // Task #111 — 서버 관리 행이 하나라도 있으면 전체 삭제 거부 (idempotency 증거 보호).
+    // 판정 실패도 fail-closed.
+    try {
+      const serverRows = await db.select().from(tradesTable)
+        .where(eq(tradesTable.managedBy, "SERVER")).limit(1);
+      if (serverRows.length > 0) {
+        return res.status(409).json({
+          ok: false, code: "SERVER_MANAGED_ROW",
+          error: "서버 Worker 관리 거래가 존재 — 전체 삭제 불가 (서버 권위 상태 보호)",
+        });
+      }
+    } catch {
+      return res.status(503).json({
+        ok: false, code: "SERVER_GUARD_UNKNOWN",
+        error: "서버 관리 상태 확인 실패 — 안전을 위해 삭제를 거부합니다 (재시도 가능)",
+      });
+    }
     await db.delete(tradesTable);
     res.json({ ok: true });
   } catch (err) {

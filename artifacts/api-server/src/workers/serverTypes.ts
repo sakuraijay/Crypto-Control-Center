@@ -143,8 +143,10 @@ export interface ServerAiDecision {
   riskApproved: boolean;
   riskVetoReason?: string;
   profitLockStage: 0 | 1 | 2 | 3;
-  paperExecuted: false;
-  paperOrderId: null;
+  /** true = 서버 권위 PAPER 실행기가 이 결정으로 실제 OPEN을 기록함 */
+  paperExecuted: boolean;
+  /** paperExecuted=true일 때 OPEN trade 행 id */
+  paperOrderId: string | null;
   /** Source tag to distinguish worker decisions from browser decisions in UI */
   source: 'server_worker';
   /** True when this decision was produced while LIVE TEST MODE was active */

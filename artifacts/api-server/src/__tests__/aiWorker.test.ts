@@ -39,7 +39,13 @@ function chain(getResult: () => unknown) {
 
 vi.mock('@workspace/db', () => ({
   db: {
-    select: vi.fn().mockImplementation(() => chain(_dbSelectImpl)),
+    select: vi.fn().mockImplementation(() => {
+      // Task #111 — serverPaperExecutor의 selects(pendingClose/open rows)는 틱 타이밍에 따라
+      // 비결정적으로 끼어들므로 카운터 시퀀스에서 제외 (항상 빈 결과)
+      const stack = new Error().stack ?? '';
+      if (stack.includes('serverPaperExecutor')) return chain(() => []);
+      return chain(_dbSelectImpl);
+    }),
     insert: vi.fn().mockImplementation(() => chain(_dbInsertImpl)),
     update: vi.fn().mockImplementation(() => chain(_dbUpdateImpl)),
     delete: vi.fn().mockImplementation(() => chain(() => 0)),
@@ -55,6 +61,7 @@ vi.mock('drizzle-orm', () => ({
   eq:   vi.fn(() => ({})),
   desc: vi.fn(() => ({})),
   lt:   vi.fn(() => ({})),
+  like: vi.fn(() => ({})),
   and:  vi.fn(() => ({})),
   sql:  Object.assign(vi.fn(() => ({})), { raw: vi.fn(() => ({})) }),
 }));

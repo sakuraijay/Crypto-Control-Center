@@ -72,6 +72,21 @@ interface ExecutorHealth {
   rpcConfigured?: boolean;
   /** ISO timestamp of the last RPC health check (null = never checked) */
   lastRpcCheckAt?: string | null;
+  /** Task #111 — 서버 권위 PAPER 실행기 스냅샷 (PAPER 모드에서만 non-null) */
+  serverPaperExec?: {
+    openPosition: {
+      tradeId: string; symbol: string; side: 'LONG' | 'SHORT';
+      sizeInUsd: number; entryPriceUsd: number; leverage: number;
+      stopPriceUsd: number | null; tpPriceUsd: number | null;
+      openedAt: string; unrealizedPnlUsd: number | null;
+    } | null;
+    pendingClose: { reason: string; requestedAt: string } | null;
+    lastTickAt: string | null;
+    lastTickStale: boolean;
+    lastOpenAttempt: { at: string; ok: boolean; reason: string | null; tradeId: string | null } | null;
+    lastCloseAction: { at: string; kind: string; reason: string; ok: boolean; detail: string | null } | null;
+    unresolved: string | null;
+  } | null;
 }
 
 const AUTO_REFRESH_MS = 30_000;
@@ -1498,6 +1513,48 @@ export default function Settings() {
                   <span className="text-muted-foreground/60 text-[10px]">(서버 시작 이후 최고점)</span>
                 </div>
               )}
+
+              {/* Task #111 — 서버 권위 PAPER 실행기 상태 */}
+              {health.serverPaperExec && (() => {
+                const sp = health.serverPaperExec;
+                return (
+                  <div className="flex flex-col gap-2 border-t border-border/60 pt-3" data-testid="server-paper-exec">
+                    <div className="flex items-center gap-2 text-[11px]">
+                      <span className="font-semibold text-foreground">서버 PAPER 실행기</span>
+                      {sp.unresolved ? (
+                        <span className="text-red-400 font-medium">UNRESOLVED — {sp.unresolved}</span>
+                      ) : sp.openPosition ? (
+                        <span className="font-mono text-muted-foreground">
+                          {sp.openPosition.symbol} {sp.openPosition.side} ${sp.openPosition.sizeInUsd.toFixed(2)}
+                          {' '}@{sp.openPosition.entryPriceUsd.toLocaleString('en-US', { maximumFractionDigits: 4 })}
+                          {' '}SL {sp.openPosition.stopPriceUsd?.toLocaleString('en-US', { maximumFractionDigits: 4 }) ?? '—'}
+                          {' '}TP {sp.openPosition.tpPriceUsd?.toLocaleString('en-US', { maximumFractionDigits: 4 }) ?? '—'}
+                          {sp.openPosition.unrealizedPnlUsd != null && (
+                            <> · PnL ${sp.openPosition.unrealizedPnlUsd.toFixed(2)}</>
+                          )}
+                        </span>
+                      ) : (
+                        <span className="text-muted-foreground">미청산 포지션 없음</span>
+                      )}
+                    </div>
+                    {sp.pendingClose && (
+                      <p className="text-[10px] text-amber-400">
+                        전량 청산 진행 중 — {sp.pendingClose.reason} (요청 {format(new Date(sp.pendingClose.requestedAt), 'HH:mm:ss')})
+                      </p>
+                    )}
+                    <p className="text-[10px] text-muted-foreground font-mono">
+                      관리 틱: {sp.lastTickAt ? format(new Date(sp.lastTickAt), 'HH:mm:ss') : '—'}
+                      {sp.lastTickStale && ' (시세 stale — 관리 보류)'}
+                      {sp.lastOpenAttempt && (
+                        <> · 마지막 진입 시도: {sp.lastOpenAttempt.ok ? '성공' : `거부 (${sp.lastOpenAttempt.reason})`}</>
+                      )}
+                      {sp.lastCloseAction && (
+                        <> · 마지막 청산: {sp.lastCloseAction.kind} {sp.lastCloseAction.reason} {sp.lastCloseAction.ok ? 'OK' : '보류'}</>
+                      )}
+                    </p>
+                  </div>
+                );
+              })()}
 
               {/* 핵심 Risk Limits (마지막 사이클 기준) */}
               {(health as { lastLimitsUsed?: object | null }).lastLimitsUsed && (() => {

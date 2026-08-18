@@ -120,6 +120,7 @@ function hydrateOpenPositions(trades: Trade[]): Position[] {
         tpPrice:                undefined,
         slPrice:                undefined,
         trailingStopPct:        undefined,
+        managedBy:              t.managedBy ?? null,
       });
     }
   }
@@ -182,6 +183,7 @@ export function TradingProvider({ children }: { children: ReactNode }) {
         sizeInUsd?: string; size?: string; price: string; pnl: string;
         strategy: string; timestamp: string; closeTime?: number;
         gmxMarketAddress?: string | null; collateralToken?: string | null;
+        managedBy?: string | null;
       }> | null) => {
         const loaded: Trade[] = (rows ?? []).map(r => ({
           id:               r.id,
@@ -197,6 +199,7 @@ export function TradingProvider({ children }: { children: ReactNode }) {
           closeTime:        r.closeTime ?? 0,
           gmxMarketAddress: r.gmxMarketAddress ?? undefined,
           collateralToken:  r.collateralToken ?? undefined,
+          managedBy:        r.managedBy === 'SERVER' ? 'SERVER' : null,
         }));
         // 0건도 유효한 실제 상태 (신규 계정) — mock으로 대체하지 않음
         setClosedTrades(loaded);
@@ -263,6 +266,19 @@ export function TradingProvider({ children }: { children: ReactNode }) {
           const live = livePrices.current.get(pos.symbol);
           // 실시간 가격이 없으면 mark를 변경하지 않는다 (random walk 금지)
           const newMark = live !== undefined ? live : pos.markPrice;
+
+          // ── Task #111 — 서버 관리 포지션: 표시(mark/PnL)만 갱신, SL/TP/트레일링·
+          // 자동 청산은 전부 서버 권위 (브라우저 이중 체결 금지) ────────────────
+          if (pos.managedBy === 'SERVER') {
+            const deltaRatio = pos.side === 'LONG'
+              ? (newMark - pos.entryPrice) / pos.entryPrice
+              : (pos.entryPrice - newMark) / pos.entryPrice;
+            const pnl = deltaRatio * pos.sizeInUsd;
+            return {
+              ...pos, markPrice: newMark, unrealizedPnl: pnl,
+              roe: pos.collateralUsd > 0 ? (pnl / pos.collateralUsd) * 100 : 0,
+            };
+          }
 
           // GMX PnL: price delta relative to sizeInUsd
           const priceDeltaRatio = pos.side === 'LONG'
@@ -496,6 +512,15 @@ export function TradingProvider({ children }: { children: ReactNode }) {
     setPositions(prev => {
       const pos = prev.find(p => p.id === id);
       if (!pos) return prev;
+      // Task #111 — 서버 관리 포지션은 브라우저에서 청산 불가 (서버 권위, 이중 청산 금지)
+      if (pos.managedBy === 'SERVER') {
+        setLogs(l => [{
+          id: `log-${Date.now()}`, level: 'WARN' as const,
+          message: `[PAPER] ${pos.displaySymbol}은(는) 서버 Worker가 관리 중 — 브라우저 청산 불가`,
+          timestamp: new Date(),
+        }, ...l]);
+        return prev;
+      }
       const remaining = prev.filter(p => p.id !== id);
       const trade: Trade = {
         id: `closed-${Date.now()}`, symbol: pos.symbol, displaySymbol: pos.displaySymbol,
@@ -520,7 +545,11 @@ export function TradingProvider({ children }: { children: ReactNode }) {
   const clearAllPositions = useCallback(() => {
     setPositions(prev => {
       const now = Date.now();
-      const newTrades: Trade[] = prev.map((pos, i) => ({
+      // Task #111 — 서버 관리 포지션은 제외 (서버가 CASH/RiskEngine 규칙으로 청산)
+      const serverManaged = prev.filter(p => p.managedBy === 'SERVER');
+      const clientOwned   = prev.filter(p => p.managedBy !== 'SERVER');
+      if (clientOwned.length === 0) return prev;
+      const newTrades: Trade[] = clientOwned.map((pos, i) => ({
         id: `closed-${now}-${i}`, symbol: pos.symbol, displaySymbol: pos.displaySymbol,
         side: pos.side, action: 'CLOSE' as const, sizeInUsd: pos.sizeInUsd,
         price: pos.markPrice, pnl: pos.unrealizedPnl,
@@ -532,10 +561,12 @@ export function TradingProvider({ children }: { children: ReactNode }) {
       setClosedTrades(ts => [...newTrades, ...ts]);
       setLogs(l => [{
         id: `log-${now}`, level: 'WARN' as const,
-        message: '[PAPER] All positions cleared',
+        message: serverManaged.length > 0
+          ? `[PAPER] 브라우저 포지션 청산 — 서버 관리 ${serverManaged.length}건은 서버가 청산`
+          : '[PAPER] All positions cleared',
         timestamp: new Date(),
       }, ...l]);
-      return [];
+      return serverManaged;
     });
   }, []);
 

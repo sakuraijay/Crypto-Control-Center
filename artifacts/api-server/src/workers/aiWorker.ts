@@ -17,7 +17,7 @@
  */
 
 import { db, aiDecisionsTable, liveApprovalsTable, strategyConfigTable, tradesTable, workerStateTable } from "@workspace/db";
-import { and, desc, eq, lt } from "drizzle-orm";
+import { and, desc, eq, like, lt } from "drizzle-orm";
 import { computeIndicators, computeScores } from "./indicators";
 import { runAiEngine } from "./stateEngine";
 import { getCachedPrices, getCachedChange24h, ensureGmxPoller } from "../routes/gmx";
@@ -51,6 +51,13 @@ import {
 } from "../lib/riskEngineState";
 import { manilaDayStartIso, manilaWeekStartIso, msUntilNextManilaDay } from "../lib/manilaTime";
 import { runIntelServiceCycle, stopIntelService, resumeIntelService } from "../intel/intelService";
+import {
+  openServerPaperPosition, closeServerPaperPosition, reduceServerPaper70,
+  requestServerPaperCloseAll, loadPendingCloseFromDb, manageServerPaperTick,
+  loadServerOpenRows, getServerPaperStatus, MAX_MANAGE_PRICE_AGE_MS,
+  reconcileStartupCloseIntent,
+  type ServerPaperExecStatus, type PriceQuote,
+} from "./serverPaperExecutor";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -166,6 +173,9 @@ export interface WorkerStatus {
   // ── 6H-2A §5 — LIVE 정산 reconciliation ─────────────────────────────────────
   /** 마지막 정산 reconciliation 결과. incomplete=true → 신규 LIVE 진입 차단 */
   settlementReconcile: ReconcileResult | null;
+  // ── Task #111 — 서버 권위 PAPER 실행기 관측값 ───────────────────────────────
+  /** 서버 PAPER 실행기 스냅샷. null = 미기동 */
+  serverPaperExec: ServerPaperExecStatus | null;
 }
 
 /** PAPER 사이징 엔진 결과 요약 — 상태 카드 표시용 */
@@ -265,12 +275,17 @@ class WorkerManager {
 
   /** 마지막 가격 업데이트 시각 (dataFreshMs 계산용) */
   private lastPriceAt: number = 0;
+  /** Task #111 — 심볼별 마지막 유효 가격 수신 시각 (per-symbol stale 판정) */
+  private priceAtBySymbol = new Map<string, number>();
 
   /** 가격 폴링 타이머 */
   private pricePollTimer: ReturnType<typeof setInterval> | null = null;
 
   /** 사이클 타이머 */
   private cycleTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Task #111 — 서버 권위 PAPER 관리 틱 타이머 (PAPER 모드 전용) */
+  private serverPaperTimer: ReturnType<typeof setInterval> | null = null;
 
   /** 워커 루프 활성 여부 */
   private active = false;
@@ -325,6 +340,25 @@ class WorkerManager {
     this.updatePriceBuffers(); // 즉시 첫 실행
     this.pricePollTimer = setInterval(() => this.updatePriceBuffers(), 10_000);
 
+    // ── Task #111 — 서버 권위 PAPER 관리 틱 (PAPER 모드 전용, 15s) ────────────
+    // 재시작 복구: 권위 상태는 전부 DB — pendingClose 로드 후 틱이 open 행 재발견
+    if (process.env.WORKER_ENGINE_MODE !== 'LIVE') {
+      await loadPendingCloseFromDb();
+      // write-failure → crash 복구: 마지막 영속 결정이 flat 지시 + 서버 미청산 존재 시
+      // close-all 재수립 (판정 실패 = fail-closed unresolved, 틱 재시도)
+      await reconcileStartupCloseIntent(async () => {
+        const rows = await db.select().from(aiDecisionsTable)
+          .orderBy(desc(aiDecisionsTable.createdAt)).limit(1);
+        return rows[0]?.direction ?? null;
+      });
+      this.serverPaperTimer = setInterval(() => {
+        // 신선한 시세가 전혀 없으면 어떤 관리 판정도 불가 (stale 스킵과 동일) — DB 접근 생략
+        if (this.priceBuffer.size === 0) return;
+        if (this.lastPriceAt === 0 || Date.now() - this.lastPriceAt > MAX_MANAGE_PRICE_AGE_MS) return;
+        void manageServerPaperTick((sym) => this.serverPaperQuote(sym));
+      }, 15_000);
+    }
+
     // 초기 지연 후 사이클 시작 (가격 히스토리 축적 대기)
     this.cycleTimer = setTimeout(() => void this.runCycle(), INITIAL_DELAY_MS);
 
@@ -336,10 +370,97 @@ class WorkerManager {
     this.active = false;
     if (this.pricePollTimer) { clearInterval(this.pricePollTimer); this.pricePollTimer = null; }
     if (this.cycleTimer)    { clearTimeout(this.cycleTimer);       this.cycleTimer    = null; }
+    if (this.serverPaperTimer) { clearInterval(this.serverPaperTimer); this.serverPaperTimer = null; }
     stopIntelService();   // 6I-2 §3 — 신규 intel 사이클/enrichment 진입 차단
     console.info('[AIWorker] 정지');
   }
 
+
+  /** Task #111 — priceBuffer 마지막 값 + 심볼별 수신 시각 기반 시세 조회 (합성 금지).
+   *  다른 심볼만 갱신돼도 이 심볼이 fresh로 판정되지 않도록 per-symbol 시각을 쓴다. */
+  private serverPaperQuote(symbol: string): PriceQuote | null {
+    const buf = this.priceBuffer.get(symbol);
+    const price = buf && buf.length > 0 ? buf[buf.length - 1] : null;
+    const symbolAt = this.priceAtBySymbol.get(symbol) ?? 0;
+    if (price == null || !Number.isFinite(price) || price <= 0 || symbolAt <= 0) return null;
+    return { priceUsd: price, ageMs: Date.now() - symbolAt };
+  }
+
+  /**
+   * Task #111 — 서버 권위 PAPER 실행 (사이클 내, persistDecision 직전).
+   * PAPER 모드에서만 호출된다. LIVE/GMX submit/서명 경로 호출 0회.
+   *
+   * 순서:
+   *  1) RiskEngine REDUCE_POSITION_70PCT → durable 1회 축소
+   *  2) RiskEngine CLOSE_ALL 또는 CASH/NO_TRADE 결정 + 서버 미청산 존재 → 전량 청산 요청(영속)
+   *  3) riskApproved LONG/SHORT 신규 진입(perp_*_open만 — scale_in 등 물타기 거부) → OPEN
+   * 성공 시 decision.paperExecuted/paperOrderId 갱신.
+   */
+  private async runServerPaperExecution(
+    decision: ServerAiDecision,
+    paperState: Awaited<ReturnType<WorkerManager['loadPaperState']>>,
+    riskEval: RiskEvaluationResult | null,
+    cycleNum: number,
+  ): Promise<void> {
+    const serverOpenRows = await loadServerOpenRows();
+
+    // 1) 수익 보호 70% 축소 (RiskEngine 액션)
+    if (riskEval?.actions.includes('REDUCE_POSITION_70PCT') && serverOpenRows.length > 0) {
+      const row = serverOpenRows[0];
+      const r = await reduceServerPaper70({ openRow: row, quote: this.serverPaperQuote(row.symbol) });
+      console.info(`[AIWorker] 사이클 #${cycleNum} 서버 PAPER REDUCE70 — ${r.ok ? '실행' : r.reason}`);
+    }
+
+    // 2) 전량 청산 (RiskEngine CLOSE_ALL 우선, CASH/NO_TRADE 전환 포함)
+    //
+    // 크래시 내구성 불변식: close-all 의도는 매 사이클 durable 소스(DB의 riskState·
+    // 결정 입력)에서 재파생된다. pendingClose 영속 write가 실패한 직후 크래시해도,
+    // 재시작 후 첫 사이클이 같은 조건에서 wantsFlat을 다시 도출해 재요청한다.
+    // 신규 진입(3)은 이 분기 이후에만 도달하므로, 유실된 의도가 잘못된 OPEN으로
+    // 이어지는 경로는 구조적으로 없다.
+    const wantsFlat =
+      riskEval?.actions.includes('CLOSE_ALL_POSITIONS') === true ||
+      decision.operatingState === 'CASH';
+    if (wantsFlat && serverOpenRows.length > 0) {
+      const reason = riskEval?.actions.includes('CLOSE_ALL_POSITIONS') ? 'RISK_CLOSE_ALL' : 'CASH_TRANSITION';
+      await requestServerPaperCloseAll(reason);
+      // 즉시 1회 시도 — 시세 stale이면 관리 틱이 완료까지 재시도 (영속 요청)
+      for (const row of serverOpenRows) {
+        await closeServerPaperPosition({
+          openTradeId: row.id, reason, kind: 'FULL', quote: this.serverPaperQuote(row.symbol),
+        });
+      }
+      return; // 청산 사이클에는 신규 진입 없음
+    }
+
+    // 3) 신규 진입 — 즉시 진입 유형만 (scale_in/scale_out/hedge 등 물타기·복합 거부)
+    const isEntry =
+      (decision.operatingState === 'LONG' || decision.operatingState === 'SHORT') &&
+      decision.riskApproved === true &&
+      (decision.executionType === 'perp_long_open' || decision.executionType === 'perp_short_open');
+    if (!isEntry || !decision.primarySymbol || decision.sizeUsd == null || decision.leverage == null) return;
+    if (riskEval?.entryAllowed !== true) return; // RiskEngine 최종 허용 재확인
+
+    const result = await openServerPaperPosition({
+      decisionId:        decision.id,
+      symbol:            decision.primarySymbol,
+      side:              decision.operatingState === 'LONG' ? 'LONG' : 'SHORT',
+      sizeUsd:           decision.sizeUsd,
+      leverage:          decision.leverage,
+      quote:             this.serverPaperQuote(decision.primarySymbol),
+      tpPriceUsd:        decision.tpPrice ?? null,
+      // paperState.positions는 trades 전체(서버 행 포함)에서 파생 — 서버 행 수와 큰 쪽 사용
+      openPositionCount: Math.max(paperState.positions.length, serverOpenRows.length),
+      entriesManilaDay:  paperState.entriesManilaDay,
+    });
+    if (result.ok) {
+      decision.paperExecuted = true;
+      decision.paperOrderId  = result.tradeId;
+      console.info(`[AIWorker] 사이클 #${cycleNum} 서버 PAPER OPEN 성공 — trade=${result.tradeId}`);
+    } else {
+      console.info(`[AIWorker] 사이클 #${cycleNum} 서버 PAPER OPEN 거부 — ${result.reason}`);
+    }
+  }
 
   getStatus(): WorkerStatus {
     return {
@@ -379,6 +500,7 @@ class WorkerManager {
       liveSizingEnforcement: getLastSizingEnforcement(),
       closeAllSummary:       this.lastCloseAllSummary,
       settlementReconcile:   this.lastSettlementReconcile,
+      serverPaperExec:       process.env.WORKER_ENGINE_MODE !== 'LIVE' ? getServerPaperStatus() : null,
     };
   }
 
@@ -564,6 +686,7 @@ class WorkerManager {
       const buf = this.priceBuffer.get(sym) ?? [];
       buf.push(tick.priceUsd);
       if (buf.length > MAX_PRICE_HISTORY) buf.shift();
+      this.priceAtBySymbol.set(sym, Date.now()); // Task #111 — per-symbol 신선도
       this.priceBuffer.set(sym, buf);
     }
   }
@@ -599,8 +722,9 @@ class WorkerManager {
     return analyses.sort((a, b) => b.opportunityScore - a.opportunityScore);
   }
 
-  /** 결정을 ai_decisions 테이블에 저장한다. */
-  private async persistDecision(decision: ServerAiDecision): Promise<void> {
+  /** 결정을 ai_decisions 테이블에 저장한다. 성공 여부를 반환한다 (Task #111 —
+   *  서버 PAPER 실행은 결정이 durable하게 기록된 후에만 허용). */
+  private async persistDecision(decision: ServerAiDecision): Promise<boolean> {
     try {
       await db.insert(aiDecisionsTable).values({
         ts:               new Date(decision.createdAt),
@@ -617,8 +741,22 @@ class WorkerManager {
         fullJson:         JSON.stringify(decision),
         testMode:         decision.testMode ?? false,
       });
+      return true;
     } catch (err) {
       console.error("[AIWorker] persistDecision 실패:", err);
+      return false;
+    }
+  }
+
+  /** Task #111 — 실행 후 paperExecuted/paperOrderId 반영 (full_json 갱신, 실패는 로그만). */
+  private async updateDecisionExecutionFlags(decision: ServerAiDecision): Promise<void> {
+    try {
+      // 결정 UUID는 fullJson에만 존재 — LIKE 매칭 (uuid는 전역 유일)
+      await db.update(aiDecisionsTable)
+        .set({ fullJson: JSON.stringify(decision) })
+        .where(like(aiDecisionsTable.fullJson, `%"id":"${decision.id}"%`));
+    } catch (err) {
+      console.error("[AIWorker] 결정 실행 플래그 갱신 실패:", (err as Error).message);
     }
   }
 
@@ -1342,8 +1480,27 @@ class WorkerManager {
         ...engineResult,
       };
 
-      // DB 저장
-      await this.persistDecision(decision);
+      // DB 저장 — 반드시 서버 PAPER 실행 '이전' (durable-intent-first).
+      // 결정이 durable하게 기록된 후에만 실행을 허용해야, close-all 영속 write 실패 후
+      // 크래시해도 재시작 reconciliation이 마지막 영속 결정(CASH/NO_TRADE)에서 의도를
+      // 복원할 수 있다. 기록 실패 = 실행 불가 (fail-closed).
+      const decisionPersisted = await this.persistDecision(decision);
+
+      // ── Task #111 — 서버 권위 PAPER 실행 (PAPER 모드 전용, LIVE/승인 경로와 분리) ──
+      if (!isLiveMode && !testModeActive) {
+        if (!decisionPersisted) {
+          console.error(`[AIWorker] 사이클 #${cycleNum} 결정 영속 실패 — 서버 PAPER 실행 차단 (fail-closed)`);
+        } else {
+          try {
+            await this.runServerPaperExecution(decision, paperState, riskEval, cycleNum);
+            // 실행 결과(paperExecuted/paperOrderId)를 durable 기록에 반영
+            if (decision.paperExecuted) await this.updateDecisionExecutionFlags(decision);
+          } catch (err) {
+            // 실행기 오류는 사이클을 중단하지 않는다 — OPEN은 내부적으로 fail-closed
+            console.error(`[AIWorker] 사이클 #${cycleNum} 서버 PAPER 실행 오류:`, (err as Error).message);
+          }
+        }
+      }
 
       // LIVE 모드: 승인 큐 추가 (PAPER 승인 흐름)
       const approvalCreated = await this.maybeCreateApproval(decision);

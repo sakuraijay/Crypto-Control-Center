@@ -636,6 +636,31 @@ const MIGRATIONS: { name: string; sql: string }[] = [
       $reset1000$;
     `,
   },
+  {
+    name: "0029_server_paper_executor",
+    sql: `
+      -- Task #111 — 서버 권위 PAPER 실행 (additive, 기존 행 무영향)
+      ALTER TABLE trades ADD COLUMN IF NOT EXISTS managed_by            text;
+      ALTER TABLE trades ADD COLUMN IF NOT EXISTS open_decision_id      text;
+      ALTER TABLE trades ADD COLUMN IF NOT EXISTS closes_trade_id       text;
+      ALTER TABLE trades ADD COLUMN IF NOT EXISTS close_kind            text;
+      ALTER TABLE trades ADD COLUMN IF NOT EXISTS close_reason          text;
+      ALTER TABLE trades ADD COLUMN IF NOT EXISTS stop_price_usd        numeric(18,8);
+      ALTER TABLE trades ADD COLUMN IF NOT EXISTS take_profit_price_usd numeric(18,8);
+
+      -- 결정당 OPEN 1회 (idempotent 진입 — 재시작/재시도 중복 OPEN 구조적 차단)
+      CREATE UNIQUE INDEX IF NOT EXISTS trades_open_decision_uq
+        ON trades (open_decision_id) WHERE open_decision_id IS NOT NULL;
+
+      -- 서버 관리 미청산 포지션 최대 1개 (동시 포지션 1개 제한을 DB가 최종 강제)
+      CREATE UNIQUE INDEX IF NOT EXISTS trades_server_single_open_uq
+        ON trades ((managed_by)) WHERE managed_by = 'SERVER' AND action = 'OPEN' AND close_time = 0;
+
+      -- OPEN 행당 FULL CLOSE 1회 (중복 전량 청산 구조적 차단; REDUCE70은 예약 게이트가 관리)
+      CREATE UNIQUE INDEX IF NOT EXISTS trades_full_close_uq
+        ON trades (closes_trade_id) WHERE closes_trade_id IS NOT NULL AND close_kind = 'FULL';
+    `,
+  },
   // Add future migrations here in chronological order.
 ];
 
