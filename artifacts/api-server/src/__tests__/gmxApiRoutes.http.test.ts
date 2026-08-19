@@ -70,6 +70,8 @@ beforeEach(() => {
   delete process.env.DELEGATED_SIGNER_ENABLED;
   delete process.env.GMX_API_READONLY_ENABLED;
   delete process.env.GMX_API_ORDER_SUBMISSION_ENABLED;
+  // 로컬 shared env(LIVE_TEST_EXECUTION_LOCKED=false 등)에 좌우되지 않도록 제거 — 미설정=잠금(fail-closed) 기본값을 검증
+  delete process.env.LIVE_TEST_EXECUTION_LOCKED;
 });
 afterEach(() => {
   __setGmxApiRouteTransportForTests(null);

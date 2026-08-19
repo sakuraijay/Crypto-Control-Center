@@ -68,6 +68,7 @@ describe('readiness refresh 응답 snapshot (6E-10)', () => {
     vi.stubEnv('GMX_WALLET_ADDRESS', ADDR);
     vi.stubEnv('DELEGATED_SIGNER_ENABLED', '');       // signer 구조적 비활성
     vi.stubEnv('GMX_RPC_URL', 'https://rpc.invalid'); // 실제로는 fake client가 대신함
+    vi.stubEnv('LIVE_TEST_EXECUTION_LOCKED', 'true'); // 로컬 shared env(false)에 좌우되지 않도록 잠금 상태 고정
     __setRelayCanonicalClientFactoryForTests(canonicalFactorySpy as never);
     __setRelayReadonlyPublicClientFactoryForTests((() => ({
       getCode: getCodeSpy,
