@@ -295,7 +295,12 @@ export function extractOrderKeyFromReceiptLogs(
 }
 
 export type OrderResolution =
-  | { kind: 'executed' | 'cancelled' | 'frozen'; txHash: string | null; blockNumber: string | null }
+  | {
+      kind: 'executed' | 'cancelled' | 'frozen';
+      txHash: string | null;
+      blockNumber: string | null;
+      emitterAddress: string;
+    }
   | null;
 
 /**
@@ -330,5 +335,6 @@ export function classifyOrderResolutionLogs(
     kind:        found.kind,
     txHash:      found.log.transactionHash ?? null,
     blockNumber: bn == null ? null : String(bn),
+    emitterAddress: found.log.address,
   };
 }

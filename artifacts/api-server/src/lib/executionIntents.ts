@@ -293,6 +293,19 @@ export async function listRecentIntents(limit = 50): Promise<
   }
 }
 
+/** 단일 intent 권위 행 조회. 조회 실패/부재는 null로 fail-closed 처리한다. */
+export async function getExecutionIntent(id: string): Promise<
+  typeof executionIntentsTable.$inferSelect | null
+> {
+  try {
+    const rows = await db.select().from(executionIntentsTable)
+      .where(eq(executionIntentsTable.id, id)).limit(1);
+    return rows[0] ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export interface IntentReconcileResult {
   ok:            boolean;
   blockingCount: number;

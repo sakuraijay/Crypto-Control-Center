@@ -575,7 +575,10 @@ export function buildActivationInput(d: ActivationSourceDeps): ActivationGateInp
 // ── §5 실행 오케스트레이터 ────────────────────────────────────────────────────
 
 export interface OpenPositionEvidence {
+  /** GMX V2 canonical position key from PositionReader inputs. */
+  positionKey?: string;
   marketAddress: string;
+  collateralToken?: string;
   isLong: boolean;
   sizeUsd: number;
 }

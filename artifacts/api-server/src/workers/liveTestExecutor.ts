@@ -23,6 +23,7 @@ import { eq } from 'drizzle-orm';
 import {
   getSignerAddress,
   getSignerEthBalance,
+  getStoredPublicSignerAddress,
 } from '../lib/delegatedSigner';
 import {
   checkDelegationStatus,
@@ -46,6 +47,7 @@ import {
   markIntentFailedPreBroadcast,
   hasBlockingIntents,
   reconcileIntentsOnRestart,
+  getExecutionIntent,
 } from '../lib/executionIntents';
 import {
   reconcileBlockingIntentsOnchain,
@@ -58,7 +60,10 @@ import {
   validateExecutionEligibleSnapshot,
   type CostSnapshot,
 } from '../lib/costSnapshot';
-import { listUncovered, type StopCoverageMap, type StopCoverageRecord } from '../lib/stopLossPlan';
+import {
+  computeStopAcceptablePrice, computeStopTrigger, listUncovered,
+  type StopCoverageMap, type StopCoverageRecord,
+} from '../lib/stopLossPlan';
 import { isGmxLiveRelayConfigured, resolveGmxLiveRelayConfig } from '../lib/gmxLiveConfig';
 // ── 6G-2 §5 — 공식 GMX API v2 실행 경로 (legacy writeContract 경로 대체) ──────
 import { createGmxApiTransport, type GmxApiTransport } from '../lib/gmxApiTransport';
@@ -103,9 +108,19 @@ import { arbitrum } from 'viem/chains';
 import { ORDER_TYPE } from '../lib/gmxCreateOrder';
 import {
   setProtectionSubmitFn, runEmergencyClose, reconcileProtections,
-  checkStartupProtectionCoverage,
+  checkStartupProtectionCoverage, createInitialStopAfterOpenConfirmed,
+  recordInitialStopHandoffFailure,
   type ProtectionSubmitRequest, type ProtectionSubmitOutcome,
 } from './protectionExecutor';
+import {
+  isConfirmedOpenHandoffWired, setConfirmedOpenHandoff,
+  type ConfirmedOpenHandoffInput, type ConfirmedOpenHandoffResult,
+} from '../lib/gmxApiStatusReconciler';
+import { runConfirmedOpenStopHandoff } from '../lib/confirmedOpenStopHandoff';
+import { getActiveReadySession, getConfiguredMainAccount } from '../lib/ownerApprovalSession';
+import { MARKET_BY_SYMBOL_SERVER } from '../lib/gmxMarkets';
+import { EXPECTED_CANARY_SIGNER } from '../lib/canaryAllowanceInfo';
+import { bindExactProtectionPosition } from '../lib/protectionPositionBinding';
 
 /**
  * DEPRECATED — legacy SubaccountRouter 직접 주문 경로 (multicall/sendTokens/createOrder).
@@ -508,10 +523,9 @@ export async function refreshStopExecutionCapability(): Promise<StopCapabilityRe
   try { noBlockingIntents = !(await hasBlockingIntents()); } catch { /* fail-closed */ }
 
   const derived = deriveStopExecutionCapability({
-    // createInitialStopAfterOpenConfirmed()는 검증됐지만 production caller가 아직 없다.
-    // 이 값은 실제 confirmed-OPEN handoff가 구현·검증되기 전까지 false여야 하며,
-    // 그 전에는 transport가 구성되어도 Manual Canary OPEN을 절대 admit하지 않는다.
-    initialStopHandoffReady: false,
+    // 실제 finalized OPEN reconciliation seam에 production callback이 결선된 경우만 true.
+    // 별도 executionUnlocked=false이면 capability는 계속 unavailable이므로 현재 잠금은 유지된다.
+    initialStopHandoffReady: isConfirmedOpenHandoffWired(),
     schemaVerified: await verifyStopSchemaAgainstSdk(), // 설치된 SDK enum 실시간 대조
     transportConfigured:
       resolveGmxEventEmitterAddress().ok &&
@@ -778,6 +792,84 @@ export function isManualCanaryProtectionRequest(
 }
 
 /**
+ * finalized OrderExecuted → INITIAL_STOP production handoff.
+ * 외부에서 받은 market/size/trigger를 신뢰하지 않고 intent, pre-OPEN coverage,
+ * authoritative PositionReader, SDK+온체인 decimals, cost/budget/signer binding을
+ * 전부 다시 읽는다. 선행조건 소실은 stop을 UNRESOLVED로 고정하고 emergency-close
+ * state machine으로 수렴한다.
+ */
+export async function runConfirmedOpenInitialStopHandoff(
+  evidence: ConfirmedOpenHandoffInput,
+): Promise<ConfirmedOpenHandoffResult> {
+  return runConfirmedOpenStopHandoff(evidence, {
+    now: () => new Date(),
+    finalityDepth: EVIDENCE_CONFIRMATION_DEPTH,
+    expectedCollateralToken: USDC_ADDRESS,
+    postureAllowed: () => isManualCanarySignerRestoreAllowed(process.env).allowed,
+    loadIntent: getExecutionIntent,
+    marketAddressForSymbol: (symbol) => MARKET_BY_SYMBOL_SERVER.get(symbol)?.marketToken ?? null,
+    fetchPositions: fetchAuthoritativeOpenPositions,
+    loadStopPlan: async (intentId) => {
+      const coverage = await loadStopCoverage();
+      return { ok: coverage.ok, plan: coverage.ok ? (coverage.map[intentId] ?? null) : null };
+    },
+    decimalsReady: async (marketAddress) =>
+      (await resolveIndexTokenDecimalsEvidence(marketAddress)) !== null,
+    executionCostReady: (marketAddress, isLong, nowMs) => {
+      const cost = getExecutionEligibleCostEvidence(nowMs);
+      return cost.fresh && cost.evidence !== null
+        && cost.evidence.market.toLowerCase() === marketAddress.toLowerCase()
+        && cost.evidence.isLong === isLong;
+    },
+    actionBudgetReady: async (nowMs) => {
+      const canonical = getCanonicalSnapshot();
+      if (!canonical?.confirmed || canonical.isSubaccountListed !== true) return false;
+      const budget = evaluateActionBudget({
+        remaining: canonical.remaining,
+        expiresAt: canonical.expiresAt,
+        nowMs,
+        inFlightReservedActions: await countInFlightReservedActions(),
+      });
+      return budget.sufficient;
+    },
+    signerBindingReady: async () => {
+      const canonical = getCanonicalSnapshot();
+      const owner = getConfiguredMainAccount();
+      const signer = getSignerAddress();
+      let nonce: bigint | null = null;
+      try { nonce = canonical?.approvalNonce == null ? null : BigInt(canonical.approvalNonce); }
+      catch { nonce = null; }
+      if (!owner || !signer || !isSignerInitialized() || nonce === null) return false;
+      const stored = await getStoredPublicSignerAddress(EXPECTED_CANARY_SIGNER);
+      if (!stored.ok
+          || stored.address.toLowerCase() !== EXPECTED_CANARY_SIGNER.toLowerCase()
+          || signer.toLowerCase() !== stored.address.toLowerCase()) {
+        return false;
+      }
+      const session = await getActiveReadySession({
+        expectedOwner: owner,
+        expectedSubaccount: signer as `0x${string}`,
+        canonicalNonce: nonce,
+      });
+      return session !== null && session.subaccount.toLowerCase() === signer.toLowerCase();
+    },
+    createInitialStop: createInitialStopAfterOpenConfirmed,
+    recordStopFailure: recordInitialStopHandoffFailure,
+    runEmergencyClose: async (open, reason, now) => runEmergencyClose({
+      parentOpenIntentId: open.parentOpenIntentId,
+      positionKey: open.positionKey,
+      symbol: open.symbol,
+      marketAddress: open.marketAddress,
+      isLong: open.isLong,
+      fullSizeUsd: open.confirmedSizeUsd,
+      reason,
+      manualCanary: true,
+      now,
+    }),
+  });
+}
+
+/**
  * 실제 보호 주문 제출 함수 결선 — executeViaGmxApi 경로 재사용 (activation gate·
  * durable intent·단일 submit 규칙 전부 그대로 적용). LIVE 잠금이면 gate가 차단
  * (네트워크 0회). 테스트가 setProtectionSubmitFn으로 override 가능.
@@ -785,14 +877,29 @@ export function isManualCanaryProtectionRequest(
 export function wireProtectionExecution(): void {
   if (_protectionWired) return;
   _protectionWired = true;
+  setConfirmedOpenHandoff(runConfirmedOpenInitialStopHandoff);
   setProtectionSubmitFn(async (req: ProtectionSubmitRequest): Promise<ProtectionSubmitOutcome> => {
+    // Manual Canary 보호 실행은 매 시도마다 저장 공개주소까지 재검증한다.
+    // handoff 직후 DB binding이 바뀌어도 PositionReader/prepare/sign/submit에 도달하지 않는다.
+    if (req.manualCanary) {
+      if (!isManualCanaryProtectionRequest(req)) {
+        return { status: 'FAILED_PRE_BROADCAST', reason: 'Manual Canary lineage/posture 불일치 — 보호 주문 제출 0회' };
+      }
+      const stored = await getStoredPublicSignerAddress(EXPECTED_CANARY_SIGNER);
+      const signer = getSignerAddress();
+      if (!stored.ok || !signer
+          || stored.address.toLowerCase() !== EXPECTED_CANARY_SIGNER.toLowerCase()
+          || signer.toLowerCase() !== stored.address.toLowerCase()) {
+        return { status: 'FAILED_PRE_BROADCAST', reason: '저장 공개 signer binding 불일치 — 보호 주문 제출 0회' };
+      }
+    }
+
     // 포지션 증거 필수 (STOP/CLOSE 공통 — authoritative readback)
     const positions = await fetchAuthoritativeOpenPositions();
     if (positions === null) return { status: 'FAILED_PRE_BROADCAST', reason: 'authoritative 포지션 조회 실패 — 제출 0회 (fail-closed)' };
-    const pos = positions.find(
-      (p) => p.marketAddress.toLowerCase() === req.marketAddress.toLowerCase() && p.isLong === req.isLong,
-    ) ?? null;
-    if (!pos) return { status: 'FAILED_PRE_BROADCAST', reason: '대상 포지션 없음 — 보호 주문 제출 0회' };
+    const bound = bindExactProtectionPosition(req, positions, USDC_ADDRESS);
+    if (!bound.ok) return { status: 'FAILED_PRE_BROADCAST', reason: bound.reason };
+    const pos = bound.position;
 
     const mainAddress = process.env.GMX_WALLET_ADDRESS ?? '';
     const isStop = req.purpose !== 'EMERGENCY_CLOSE';
@@ -1005,7 +1112,7 @@ export async function runProtectionPass(source: 'startup' | 'periodic' = 'period
       active.ok ? active.rows.filter((r) => r.status === 'ACTIVE').map((r) => r.positionKey) : [],
     );
     const posList = positions === null ? null : positions.map((p) => ({
-      positionKey: `${p.marketAddress.toLowerCase()}:${p.isLong ? 'L' : 'S'}`,
+      positionKey: p.positionKey ?? `${p.marketAddress.toLowerCase()}:${p.isLong ? 'L' : 'S'}`,
       marketAddress: p.marketAddress, isLong: p.isLong, sizeUsd: p.sizeUsd,
     }));
     const cov = checkStartupProtectionCoverage({
@@ -1474,12 +1581,38 @@ export async function executeLiveTestOrder(params: LiveOrderParams): Promise<Liv
   // ── 2) durable execution intent — writeContract 도달 전 PREPARED 커밋 필수 ──
   const intentId = buildIntentId(params.decisionId, 'open');
 
+  // OPEN 전 서버 권위 stop 계획을 durable coverage에 함께 고정한다.
+  // OPEN 확정 후 handoff는 현재가를 재추정하지 않고 이 값을 그대로 사용한다.
+  if (params.sizingContext.stopDistanceFraction === null) {
+    return sizingFail('[LIVE TEST] stop distance 누락 — INITIAL_STOP 사전 계획 불가, OPEN 차단');
+  }
+  const preOpenStop = computeStopTrigger({
+    entryPriceUsd: params.currentPriceUsd,
+    isLong: params.isLong,
+    stopDistanceFraction: params.sizingContext.stopDistanceFraction,
+  });
+  if (!preOpenStop.ok) {
+    return sizingFail(`[LIVE TEST] INITIAL_STOP 사전 계획 실패 — ${preOpenStop.reason}`);
+  }
+  const acceptableStopPrice = computeStopAcceptablePrice(
+    preOpenStop.plan.triggerPriceUsd,
+    params.isLong,
+  );
+  if (acceptableStopPrice === null) {
+    return sizingFail('[LIVE TEST] INITIAL_STOP acceptable price 계산 실패 — OPEN 차단');
+  }
+
   // ── §8 진입 전 계약 — 제출 시도 전에 stop coverage PENDING을 원자적으로 예약.
   // 저장 실패 = OPEN 차단 (fail-closed). 제출 미도달/실패 시 아래에서 제거를
   // 시도하며, 제거 실패 시 PENDING 잔존 → 다음 OPEN이 차단된다 (역시 fail-closed).
   const covReserved = await saveStopCoverageRecord({
     positionRef: intentId, status: 'PENDING', stopOrderKey: null,
-    triggerPriceUsd: null, updatedAt: new Date().toISOString(),
+    triggerPriceUsd: preOpenStop.plan.triggerPriceUsd,
+    acceptablePriceUsd: acceptableStopPrice,
+    marketAddress: params.marketAddress,
+    symbol: params.symbol,
+    isLong: params.isLong,
+    updatedAt: new Date().toISOString(),
   });
   if (!covReserved) {
     return sizingFail('[LIVE TEST] stop coverage PENDING 예약 실패 — 신규 OPEN 차단 (fail-closed)');

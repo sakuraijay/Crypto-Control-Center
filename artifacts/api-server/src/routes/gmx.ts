@@ -503,14 +503,22 @@ function isValidAddress(addr: string): boolean {
  * fetchServerLiveTestData와 달리 캐시 없이 실조회 — CLOSE는 즉시성이 중요하다.
  */
 export async function fetchServerOpenPositions(): Promise<
-  { marketAddress: string; isLong: boolean; sizeUsd: number }[] | null
+  {
+    positionKey: string;
+    marketAddress: string;
+    collateralToken: string;
+    isLong: boolean;
+    sizeUsd: number;
+  }[] | null
 > {
   const walletAddress = process.env.GMX_WALLET_ADDRESS?.toLowerCase() ?? '';
   if (!walletAddress || !isValidAddress(walletAddress)) return null;
   const positions = await fetchFromRpc(walletAddress);
   if (positions === null) return null;
   return positions.map((p) => ({
+    positionKey: p.id,
     marketAddress: p.market,
+    collateralToken: p.collateralToken,
     isLong: p.isLong,
     sizeUsd: Number(p.sizeInUsd) / 1e30,
   }));
