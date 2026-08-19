@@ -276,6 +276,63 @@ export function GmxApiStatusCard() {
         </div>
       )}
 
+      {/* ── CLOSE 정산 증거 (Settlement Evidence) — 읽기 전용 관측 ── */}
+      {s && (
+        <div className="space-y-1" data-testid="gmx-api-settlement-evidence">
+          <p className="text-[11px] font-semibold text-muted-foreground">Settlement Evidence</p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6">
+            <Row
+              label="CLOSE 정산 reconciliation"
+              tone={
+                s.settlementReconcile === null
+                  ? 'warn'
+                  : s.settlementReconcile.incomplete
+                    ? 'error'
+                    : 'ok'
+              }
+              value={
+                s.settlementReconcile === null
+                  ? '미실행/조회 불가'
+                  : s.settlementReconcile.incomplete
+                    ? `미완료 — ${s.settlementReconcile.unsettledCount}건 중 ${s.settlementReconcile.settledNow}건 정산`
+                    : `완료 (${s.settlementReconcile.unsettledCount}건)`
+              }
+            />
+            {s.settlementReconcile !== null && s.settlementReconcile.incomplete && s.settlementReconcile.reasons.length > 0 && (
+              <Row
+                label="정산 차단 사유 (첫 번째)"
+                tone="error"
+                value={s.settlementReconcile.reasons[0]
+                  .replace(/^LIVE_SETTLEMENT_INCOMPLETE:\s*/i, '')
+                  .slice(0, 80)}
+              />
+            )}
+            <Row
+              label="미정산 LIVE 거래"
+              tone={
+                s.unsettledLiveTradeCount === null
+                  ? 'warn'
+                  : s.unsettledLiveTradeCount > 0
+                    ? 'error'
+                    : 'ok'
+              }
+              value={s.unsettledLiveTradeCount === null ? '조회 실패' : String(s.unsettledLiveTradeCount)}
+            />
+            <Row
+              label="Legacy zero-fee 거래"
+              tone={
+                s.legacyZeroFeeCount === null
+                  ? 'warn'
+                  : s.legacyZeroFeeCount > 0
+                    ? 'error'
+                    : 'ok'
+              }
+              value={s.legacyZeroFeeCount === null ? '조회 실패' : String(s.legacyZeroFeeCount)}
+            />
+          </div>
+        </div>
+      )}
+
       {s && s.blockedReasons.length > 0 && (
         <div className="px-2.5 py-1.5 rounded border border-amber-500/40 bg-amber-500/10 text-[11px] text-amber-400 space-y-0.5"
           data-testid="gmx-api-blocked-reasons">

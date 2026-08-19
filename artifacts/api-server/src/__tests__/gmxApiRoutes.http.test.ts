@@ -108,6 +108,9 @@ describe('GET /api/executor/gmx-api/status', () => {
     expect(s).toHaveProperty('blockingIntentCount');
     expect(s).toHaveProperty('approvalSessionReady');
     expect(s).toHaveProperty('manifestVersion');
+    expect(s).toHaveProperty('settlementReconcile');
+    expect(s).toHaveProperty('legacyZeroFeeCount');
+    expect(s).toHaveProperty('unsettledLiveTradeCount');
   });
 
   it('Gelato Enterprise/Gas Tank/API key 문구 0건 + PIN/Secret 미노출', async () => {

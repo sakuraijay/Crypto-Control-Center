@@ -101,6 +101,16 @@ export interface GmxApiStatusView {
   };
   blockedReasons: string[];
   notices: string[];
+  // ── CLOSE 정산 관측 (읽기 전용; null = Worker 미실행 또는 조회 실패) ──
+  settlementReconcile: {
+    ok: boolean;
+    unsettledCount: number;
+    settledNow: number;
+    incomplete: boolean;
+    reasons: string[];
+  } | null;
+  legacyZeroFeeCount: number | null;
+  unsettledLiveTradeCount: number | null;
 }
 
 export type GmxApiFetchFailureKind =

@@ -146,13 +146,23 @@ async function patchTask(
 async function resolveLinkedIntent(
   row: RelayTaskRow,
   status: 'CONFIRMED' | 'FAILED' | 'CANCELLED',
-  evidence: { txHash: string | null; orderKey: string | null; basis: string },
+  evidence: {
+    txHash: string | null;
+    orderKey: string | null;
+    basis: string;
+    receiptStatus?: 'success' | 'reverted';
+    resolutionBlock?: string | null;
+    emitterAddress?: string;
+  },
 ): Promise<void> {
   if (!row.intentId) return;
   try {
     await resolveIntentTerminal(row.intentId, status, {
       resolutionTxHash: evidence.txHash,
       orderKey: evidence.orderKey ?? undefined,
+      receiptStatus: evidence.receiptStatus,
+      resolutionBlock: evidence.resolutionBlock,
+      orderEmitterAddress: evidence.emitterAddress,
       resolutionReason: evidence.basis,
     });
   } catch { /* intent 해소 실패 → blocking 유지 (fail-closed) */ }
@@ -256,7 +266,10 @@ async function reconcileOneTask(row: RelayTaskRow, deps: GmxReconcileDeps, summa
       });
       if (t.ok) {
         summary.transitioned += 1;
-        await resolveLinkedIntent(row, 'FAILED', { txHash, orderKey: null, basis: '온체인 receipt revert' });
+        await resolveLinkedIntent(row, 'FAILED', {
+          txHash, orderKey: null, basis: '온체인 receipt revert',
+          receiptStatus: 'reverted', resolutionBlock: receipt.blockNumber == null ? null : String(receipt.blockNumber),
+        });
       }
     } else {
       // 보고와 온체인 모순 — 조사 필요
@@ -343,7 +356,14 @@ async function reconcileOneTask(row: RelayTaskRow, deps: GmxReconcileDeps, summa
       if (t.ok) {
         summary.transitioned += 1;
         await patchTask(row.id, { gmxExecutionTxHash: txHash, gmxOrderKeys: JSON.stringify([orderKey]) });
-        await resolveLinkedIntent(row, 'CONFIRMED', { txHash, orderKey, basis: '온체인 OrderExecuted' });
+        await resolveLinkedIntent(row, 'CONFIRMED', {
+          txHash,
+          orderKey,
+          basis: '온체인 OrderExecuted',
+          receiptStatus: 'success',
+          resolutionBlock: resolution.blockNumber,
+          emitterAddress: resolution.emitterAddress,
+        });
       }
     } else {
       // executed 보고인데 온체인 OrderExecuted 이벤트 없음 — 보고만으로 CONFIRMED 금지
@@ -365,7 +385,14 @@ async function reconcileOneTask(row: RelayTaskRow, deps: GmxReconcileDeps, summa
       });
       if (t.ok) {
         summary.transitioned += 1;
-        await resolveLinkedIntent(row, 'CANCELLED', { txHash, orderKey, basis: '온체인 OrderCancelled' });
+        await resolveLinkedIntent(row, 'CANCELLED', {
+          txHash,
+          orderKey,
+          basis: '온체인 OrderCancelled',
+          receiptStatus: 'success',
+          resolutionBlock: resolution.blockNumber,
+          emitterAddress: resolution.emitterAddress,
+        });
       }
     } else {
       const t = await transitionRelayTask({

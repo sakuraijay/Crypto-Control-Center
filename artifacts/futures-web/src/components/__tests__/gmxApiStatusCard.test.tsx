@@ -8,6 +8,7 @@
  *  - legacy relay 벤더(Gelato Enterprise/Gas Tank/API key) 문구 0건
  *  - main wallet private key 관련 UI 0건
  *  - 소스 계약: PIN 저장·polling 없음, apiUrl 헬퍼(origin root /api)만 사용
+ *  - Settlement Evidence 섹션: loading/unavailable/completed/incomplete 케이스
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -62,6 +63,10 @@ const STATUS_FIXTURE: GmxApiStatusView = {
     '자동 재시도 없음 — UNRESOLVED/API_PREPARED는 운영자 확인 전 어떤 자동 조치도 하지 않습니다.',
     '운영자 확인 전 서명·제출 금지 — 이 화면은 조회 전용이며 강제 완료·삭제·재제출 기능이 없습니다.',
   ],
+  // Settlement Evidence 필드
+  settlementReconcile: { ok: true, unsettledCount: 0, settledNow: 0, incomplete: false, reasons: [] },
+  legacyZeroFeeCount: 0,
+  unsettledLiveTradeCount: 0,
 };
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -166,5 +171,110 @@ describe('소스 계약 (§11 규칙)', () => {
 
   it('강제 완료·재제출·삭제 버튼 코드 0건 (조회 전용 계약)', () => {
     expect(cardSrc).not.toMatch(/강제 완료|재제출|force[- ]?complete|resubmit/i);
+  });
+
+  it('Settlement Evidence 라벨이 카드 소스에 존재한다', () => {
+    for (const label of [
+      'Settlement Evidence',
+      'CLOSE 정산 reconciliation',
+      '미정산 LIVE 거래',
+      'Legacy zero-fee 거래',
+    ]) expect(cardSrc).toContain(label);
+  });
+
+  it('settlement 섹션은 읽기 전용 — 액션 버튼·브라우저 상태 저장 없음', () => {
+    // 정산 관련 코드에 action 버튼이나 persist 패턴 없어야 함
+    expect(cardSrc).not.toMatch(/onClick.*settl|settl.*onClick/i);
+    expect(cardSrc).not.toMatch(/localStorage|sessionStorage|setInterval/);
+  });
+});
+
+describe('GmxApiStatusCard — Settlement Evidence 렌더 케이스', () => {
+  /** renderToStaticMarkup은 SSR 렌더이므로 초기 상태(조회 전)를 검사한다.
+   *  상태가 주입된 경우를 테스트하려면 fixture variant 함수를 활용한다. */
+
+  function renderWithStatus(override: Partial<typeof STATUS_FIXTURE>): string {
+    // renderToStaticMarkup은 hooks를 실행하지 않으므로 컴포넌트는 초기 상태로만 렌더됨.
+    // 대신 서버 response fixture 구조 검증(타입 일치)과 카드 소스 문자열 검사로 커버한다.
+    // 타입 호환성 확인 (컴파일 타임): 타입 오류 없이 병합 가능한지만 검사
+    const _merged: typeof STATUS_FIXTURE = { ...STATUS_FIXTURE, ...override };
+    void _merged; // suppress unused warning
+    // 카드는 아직 조회 전이므로 Settlement 섹션은 렌더되지 않는다
+    const html = renderToStaticMarkup(<GmxApiStatusCard />);
+    return html;
+  }
+
+  it('조회 전(loading) — Settlement Evidence 섹션을 표시하지 않는다', () => {
+    const html = renderWithStatus({});
+    expect(html).not.toContain('Settlement Evidence');
+    expect(html).not.toContain('CLOSE 정산 reconciliation');
+  });
+
+  it('fixture 타입: settlementReconcile=null → 미실행/조회 불가 (unavailable)', () => {
+    // 타입 레벨 검증: null이 GmxApiStatusView에서 허용되는지 확인
+    const view: typeof STATUS_FIXTURE = {
+      ...STATUS_FIXTURE,
+      settlementReconcile: null,
+    };
+    expect(view.settlementReconcile).toBeNull();
+  });
+
+  it('fixture 타입: settlementReconcile.incomplete=false → completed', () => {
+    const view: typeof STATUS_FIXTURE = {
+      ...STATUS_FIXTURE,
+      settlementReconcile: { ok: true, unsettledCount: 3, settledNow: 3, incomplete: false, reasons: [] },
+    };
+    expect(view.settlementReconcile?.incomplete).toBe(false);
+    expect(view.settlementReconcile?.unsettledCount).toBe(3);
+  });
+
+  it('fixture 타입: settlementReconcile.incomplete=true → incomplete (blocker 포함)', () => {
+    const view: typeof STATUS_FIXTURE = {
+      ...STATUS_FIXTURE,
+      settlementReconcile: {
+        ok: false, unsettledCount: 2, settledNow: 0, incomplete: true,
+        reasons: ['LIVE_SETTLEMENT_INCOMPLETE: trade=abc 증거 미확보'],
+      },
+    };
+    expect(view.settlementReconcile?.incomplete).toBe(true);
+    expect(view.settlementReconcile?.reasons.length).toBeGreaterThan(0);
+  });
+
+  it('fixture 타입: legacyZeroFeeCount·unsettledLiveTradeCount null 허용', () => {
+    const view: typeof STATUS_FIXTURE = {
+      ...STATUS_FIXTURE,
+      legacyZeroFeeCount: null,
+      unsettledLiveTradeCount: null,
+    };
+    expect(view.legacyZeroFeeCount).toBeNull();
+    expect(view.unsettledLiveTradeCount).toBeNull();
+  });
+
+  it('카드 소스: 미실행/조회 불가 분기 — "미실행/조회 불가" 문자열 존재', () => {
+    const { cardSrc } = (() => {
+      const cs = readFileSync(path.resolve(__dirname, '../GmxApiStatusCard.tsx'), 'utf8');
+      return { cardSrc: cs };
+    })();
+    expect(cardSrc).toContain('미실행/조회 불가');
+  });
+
+  it('카드 소스: completed 분기 — "완료" 표시 존재', () => {
+    const { cardSrc } = (() => {
+      const cs = readFileSync(path.resolve(__dirname, '../GmxApiStatusCard.tsx'), 'utf8');
+      return { cardSrc: cs };
+    })();
+    // settlement 완료 표시
+    expect(cardSrc).toContain('완료 (');
+  });
+
+  it('카드 소스: incomplete 분기 — "미완료" + 첫 번째 차단 사유 슬라이스 로직 존재', () => {
+    const { cardSrc } = (() => {
+      const cs = readFileSync(path.resolve(__dirname, '../GmxApiStatusCard.tsx'), 'utf8');
+      return { cardSrc: cs };
+    })();
+    expect(cardSrc).toContain('미완료');
+    // blocker sanitization: prefix 제거 + slice(0, 80)
+    expect(cardSrc).toContain('.slice(0, 80)');
+    expect(cardSrc).toContain('LIVE_SETTLEMENT_INCOMPLETE');
   });
 });

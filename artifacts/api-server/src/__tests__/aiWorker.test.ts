@@ -683,4 +683,27 @@ describe('#135 AUTO_WORKER_LIVE_ENABLED 게이트 (F22)', () => {
       infoSpy.mockRestore();
     }
   });
+
+  it('플래그 미설정이면 자동 CLOSE_ALL/REDUCE도 OPEN과 동일하게 차단된다', async () => {
+    delete process.env.AUTO_WORKER_LIVE_ENABLED;
+    const { workerManager } = await import('../workers/aiWorker');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const closeSpy = vi.spyOn(workerManager as any, 'executeCloseAllPositions');
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (workerManager as any).tryLiveTestExecution(
+        { operatingState: 'CASH', confidence: 90, executionType: 'close_all', primarySymbol: null },
+        [], { positionCount: 1 },
+        { liveTestAccumLossUsd: 0, liveTestDbOk: true },
+        { liveTestMode: true, tradingCapital: 100 }, 1,
+        { closeAllRequested: true, reduce70Requested: false },
+      );
+      expect(closeSpy).not.toHaveBeenCalled();
+      expect(infoSpy.mock.calls.some(c => String(c[0]).includes('AUTO_WORKER_LIVE_ENABLED'))).toBe(true);
+    } finally {
+      closeSpy.mockRestore();
+      infoSpy.mockRestore();
+    }
+  });
 });

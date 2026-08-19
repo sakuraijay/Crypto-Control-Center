@@ -41,6 +41,7 @@ import {
 } from '../lib/delegatedSigner';
 import {
   buildIntentId,
+  buildCloseSettlementTradeId,
   createPreparedIntent,
   markIntentSubmitted,
   markIntentUnresolved,
@@ -48,6 +49,8 @@ import {
   hasBlockingIntents,
   reconcileIntentsOnRestart,
   getExecutionIntent,
+  type NewCloseIntent,
+  type ClosePositionBinding,
 } from '../lib/executionIntents';
 import {
   reconcileBlockingIntentsOnchain,
@@ -70,6 +73,7 @@ import { createGmxApiTransport, type GmxApiTransport } from '../lib/gmxApiTransp
 import {
   executeViaGmxApi,
   buildActivationInput,
+  sizeDeltaUsdString,
   usdPriceToGmxString,
   type OpenPositionEvidence,
 } from '../lib/gmxApiExecution';
@@ -1676,6 +1680,13 @@ export interface ClosePositionParams {
   /** 운영자 설정 liveTestMode 플래그 (중앙 게이트 검증용, fail-closed) */
   liveTestMode:    boolean;
   manualCanary?:   boolean;
+  /**
+   * 호출자가 이미 권위 readback으로 확인한 exact 포지션 결속 데이터 (0030).
+   * 존재 시: 이 함수 내 재조회를 건너뛰고 제공된 exact 식별자를 사용한다.
+   * 부재 시: 함수 내에서 fetchServerOpenPositions()로 조회한다.
+   * manualCanary=true에서는 반드시 제공되어야 하며 없으면 제출이 차단된다.
+   */
+  exactPosition?: ClosePositionBinding | null;
 }
 
 export async function closeLiveTestPosition(params: ClosePositionParams): Promise<LiveOrderResult> {
@@ -1757,17 +1768,114 @@ export async function closeLiveTestPosition(params: ClosePositionParams): Promis
 
   // legacy calldata 빌드 제거됨 (6G-2 §5) — 청산 payload는 GMX API prepare가 생성한다.
 
-  // ── 2) durable execution intent — writeContract 도달 전 PREPARED 커밋 필수 ──
+  // ── 2) CLOSE 포지션 권위 readback (intent 생성 **전**) ────────────────────────
+  // 호출자가 exactPosition을 제공한 경우(manualCanary 경로) 그것을 그대로 사용한다.
+  // 제공되지 않은 경우 여기서 fetchServerOpenPositions()를 수행한다.
+  // manualCanary=true인데 exactPosition이 없으면 즉시 차단 (lower re-read 대체 금지).
+  let closeBinding: ClosePositionBinding | null = null;
+  if (params.exactPosition) {
+    closeBinding = params.exactPosition;
+  } else if (manualCanary) {
+    // manualCanary 경로에서는 반드시 호출자가 exact position을 내려보내야 한다
+    const msg = '[LIVE TEST] manualCanary CLOSE에 exactPosition 없음 — 대체 readback 금지 (fail-closed)';
+    console.error(`[LiveTestExecutor] ${msg}`);
+    await appendAuditLog({
+      id: entryId, decisionId: params.decisionId, cycleNumber: params.cycleNumber,
+      symbol: params.symbol, orderType: 'MarketDecrease', isLong: params.isLong,
+      sizeUsd: params.sizeUsd, collateralUsd: 0,
+      txHash: null, orderKey: null, status: 'FAILED', error: msg,
+      simulated: false, gateChecks: gateResult.checks, submittedAt: executedAt, confirmedAt: null,
+    });
+    return { ok: false, txHash: null, orderKey: null, simulated: false, error: msg, gateResult, executedAt };
+  } else {
+    // 일반 경로: 권위 readback 수행
+    try {
+      const positions = _openPositionsFetchOverride
+        ? await _openPositionsFetchOverride()
+        : await fetchServerOpenPositions();
+      if (positions) {
+        const matches = positions.filter((p): p is OpenPositionEvidence & {
+          positionKey: string; accountAddress: string; collateralToken: string; sizeUsd30: string;
+        } =>
+          typeof p.positionKey === 'string'
+            && typeof p.accountAddress === 'string'
+            && typeof p.collateralToken === 'string'
+            && typeof p.sizeUsd30 === 'string'
+            && p.marketAddress.toLowerCase() === params.marketAddress.toLowerCase()
+            && p.isLong === params.isLong
+            && p.accountAddress.toLowerCase() === params.mainAddress.toLowerCase()
+            && p.collateralToken.toLowerCase() === USDC_ADDRESS.toLowerCase(),
+        );
+        const matched = matches.length === 1 ? matches[0] : null;
+        if (matched) {
+          closeBinding = {
+            account:              matched.accountAddress.toLowerCase(),
+            marketAddress:        matched.marketAddress.toLowerCase(),
+            collateralToken:      matched.collateralToken.toLowerCase(),
+            positionKey:          matched.positionKey,
+            preSizeUsd:           matched.sizeUsd,
+            preSizeUsd30:         matched.sizeUsd30,
+            requestedReductionUsd: params.sizeUsd,
+            requestedReductionUsd30: sizeDeltaUsdString(params.sizeUsd),
+          };
+        }
+      }
+    } catch {
+      closeBinding = null; // 조회 실패 → 차단 (fail-closed)
+    }
+  }
+
+  // ── 3) durable execution intent + UNSETTLED 정산 거래 원자적 INSERT ───────────
+  // writeContract 도달 전 PREPARED 커밋 필수. closeBinding 없으면 intent 생성 불가.
   const intentId = buildIntentId(params.decisionId, 'close');
-  const intentCreated = await createPreparedIntent({
+  if (!closeBinding) {
+    const msg = '[LIVE TEST] 열린 포지션 확인 실패/없음 — CLOSE intent 생성 불가 (fail-closed)';
+    console.error(`[LiveTestExecutor] ${msg} (intentId=${intentId})`);
+    await appendAuditLog({
+      id: entryId, decisionId: params.decisionId, cycleNumber: params.cycleNumber,
+      symbol: params.symbol, orderType: 'MarketDecrease', isLong: params.isLong,
+      sizeUsd: params.sizeUsd, collateralUsd: 0,
+      txHash: null, orderKey: null, status: 'FAILED', error: msg,
+      simulated: false, gateChecks: gateResult.checks, submittedAt: executedAt, confirmedAt: null,
+    });
+    return { ok: false, txHash: null, orderKey: null, simulated: false, error: msg, gateResult, executedAt };
+  }
+  let exactBindingValid = false;
+  try {
+    exactBindingValid =
+      closeBinding.account.toLowerCase() === params.mainAddress.toLowerCase()
+      && closeBinding.marketAddress.toLowerCase() === params.marketAddress.toLowerCase()
+      && closeBinding.collateralToken.toLowerCase() === USDC_ADDRESS.toLowerCase()
+      && /^0x[0-9a-fA-F]{64}$/.test(closeBinding.positionKey)
+      && closeBinding.requestedReductionUsd30 === sizeDeltaUsdString(params.sizeUsd)
+      && BigInt(closeBinding.preSizeUsd30) >= BigInt(closeBinding.requestedReductionUsd30)
+      && BigInt(closeBinding.requestedReductionUsd30) > 0n;
+  } catch {
+    exactBindingValid = false;
+  }
+  if (!exactBindingValid) {
+    const msg = '[LIVE TEST] CLOSE exact position/size 결속 불일치 — intent 생성·제출 금지';
+    await appendAuditLog({
+      id: entryId, decisionId: params.decisionId, cycleNumber: params.cycleNumber,
+      symbol: params.symbol, orderType: 'MarketDecrease', isLong: params.isLong,
+      sizeUsd: params.sizeUsd, collateralUsd: 0,
+      txHash: null, orderKey: null, status: 'FAILED', error: msg,
+      simulated: false, gateChecks: gateResult.checks, submittedAt: executedAt, confirmedAt: null,
+    });
+    return { ok: false, txHash: null, orderKey: null, simulated: false, error: msg, gateResult, executedAt };
+  }
+
+  const closeIntent: NewCloseIntent = {
     id: intentId, decisionId: params.decisionId, cycleNumber: params.cycleNumber,
     symbol: params.symbol, orderType: 'close', isLong: params.isLong,
     sizeUsd: params.sizeUsd, collateralUsd: 0,
-  });
+    closeBinding,
+  };
+  const intentCreated = await createPreparedIntent(closeIntent);
   if (intentCreated !== 'created') {
     const msg = intentCreated === 'duplicate'
       ? '[LIVE TEST] 동일 intent 중복 제출 시도 (idempotency key 충돌) — 청산 차단'
-      : '[LIVE TEST] execution intent 저장 실패 — 온체인 제출 차단 (fail-closed)';
+      : '[LIVE TEST] execution intent+settlement trade 저장 실패 — 온체인 제출 차단 (fail-closed)';
     console.error(`[LiveTestExecutor] ${msg} (intentId=${intentId})`);
     await appendAuditLog({
       id: entryId, decisionId: params.decisionId, cycleNumber: params.cycleNumber,
@@ -1779,23 +1887,16 @@ export async function closeLiveTestPosition(params: ClosePositionParams): Promis
     return { ok: false, txHash: null, orderKey: null, simulated: false, error: msg, gateResult, executedAt };
   }
 
-  // ── 3) CLOSE 포지션 증거 (§5) — 조회 실패/부재 = submit 금지 (executeViaGmxApi가 차단) ──
-  let openPosition: OpenPositionEvidence | null = null;
-  try {
-    const positions = _openPositionsFetchOverride
-      ? await _openPositionsFetchOverride()
-      : await fetchServerOpenPositions();
-    if (positions) {
-      openPosition = positions.find(
-        (p) => p.marketAddress.toLowerCase() === params.marketAddress.toLowerCase()
-          && p.isLong === params.isLong,
-      ) ?? null;
-    }
-  } catch {
-    openPosition = null; // 조회 실패 → 차단 (fail-closed)
-  }
+  // ── 4) CLOSE 포지션 증거 (§5) — closeBinding에서 OpenPositionEvidence 구성 ──
+  const openPosition: OpenPositionEvidence = {
+    positionKey:     closeBinding.positionKey,
+    marketAddress:   closeBinding.marketAddress,
+    collateralToken: closeBinding.collateralToken,
+    isLong:          params.isLong,
+    sizeUsd:         closeBinding.preSizeUsd,
+  };
 
-  // ── 4) 공식 GMX API v2 흐름 (§5) — legacy writeContract 경로는 LEGACY_DISABLED로 폐기됨 ──
+  // ── 5) 공식 GMX API v2 흐름 (§5) — legacy writeContract 경로는 LEGACY_DISABLED로 폐기됨 ──
   const flowRes = await runGmxApiOrderPath({
     kind: 'CLOSE', intentId, entryId, executedAt, gateChecks: gateResult.checks,
     liveTestMode: params.liveTestMode, manualCanary,

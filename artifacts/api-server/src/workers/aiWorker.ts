@@ -28,6 +28,7 @@ import { enforceOrderSizing } from "../lib/orderSizingEnforcement";
 import { fetchPaperCostSnapshot, fetchLiveCostSnapshot, COST_DATA_UNAVAILABLE, type LiveCostFetchers } from "../lib/costSnapshot";
 import { storePaperCostSnapshot } from "../lib/paperCostCache";
 import { reconcileLiveSettlements, type ReconcileResult, type SettlementEvidenceFetcher } from "../lib/tradeSettlement";
+import { createProductionCloseSettlementFetcher } from "../lib/productionCloseSettlementFetcher";
 import { DEFAULT_STOP_DISTANCE_FRACTION, computeStopTrigger } from "../lib/stopLossPlan";
 import {
   manilaDayKey, computeReduction, GMX_MIN_POSITION_NOTIONAL_USD,
@@ -208,8 +209,8 @@ function getPaperCostFetchers(): LiveCostFetchers {
   return paperCostFetchers ?? { readonlyEnabled: process.env.GMX_API_READONLY_ENABLED === 'true' };
 }
 
-/** LIVE 정산 증거 fetcher — 기본 미구성 → LIVE_SETTLEMENT_INCOMPLETE (§5 fail-closed) */
-let settlementEvidenceFetcher: SettlementEvidenceFetcher = {};
+/** LIVE 정산 증거 fetcher — production은 read-only RPC/status/PositionReader만 사용 */
+let settlementEvidenceFetcher: SettlementEvidenceFetcher = createProductionCloseSettlementFetcher();
 export function __setSettlementEvidenceFetcherForTests(f: SettlementEvidenceFetcher): void {
   settlementEvidenceFetcher = f;
 }
@@ -1623,6 +1624,12 @@ class WorkerManager {
     try {
       const { operatingState, primarySymbol } = decision;
       const mainAddress = process.env.GMX_WALLET_ADDRESS ?? '';
+      // 자동 Worker의 모든 fund-moving LIVE action(OPEN/CLOSE/REDUCE)은 동일한
+      // 명시적 opt-in 없이는 금지. Manual Canary는 이 메서드를 거치지 않는다.
+      if (process.env.AUTO_WORKER_LIVE_ENABLED !== 'true') {
+        console.info('[AIWorker] LIVE 자동 실행 차단 — AUTO_WORKER_LIVE_ENABLED ≠ true (OPEN/CLOSE/REDUCE 공통)');
+        return;
+      }
 
       // ── 6H-2A §8 — CLOSE_ALL 실배선: authoritative 포지션 전수 청산 ─────────
       // primarySymbol과 무관하게 실행 — 위험 액션은 특정 심볼 결정에 종속되지 않는다.
@@ -1656,14 +1663,6 @@ class WorkerManager {
       if (currentPrice <= 0) return;
 
       if (operatingState === 'LONG' || operatingState === 'SHORT') {
-        // ── #135 구조적 분리 — 자동 Worker의 신규 LIVE 진입(OPEN)은
-        // AUTO_WORKER_LIVE_ENABLED가 정확히 'true'일 때만 허용 (미설정=차단, fail-closed).
-        // 청산/축소(위 위험 액션 경로)는 보호 목적이므로 게이트 대상이 아니다.
-        // Manual Canary(decisionId `manual-canary:*`)는 이 메서드를 거치지 않는 별도 경로.
-        if (process.env.AUTO_WORKER_LIVE_ENABLED !== 'true') {
-          console.info('[AIWorker] LIVE 자동 신규 진입 차단 — AUTO_WORKER_LIVE_ENABLED ≠ true (수동 Canary 분리 게이트, #135)');
-          return;
-        }
         // ── 6H-2A §5 — 정산 미완료 동안 신규 LIVE 진입 차단 (청산은 허용) ──
         const rec = this.lastSettlementReconcile;
         if (!rec || rec.incomplete) {
@@ -1885,13 +1884,8 @@ class WorkerManager {
         intentId: intent.intentId, positionKey: intent.positionKey,
         status: result.simulated ? 'PENDING' : result.ok ? 'SUBMITTED' : 'FAILED',
       });
-      if (!result.simulated && result.ok) {
-        // 제출 수락 → durable UNSETTLED CLOSE 기록 (reconciliation 대상)
-        await this.recordLiveTradeUnsettled({
-          symbol, action: 'CLOSE', isLong: intent.isLong,
-          sizeUsd: intent.closeSizeUsd, priceUsd: price, marketAddress: intent.marketAddress,
-        });
-      }
+      // CLOSE durable UNSETTLED 행은 closeLiveTestPosition이 제출 전에 intent와
+      // 원자적으로 생성한다. 여기서 legacy 행을 추가하면 미결속 중복이 생긴다.
     }
     this.lastCloseAllSummary = summarizeCloseAll(progress);
     console.warn(
@@ -1980,12 +1974,6 @@ class WorkerManager {
           orderKey: result.orderKey ?? null,
           updatedAt: new Date().toISOString(),
         };
-        if (result.ok) {
-          await this.recordLiveTradeUnsettled({
-            symbol, action: 'CLOSE', isLong: p.isLong,
-            sizeUsd: reduction.reduceSizeUsd, priceUsd: price, marketAddress: p.marketAddress,
-          });
-        }
       }
       await this.saveProfitProtectRecords(records); // 상태 갱신 실패 = 예약(UNRESOLVED) 유지 → 재제출 계속 차단
       console.warn(

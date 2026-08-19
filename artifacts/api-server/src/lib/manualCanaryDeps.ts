@@ -199,11 +199,28 @@ export function buildDefaultCanaryDeps(): ManualCanaryDeps {
       return positions === null ? null : positions.length;
     },
 
-    // close 크기 결속용 — authoritative 온체인 포지션 실측 (실패=null, fail-closed)
+    // close 결속용 — authoritative 온체인 포지션 실측, full identity 포함 (실패=null, fail-closed)
     openPositions: async () => {
       const positions = await fetchAuthoritativeOpenPositions();
-      return positions === null ? null
-        : positions.map(p => ({ marketAddress: p.marketAddress, isLong: p.isLong, sizeUsd: p.sizeUsd }));
+      if (positions === null) return null;
+      if (positions.some((p) =>
+        typeof p.positionKey !== 'string'
+        || typeof p.accountAddress !== 'string'
+        || typeof p.collateralToken !== 'string'
+        || typeof p.sizeUsd30 !== 'string'
+      )) return null;
+      return positions.map(p => ({
+        positionKey:     p.positionKey,
+        accountAddress:  p.accountAddress,
+        marketAddress:   p.marketAddress,
+        collateralToken: p.collateralToken,
+        isLong:          p.isLong,
+        sizeUsd:         p.sizeUsd,
+        sizeUsd30:       p.sizeUsd30,
+      })) as Array<{
+        positionKey: string; accountAddress: string; marketAddress: string;
+        collateralToken: string; isLong: boolean; sizeUsd: number; sizeUsd30: string;
+      }>;
     },
 
     costSnapshot: async ({ symbol, isLong, notionalUsd }) => {

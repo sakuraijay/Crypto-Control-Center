@@ -18,6 +18,7 @@ import { and, eq } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 
 import type { LiveOrderParams, LiveOrderResult } from '../workers/liveTestExecutor';
+import type { ClosePositionBinding } from './executionIntents';
 import type { CostSnapshot } from '../lib/costSnapshot';
 import { computeStopTrigger } from './stopLossPlan';
 import { manilaDayKey } from './profitProtection';
@@ -89,8 +90,19 @@ export interface ManualCanaryDeps {
   rpcHealthy(): Promise<CheckOutcome>;
   reconciliationClean(): Promise<CheckOutcome>;    // blocking intents/tasks/protections=0 + startup reconcile
   openPositionCount(): Promise<number | null>;     // authoritative readback, 실패=null
-  /** authoritative 열린 포지션 목록 (close 크기 결속용) — 조회 실패=null (fail-closed) */
-  openPositions(): Promise<Array<{ marketAddress: string; isLong: boolean; sizeUsd: number }> | null>;
+  /**
+   * authoritative 열린 포지션 목록 (close 결속용) — 조회 실패=null (fail-closed).
+   * positionKey/collateralToken은 canonical 포지션 식별에 필수 — 반드시 포함되어야 한다.
+   */
+  openPositions(): Promise<Array<{
+    positionKey: string;
+    accountAddress: string;
+    marketAddress: string;
+    collateralToken: string;
+    isLong: boolean;
+    sizeUsd: number;
+    sizeUsd30: string;
+  }> | null>;
   costSnapshot(args: { symbol: string; isLong: boolean; notionalUsd: number }): Promise<
     { ok: true; snapshot: CostSnapshot; roundTripCostUsd: number | null } | { ok: false; reason: string }>;
   /** BTC와 ETH 모두의 fresh SDK+onchain decimals 증거가 있어야 한다. */
@@ -108,6 +120,8 @@ export interface ManualCanaryDeps {
     decisionId: string; cycleNumber: number; symbol: string; marketAddress: string;
     isLong: boolean; sizeUsd: number; currentPriceUsd: number; mainAddress: string;
     accumLossUsd: number; dbOk: boolean; liveTestMode: boolean; manualCanary?: true;
+    /** 0030: exact 포지션 결속 — manualCanary 경로는 반드시 제공해야 한다 */
+    exactPosition?: ClosePositionBinding | null;
   }): Promise<LiveOrderResult>;
   runEmergencyClose(openIntentId: string): Promise<CheckOutcome>;
   // 상태 판독 (온체인 증거 기반 — API 수락만으로 성공 처리 금지)
@@ -470,11 +484,30 @@ export async function executeManualCanaryClose(deps: ManualCanaryDeps, body: {
   const price = await deps.currentPriceUsd(sym);
   if (!marketAddress || price === null) return reject('시장/가격 확인 불가 — 제출 0회');
 
-  // close 크기 = authoritative 온체인 포지션 실측 (요청/고정값 사용 금지)
+  // close 크기 및 exact 포지션 결속 = authoritative 온체인 포지션 실측 (요청/고정값 사용 금지)
+  // positionKey + collateralToken을 포함한 full identity를 lower 계층에 넘겨
+  // closeLiveTestPosition 내 re-read가 다른 포지션을 대체하지 못하도록 한다.
   const positions = await deps.openPositions();
   if (positions === null) return reject('온체인 포지션 조회 실패 — 제출 0회 (fail-closed)');
-  const pos = positions.find(p => p.marketAddress.toLowerCase() === marketAddress.toLowerCase() && p.isLong === isLong);
+  const matched = positions.filter(p =>
+    p.marketAddress.toLowerCase() === marketAddress.toLowerCase()
+    && p.isLong === isLong
+    && p.accountAddress.toLowerCase() === deps.mainAddress().toLowerCase()
+  );
+  const pos = matched.length === 1 ? matched[0] : null;
   if (!pos || !(pos.sizeUsd > 0)) return reject('결속된 canary 포지션을 온체인에서 확인 불가 — 제출 0회');
+
+  // exact 포지션 결속: positionKey와 collateralToken은 PositionReader canonical 값 (0030)
+  const exactPosition: ClosePositionBinding = {
+    account:               deps.mainAddress().toLowerCase(),
+    marketAddress:         pos.marketAddress.toLowerCase(),
+    collateralToken:       pos.collateralToken.toLowerCase(),
+    positionKey:           pos.positionKey,
+    preSizeUsd:            pos.sizeUsd,
+    preSizeUsd30:          pos.sizeUsd30,
+    requestedReductionUsd: pos.sizeUsd,  // 전량 청산 — CLOSE는 항상 full
+    requestedReductionUsd30: pos.sizeUsd30,
+  };
 
   const loss = await deps.accumCanaryLossUsd();
   if (!loss.ok || loss.lossUsd === null) return reject('누적 손실 조회 실패 — 제출 0회');
@@ -489,6 +522,7 @@ export async function executeManualCanaryClose(deps: ManualCanaryDeps, body: {
     sizeUsd: pos.sizeUsd, currentPriceUsd: price,
     mainAddress: deps.mainAddress(), accumLossUsd: loss.lossUsd, dbOk: true,
     liveTestMode: deps.liveTestMode(), manualCanary: true,
+    exactPosition,  // 0030: exact 포지션 결속 — lower re-read 대체 금지
   });
   if (result.simulated) return { ok: false, phase: 'SIMULATED', reason: 'LIVE 잠금 — 시뮬레이션', intentId: closeIntentId, failures: [] };
   if (result.ok) return { ok: true, phase: 'SUBMITTED', reason: null, intentId: closeIntentId, failures: [] };

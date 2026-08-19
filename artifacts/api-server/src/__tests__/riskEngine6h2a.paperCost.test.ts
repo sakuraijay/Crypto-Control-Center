@@ -213,6 +213,16 @@ describe('§11-7~10 LIVE 정산 게이팅', () => {
     if (!noTx.ok) expect(noTx.reason).toContain('온체인 증거');
   });
 
+  it('8b. tx hash만 위조해 직접 writer를 호출해도 CLOSE linkage/finality 없이는 거부', async () => {
+    const forged = await recordTradeSettlement({
+      tradeId: 't1', grossPnlUsd: 5, positionFeeUsd: 0.1, executionFeeUsd: 0.1,
+      priceImpactUsd: 0.1, fundingFeeUsd: 0, borrowingFeeUsd: 0,
+      evidenceTxHash: `0x${'a'.repeat(64)}`, settledAt: NOW,
+    });
+    expect(forged.ok).toBe(false);
+    if (!forged.ok) expect(forged.reason).toContain('linkage/finality');
+  });
+
   it('9. 부분 actual fee(fetchEvidence null) → UNSETTLED 유지 + incomplete', async () => {
     // DB 경로는 실제 모킹 없이 접근 시 실패 → reconcile은 예외 없이 incomplete 반환해야 함
     const r = await reconcileLiveSettlements({ fetchEvidence: async () => null });

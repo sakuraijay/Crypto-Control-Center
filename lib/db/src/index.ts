@@ -661,6 +661,44 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         ON trades (closes_trade_id) WHERE closes_trade_id IS NOT NULL AND close_kind = 'FULL';
     `,
   },
+  {
+    name: "0030_close_position_binding",
+    sql: `
+      -- CLOSE 결산 결속 필드 — trades 테이블 (additive, 기존 행 무영향)
+      ALTER TABLE trades ADD COLUMN IF NOT EXISTS settlement_account          text;
+      ALTER TABLE trades ADD COLUMN IF NOT EXISTS settlement_market_address   text;
+      ALTER TABLE trades ADD COLUMN IF NOT EXISTS settlement_collateral_token text;
+      ALTER TABLE trades ADD COLUMN IF NOT EXISTS settlement_position_key     text;
+      ALTER TABLE trades ADD COLUMN IF NOT EXISTS pre_close_size_usd          numeric(18,4);
+      ALTER TABLE trades ADD COLUMN IF NOT EXISTS pre_close_size_usd_30       text;
+      ALTER TABLE trades ADD COLUMN IF NOT EXISTS requested_reduction_usd     numeric(18,4);
+      ALTER TABLE trades ADD COLUMN IF NOT EXISTS requested_reduction_usd_30  text;
+      ALTER TABLE trades ADD COLUMN IF NOT EXISTS settlement_intent_id        text;
+      ALTER TABLE trades ADD COLUMN IF NOT EXISTS settlement_relay_task_id    text;
+      ALTER TABLE trades ADD COLUMN IF NOT EXISTS settlement_order_key         text;
+      ALTER TABLE trades ADD COLUMN IF NOT EXISTS settlement_emitter_address   text;
+      ALTER TABLE trades ADD COLUMN IF NOT EXISTS settlement_block_number      text;
+      ALTER TABLE trades ADD COLUMN IF NOT EXISTS settlement_latest_block      text;
+      ALTER TABLE trades ADD COLUMN IF NOT EXISTS settlement_confirmations     integer;
+      ALTER TABLE trades ADD COLUMN IF NOT EXISTS settlement_evidence_basis    text;
+      ALTER TABLE trades ADD COLUMN IF NOT EXISTS settlement_evidence_at       timestamptz;
+      CREATE UNIQUE INDEX IF NOT EXISTS trades_settlement_intent_uq
+        ON trades (settlement_intent_id) WHERE settlement_intent_id IS NOT NULL;
+
+      -- CLOSE 포지션 결속 필드 — execution_intents 테이블 (additive, 기존 행 무영향)
+      ALTER TABLE execution_intents ADD COLUMN IF NOT EXISTS close_account                  text;
+      ALTER TABLE execution_intents ADD COLUMN IF NOT EXISTS close_market_address           text;
+      ALTER TABLE execution_intents ADD COLUMN IF NOT EXISTS close_collateral_token         text;
+      ALTER TABLE execution_intents ADD COLUMN IF NOT EXISTS close_position_key             text;
+      ALTER TABLE execution_intents ADD COLUMN IF NOT EXISTS close_pre_size_usd             numeric(18,4);
+      ALTER TABLE execution_intents ADD COLUMN IF NOT EXISTS close_pre_size_usd_30          text;
+      ALTER TABLE execution_intents ADD COLUMN IF NOT EXISTS close_requested_reduction_usd  numeric(18,4);
+      ALTER TABLE execution_intents ADD COLUMN IF NOT EXISTS close_requested_reduction_usd_30 text;
+      ALTER TABLE execution_intents ADD COLUMN IF NOT EXISTS close_settlement_trade_id      text;
+      CREATE UNIQUE INDEX IF NOT EXISTS execution_intents_close_settlement_trade_uq
+        ON execution_intents (close_settlement_trade_id) WHERE close_settlement_trade_id IS NOT NULL;
+    `,
+  },
   // Add future migrations here in chronological order.
 ];
 

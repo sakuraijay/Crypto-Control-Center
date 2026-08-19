@@ -48,6 +48,44 @@ export const executionIntentsTable = pgTable("execution_intents", {
    * 계속 reconcile할 수 있다 (허용 emitter 집합 = 현재 설정값 ∪ 이 값).
    */
   orderEmitterAddress: text("order_emitter_address"),
+  // ── CLOSE 포지션 결속 필드 (migration 0030 — additive, nullable) ─────────────
+  /**
+   * CLOSE intent에서 결속된 계정 주소 (소문자 정규화).
+   * prepare/sign/submit 전에 커밋되어야 하며, OPEN intent는 null.
+   */
+  closeAccount:            text("close_account"),
+  /**
+   * CLOSE intent에서 결속된 GMX 마켓 토큰 주소 (소문자 정규화).
+   * executeViaGmxApi의 market 일치 검증의 권위 소스.
+   */
+  closeMarketAddress:      text("close_market_address"),
+  /**
+   * CLOSE intent에서 결속된 담보 토큰 주소 (소문자 정규화).
+   * canonical position key 재구성의 exact 담보 토큰.
+   */
+  closeCollateralToken:    text("close_collateral_token"),
+  /**
+   * keccak256(account || market || collateralToken || isLong) — CLOSE 대상 GMX V2 canonical position key.
+   * PositionReader 반환값에서 직접 추출되며, 대체 포지션 선택을 구조적으로 차단한다.
+   */
+  closePositionKey:        text("close_position_key"),
+  /**
+   * CLOSE 제출 직전 온체인에서 확인된 포지션 크기 (USD, numeric string).
+   */
+  closePreSizeUsd:         numeric("close_pre_size_usd", { precision: 18, scale: 4 }),
+  /** PositionReader의 exact sizeInUsd uint256 (1e30 정수 문자열). */
+  closePreSizeUsd30:       text("close_pre_size_usd_30"),
+  /**
+   * 이 CLOSE 주문이 요청한 감소 크기 (USD, numeric string).
+   */
+  closeRequestedReductionUsd: numeric("close_requested_reduction_usd", { precision: 18, scale: 4 }),
+  /** prepare 요청의 exact sizeDeltaUsd uint256 (1e30 정수 문자열). */
+  closeRequestedReductionUsd30: text("close_requested_reduction_usd_30"),
+  /**
+   * 이 intent와 연결된 미결산 CLOSE 거래 행 id.
+   * settlement:close:<intentId> 형식으로 결정적 생성 — 재시작 후에도 동일 행 참조.
+   */
+  closeSettlementTradeId:  text("close_settlement_trade_id"),
   createdAt:     timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt:     timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });

@@ -505,10 +505,12 @@ function isValidAddress(addr: string): boolean {
 export async function fetchServerOpenPositions(): Promise<
   {
     positionKey: string;
+    accountAddress: string;
     marketAddress: string;
     collateralToken: string;
     isLong: boolean;
     sizeUsd: number;
+    sizeUsd30: string;
   }[] | null
 > {
   const walletAddress = process.env.GMX_WALLET_ADDRESS?.toLowerCase() ?? '';
@@ -517,10 +519,12 @@ export async function fetchServerOpenPositions(): Promise<
   if (positions === null) return null;
   return positions.map((p) => ({
     positionKey: p.id,
+    accountAddress: p.account,
     marketAddress: p.market,
     collateralToken: p.collateralToken,
     isLong: p.isLong,
     sizeUsd: Number(p.sizeInUsd) / 1e30,
+    sizeUsd30: p.sizeInUsd,
   }));
 }
 

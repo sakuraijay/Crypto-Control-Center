@@ -24,6 +24,8 @@ import { reconcileOnRestart, loadEmergencyStopFromDb, startPeriodicIntentReconci
 import { resolveStaticDir, assertStaticDirReady, attachStaticServing } from "./lib/staticSite";
 import { markReady } from "./lib/readiness";
 import { reconcileGmxApiTasksOnStartup, startPeriodicGmxApiReconciliation } from "./lib/gmxApiStatusReconciler";
+import { reconcileLiveSettlements } from "./lib/tradeSettlement";
+import { createProductionCloseSettlementFetcher } from "./lib/productionCloseSettlementFetcher";
 import { reconcileGmxPrepareStagesOnStartup } from "./lib/gmxApiPrepareStartup";
 import { runStartupRelayReconciliation, isRelayReadonlyNetworkEnabled } from "./lib/relayActivationStatus";
 import { countBlockingIntentsOrNull } from "./lib/executionIntents";
@@ -116,7 +118,19 @@ export function startServer({ httpServer, setDelegate, isShuttingDown }: Startup
       // 6G-2 §9 — GMX API v2 relay task reconciliation (readonly 플래그 꺼짐 = 외부 호출 0회)
       // 6G-3 §4 — prepare 단계 durable 상태 reconciliation (GMX POST·서명 0회)
       reconcileGmxPrepareStagesOnStartup().catch(() => {});
-      reconcileGmxApiTasksOnStartup().catch(() => {});
+      reconcileGmxApiTasksOnStartup()
+        .then(() => reconcileLiveSettlements(createProductionCloseSettlementFetcher()))
+        .then((s) => {
+          if (s.unsettledCount !== 0) {
+            logger.info({
+              unsettled: s.unsettledCount,
+              settledNow: s.settledNow,
+              incomplete: s.incomplete,
+              firstReason: s.reasons[0] ?? null,
+            }, "Startup CLOSE settlement reconciliation completed");
+          }
+        })
+        .catch(() => { /* read-only startup reconciliation 실패 — UNSETTLED 유지 */ });
       startPeriodicGmxApiReconciliation();
 
       // Relay startup reconciliation (5단계 §8) — migration 이후 순서 고정.

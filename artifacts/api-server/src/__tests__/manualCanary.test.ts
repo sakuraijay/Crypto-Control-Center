@@ -49,7 +49,15 @@ function makeDeps(overrides: Partial<ManualCanaryDeps> = {}) {
     reconciliationClean: async () => OK,
     openPositionCount: async () => 0,
     openPositions: async () => [
-      { marketAddress: '0x47c031236e19d024b42f8ae6780e44a573170703', isLong: true, sizeUsd: 18.4 },
+      {
+        positionKey: '0xposkey1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab',
+        accountAddress: '0x46c27887c5ec5e36b2a21e1ec1bc69e7a593950e',
+        marketAddress: '0x47c031236e19d024b42f8ae6780e44a573170703',
+        collateralToken: '0xaf88d065e77c8cc2239327c5edb3a432268e5831',
+        isLong: true,
+        sizeUsd: 18.4,
+        sizeUsd30: '18400000000000000000000000000000',
+      },
     ],
     costSnapshot: async () => ({ ok: true, snapshot: {} as never, roundTripCostUsd: 0.25 }),
     canaryDecimalsReady: async () => OK,
@@ -455,12 +463,17 @@ describe('durable/CAS fail-closed 보강 (리뷰 후속)', () => {
       closeIntentId: null, emergencyCloseUsed: false, openedAt: NOW.toISOString(),
       open: { symbol: 'BTC', direction: 'LONG', collateralUsd: 10, leverage: 2, requestedSizeUsd: 20 },
     }));
-    // ① 정상 — 실측 18.4 사용
+    // ① 정상 — 실측 18.4 사용 + exactPosition이 closePosition에 전달됨
     const a = makeDeps();
     mkDaily(a.state);
     const ra = await executeManualCanaryClose(a.deps, { confirm: CANARY_CONFIRM_CLOSE });
     expect(ra.phase).toBe('SUBMITTED');
-    expect((a.closePosition.mock.calls[0][0] as { sizeUsd: number }).sizeUsd).toBeCloseTo(18.4, 6);
+    const closeCall = a.closePosition.mock.calls[0][0] as { sizeUsd: number; exactPosition?: { positionKey: string; collateralToken: string } };
+    expect(closeCall.sizeUsd).toBeCloseTo(18.4, 6);
+    // 0030: exactPosition이 하위 계층에 전달되어야 한다
+    expect(closeCall.exactPosition).toBeDefined();
+    expect(closeCall.exactPosition?.positionKey).toBe('0xposkey1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab');
+    expect(closeCall.exactPosition?.collateralToken).toBe('0xaf88d065e77c8cc2239327c5edb3a432268e5831');
     // ② 조회 실패(null) → 거부
     const b = makeDeps({ openPositions: async () => null });
     mkDaily(b.state);
@@ -469,7 +482,15 @@ describe('durable/CAS fail-closed 보강 (리뷰 후속)', () => {
     expect(b.closePosition).not.toHaveBeenCalled();
     // ③ 결속 방향 불일치(SHORT만 존재) → 거부
     const c = makeDeps({ openPositions: async () => [
-      { marketAddress: '0x47c031236e19d024b42f8ae6780e44a573170703', isLong: false, sizeUsd: 18.4 },
+      {
+        positionKey: '0xposkey1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab',
+        accountAddress: '0x46c27887c5ec5e36b2a21e1ec1bc69e7a593950e',
+        marketAddress: '0x47c031236e19d024b42f8ae6780e44a573170703',
+        collateralToken: '0xaf88d065e77c8cc2239327c5edb3a432268e5831',
+        isLong: false,
+        sizeUsd: 18.4,
+        sizeUsd30: '18400000000000000000000000000000',
+      },
     ] });
     mkDaily(c.state);
     const rc = await executeManualCanaryClose(c.deps, { confirm: CANARY_CONFIRM_CLOSE });
