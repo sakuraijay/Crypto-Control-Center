@@ -11,6 +11,7 @@ import { validateEnvAgainstManifest } from './gmxDeploymentManifest';
 export interface ActivationGateInput {
   env: NodeJS.ProcessEnv;
   liveTestMode: boolean;            // server liveTestMode=true
+  manualCanary?: boolean;           // PAPER/manual-only GMX API v2 경로
   signerInitialized: boolean;
   canonicalAuthorized: boolean;     // AUTHORIZED 또는 유효한 첫-action approval(READY 세션+canonical nonce 일치)
   emergencyStopActive: boolean;
@@ -36,7 +37,11 @@ export function evaluateActivationGate(input: ActivationGateInput): ActivationGa
   const missing: string[] = [];
   const env = input.env;
 
-  if (env.WORKER_ENGINE_MODE !== 'LIVE') missing.push("WORKER_ENGINE_MODE !== 'LIVE'");
+  const manualPaper =
+    input.manualCanary === true &&
+    env.WORKER_ENGINE_MODE === 'PAPER' &&
+    env.AUTO_WORKER_LIVE_ENABLED !== 'true';
+  if (!manualPaper && env.WORKER_ENGINE_MODE !== 'LIVE') missing.push("WORKER_ENGINE_MODE !== 'LIVE'");
   if (env.LIVE_TEST_EXECUTION_LOCKED !== 'false') missing.push("LIVE_TEST_EXECUTION_LOCKED !== 'false'");
   if (!input.liveTestMode) missing.push('server liveTestMode 아님');
   if (env.DELEGATED_SIGNER_ENABLED !== 'true') missing.push("DELEGATED_SIGNER_ENABLED !== 'true'");
@@ -50,16 +55,20 @@ export function evaluateActivationGate(input: ActivationGateInput): ActivationGa
   if (input.activeRevokeInProgress && input.kind !== 'REVOKE') missing.push('revoke 진행 중 — 신규 주문 차단');
   if (!input.freshLiveFeeQuote) missing.push('fresh live fee quote 없음 (mock 불인정)');
   if (input.currentChainId !== 42161) missing.push(`chainId ${input.currentChainId ?? '미확인'} ≠ 42161`);
-  if (!input.gmxConfigOk) missing.push('GMX public config 미해결');
+  if (!manualPaper && !input.gmxConfigOk) missing.push('GMX public config 미해결');
   // 6C §6 — env 주소가 감사된 manifest와 다르면 LIVE fail-closed (자동 대입 없음)
-  const manifest = validateEnvAgainstManifest(env);
-  if (!manifest.ok) for (const m of manifest.mismatches) missing.push(`manifest 대조 실패: ${m}`);
+  if (!manualPaper) {
+    const manifest = validateEnvAgainstManifest(env);
+    if (!manifest.ok) for (const m of manifest.mismatches) missing.push(`manifest 대조 실패: ${m}`);
+  }
   // 6C §7 — 배포 코드 존재 검증(저장 스냅샷)이 ok가 아니면 차단
   if (!input.deploymentVerified) missing.push('배포 코드 존재 검증 미완료/실패 (readiness refresh 필요)');
-  if (env.GMX_RELAY_READONLY_NETWORK_ENABLED !== 'true') missing.push("GMX_RELAY_READONLY_NETWORK_ENABLED !== 'true'");
-  if (env.GMX_RELAY_SUBMISSION_ENABLED !== 'true') missing.push("GMX_RELAY_SUBMISSION_ENABLED !== 'true'");
-  if (env.GMX_RELAY_NETWORK_ENABLED !== 'true') missing.push("GMX_RELAY_NETWORK_ENABLED !== 'true'");
-  if ((env.GMX_RELAY_MODE ?? '').toUpperCase() !== 'LIVE') missing.push("GMX_RELAY_MODE !== 'LIVE'");
+  if (!manualPaper) {
+    if (env.GMX_RELAY_READONLY_NETWORK_ENABLED !== 'true') missing.push("GMX_RELAY_READONLY_NETWORK_ENABLED !== 'true'");
+    if (env.GMX_RELAY_SUBMISSION_ENABLED !== 'true') missing.push("GMX_RELAY_SUBMISSION_ENABLED !== 'true'");
+    if (env.GMX_RELAY_NETWORK_ENABLED !== 'true') missing.push("GMX_RELAY_NETWORK_ENABLED !== 'true'");
+    if ((env.GMX_RELAY_MODE ?? '').toUpperCase() !== 'LIVE') missing.push("GMX_RELAY_MODE !== 'LIVE'");
+  }
   // 6G-1 §4 — 공식 GMX API v2 플래그 (정확히 "true"만 인정)
   if (env.GMX_API_READONLY_ENABLED !== 'true') missing.push("GMX_API_READONLY_ENABLED !== 'true'");
   if (env.GMX_API_ORDER_SUBMISSION_ENABLED !== 'true') missing.push("GMX_API_ORDER_SUBMISSION_ENABLED !== 'true'");

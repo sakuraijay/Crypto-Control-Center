@@ -28,13 +28,13 @@ const DAY = manilaDayKey(NOW);
 /** in-memory worker_state + 전부 정상인 기본 fake deps */
 function makeDeps(overrides: Partial<ManualCanaryDeps> = {}) {
   const state = new Map<string, string>();
-  const executeOrder = vi.fn(async () => ({
+  const executeOrder = vi.fn<ManualCanaryDeps['executeOrder']>(async (_params) => ({
     ok: true, txHash: '0xabc', orderKey: '0xkey', simulated: false, executedAt: NOW.toISOString(),
   }));
-  const closePosition = vi.fn(async () => ({
+  const closePosition = vi.fn<ManualCanaryDeps['closePosition']>(async (_params) => ({
     ok: true, txHash: '0xdef', orderKey: '0xkey2', simulated: false, executedAt: NOW.toISOString(),
   }));
-  const runEmergencyClose = vi.fn(async () => OK);
+  const runEmergencyClose = vi.fn<ManualCanaryDeps['runEmergencyClose']>(async (_reason) => OK);
   let idSeq = 0;
   const deps: ManualCanaryDeps = {
     now: () => NOW,
@@ -60,8 +60,8 @@ function makeDeps(overrides: Partial<ManualCanaryDeps> = {}) {
     mainAddress: () => '0x46c27887c5ec5e36b2a21e1ec1bc69e7a593950e',
     liveTestMode: () => true,
     envSubmissionState: () => ({ locked: false, submissionEnabled: true, detail: '활성' }),
-    executeOrder: executeOrder as unknown as ManualCanaryDeps['executeOrder'],
-    closePosition: closePosition as unknown as ManualCanaryDeps['closePosition'],
+    executeOrder,
+    closePosition,
     runEmergencyClose,
     intentStatus: async () => ({ status: 'CONFIRMED', orderKey: '0xkey', txHash: '0xabc' }),
     initialStopStatus: async () => ({ status: 'ACTIVE', orderKey: '0xstop' }),
@@ -99,11 +99,11 @@ describe('#135 Manual Controlled Canary — 장애주입', () => {
     expect(r.intentId).toBe(`intent:open:manual-canary:${DAY}`);
     expect(executeOrder).toHaveBeenCalledTimes(1);
     // 하드캡이 executeOrder 인자에 그대로 반영
-    const params = executeOrder.mock.calls[0]![0] as Record<string, unknown>;
+    const params = executeOrder.mock.calls[0]![0];
     expect(params.collateralUsd).toBe(10);
     expect(params.leverage).toBe(2);
     expect(params.sizeUsd).toBe(20);
-    const sizing = params.sizingContext as Record<string, unknown>;
+    const sizing = params.sizingContext!;
     expect(sizing.canaryActive).toBe(true);
     expect(sizing.operatorApprovedNotionalCapUsd).toBe(20);
   });
@@ -345,6 +345,7 @@ describe('#135 Manual Controlled Canary — 장애주입', () => {
     const contested = makeDeps({ casState: async () => false });
     const r = await claimDailyBudget(contested.deps, 'intent:c');
     expect(r.ok).toBe(false);
+    if (r.ok) throw new Error('expected fail-closed claim rejection');
     expect(r.reason).toContain('fail-closed');
   });
 

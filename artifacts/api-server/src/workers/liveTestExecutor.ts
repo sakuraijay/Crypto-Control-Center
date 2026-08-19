@@ -35,6 +35,7 @@ import {
 } from '../lib/liveTestGate';
 import {
   isDelegatedSignerEnabled,
+  isManualCanarySignerRestoreAllowed,
   isSignerInitialized,
 } from '../lib/delegatedSigner';
 import {
@@ -52,7 +53,11 @@ import {
 } from '../lib/intentReconciler';
 import { resolveGmxEventEmitterAddress } from '../lib/gmxOrderEvents';
 import { enforceOrderSizing } from '../lib/orderSizingEnforcement';
-import { validateExecutionEligibleSnapshot, type CostSnapshot } from '../lib/costSnapshot';
+import {
+  getExecutionEligibleCostEvidence,
+  validateExecutionEligibleSnapshot,
+  type CostSnapshot,
+} from '../lib/costSnapshot';
 import { listUncovered, type StopCoverageMap, type StopCoverageRecord } from '../lib/stopLossPlan';
 import { isGmxLiveRelayConfigured, resolveGmxLiveRelayConfig } from '../lib/gmxLiveConfig';
 // ── 6G-2 §5 — 공식 GMX API v2 실행 경로 (legacy writeContract 경로 대체) ──────
@@ -497,16 +502,19 @@ export async function refreshStopExecutionCapability(): Promise<StopCapabilityRe
     nowMs: Date.now(),
     inFlightReservedActions: await countInFlightReservedActions(),
   });
-  // fee freshness — 저장 스냅샷 (10분 활성 게이트와 동일 소스; 실행 직전 30초
-  // 재확인은 executeLiveTestOrder의 validateExecutionEligibleSnapshot이 담당)
-  const fe = getFeeEstimateState();
-  const freshFeeQuote = fe.attempted && fe.ok && fe.atMs !== null && Date.now() - fe.atMs < 10 * 60_000;
+  const manualCanary = isManualCanarySignerRestoreAllowed(process.env).allowed;
+  const freshFeeQuote = getExecutionEligibleCostEvidence(Date.now()).fresh;
   let noBlockingIntents = false;
   try { noBlockingIntents = !(await hasBlockingIntents()); } catch { /* fail-closed */ }
 
   const derived = deriveStopExecutionCapability({
     schemaVerified: await verifyStopSchemaAgainstSdk(), // 설치된 SDK enum 실시간 대조
-    transportConfigured: isGmxLiveRelayConfigured() && resolveGmxEventEmitterAddress().ok,
+    transportConfigured:
+      resolveGmxEventEmitterAddress().ok &&
+      (manualCanary
+        ? process.env.GMX_API_READONLY_ENABLED === 'true'
+          && process.env.GMX_API_ORDER_SUBMISSION_ENABLED === 'true'
+        : isGmxLiveRelayConfigured()),
     signerReady: isDelegatedSignerEnabled() && isSignerInitialized(),
     durableStoreOk,
     reconciliationOk: _reconciled && noBlockingIntents,
@@ -540,6 +548,7 @@ export async function refreshStopExecutionCapability(): Promise<StopCapabilityRe
 async function buildExecutorActivationInput(args: {
   kind: 'OPEN' | 'CLOSE';
   liveTestMode: boolean;
+  manualCanary: boolean;
   dbOk: boolean;
   rpcOk: boolean;
   /** 이 실행 흐름이 방금 생성한 자기 intent id — blocking count에서 제외 */
@@ -558,14 +567,15 @@ async function buildExecutorActivationInput(args: {
   try { blockingIntentCount = await countBlockingIntentsOrNull(args.selfIntentId ?? null); } catch { blockingIntentCount = null; }
   let revoke = true; // 조회 실패 = revoke 진행 중으로 간주 (차단)
   try { revoke = (await getActiveRevokeSession()) !== null; } catch { revoke = true; }
-  // fee freshness — 저장된 fee estimate 스냅샷만 (10분 이내, mock 불인정)
   const fe = getFeeEstimateState();
-  const freshLiveFeeQuote =
-    fe.attempted && fe.ok && fe.atMs !== null && Date.now() - fe.atMs < 10 * 60_000;
+  const freshLiveFeeQuote = args.manualCanary
+    ? getExecutionEligibleCostEvidence(Date.now()).fresh
+    : fe.attempted && fe.ok && fe.atMs !== null && Date.now() - fe.atMs < 10 * 60_000;
 
   return buildActivationInput({
     env: process.env,
     liveTestMode: args.liveTestMode,
+    manualCanary: args.manualCanary,
     emergencyStopActive: _emergencyStop,
     // 6G-3 §4 — prepare 단계 startup reconciliation 실패 시 LIVE 경로 전체 차단
     reconciled: _reconciled && getGmxPrepareStartupState().attempted && getGmxPrepareStartupState().ok,
@@ -593,6 +603,7 @@ async function runGmxApiOrderPath(args: {
   executedAt: string;
   gateChecks: Record<string, boolean>;
   liveTestMode: boolean;
+  manualCanary: boolean;
   dbOk: boolean;
   rpcOk: boolean;
   decisionId: string;
@@ -622,7 +633,8 @@ async function runGmxApiOrderPath(args: {
 
   const transport = getGmxApiTransport();
   const activation = await buildExecutorActivationInput({
-    kind: args.kind, liveTestMode: args.liveTestMode, dbOk: args.dbOk, rpcOk: args.rpcOk,
+    kind: args.kind, liveTestMode: args.liveTestMode, manualCanary: args.manualCanary,
+    dbOk: args.dbOk, rpcOk: args.rpcOk,
     selfIntentId: args.intentId,
   });
   const canonicalNonce = (() => {
@@ -642,7 +654,8 @@ async function runGmxApiOrderPath(args: {
     intentId: args.intentId,
     activation,
     reevaluateActivation: () => buildExecutorActivationInput({
-      kind: args.kind, liveTestMode: args.liveTestMode, dbOk: args.dbOk, rpcOk: args.rpcOk,
+      kind: args.kind, liveTestMode: args.liveTestMode, manualCanary: args.manualCanary,
+      dbOk: args.dbOk, rpcOk: args.rpcOk,
       selfIntentId: args.intentId,
     }),
     openPosition: args.openPosition,
@@ -810,7 +823,7 @@ export function wireProtectionExecution(): void {
     }
 
     const activationArgs = {
-      kind: 'CLOSE' as const, liveTestMode: true,
+      kind: 'CLOSE' as const, liveTestMode: true, manualCanary: false,
       dbOk: true, rpcOk: Boolean(process.env.GMX_RPC_URL),
       selfIntentId: null,
     };
@@ -1228,11 +1241,14 @@ export async function executeLiveTestOrder(params: LiveOrderParams): Promise<Liv
   }
 
   const rpcUrl = process.env.GMX_RPC_URL ?? '';
+  const manualCanary =
+    process.env.WORKER_ENGINE_MODE === 'PAPER' &&
+    params.sizingContext?.canaryActive === true;
 
-  // ── 6H-2A §7 — stop 실행 능력 게이트: trigger 주문 제출 경로가 없으면
-  // 실제(비시뮬) OPEN 자체를 차단한다. "오픈 후 stop 심기" 낙관 처리 금지.
+  // ── 6H-2A §7 — 구현된 Stop-Loss 경로의 현재 capability/evidence가
+  // 충족되지 않으면 실제(비시뮬) OPEN 자체를 차단한다.
   if (!isStopExecutionAvailable()) {
-    const msg = `[LIVE TEST] ${STOP_EXECUTION_UNAVAILABLE}: stop(trigger) 주문 제출 경로 미구현 — 실제 OPEN 차단 (fail-closed)`;
+    const msg = `[LIVE TEST] ${STOP_EXECUTION_UNAVAILABLE}: Stop-Loss 경로의 현재 capability/evidence 미충족 — 실제 OPEN 차단 (fail-closed)`;
     await appendAuditLog({
       id: entryId, decisionId: params.decisionId, cycleNumber: params.cycleNumber,
       symbol: params.symbol, orderType: 'MarketIncrease', isLong: params.isLong,
@@ -1246,6 +1262,7 @@ export async function executeLiveTestOrder(params: LiveOrderParams): Promise<Liv
   // ── 중앙 실행 게이트 (writeContract에 도달하기 전 최종 fail-closed 검증) ──
   const central = checkCentralExecutionGate({
     workerEngineMode:       process.env.WORKER_ENGINE_MODE,
+    manualCanary,
     liveTestMode:           params.liveTestMode,
     delegatedSignerEnabled: isDelegatedSignerEnabled(),
     emergencyStop:          _emergencyStop,
@@ -1477,7 +1494,8 @@ export async function executeLiveTestOrder(params: LiveOrderParams): Promise<Liv
   // legacy SubaccountRouter writeContract 경로는 LEGACY_DISABLED로 폐기됨.
   const flowRes = await runGmxApiOrderPath({
     kind: 'OPEN', intentId, entryId, executedAt, gateChecks: gateResult.checks,
-    liveTestMode: params.liveTestMode, dbOk: params.dbOk, rpcOk: Boolean(rpcUrl),
+    liveTestMode: params.liveTestMode, manualCanary,
+    dbOk: params.dbOk, rpcOk: Boolean(rpcUrl),
     decisionId: params.decisionId, cycleNumber: params.cycleNumber, symbol: params.symbol,
     marketAddress: params.marketAddress, isLong: params.isLong,
     sizeUsd: finalSizeUsd, collateralUsd: finalCollateralUsd,
@@ -1510,6 +1528,7 @@ export interface ClosePositionParams {
   dbOk:            boolean;
   /** 운영자 설정 liveTestMode 플래그 (중앙 게이트 검증용, fail-closed) */
   liveTestMode:    boolean;
+  manualCanary?:   boolean;
 }
 
 export async function closeLiveTestPosition(params: ClosePositionParams): Promise<LiveOrderResult> {
@@ -1531,10 +1550,14 @@ export async function closeLiveTestPosition(params: ClosePositionParams): Promis
   }
 
   const rpcUrl = process.env.GMX_RPC_URL ?? '';
+  const manualCanary =
+    process.env.WORKER_ENGINE_MODE === 'PAPER' &&
+    params.manualCanary === true;
 
   // ── 중앙 실행 게이트 (writeContract에 도달하기 전 최종 fail-closed 검증) ──
   const central = checkCentralExecutionGate({
     workerEngineMode:       process.env.WORKER_ENGINE_MODE,
+    manualCanary,
     liveTestMode:           params.liveTestMode,
     delegatedSignerEnabled: isDelegatedSignerEnabled(),
     emergencyStop:          _emergencyStop,
@@ -1628,7 +1651,8 @@ export async function closeLiveTestPosition(params: ClosePositionParams): Promis
   // ── 4) 공식 GMX API v2 흐름 (§5) — legacy writeContract 경로는 LEGACY_DISABLED로 폐기됨 ──
   const flowRes = await runGmxApiOrderPath({
     kind: 'CLOSE', intentId, entryId, executedAt, gateChecks: gateResult.checks,
-    liveTestMode: params.liveTestMode, dbOk: params.dbOk, rpcOk: Boolean(rpcUrl),
+    liveTestMode: params.liveTestMode, manualCanary,
+    dbOk: params.dbOk, rpcOk: Boolean(rpcUrl),
     decisionId: params.decisionId, cycleNumber: params.cycleNumber, symbol: params.symbol,
     marketAddress: params.marketAddress, isLong: params.isLong,
     sizeUsd: params.sizeUsd, collateralUsd: 0,

@@ -54,7 +54,7 @@ router.post("/data/trades/batch", async (req, res) => {
       price: number | string; pnl?: number | string; strategy?: string;
       timestamp: string; closeTime?: number;
     }>;
-    if (!Array.isArray(rows) || rows.length === 0) { res.json({ count: 0 }); return; }
+    if (!Array.isArray(rows) || rows.length === 0) return res.json({ count: 0 });
 
     // ── Task #111 — 서버 권위 격리 (batch도 단건 POST와 동일한 fail-closed 가드) ──
     try {
@@ -118,9 +118,9 @@ router.post("/data/trades/batch", async (req, res) => {
       })))
       .onConflictDoNothing();
 
-    res.json({ count: rows.length });
+    return res.json({ count: rows.length });
   } catch (err) {
-    res.status(500).json({ error: "Failed to batch-insert trades" });
+    return res.status(500).json({ error: "Failed to batch-insert trades" });
   }
 });
 
@@ -297,9 +297,9 @@ router.post("/data/trades", async (req, res) => {
           collateralUsd:    collateralUsdV,
         },
       });
-    res.json({ ok: true });
+    return res.json({ ok: true });
   } catch (err) {
-    res.status(500).json({ error: "Failed to save trade" });
+    return res.status(500).json({ error: "Failed to save trade" });
   }
 });
 
@@ -324,9 +324,9 @@ router.delete("/data/trades", async (_req, res) => {
       });
     }
     await db.delete(tradesTable);
-    res.json({ ok: true });
+    return res.json({ ok: true });
   } catch (err) {
-    res.status(500).json({ error: "Failed to clear trades" });
+    return res.status(500).json({ error: "Failed to clear trades" });
   }
 });
 

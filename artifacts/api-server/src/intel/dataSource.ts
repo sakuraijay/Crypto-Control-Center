@@ -177,6 +177,8 @@ export function createProductionFetchers(deps: {
   getCachedPrices: () => { tokenSymbol: string; priceUsd: number; updatedAt?: number }[] | null;
   getCachedChange24h: () => Record<string, number> | null;
   fetchGmxCandles: (symbol: string, period: string, countBack: number) => Promise<{ prices: number[][] } | null>;
+  /** 실행 적격 비용 조회는 hardened GMX API transport를 주입한다. 미제공 시 기존 readonly fetch 사용. */
+  fetchOfficialJson?: (path: string) => Promise<{ ok: true; data: unknown } | { ok: false; rateLimited: boolean }>;
   /** gmx.ts candle 계측의 last429AtMs — candle 429를 backoff에 연결 (미제공 시 미연동) */
   getLast429AtMs?: () => number | null;
   nowFn?: () => number;
@@ -330,15 +332,21 @@ export function createProductionFetchers(deps: {
           flight = (async () => {
             stats.tickersRequests++;
             try {
-              // read-only GET — method/body 없음 (주문·서명 경로 아님)
-              const r = await fetch(`${GMX_OFFICIAL_API}${COST_TICKERS_PATH}`, {
-                signal: AbortSignal.timeout(10_000), redirect: 'error',
-              });
+              const r = deps.fetchOfficialJson
+                ? await deps.fetchOfficialJson(COST_TICKERS_PATH)
+                : await (async () => {
+                    const response = await fetch(`${GMX_OFFICIAL_API}${COST_TICKERS_PATH}`, {
+                      signal: AbortSignal.timeout(10_000), redirect: 'error',
+                    });
+                    return response.ok
+                      ? { ok: true as const, data: await response.json() }
+                      : { ok: false as const, rateLimited: response.status === 429 };
+                  })();
               if (!r.ok) {
-                if (r.status === 429) backoffUntilMs = now() + RATE_LIMIT_BACKOFF_MS;
+                if (r.rateLimited) backoffUntilMs = now() + RATE_LIMIT_BACKOFF_MS;
                 return; // 실패 = 캐시 미갱신 (만료 캐시는 아래에서 null 처리)
               }
-              const { entries, rejects } = parseMarketsTickers(await r.json());
+              const { entries, rejects } = parseMarketsTickers(r.data);
               stats.tickersSchemaRejects += rejects.count;
               if (rejects.count > 0) {
                 console.warn(`[Intel] tickers 계약 위반 record ${rejects.count}건 폐기: ${rejects.reasons.join(' | ')}`);
@@ -372,15 +380,21 @@ export function createProductionFetchers(deps: {
           flight = (async () => {
             stats.impactInfoRequests++;
             try {
-              // read-only GET — method/body 없음 (주문·서명 경로 아님)
-              const r = await fetch(`${GMX_OFFICIAL_API}${IMPACT_INFO_PATH}`, {
-                signal: AbortSignal.timeout(10_000), redirect: 'error',
-              });
+              const r = deps.fetchOfficialJson
+                ? await deps.fetchOfficialJson(IMPACT_INFO_PATH)
+                : await (async () => {
+                    const response = await fetch(`${GMX_OFFICIAL_API}${IMPACT_INFO_PATH}`, {
+                      signal: AbortSignal.timeout(10_000), redirect: 'error',
+                    });
+                    return response.ok
+                      ? { ok: true as const, data: await response.json() }
+                      : { ok: false as const, rateLimited: response.status === 429 };
+                  })();
               if (!r.ok) {
-                if (r.status === 429) backoffUntilMs = now() + RATE_LIMIT_BACKOFF_MS;
+                if (r.rateLimited) backoffUntilMs = now() + RATE_LIMIT_BACKOFF_MS;
                 return; // 실패 = 캐시 미갱신 (만료 캐시는 아래에서 null 처리)
               }
-              const { entries, rejects } = parseMarketsImpactInfo(await r.json());
+              const { entries, rejects } = parseMarketsImpactInfo(r.data);
               stats.impactInfoSchemaRejects += rejects.count;
               if (rejects.count > 0) {
                 console.warn(`[Intel] markets/info impact 계약 위반 record ${rejects.count}건 폐기: ${rejects.reasons.join(' | ')}`);

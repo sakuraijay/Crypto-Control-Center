@@ -40,6 +40,8 @@ export function isLiveTestExecutionLocked(): boolean {
 export interface CentralGateInput {
   /** process.env.WORKER_ENGINE_MODE — 정확히 'LIVE'만 허용 */
   workerEngineMode:        string | undefined;
+  /** Manual Canary만 PAPER를 허용하는 좁은 예외. 자동 Worker에는 절대 true로 전달하지 않는다. */
+  manualCanary?:           boolean;
   /** 운영자 설정 liveTestMode 플래그 */
   liveTestMode:            boolean;
   /** DELEGATED_SIGNER_ENABLED === 'true' 여부 */
@@ -76,8 +78,12 @@ export function checkCentralExecutionGate(input: CentralGateInput): GateResult {
   const checks: Record<string, boolean> = {};
 
   checks.engineModeLive = input.workerEngineMode === 'LIVE';
-  if (!checks.engineModeLive) {
-    return { allowed: false, reason: '[CENTRAL GATE] WORKER_ENGINE_MODE가 LIVE가 아님 — 실제 실행 차단', checks };
+  checks.manualCanaryPaper =
+    input.manualCanary === true &&
+    input.workerEngineMode === 'PAPER' &&
+    process.env.AUTO_WORKER_LIVE_ENABLED !== 'true';
+  if (!checks.engineModeLive && !checks.manualCanaryPaper) {
+    return { allowed: false, reason: '[CENTRAL GATE] WORKER_ENGINE_MODE가 LIVE가 아니며 PAPER Manual Canary 조건도 아님 — 실제 실행 차단', checks };
   }
 
   checks.liveTestMode = input.liveTestMode === true;
@@ -124,7 +130,7 @@ export function checkCentralExecutionGate(input: CentralGateInput): GateResult {
 
   // 최신 delegated trading relay 구성(SubaccountGelatoRelayRouter/DataStore/EventEmitter,
   // chainId 42161)이 완비되지 않으면 LIVE 실행 금지. legacy 라우터 설정만으로는 열리지 않는다.
-  checks.relayConfigured = input.relayConfigured === true;
+  checks.relayConfigured = input.manualCanary === true || input.relayConfigured === true;
   if (!checks.relayConfigured) {
     return { allowed: false, reason: '[CENTRAL GATE] 최신 GMX relay 구성 미완비 (SubaccountGelatoRelayRouter/DataStore/EventEmitter/chainId) — 실제 실행 차단 (fail-closed)', checks };
   }

@@ -68,8 +68,13 @@ export type CanaryFetchResult<T> =
 async function parse<T>(res: Response): Promise<CanaryFetchResult<T>> {
   if (res.status === 401 || res.status === 403) return { kind: 'auth' };
   const body = await readApiJson(res);
-  if (body.kind !== 'json') return { kind: 'error', message: body.kind === 'mismatch' ? 'API 라우팅 오류' : '응답 파싱 실패' };
-  return { kind: 'ok', data: body.data as T };
+  if (body.kind !== 'json') {
+    return {
+      kind: 'error',
+      message: body.kind === 'route_mismatch' ? 'API 라우팅 오류' : '응답 파싱 실패',
+    };
+  }
+  return { kind: 'ok', data: body.json as T };
 }
 
 export async function fetchCanaryStatus(pin: string): Promise<CanaryFetchResult<CanaryStatusResponse>> {

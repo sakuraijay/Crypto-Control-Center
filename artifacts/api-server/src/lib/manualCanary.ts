@@ -106,7 +106,7 @@ export interface ManualCanaryDeps {
   closePosition(params: {
     decisionId: string; cycleNumber: number; symbol: string; marketAddress: string;
     isLong: boolean; sizeUsd: number; currentPriceUsd: number; mainAddress: string;
-    accumLossUsd: number; dbOk: boolean; liveTestMode: boolean;
+    accumLossUsd: number; dbOk: boolean; liveTestMode: boolean; manualCanary?: true;
   }): Promise<LiveOrderResult>;
   runEmergencyClose(openIntentId: string): Promise<CheckOutcome>;
   // 상태 판독 (온체인 증거 기반 — API 수락만으로 성공 처리 금지)
@@ -480,7 +480,7 @@ export async function executeManualCanaryClose(deps: ManualCanaryDeps, body: {
     decisionId, cycleNumber: 0, symbol: sym, marketAddress, isLong,
     sizeUsd: pos.sizeUsd, currentPriceUsd: price,
     mainAddress: deps.mainAddress(), accumLossUsd: loss.lossUsd, dbOk: true,
-    liveTestMode: deps.liveTestMode(),
+    liveTestMode: deps.liveTestMode(), manualCanary: true,
   });
   if (result.simulated) return { ok: false, phase: 'SIMULATED', reason: 'LIVE 잠금 — 시뮬레이션', intentId: closeIntentId, failures: [] };
   if (result.ok) return { ok: true, phase: 'SUBMITTED', reason: null, intentId: closeIntentId, failures: [] };

@@ -336,6 +336,24 @@ describe('6단계 §6 — activation 게이트에 read-only 플래그 요구', (
     expect(r.networkEligible).toBe(false);
     expect(r.missing.some((m) => m.includes('GMX_RELAY_READONLY_NETWORK_ENABLED'))).toBe(true);
   });
+
+  it('PAPER Manual Canary는 AUTO Worker 비활성 + GMX API 플래그만 요구하고 legacy relay 플래그를 요구하지 않는다', () => {
+    const env = {
+      WORKER_ENGINE_MODE: 'PAPER',
+      AUTO_WORKER_LIVE_ENABLED: 'false',
+      LIVE_TEST_EXECUTION_LOCKED: 'false',
+      DELEGATED_SIGNER_ENABLED: 'true',
+      GMX_API_READONLY_ENABLED: 'true',
+      GMX_API_ORDER_SUBMISSION_ENABLED: 'true',
+    };
+    const input = fullInput(env);
+    input.manualCanary = true;
+    input.gmxConfigOk = false;
+    expect(evaluateActivationGate(input)).toMatchObject({ networkEligible: true, missing: [] });
+
+    input.env.AUTO_WORKER_LIVE_ENABLED = 'true';
+    expect(evaluateActivationGate(input).networkEligible).toBe(false);
+  });
 });
 
 // ═════════════════════════════════════════════════════════════════════════════

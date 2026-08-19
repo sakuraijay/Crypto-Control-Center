@@ -235,7 +235,7 @@ describe('6I-3 §2 실측 비용 breakdown', () => {
     const r = createGmxCostReader({ client: null });
     expect(await r.readMarketFeeParams(ADDR(1), NOW)).toBeNull();
     const r2 = createGmxCostReader({
-      client: { readDataStoreUint: async () => 1n, getGasPrice: async () => 1n },
+      client: { readContract: async () => 1n, getGasPrice: async () => 1n } as never,
     });
     expect(await r2.readMarketFeeParams('not-an-address', NOW)).toBeNull();
   });

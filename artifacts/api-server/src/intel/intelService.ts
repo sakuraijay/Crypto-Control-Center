@@ -124,6 +124,7 @@ async function buildCandidateCost(args: { marketToken: string; symbol: string; i
   });
 }
 
+
 /** intel 사이클 최소 간격 — 매매 사이클(60s)보다 낮은 빈도 (외부 조회 절약) */
 export const INTEL_CYCLE_MIN_INTERVAL_MS = 5 * 60_000;
 /** enrichment 실행 간격 */

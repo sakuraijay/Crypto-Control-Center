@@ -535,6 +535,7 @@ export function buildOrderSubmitBody(
 export interface ActivationSourceDeps {
   env: NodeJS.ProcessEnv;
   liveTestMode: boolean;
+  manualCanary?: boolean;
   emergencyStopActive: boolean;
   reconciled: boolean;
   canonicalAuthorized: boolean;
@@ -553,6 +554,7 @@ export function buildActivationInput(d: ActivationSourceDeps): ActivationGateInp
   return {
     env: d.env,
     liveTestMode: d.liveTestMode,
+    manualCanary: d.manualCanary,
     signerInitialized: isSignerInitialized(),
     // §6 — canonical verified + approval 미만료·잔여 액션 확인까지 묶어서 결속
     canonicalAuthorized: d.canonicalAuthorized && d.approvalRemainingOk,

@@ -74,7 +74,7 @@ const FRESH_BINDING = {
   estExitCostUsd: 0.7,
   fundingRatePerHourFraction: 0.00001,
   borrowingRatePerHourFraction: 0.00002,
-  costFetchedAt: Date.now(),
+  costFetchedAt: new Date().toISOString(),
 };
 
 const BASE_OPEN = {
@@ -484,7 +484,8 @@ describe('manageServerPaperTick', () => {
     const first = manageServerPaperTick(() => null);
     await manageServerPaperTick(() => null); // 재진입 — no-op이어야 함
     expect(selectCalls).toBe(1);
-    resolveSelect?.();
+    const releaseSelect = resolveSelect as unknown as (() => void) | null;
+    releaseSelect?.();
     await first;
   });
 });

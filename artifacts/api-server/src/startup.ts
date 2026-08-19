@@ -13,7 +13,13 @@ import { logger } from "./lib/logger";
 import { runMigrations } from "@workspace/db";
 import { startRpcHealthMonitor } from "./workers/internalExecutor";
 import { workerManager } from "./workers/aiWorker";
-import { initializeDelegatedSigner, isDelegatedSignerEnabled, isSignerStorageAccessAllowed } from "./lib/delegatedSigner";
+import {
+  initializeDelegatedSigner,
+  isDelegatedSignerEnabled,
+  isManualCanarySignerRestoreAllowed,
+  isSignerStorageAccessAllowed,
+  restoreExistingManualCanarySigner,
+} from "./lib/delegatedSigner";
 import { reconcileOnRestart, loadEmergencyStopFromDb, startPeriodicIntentReconciliation } from "./workers/liveTestExecutor";
 import { resolveStaticDir, assertStaticDirReady, attachStaticServing } from "./lib/staticSite";
 import { markReady } from "./lib/readiness";
@@ -83,12 +89,20 @@ export function startServer({ httpServer, setDelegate, isShuttingDown }: Startup
       // mode LIVE+enabled+PAPER 아님+LIVE 잠금 해제 전부 충족 시에만 시작.
       // (initializeDelegatedSigner 내부에도 동일 게이트가 있어 이중 방어)
       const signerStorage = isSignerStorageAccessAllowed(process.env);
+      const manualCanaryRestore = isManualCanarySignerRestoreAllowed(process.env);
       if (isDelegatedSignerEnabled() && signerStorage.allowed) {
         initializeDelegatedSigner()
           .then(() => logger.info("Delegated signer initialized"))
           .catch((e: Error) => logger.warn({ err: e }, "Delegated signer init failed (fail-closed — signer 비활성 유지)"));
+      } else if (isDelegatedSignerEnabled() && manualCanaryRestore.allowed) {
+        restoreExistingManualCanarySigner()
+          .then(() => logger.info("Manual Canary existing signer restored"))
+          .catch((e: Error) => logger.warn({ err: e }, "Manual Canary signer restore failed (fail-closed — signer 비활성 유지)"));
       } else if (isDelegatedSignerEnabled()) {
-        logger.info(`Delegated signer init skipped — signer 저장소 접근 조건 미충족: ${signerStorage.missing.join(', ')}`);
+        logger.info(
+          `Delegated signer init skipped — legacy=${signerStorage.missing.join(', ')}; ` +
+          `manualCanary=${manualCanaryRestore.missing.join(', ')}`,
+        );
       } else {
         logger.info("Delegated signer disabled (DELEGATED_SIGNER_ENABLED != 'true')");
       }

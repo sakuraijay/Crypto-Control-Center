@@ -29,6 +29,7 @@ import { privateKeyToAccount } from 'viem/accounts';
 import { arbitrum } from 'viem/chains';
 import { db, workerStateTable } from '@workspace/db';
 import { eq } from 'drizzle-orm';
+import { EXPECTED_CANARY_SIGNER } from './canaryAllowanceInfo';
 
 // ── worker_state 키 ────────────────────────────────────────────────────────────
 const SIGNER_KEY_STATE_KEY = 'delegatedSignerEncryptedKey';
@@ -89,6 +90,27 @@ export function isSignerStorageAccessAllowed(env: NodeJS.ProcessEnv = process.en
   if (env.DELEGATED_SIGNER_ENABLED !== 'true') missing.push("DELEGATED_SIGNER_ENABLED !== 'true'");
   if (env.WORKER_ENGINE_MODE !== 'LIVE') missing.push('PAPER 모드 (WORKER_ENGINE_MODE ≠ LIVE)');
   if (env.LIVE_TEST_EXECUTION_LOCKED !== 'false') missing.push('LIVE 잠금 활성 (LIVE_TEST_EXECUTION_LOCKED ≠ false)');
+  return { allowed: missing.length === 0, missing };
+}
+
+/**
+ * Manual Controlled Canary 전용 restore-existing 게이트.
+ *
+ * legacy Gelato relay 플래그나 WORKER_ENGINE_MODE=LIVE에 의존하지 않는다.
+ * 자동 Worker LIVE는 반드시 비활성이고, PAPER + 수동 GMX API 제출만 명시적으로
+ * 열린 상태에서 기존 signer 복원만 허용한다.
+ */
+export function isManualCanarySignerRestoreAllowed(env: NodeJS.ProcessEnv = process.env): {
+  allowed: boolean;
+  missing: string[];
+} {
+  const missing: string[] = [];
+  if (env.GMX_API_READONLY_ENABLED !== 'true') missing.push("GMX_API_READONLY_ENABLED !== 'true'");
+  if (env.GMX_API_ORDER_SUBMISSION_ENABLED !== 'true') missing.push("GMX_API_ORDER_SUBMISSION_ENABLED !== 'true'");
+  if (env.DELEGATED_SIGNER_ENABLED !== 'true') missing.push("DELEGATED_SIGNER_ENABLED !== 'true'");
+  if (env.WORKER_ENGINE_MODE !== 'PAPER') missing.push("WORKER_ENGINE_MODE !== 'PAPER'");
+  if (env.AUTO_WORKER_LIVE_ENABLED === 'true') missing.push('AUTO_WORKER_LIVE_ENABLED=true — 자동 LIVE Worker 활성');
+  if (env.LIVE_TEST_EXECUTION_LOCKED !== 'false') missing.push("LIVE_TEST_EXECUTION_LOCKED !== 'false'");
   return { allowed: missing.length === 0, missing };
 }
 
@@ -512,6 +534,65 @@ export async function initializeDelegatedSigner(): Promise<void> {
       return;
     }
   }
+}
+
+/**
+ * Manual Canary startup 전용: DB에 이미 존재하는 signer만 복원한다.
+ *
+ * 보장:
+ *  - absent/db_error/corrupt/복호화 실패/주소 불일치 전부 fail-closed
+ *  - 키 생성·DB insert/update·공개주소 backfill/overwrite 0회
+ *  - 복원한 개인키의 파생 주소 = 저장 공개주소 = EXPECTED_CANARY_SIGNER 삼중 결속
+ */
+export async function restoreExistingManualCanarySigner(
+  env: NodeJS.ProcessEnv = process.env,
+  expectedAddress: string = EXPECTED_CANARY_SIGNER,
+): Promise<void> {
+  const gate = isManualCanarySignerRestoreAllowed(env);
+  if (!gate.allowed) {
+    throw new Error(`[DelegatedSigner] manual Canary restore 차단 (fail-closed): ${gate.missing.join(', ')}`);
+  }
+  if (_initialized) {
+    if (_signerAddress?.toLowerCase() !== expectedAddress.toLowerCase()) {
+      throw new Error('[DelegatedSigner] 초기화된 signer가 예상 canary signer와 불일치 (fail-closed)');
+    }
+    return;
+  }
+
+  getSessionSecret();
+  const loaded = await loadFromDb();
+  if (loaded.status === 'absent') {
+    throw new Error('[DelegatedSigner] 기존 signer 없음 — manual Canary restore는 신규 생성 금지 (fail-closed)');
+  }
+  if (loaded.status === 'db_error') {
+    throw new Error('[DelegatedSigner] DB 조회 실패 — manual Canary restore 차단 (fail-closed)');
+  }
+  if (loaded.status === 'corrupt') {
+    throw new Error('[DelegatedSigner] signer 데이터 손상 — manual Canary restore 차단 (fail-closed)');
+  }
+
+  let privateKeyHex: string;
+  let derivedAddress: string;
+  try {
+    privateKeyHex = decryptPrivateKey(loaded.encryptedKey);
+    derivedAddress = privateKeyToAccount(`0x${privateKeyHex}` as `0x${string}`).address;
+  } catch {
+    throw new Error('[DelegatedSigner] 기존 signer 복호화 실패 — 신규 생성·overwrite 금지 (fail-closed)');
+  }
+  if (derivedAddress.toLowerCase() !== expectedAddress.toLowerCase()) {
+    throw new Error('[DelegatedSigner] 복원 signer 주소가 예상 canary signer와 불일치 (fail-closed)');
+  }
+  const storedPublic = await getStoredPublicSignerAddress(expectedAddress, env);
+  if (!storedPublic.ok || storedPublic.address.toLowerCase() !== derivedAddress.toLowerCase()) {
+    throw new Error('[DelegatedSigner] 저장 공개주소와 복원 signer 주소 결속 실패 (fail-closed)');
+  }
+
+  // 모든 검증이 끝난 뒤에만 런타임 상태를 한 번에 공개한다.
+  _privateKeyHex = privateKeyHex;
+  _signerAddress = derivedAddress;
+  _createdAt = loaded.createdAt;
+  _initialized = true;
+  console.info(`[DelegatedSigner] manual Canary 기존 signer 복원 — address=${_signerAddress} createdAt=${_createdAt}`);
 }
 
 /** 공개 주소 반환. initializeDelegatedSigner() 이전에 호출하면 null. */

@@ -27,10 +27,15 @@ import {
 } from '../lib/relayActivationStatus';
 import { getActiveRevokeSession } from '../lib/revokeSession';
 import { resolveGmxLiveRelayConfig } from '../lib/gmxLiveConfig';
-import { isDelegatedSignerEnabled, isSignerInitialized } from '../lib/delegatedSigner';
+import {
+  isDelegatedSignerEnabled,
+  isManualCanarySignerRestoreAllowed,
+  isSignerInitialized,
+} from '../lib/delegatedSigner';
 import { isLiveTestExecutionLocked } from '../lib/liveTestGate';
 import {
   isEmergencyStopActive, isReconciled, isStopExecutionAvailable, getStopExecutionCapability,
+  refreshStopExecutionCapability,
   STOP_EXECUTION_UNAVAILABLE, getProtectionReconState, countInFlightReservedActions,
   verifyPriceConversionGolden,
 } from '../workers/liveTestExecutor';
@@ -41,7 +46,7 @@ import {
   evaluateActionBudget, ACTION_BUDGET_VERSION, AUTO_CANCEL_BUDGET_POLICY,
   worstCasePathName, RECOMMENDED_OWNER_APPROVAL_COUNT,
 } from '../lib/actionBudget';
-import { EXECUTION_ELIGIBLE_MAX_AGE_MS } from '../lib/costSnapshot';
+import { EXECUTION_ELIGIBLE_MAX_AGE_MS, getExecutionEligibleCostEvidence } from '../lib/costSnapshot';
 import { listUncovered } from '../lib/stopLossPlan';
 import { loadStopCoverage } from '../workers/liveTestExecutor';
 import { getWorkerStatus } from '../workers/aiWorker';
@@ -51,6 +56,8 @@ import { reconcileGmxApiTasks, makeProductionDeps } from '../lib/gmxApiStatusRec
 import { getGmxPrepareStartupState } from '../lib/gmxApiPrepareStartup';
 import { sanitizeRpcError } from '../lib/rpcErrorSanitize';
 import { getLastPreflight, isPreflightPassedFresh, runGmxLivePreflight, PREFLIGHT_TTL_MS } from '../lib/gmxLivePreflight';
+import { refreshManualCanaryReadonlyEvidence } from '../lib/manualCanaryDeps';
+import { MARKET_BY_SYMBOL_SERVER } from '../lib/gmxMarkets';
 
 const router = Router();
 
@@ -61,6 +68,22 @@ export function __setGmxApiRouteTransportForTests(t: GmxApiTransport | null): vo
 }
 function transport(): GmxApiTransport {
   return injectedTransport ?? createGmxApiTransport(process.env);
+}
+
+export function deriveCanaryDecimalsReadiness(entries: Array<{
+  tokenAddress: string;
+  stale: boolean;
+  source: string;
+}>): Record<'BTC' | 'ETH', boolean> {
+  const freshValidated = new Set(
+    entries
+      .filter((entry) => !entry.stale && entry.source === 'sdk+onchain')
+      .map((entry) => entry.tokenAddress.toLowerCase()),
+  );
+  return {
+    BTC: freshValidated.has(MARKET_BY_SYMBOL_SERVER.get('BTC')!.indexToken.toLowerCase()),
+    ETH: freshValidated.has(MARKET_BY_SYMBOL_SERVER.get('ETH')!.indexToken.toLowerCase()),
+  };
 }
 
 /** GMX API v2 상태 스냅샷 조립 — 외부 호출 0회 (DB read + 메모리 getter만) */
@@ -156,6 +179,8 @@ async function buildGmxApiStatusSnapshot() {
   const emergencyStop = isEmergencyStopActive();
   const reconciled = isReconciled();
   const gmxConfigOk = resolveGmxLiveRelayConfig().ok;
+  const manualCanaryPosture = isManualCanarySignerRestoreAllowed(env);
+  const executionCostEvidence = getExecutionEligibleCostEvidence(Date.now());
   const feeEstimateFresh =
     fe.attempted && fe.ok && fe.atMs !== null && Date.now() - fe.atMs < 10 * 60_000;
 
@@ -180,9 +205,11 @@ async function buildGmxApiStatusSnapshot() {
   if ((unresolvedCount ?? 1) > 0) blockedReasons.push(`UNRESOLVED task ${unresolvedCount ?? '조회 실패'} — 자동 재시도 없음`);
 
   // ── 6H-2A §10 — Canary 적격 조건 확장 (전부 fail-closed) ────────────────────
-  // stop 실행 능력 (§7) — trigger 주문 경로 미구현 = 부적격
+  // stop 실행 능력 (§7) — 경로 구현 여부가 아니라 현재 capability/evidence로 판정
   const stopExecutionAvailable = isStopExecutionAvailable();
-  if (!stopExecutionAvailable) blockedReasons.push(`${STOP_EXECUTION_UNAVAILABLE} — stop(trigger) 주문 제출 경로 미구현`);
+  if (!stopExecutionAvailable) {
+    blockedReasons.push(`${STOP_EXECUTION_UNAVAILABLE} — Stop-Loss 경로 구현됨, 현재 capability/evidence 미충족`);
+  }
   // stop 미확보 포지션 0건 필수 (§7)
   let uncoveredStopCount: number | null = null;
   try {
@@ -252,6 +279,10 @@ async function buildGmxApiStatusSnapshot() {
   // ── 6H-2C §10 — decimals·증거 수집기·reconciliation 관측값 (저장 스냅샷만) ──
   const protectionRecon = getProtectionReconState();
   const decimalsCache = getDecimalsCacheSnapshot(Date.now());
+  const canaryDecimals = deriveCanaryDecimalsReadiness(decimalsCache);
+  const decimalsReady = canaryDecimals.BTC && canaryDecimals.ETH;
+  if (!decimalsReady) blockedReasons.push('BTC/ETH index token decimals 증거 미확보/만료');
+  if (!executionCostEvidence.fresh) blockedReasons.push('30초 실행 적격 비용 스냅샷 미확보/만료');
   const evidenceCollector = {
     emitterConfigured: resolveGmxEventEmitterAddress().ok,
     rpcConfigured: Boolean(process.env.GMX_RPC_URL?.trim()),
@@ -275,7 +306,7 @@ async function buildGmxApiStatusSnapshot() {
     !liveLocked && !emergencyStop && reconciled && dbOk &&
     canonicalAuthorized && approvalRemainingOk && approvalSessionReady === true &&
     blockingIntents === 0 && (unresolvedCount ?? 1) === 0 && revoke === false &&
-    gmxConfigOk && dv.ok && feeEstimateFresh &&
+    manualCanaryPosture.allowed && dv.ok && executionCostEvidence.fresh && decimalsReady &&
     stopExecutionAvailable && uncoveredStopCount === 0 && settlementComplete &&
     legacyZeroFeeCount === 0 && unsettledLiveTradeCount === 0 &&
     blockingProtectionCount === 0 && (staleStopCount ?? 1) === 0 && actionBudget.sufficient &&
@@ -310,6 +341,8 @@ async function buildGmxApiStatusSnapshot() {
     deploymentVerification: { attempted: dv.attempted, ok: dv.ok, atMs: dv.atMs, manifestVersion: dv.manifestVersion },
     manifestVersion: GMX_DEPLOYMENT_MANIFEST.manifestVersion,
     feeEstimate: { attempted: fe.attempted, ok: fe.ok, atMs: fe.atMs, fresh: feeEstimateFresh },
+    manualCanaryPosture,
+    executionEligibleCostEvidence: executionCostEvidence,
     lastReadinessRefresh: {
       attempted: lastRefresh.attempted, atMs: lastRefresh.atMs,
       ok: lastRefresh.ok, basis: lastRefresh.basis,
@@ -346,6 +379,7 @@ async function buildGmxApiStatusSnapshot() {
     },
     // ── 6H-2C §10 — decimals·증거 수집기·reconciliation 관측값 ────────────────
     decimalsCache,
+    canaryDecimals,
     priceConversionVerified,
     evidenceCollector,
     protectionReconciliation: {
@@ -421,11 +455,21 @@ router.post('/executor/gmx-api/readiness/refresh', requireOperatorAuth, async (_
         ? { transport: injectedTransport, onchain: null, nowMs: () => Date.now() }
         : makeProductionDeps(),
     );
+    const canaryEvidence = t.readonlyEnabled
+      ? await refreshManualCanaryReadonlyEvidence()
+      : { decimals: {}, costs: {} };
+    const stopCapability = await refreshStopExecutionCapability();
 
     const snapshot = await buildGmxApiStatusSnapshot();
     return res.json({
       ok: true,
-      refresh: { readonlyEnabled: t.readonlyEnabled, peerHealth, reconciliation: recon },
+      refresh: {
+        readonlyEnabled: t.readonlyEnabled,
+        peerHealth,
+        reconciliation: recon,
+        canaryEvidence,
+        stopCapability,
+      },
       status: snapshot,
     });
   } catch (e: unknown) {

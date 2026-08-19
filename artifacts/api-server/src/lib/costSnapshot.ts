@@ -183,6 +183,44 @@ export interface LiveCostFetchers {
   fetchCosts?: (args: { market: string; isLong: boolean; notionalUsd: number }) => Promise<FetchedCostFields>;
 }
 
+export interface ExecutionEligibleCostEvidence {
+  market: string;
+  isLong: boolean;
+  observedAtMs: number;
+}
+
+let executionEligibleEvidence: ExecutionEligibleCostEvidence | null = null;
+
+export function recordExecutionEligibleCostEvidence(
+  snap: CostSnapshot,
+  expected: CostSnapshotExpectation,
+  nowMs: number,
+): boolean {
+  const valid = validateExecutionEligibleSnapshot(snap, expected, nowMs);
+  if (!valid.ok) return false;
+  executionEligibleEvidence = {
+    market: snap.market,
+    isLong: snap.isLong,
+    observedAtMs: Date.parse(snap.fetchedAt),
+  };
+  return true;
+}
+
+export function getExecutionEligibleCostEvidence(nowMs: number = Date.now()): {
+  fresh: boolean;
+  evidence: ExecutionEligibleCostEvidence | null;
+} {
+  return {
+    fresh: executionEligibleEvidence !== null
+      && nowMs - executionEligibleEvidence.observedAtMs <= EXECUTION_ELIGIBLE_MAX_AGE_MS,
+    evidence: executionEligibleEvidence,
+  };
+}
+
+export function __resetExecutionEligibleCostEvidenceForTests(): void {
+  executionEligibleEvidence = null;
+}
+
 /** 필수 USD 비용 필드 — 누락(undefined/null)을 0으로 추정하는 행위 금지 (§3) */
 const REQUIRED_COST_FIELDS = [
   'positionFeeUsd', 'executionFeeUsd', 'estimatedPriceImpactUsd',
@@ -212,6 +250,10 @@ async function fetchCostSnapshotWithSource(
     if (c.fundingRatePerHourFraction === undefined || c.borrowingRatePerHourFraction === undefined) {
       return { ok: false, reason: `${COST_DATA_UNAVAILABLE}: funding/borrowing rate 필드 부재 — 누락은 null로 명시해야 함` };
     }
+    const sourceObservedAtMs = c.apiTimestamp === null ? args.now.getTime() : Date.parse(c.apiTimestamp);
+    if (!Number.isFinite(sourceObservedAtMs) || sourceObservedAtMs > args.now.getTime() + 5_000) {
+      return { ok: false, reason: `${COST_DATA_UNAVAILABLE}: 비용 관측 시각 비정상` };
+    }
     const snap: CostSnapshot = {
       market: args.market, isLong: args.isLong, orderType: args.orderType, notionalUsd: args.notionalUsd,
       positionFeeUsd: c.positionFeeUsd, executionFeeUsd: c.executionFeeUsd,
@@ -226,8 +268,8 @@ async function fetchCostSnapshotWithSource(
       totalEstimatedRoundTripCostUsd:
         c.positionFeeUsd + c.executionFeeUsd + c.estimatedPriceImpactUsd + c.estimatedExitPriceImpactUsd
         + c.fundingFeeUsd + c.borrowingFeeUsd + c.estimatedExitFeeUsd,
-      fetchedAt: args.now.toISOString(),
-      expiresAt: new Date(args.now.getTime() + COST_SNAPSHOT_TTL_MS).toISOString(),
+      fetchedAt: new Date(sourceObservedAtMs).toISOString(),
+      expiresAt: new Date(sourceObservedAtMs + COST_SNAPSHOT_TTL_MS).toISOString(),
     };
     const valid = validateCostSnapshot(snap, args, args.now.getTime());
     if (!valid.ok) return { ok: false, reason: sanitizeCostError(valid.reason) };

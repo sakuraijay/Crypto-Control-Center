@@ -48,8 +48,8 @@ function jsonResponse(): Response {
 
 describe('Canary 1단계 — READONLY 단독 활성의 구조적 0회 보장', () => {
   it('§1a readonly GET은 허용된다 (fetch 1회, GET만)', async () => {
-    const fetchMock = vi.fn(async () => jsonResponse());
-    const t = createGmxApiTransport(STAGE1_ENV, { fetchImpl: fetchMock as unknown as typeof fetch });
+    const fetchMock = vi.fn<typeof fetch>(async (_input, _init) => jsonResponse());
+    const t = createGmxApiTransport(STAGE1_ENV, { fetchImpl: fetchMock });
     expect(t.readonlyEnabled).toBe(true);
     expect(t.submissionEnabled).toBe(false);
 

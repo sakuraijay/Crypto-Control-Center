@@ -248,6 +248,25 @@ describe('checkCentralExecutionGate — fail-closed 조합', () => {
     expect(r.reason).toMatch(/WORKER_ENGINE_MODE/);
   });
 
+  it('PAPER Manual Canary만 명시 마커 + AUTO Worker 비활성일 때 허용', async () => {
+    process.env.LIVE_TEST_EXECUTION_LOCKED = 'false';
+    process.env.AUTO_WORKER_LIVE_ENABLED = 'false';
+    const { checkCentralExecutionGate } = await import('../lib/liveTestGate');
+    const r = checkCentralExecutionGate({
+      ...allowInput(),
+      workerEngineMode: 'PAPER',
+      manualCanary: true,
+      relayConfigured: false,
+    });
+    expect(r.allowed).toBe(true);
+    process.env.AUTO_WORKER_LIVE_ENABLED = 'true';
+    expect(checkCentralExecutionGate({
+      ...allowInput(),
+      workerEngineMode: 'PAPER',
+      manualCanary: true,
+    }).allowed).toBe(false);
+  });
+
   it('liveTestMode=false → 차단', async () => {
     process.env.LIVE_TEST_EXECUTION_LOCKED = 'false';
     const { checkCentralExecutionGate } = await import('../lib/liveTestGate');
