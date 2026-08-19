@@ -4,11 +4,9 @@ title = "Futures Terminal Web"
 description = "Desktop web trading control center for Binance USD-M Futures. Mirrors the mobile Futures Terminal but designed for large screens: persistent sidebar navigation, multi-panel dashboard, wide data tables for positions and history, two-column strategy/risk panels. Paper/mock trading mode only in v1. Shares the same dark trading aesthetic — black background, cyan primary, gold accent, green/red for long/short."
 version = "1.0.0"
 id = "artifacts/futures-web"
-router = "path"
 
 [[services]]
 name = "web"
-paths = [ "/futures-web/" ]
 localPort = 25285
 
 [services.development]
