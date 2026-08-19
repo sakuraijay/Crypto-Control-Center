@@ -20,10 +20,20 @@ import {
   isSignerStorageAccessAllowed,
   restoreExistingManualCanarySigner,
 } from "./lib/delegatedSigner";
-import { reconcileOnRestart, loadEmergencyStopFromDb, startPeriodicIntentReconciliation } from "./workers/liveTestExecutor";
+import {
+  reconcileOnRestart,
+  loadEmergencyStopFromDb,
+  refreshStopExecutionCapability,
+  startPeriodicIntentReconciliation,
+  stopPeriodicIntentReconciliation,
+} from "./workers/liveTestExecutor";
 import { resolveStaticDir, assertStaticDirReady, attachStaticServing } from "./lib/staticSite";
 import { markReady } from "./lib/readiness";
-import { reconcileGmxApiTasksOnStartup, startPeriodicGmxApiReconciliation } from "./lib/gmxApiStatusReconciler";
+import {
+  reconcileGmxApiTasksOnStartup,
+  startPeriodicGmxApiReconciliation,
+  stopPeriodicGmxApiReconciliation,
+} from "./lib/gmxApiStatusReconciler";
 import { reconcileLiveSettlements } from "./lib/tradeSettlement";
 import { createProductionCloseSettlementFetcher } from "./lib/productionCloseSettlementFetcher";
 import { reconcileGmxPrepareStagesOnStartup } from "./lib/gmxApiPrepareStartup";
@@ -109,9 +119,15 @@ export function startServer({ httpServer, setDelegate, isShuttingDown }: Startup
         logger.info("Delegated signer disabled (DELEGATED_SIGNER_ENABLED != 'true')");
       }
 
-      // Emergency Stop 상태 복원 + SUBMITTED 주문 reconciliation
-      loadEmergencyStopFromDb().catch(() => {});
-      reconcileOnRestart().catch(() => {});
+      // Emergency Stop을 먼저 복원한 뒤 보호/intent reconciliation과 stop
+      // capability 평가를 순서대로 수행한다. 초기 상태가 '미평가'로 남거나
+      // DB의 emergency-stop 복원 전에 낙관 평가되는 race를 금지한다.
+      loadEmergencyStopFromDb()
+        .then(() => reconcileOnRestart())
+        .then(() => refreshStopExecutionCapability())
+        .catch((err: unknown) => {
+          logger.warn({ err }, "Startup safety reconciliation incomplete (fail-closed maintained)");
+        });
       // 차단 intent 온체인 재판정 (차단 intent 없으면 no-op — PAPER 무영향)
       startPeriodicIntentReconciliation();
 
@@ -171,5 +187,7 @@ export function startServer({ httpServer, setDelegate, isShuttingDown }: Startup
 
 /** index.ts가 신호 수신 시 호출 — worker 정지 등 본체 자원 정리 */
 export function stopServices(): void {
+  stopPeriodicIntentReconciliation();
+  stopPeriodicGmxApiReconciliation();
   workerManager.stop();
 }
