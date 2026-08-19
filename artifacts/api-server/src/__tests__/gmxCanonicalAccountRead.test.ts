@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   classifyPositionCountConsistency,
+  readWithTimeout,
   resolvePositionsAccount,
 } from '../routes/gmx';
 
@@ -59,5 +60,11 @@ describe('GMX RPC/API position-count cross-check', () => {
     expect(classifyPositionCountConsistency(1, null)).toBe('unavailable');
     expect(classifyPositionCountConsistency(null, 1)).toBe('rpc-unavailable');
     expect(classifyPositionCountConsistency(null, null)).toBe('unavailable');
+  });
+
+  it('bounds an unresponsive read without turning it into successful data', async () => {
+    const never = new Promise<string>(() => {});
+    await expect(readWithTimeout(never, 5)).resolves.toBeNull();
+    await expect(readWithTimeout(Promise.resolve('ok'), 100)).resolves.toBe('ok');
   });
 });
