@@ -115,7 +115,17 @@ function rowToMessage(row: SubaccountApprovalSessionRow): SubaccountApprovalMess
   };
 }
 
+/**
+ * #134 — 세션 결속 digest는 지갑이 실제 서명하는 canonical EIP-712 typed-data
+ * digest(hashTypedData) 그대로 저장한다. 제출 시 동일 함수로 재계산·대조 후에만
+ * recover 단계로 진행한다 (서버 권위, 클라이언트 digest는 참고용).
+ */
 function computeSessionDigest(chainId: number, verifyingContract: Address, msg: SubaccountApprovalMessage): Hex {
+  return hashSubaccountApproval({ chainId, verifyingContract, approval: msg });
+}
+
+/** 구세대(v1) digest 스킴 — canonical digest를 0x1901로 재래핑하던 값. 레거시 세션 판별 전용. */
+function computeLegacySessionDigest(chainId: number, verifyingContract: Address, msg: SubaccountApprovalMessage): Hex {
   const ds = computeGmxRelayDomainSeparator(chainId, verifyingContract);
   return computeRelayDigest(ds, hashSubaccountApproval({ chainId, verifyingContract, approval: msg }));
 }
@@ -247,6 +257,8 @@ export async function submitApprovalSignature(params: {
   canonicalNonce: bigint;   // 제출 시점 router nonce 재확인
   expectedOwner: Address;   // GMX_WALLET_ADDRESS
   nowSec: bigint;
+  /** #134 — 브라우저가 서명 직전 계산한 canonical digest (진단 참고용, 서버 권위 아님) */
+  clientDigest?: Hex | null;
 }): Promise<SubmitResult> {
   let row: SubaccountApprovalSessionRow | undefined;
   try {
@@ -285,11 +297,40 @@ export async function submitApprovalSignature(params: {
   const chainId = Number(row.chainId);
   const verifyingContract = row.verifyingContract as Address;
 
-  // 저장 파라미터 무결성: digest 재계산이 저장 digest와 일치해야 함 (변조 검사)
+  // 저장 파라미터 무결성: canonical digest 재계산이 저장 digest와 일치해야 함 (변조 검사)
   const digest = computeSessionDigest(chainId, verifyingContract, message);
   if (digest !== row.typedDataDigest) {
+    // #134 — canonical 스킴 전환 이전(v1 재래핑 스킴) 세션은 변조가 아니라 레거시.
+    // 어느 쪽이든 재사용 금지 — 명확한 사유로 무효화하고 새 prepare를 요구한다.
+    const legacy = computeLegacySessionDigest(chainId, verifyingContract, message);
+    if (legacy === row.typedDataDigest) {
+      await markInvalid(row.id, '레거시 digest 스킴(v1) 세션 — canonical 스킴 전환으로 재사용 불가');
+      return { ok: false, reason: '세션이 구버전 스킴으로 생성되었습니다 — 새로 준비하세요' };
+    }
     await markInvalid(row.id, 'digest 불일치 (세션 데이터 변조 의심)');
     return { ok: false, reason: '세션 데이터 무결성 검증 실패' };
+  }
+  // 클라이언트 참고 digest 대조 (진단용 — 서버 권위 판정에는 사용하지 않음)
+  const clientDigestMatch: boolean | null =
+    params.clientDigest != null ? params.clientDigest.toLowerCase() === digest.toLowerCase() : null;
+
+  // #134 — durable claim-first: 검증 시도 전에 PREPARED → INVALIDATED(claim)로
+  // 원자 전환(조건부 UPDATE, 결과 확인). 이후 어떤 실패(검증 실패·저장 실패)에도
+  // 세션은 이미 터미널 상태라 재사용 불가 — 무효화 기록 실패로 인한 재사용 창이 없다.
+  // 검증 성공 시에만 claim 상태에서 READY로 전환한다.
+  try {
+    const claimed = await db.update(subaccountApprovalSessionsTable)
+      .set({ status: SESSION_STATUS.INVALIDATED, invalidReason: SUBMIT_CLAIM_REASON, updatedAt: new Date() })
+      .where(and(
+        eq(subaccountApprovalSessionsTable.id, row.id),
+        eq(subaccountApprovalSessionsTable.status, SESSION_STATUS.PREPARED),
+      ))
+      .returning({ id: subaccountApprovalSessionsTable.id });
+    if (claimed.length !== 1) {
+      return { ok: false, reason: '세션 클레임 실패 — 동시 제출 또는 상태 변경, 저장되지 않음 (fail-closed)' };
+    }
+  } catch {
+    return { ok: false, reason: '세션 클레임 저장 실패 — 서명 저장 중단 (fail-closed)' };
   }
 
   const verify = await verifySubaccountApprovalSignature({
@@ -302,8 +343,13 @@ export async function submitApprovalSignature(params: {
     nowSec: params.nowSec,
   });
   if (!verify.ok) {
-    // 서명 원문·recovered 주소 외 정보 비노출 — verify.reason은 sanitize된 사유만 포함
-    return { ok: false, reason: `서명 검증 실패: ${verify.reason}` };
+    // #134 — 세션은 이미 claim 단계에서 durable하게 INVALIDATED. 사유만 구체화
+    // (best-effort — 실패해도 세션은 터미널 상태 유지).
+    await markInvalid(row.id, `서명 검증 실패: ${verify.reason}`);
+    const digestNote = clientDigestMatch == null
+      ? 'client digest 미제공'
+      : `client/server digest ${clientDigestMatch ? '일치' : '불일치'}`;
+    return { ok: false, reason: `서명 검증 실패: ${verify.reason} · ${digestNote} · 세션 무효화됨 — 새로 준비하세요` };
   }
 
   let encrypted: string;
@@ -314,12 +360,13 @@ export async function submitApprovalSignature(params: {
   }
 
   try {
-    // 조건부 전환: PREPARED 상태일 때만 READY로 (경합 차단)
+    // 조건부 전환: 이 제출이 claim한 세션만 READY로 (경합 차단)
     const updated = await db.update(subaccountApprovalSessionsTable)
-      .set({ encryptedSignature: encrypted, status: SESSION_STATUS.OWNER_SIGNATURE_READY, updatedAt: new Date() })
+      .set({ encryptedSignature: encrypted, status: SESSION_STATUS.OWNER_SIGNATURE_READY, invalidReason: null, updatedAt: new Date() })
       .where(and(
         eq(subaccountApprovalSessionsTable.id, row.id),
-        eq(subaccountApprovalSessionsTable.status, SESSION_STATUS.PREPARED),
+        eq(subaccountApprovalSessionsTable.status, SESSION_STATUS.INVALIDATED),
+        eq(subaccountApprovalSessionsTable.invalidReason, SUBMIT_CLAIM_REASON),
       ))
       .returning({ id: subaccountApprovalSessionsTable.id });
     if (updated.length !== 1) {
@@ -331,6 +378,9 @@ export async function submitApprovalSignature(params: {
 
   return { ok: true, sessionId: row.id, status: SESSION_STATUS.OWNER_SIGNATURE_READY };
 }
+
+/** #134 — 제출 처리 claim 마커. 이 사유의 INVALIDATED 세션만 READY로 전환 가능. */
+const SUBMIT_CLAIM_REASON = '#134 서명 제출 처리 중 (claim)';
 
 async function markInvalid(id: string, reason: string): Promise<void> {
   try {

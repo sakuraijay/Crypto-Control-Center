@@ -119,6 +119,139 @@ export function canRequestOwnerSignature(input: SignGuardInput): SignGuardResult
   return { ok: true };
 }
 
+// ── #134 서명 직전 라이브 재검증 + 클라이언트측 사전 recover ─────────────────
+
+export interface EthereumProviderLike {
+  request: (a: { method: string; params?: unknown[] }) => Promise<unknown>;
+}
+
+export type LiveWalletCheck =
+  | { ok: true; activeAccount: string }
+  | { ok: false; reason: string };
+
+/**
+ * MetaMask 창을 열기 전에 활성 계정·chainId를 **다시 조회**해 owner·42161과
+ * 결속한다. React 상태의 캐시(wallet.address)는 신뢰하지 않는다 (fail-closed).
+ */
+export async function recheckActiveWallet(
+  ethereum: EthereumProviderLike,
+  mainAccount: string,
+): Promise<LiveWalletCheck> {
+  let accounts: unknown;
+  let chainHex: unknown;
+  try {
+    [accounts, chainHex] = await Promise.all([
+      ethereum.request({ method: 'eth_accounts' }),
+      ethereum.request({ method: 'eth_chainId' }),
+    ]);
+  } catch {
+    return { ok: false, reason: '지갑 활성 계정/체인 재조회 실패 — 서명을 차단합니다.' };
+  }
+  const active = Array.isArray(accounts) && typeof accounts[0] === 'string' ? accounts[0] : null;
+  if (!active) {
+    return { ok: false, reason: '활성 계정이 없습니다 — MetaMask 연결을 확인하세요.' };
+  }
+  if (active.toLowerCase() !== mainAccount.toLowerCase()) {
+    return {
+      ok: false,
+      reason: `활성 계정(${shortAddr(active)})이 main owner(${shortAddr(mainAccount)})와 다릅니다 — MetaMask에서 owner 계정을 선택하세요.`,
+    };
+  }
+  const chainId = typeof chainHex === 'string' ? Number.parseInt(chainHex, 16) : NaN;
+  if (chainId !== ARBITRUM_ONE_CHAIN_ID) {
+    return { ok: false, reason: `현재 체인(${Number.isNaN(chainId) ? '알 수 없음' : chainId})이 Arbitrum One(42161)이 아닙니다 — 전환 후 다시 시도하세요.` };
+  }
+  return { ok: true, activeAccount: active };
+}
+
+export function shortAddr(a: string): string {
+  return /^0x[0-9a-fA-F]{40}$/.test(a) ? `${a.slice(0, 6)}…${a.slice(-4)}` : a;
+}
+
+export type ClientSignatureVerify =
+  | { ok: true; digest: string; recovered: string }
+  | { ok: false; reason: string; digest?: string; recovered?: string };
+
+/**
+ * 서버 echo typedData(JSON, uint256은 문자열)를 canonical 형태로 정규화한 뒤
+ * 브라우저에서 digest·recovered를 직접 계산한다. recovered ≠ owner면 서버에
+ * 제출하지 않는다 (#134 — 지갑 domain 해싱 분기 조기 탐지).
+ * serverDigest가 주어지면 서명 **전** digest 결속도 함께 판정할 수 있도록
+ * digest를 항상 반환한다.
+ */
+export async function clientVerifyApprovalSignature(params: {
+  typedData: unknown;
+  signature: `0x${string}`;
+  expectedOwner: string;
+}): Promise<ClientSignatureVerify> {
+  const { hashTypedData, recoverTypedDataAddress } = await import('viem');
+  let normalized: Parameters<typeof hashTypedData>[0];
+  try {
+    normalized = normalizeApprovalTypedData(params.typedData);
+  } catch (e: unknown) {
+    return { ok: false, reason: `typedData 정규화 실패: ${(e as Error).message}` };
+  }
+  let digest: string;
+  let recovered: string;
+  try {
+    digest = hashTypedData(normalized);
+    recovered = await recoverTypedDataAddress({ ...normalized, signature: params.signature });
+  } catch {
+    return { ok: false, reason: '클라이언트측 서명 recover 실패 — 서버에 제출하지 않습니다.' };
+  }
+  if (recovered.toLowerCase() !== params.expectedOwner.toLowerCase()) {
+    return {
+      ok: false,
+      reason: `클라이언트 사전 검증 실패: recovered ${shortAddr(recovered)} ≠ owner ${shortAddr(params.expectedOwner)} — 서버에 제출하지 않습니다. 지갑/계정 상태를 확인하세요.`,
+      digest,
+      recovered,
+    };
+  }
+  return { ok: true, digest, recovered };
+}
+
+/**
+ * 서버 echo typedData → viem 입력 정규화 (uint256 문자열→BigInt).
+ * 필드 추가·삭제·재정렬 없이 값 타입만 변환한다 — 서명 대상과 동일 구조 유지.
+ */
+export function normalizeApprovalTypedData(raw: unknown): {
+  domain: { name: string; version: string; chainId: bigint; verifyingContract: `0x${string}` };
+  types: Record<string, { name: string; type: string }[]>;
+  primaryType: 'SubaccountApproval';
+  message: Record<string, unknown>;
+} {
+  const td = raw as {
+    domain?: { name?: unknown; version?: unknown; chainId?: unknown; verifyingContract?: unknown };
+    types?: Record<string, { name: string; type: string }[]>;
+    primaryType?: unknown;
+    message?: Record<string, unknown>;
+  } | null;
+  if (!td?.domain || !td.types || !td.message) throw new Error('typedData 필드 누락');
+  if (td.primaryType !== 'SubaccountApproval') throw new Error('primaryType이 SubaccountApproval이 아님');
+  if (!Array.isArray(td.types.EIP712Domain) || td.types.EIP712Domain.length !== 4) {
+    throw new Error('types.EIP712Domain 누락 — 서버 응답이 v4 스키마를 충족하지 않음');
+  }
+  const fields = td.types.SubaccountApproval;
+  if (!Array.isArray(fields)) throw new Error('types.SubaccountApproval 누락');
+  const message: Record<string, unknown> = {};
+  for (const f of fields) {
+    const v = td.message[f.name];
+    if (v === undefined) throw new Error(`message.${f.name} 누락`);
+    message[f.name] = f.type.startsWith('uint') ? BigInt(v as string | number | bigint) : v;
+  }
+  return {
+    domain: {
+      name: String(td.domain.name),
+      version: String(td.domain.version),
+      chainId: BigInt(td.domain.chainId as string | number | bigint),
+      verifyingContract: String(td.domain.verifyingContract) as `0x${string}`,
+    },
+    types: td.types,
+    primaryType: 'SubaccountApproval',
+    message,
+  };
+}
+
 /** eth_signTypedData_v4 오류 → 사용자 메시지 (취소는 오류가 아님) */
 export function mapSignError(err: unknown): { cancelled: boolean; message: string } {
   const e = err as { code?: number; message?: string } | null;
@@ -229,6 +362,8 @@ export interface PrepareResponse {
   ok: boolean;
   sessionId?: string;
   typedData?: unknown;
+  /** #134 — 서버 canonical EIP-712 digest (서명 전 클라이언트 digest 결속용) */
+  digest?: string;
   summary?: Record<string, string | number | boolean>;
   error?: string;
 }
@@ -258,12 +393,16 @@ export async function postPrepareApproval(params: {
 }
 
 export async function postApprovalSignature(params: {
-  pin: string; sessionId: string; signature: string;
+  pin: string; sessionId: string; signature: string; clientDigest?: string;
 }): Promise<{ ok: boolean; status?: string; error?: string }> {
   try {
     const res = await postApiJson('executor/subaccount-approval/signature', {
       headers: { 'x-operator-pin': params.pin },
-      body: { sessionId: params.sessionId, signature: params.signature },
+      body: {
+        sessionId: params.sessionId,
+        signature: params.signature,
+        ...(params.clientDigest ? { clientDigest: params.clientDigest } : {}),
+      },
     });
     const body = await readApiJson(res);
     if (body.kind === 'route_mismatch') return { ok: false, error: API_ROUTE_MISMATCH_MESSAGE };

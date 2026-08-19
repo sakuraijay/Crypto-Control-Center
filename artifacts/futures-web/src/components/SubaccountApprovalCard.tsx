@@ -14,6 +14,7 @@ import { useWallet } from '@/lib/context';
 import {
   fetchSubaccountAuthDetailed, mapAuthFetchToDisplayState, postPrepareApproval, postApprovalSignature,
   mapAuthStateToView, canRequestOwnerSignature, canPrepareApproval, mapSignError, formatUnixSeconds,
+  recheckActiveWallet, clientVerifyApprovalSignature,
   APPROVAL_GRANTS, APPROVAL_DENIALS, CANARY_REQUESTED_MAX_ALLOWED_COUNT,
   type SubaccountAuthResponse, type PrepareResponse,
 } from '@/lib/subaccountApproval';
@@ -91,22 +92,46 @@ export function SubaccountApprovalCard() {
       walletAddress: wallet.address, mainAccount: auth?.mainAccount ?? null,
     });
     if (!g.ok) { setMessage({ tone: 'error', text: g.reason }); return; }
-    const ethereum = (window as unknown as { ethereum?: { request: (a: { method: string; params: unknown[] }) => Promise<unknown> } }).ethereum;
+    const ethereum = (window as unknown as { ethereum?: { request: (a: { method: string; params?: unknown[] }) => Promise<unknown> } }).ethereum;
     if (!ethereum) { setMessage({ tone: 'error', text: 'MetaMask provider를 찾을 수 없습니다.' }); return; }
+    const owner = auth?.mainAccount;
+    if (!owner) { setMessage({ tone: 'error', text: '서버 main wallet 미설정 — 서명 차단.' }); return; }
+    // #134 §1 — MetaMask 창을 열기 전에 활성 계정·chainId를 재조회해 owner·42161 결속
+    const live = await recheckActiveWallet(ethereum, owner);
+    if (!live.ok) { setMessage({ tone: 'error', text: live.reason }); return; }
     setMessage(null);
     let signature: string;
     try {
       signature = await ethereum.request({
         method: 'eth_signTypedData_v4',
-        params: [wallet.address, JSON.stringify(prepared.typedData)],
+        // from은 캐시가 아니라 방금 재조회한 활성 계정(owner 일치 확인 완료)
+        params: [live.activeAccount, JSON.stringify(prepared.typedData)],
       }) as string;
     } catch (err) {
       const m = mapSignError(err);
       setMessage({ tone: m.cancelled ? 'warn' : 'error', text: m.message });
       return;
     }
+    // #134 §2 — 서버 제출 전 브라우저에서 exact typedData의 digest·recovered 검증.
+    // recovered ≠ owner면 제출하지 않는다 (지갑 domain 해싱 분기 즉시 탐지).
+    const pre = await clientVerifyApprovalSignature({
+      typedData: prepared.typedData,
+      signature: signature as `0x${string}`,
+      expectedOwner: owner,
+    });
+    if (!pre.ok) {
+      const digestNote = prepared.digest && pre.digest
+        ? (prepared.digest.toLowerCase() === pre.digest.toLowerCase() ? ' (server digest 일치)' : ' (server digest 불일치 — typedData 분기 의심)')
+        : '';
+      setMessage({ tone: 'error', text: `${pre.reason}${digestNote}` });
+      return;
+    }
+    if (prepared.digest && prepared.digest.toLowerCase() !== pre.digest.toLowerCase()) {
+      setMessage({ tone: 'error', text: 'client/server canonical digest 불일치 — 제출 차단. 새로 준비하세요.' });
+      return;
+    }
     setPhase('submitting');
-    const r = await postApprovalSignature({ pin: pin.trim(), sessionId: prepared.sessionId, signature });
+    const r = await postApprovalSignature({ pin: pin.trim(), sessionId: prepared.sessionId, signature, clientDigest: pre.digest });
     if (!r.ok) {
       setPhase('awaiting_signature');
       setMessage({ tone: 'error', text: r.error ?? '서명 저장 실패' });

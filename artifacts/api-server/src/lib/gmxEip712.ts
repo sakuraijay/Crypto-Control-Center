@@ -70,6 +70,18 @@ export function computeGmxRelayDomainSeparator(chainId: number, verifyingContrac
 export const SUBACCOUNT_APPROVAL_TYPE_STRING =
   'SubaccountApproval(address subaccount,bool shouldAdd,uint256 expiresAt,uint256 maxAllowedCount,bytes32 actionType,uint256 nonce,uint256 desChainId,uint256 deadline,bytes32 integrationId)';
 
+/**
+ * #134 — MetaMask eth_signTypedData_v4 스키마는 types.EIP712Domain 명시를 요구한다.
+ * 누락 시 지갑 구현에 따라 domain을 다르게 해싱해 recovered 주소가 owner와
+ * 결정적으로 불일치하는 사고가 Production에서 실측됨. 절대 제거 금지.
+ */
+export const GMX_RELAY_EIP712_DOMAIN_FIELDS = [
+  { name: 'name', type: 'string' },
+  { name: 'version', type: 'string' },
+  { name: 'chainId', type: 'uint256' },
+  { name: 'verifyingContract', type: 'address' },
+] as const;
+
 export const SUBACCOUNT_APPROVAL_EIP712_TYPES = {
   SubaccountApproval: [
     { name: 'subaccount', type: 'address' },
@@ -104,7 +116,11 @@ export function buildSubaccountApprovalTypedData(params: {
 }) {
   return {
     domain: buildGmxRelayDomain(params.chainId, params.verifyingContract),
-    types: SUBACCOUNT_APPROVAL_EIP712_TYPES,
+    // #134 — EIP712Domain 명시 필수 (v4 스키마·지갑 간 domain 해싱 분기 방지)
+    types: {
+      EIP712Domain: GMX_RELAY_EIP712_DOMAIN_FIELDS,
+      ...SUBACCOUNT_APPROVAL_EIP712_TYPES,
+    },
     primaryType: 'SubaccountApproval' as const,
     message: params.approval,
   };
@@ -157,7 +173,12 @@ export async function verifySubaccountApprovalSignature(params: {
     return { ok: false, reason: '서명 복구 실패 — 형식 오류 거부' };
   }
   if (recovered.toLowerCase() !== params.expectedOwner.toLowerCase()) {
-    return { ok: false, reason: '서명자가 main account(owner)와 불일치 — 거부' };
+    // #134 — 공개 주소는 비밀이 아님. 운영자가 어떤 키로 서명됐는지 즉시 식별하도록
+    // expected/recovered를 포함한다 (서명 원문·개인키·PIN은 절대 미포함).
+    return {
+      ok: false,
+      reason: `서명자가 main account(owner)와 불일치 — 거부 (expected ${params.expectedOwner.toLowerCase()}, recovered ${recovered.toLowerCase()})`,
+    };
   }
   return { ok: true, recovered };
 }

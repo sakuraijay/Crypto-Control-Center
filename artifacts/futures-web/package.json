@@ -79,6 +79,7 @@
     "zod": "catalog:"
   },
   "dependencies": {
-    "uuid": "^14.0.1"
+    "uuid": "^14.0.1",
+    "viem": "^2.55.16"
   }
 }

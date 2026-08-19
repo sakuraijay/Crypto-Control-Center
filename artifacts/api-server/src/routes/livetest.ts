@@ -364,6 +364,9 @@ router.post('/executor/subaccount-approval/prepare', requireOperatorAuth, async 
       ok: true,
       sessionId: result.prepared.sessionId,
       typedData: JSON.parse(JSON.stringify(result.prepared.typedData, (_k, v) => typeof v === 'bigint' ? v.toString() : v)),
+      // #134 — 서버 canonical EIP-712 digest. 브라우저가 서명 전/후 자체 계산값과
+      // 대조해 digest 분기를 사전에 탐지한다 (판정 권위는 서버 재계산).
+      digest: result.prepared.digest,
       summary: result.prepared.summary,
       limits: {
         expirySecondsMin: APPROVAL_LIMITS.MIN_EXPIRY_SECONDS,
@@ -396,6 +399,10 @@ router.post('/executor/subaccount-approval/signature', requireOperatorAuth, asyn
     if (!sessionId || !/^0x[0-9a-fA-F]{130}$/.test(signature)) {
       return res.status(400).json({ ok: false, error: 'sessionId와 65-byte hex signature가 필요합니다' });
     }
+    // #134 — 브라우저 사전 recover 시 계산한 canonical digest (선택, 진단 참고용).
+    // 서버 판정은 항상 세션 저장값 재계산 기준 — 클라이언트 digest는 신뢰하지 않는다.
+    const clientDigestRaw = typeof req.body?.clientDigest === 'string' ? req.body.clientDigest : null;
+    const clientDigest = clientDigestRaw && /^0x[0-9a-fA-F]{64}$/.test(clientDigestRaw) ? (clientDigestRaw as Hex) : null;
 
     let canonicalNonce: bigint;
     try {
@@ -410,6 +417,7 @@ router.post('/executor/subaccount-approval/signature', requireOperatorAuth, asyn
       canonicalNonce,
       expectedOwner: mainAccount,
       nowSec: BigInt(Math.floor(Date.now() / 1000)),
+      clientDigest,
     });
     if (!result.ok) return res.status(422).json({ ok: false, error: result.reason });
 

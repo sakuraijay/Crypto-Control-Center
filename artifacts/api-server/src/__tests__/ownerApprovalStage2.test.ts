@@ -292,7 +292,8 @@ describe('submitApprovalSignature', () => {
     });
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toContain('서명');
-    expect(store.rows[0].status).toBe(SESSION_STATUS.PREPARED);
+    // #134 — 검증 실패 세션은 재사용 금지: INVALIDATED로 전환, 서명은 저장되지 않음
+    expect(store.rows[0].status).toBe(SESSION_STATUS.INVALIDATED);
     expect(store.rows[0].encryptedSignature).toBeNull();
   });
 
@@ -350,6 +351,127 @@ describe('submitApprovalSignature', () => {
     });
     expect(r.ok).toBe(false);
     expect(store.rows[0].status).toBe(SESSION_STATUS.INVALIDATED);
+  });
+
+  it('#134 durable claim-first: 검증 실패 세션은 재제출해도 절대 READY가 될 수 없다', async () => {
+    const p = await prepare();
+    if (!p.ok) return;
+    const bad = await signPrepared(p, other);
+    const r1 = await submitApprovalSignature({
+      sessionId: p.prepared.sessionId, signature: bad as Hex,
+      canonicalNonce: 5n, expectedOwner: owner.address, nowSec: NOW,
+    });
+    expect(r1.ok).toBe(false);
+    expect(store.rows[0].status).toBe(SESSION_STATUS.INVALIDATED);
+    // 올바른 owner 서명으로 재제출해도 거부 (세션 터미널)
+    const good = await signPrepared(p, owner);
+    const r2 = await submitApprovalSignature({
+      sessionId: p.prepared.sessionId, signature: good as Hex,
+      canonicalNonce: 5n, expectedOwner: owner.address, nowSec: NOW,
+    });
+    expect(r2.ok).toBe(false);
+    expect(store.rows[0].status).toBe(SESSION_STATUS.INVALIDATED);
+    expect(store.rows[0].encryptedSignature).toBeNull();
+  });
+
+  it('#134 claim 저장 실패(DB 불능) → 서명 검증 자체를 시도하지 않고 fail-closed', async () => {
+    const p = await prepare();
+    const sig = await signPrepared(p);
+    if (!p.ok) return;
+    store.failUpdate = true;
+    const r = await submitApprovalSignature({
+      sessionId: p.prepared.sessionId, signature: sig as Hex,
+      canonicalNonce: 5n, expectedOwner: owner.address, nowSec: NOW,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain('클레임');
+    expect(store.rows[0].encryptedSignature).toBeNull();
+    // DB 복구 후 정상 owner 서명 제출은 여전히 가능 (검증 실패가 아니었으므로)
+    store.failUpdate = false;
+    const r2 = await submitApprovalSignature({
+      sessionId: p.prepared.sessionId, signature: sig as Hex,
+      canonicalNonce: 5n, expectedOwner: owner.address, nowSec: NOW,
+    });
+    expect(r2.ok).toBe(true);
+    expect(store.rows[0].status).toBe(SESSION_STATUS.OWNER_SIGNATURE_READY);
+  });
+
+  it('#134 정상 제출 후 세션은 READY이며 invalidReason은 비어 있다', async () => {
+    const p = await prepare();
+    const sig = await signPrepared(p);
+    if (!p.ok) return;
+    const r = await submitApprovalSignature({
+      sessionId: p.prepared.sessionId, signature: sig as Hex,
+      canonicalNonce: 5n, expectedOwner: owner.address, nowSec: NOW,
+    });
+    expect(r.ok).toBe(true);
+    expect(store.rows[0].status).toBe(SESSION_STATUS.OWNER_SIGNATURE_READY);
+    expect(store.rows[0].invalidReason).toBeNull();
+  });
+
+  it('#134 레거시 digest 스킴(v1 재래핑) 세션 → 명확한 사유로 INVALIDATED, 재사용 불가', async () => {
+    const p = await prepare();
+    const sig = await signPrepared(p);
+    if (!p.ok) return;
+    // v1 스킴 시뮬레이션: canonical digest를 0x1901 재래핑한 값으로 교체
+    const { computeGmxRelayDomainSeparator, computeRelayDigest } = await import('../lib/gmxEip712');
+    const ds = computeGmxRelayDomainSeparator(42161, ROUTER);
+    store.rows[0].typedDataDigest = computeRelayDigest(ds, String(store.rows[0].typedDataDigest) as Hex);
+    const r = await submitApprovalSignature({
+      sessionId: p.prepared.sessionId, signature: sig as Hex,
+      canonicalNonce: 5n, expectedOwner: owner.address, nowSec: NOW,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain('구버전');
+    expect(store.rows[0].status).toBe(SESSION_STATUS.INVALIDATED);
+    expect(String(store.rows[0].invalidReason)).toContain('레거시');
+  });
+
+  it('#134 clientDigest 제공 시 불일치 오류에 client/server digest 일치 여부 포함', async () => {
+    const p = await prepare();
+    const sig = await signPrepared(p, other);   // 잘못된 계정 서명
+    if (!p.ok) return;
+    const r = await submitApprovalSignature({
+      sessionId: p.prepared.sessionId, signature: sig as Hex,
+      canonicalNonce: 5n, expectedOwner: owner.address, nowSec: NOW,
+      clientDigest: p.prepared.digest,   // 브라우저가 같은 typedData를 해싱한 경우
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.reason).toContain('client/server digest 일치');
+      expect(r.reason).toContain('세션 무효화됨');
+      expect(r.reason).toContain(other.address.toLowerCase());   // recovered 공개주소
+    }
+    // 다른 digest를 보낸 경우 → 불일치 표기
+    const p2 = await prepare();
+    const sig2 = await signPrepared(p2, other);
+    if (!p2.ok) return;
+    const r2 = await submitApprovalSignature({
+      sessionId: p2.prepared.sessionId, signature: sig2 as Hex,
+      canonicalNonce: 5n, expectedOwner: owner.address, nowSec: NOW,
+      clientDigest: `0x${'ff'.repeat(32)}` as Hex,
+    });
+    expect(r2.ok).toBe(false);
+    if (!r2.ok) expect(r2.reason).toContain('digest 불일치');
+  });
+
+  it('#134 prepare가 저장하는 typedDataDigest = canonical hashTypedData 원형', async () => {
+    const p = await prepare();
+    expect(p.ok).toBe(true);
+    if (!p.ok) return;
+    const { hashSubaccountApproval } = await import('../lib/gmxEip712');
+    const s = p.prepared.summary;
+    const canonical = hashSubaccountApproval({
+      chainId: s.chainId, verifyingContract: s.verifyingContract,
+      approval: {
+        subaccount: s.subaccount, shouldAdd: s.shouldAdd,
+        expiresAt: BigInt(s.expiresAt), maxAllowedCount: BigInt(s.maxAllowedCount),
+        actionType: s.actionType, nonce: BigInt(s.nonce), desChainId: BigInt(s.desChainId),
+        deadline: BigInt(s.deadline), integrationId: s.integrationId,
+      },
+    });
+    expect(store.rows[0].typedDataDigest).toBe(canonical);
+    expect(p.prepared.digest).toBe(canonical);
   });
 
   it('세션 필드 변조(expiresAt) → digest 불일치 거부', async () => {

@@ -13,8 +13,8 @@
 import type { Address, Hex } from 'viem';
 import { getAddress } from 'viem';
 import {
-  buildSubaccountApprovalTypedData, computeGmxRelayDomainSeparator, hashSubaccountApproval,
-  computeRelayDigest, GMX_RELAY_DOMAIN_NAME, GMX_RELAY_DOMAIN_VERSION,
+  buildSubaccountApprovalTypedData, hashSubaccountApproval,
+  GMX_RELAY_DOMAIN_NAME, GMX_RELAY_DOMAIN_VERSION,
   type SubaccountApprovalMessage,
 } from './gmxEip712';
 import { APPROVAL_LIMITS } from './ownerApprovalSession';
@@ -148,12 +148,10 @@ export function validateGmxPreparedApproval(input: GmxPreparedApprovalValidation
     integrationId: m.integrationId as Hex,
   };
 
-  // digest는 서버 독립 재계산 (API 응답 digest 필드는 신뢰하지 않음)
-  const domainSeparator = computeGmxRelayDomainSeparator(GMX_API_CHAIN_ID, vc as Address);
-  const digest = computeRelayDigest(
-    domainSeparator,
-    hashSubaccountApproval({ chainId: GMX_API_CHAIN_ID, verifyingContract: vc as Address, approval: message }),
-  );
+  // digest는 서버 독립 재계산 (API 응답 digest 필드는 신뢰하지 않음).
+  // #134 — canonical EIP-712 typed-data digest(hashTypedData 원형)로 통일:
+  // 세션 저장·클라이언트 사전 검증과 동일 스킴 (0x1901 재래핑 스킴 폐기).
+  const digest = hashSubaccountApproval({ chainId: GMX_API_CHAIN_ID, verifyingContract: vc as Address, approval: message });
 
   // 서버 재계산 typed data와 API typed data의 message 결속은 위 필드 검증 +
   // digest 재계산으로 완결된다 (buildSubaccountApprovalTypedData는 동일 입력에
