@@ -180,6 +180,7 @@ async function getMarketSymbols(): Promise<Record<string, string>> {
 // ── Provider ──────────────────────────────────────────────────────────────────
 
 const POLL_INTERVAL_MS = 30_000;
+const REQUEST_TIMEOUT_MS = 20_000;
 
 export function GmxAccountProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<GmxAccountState>({
@@ -205,6 +206,9 @@ export function GmxAccountProvider({ children }: { children: ReactNode }) {
     setState(prev => ({ ...prev, status: 'loading' }));
 
     const fetchStart = Date.now();
+    const timeoutId = setTimeout(() => {
+      ctrl.abort(new DOMException('GMX account request timed out', 'TimeoutError'));
+    }, REQUEST_TIMEOUT_MS);
 
     try {
       // ── Fetch via API server proxy (Arbitrum RPC, no browser-side calls) ──
@@ -370,7 +374,8 @@ export function GmxAccountProvider({ children }: { children: ReactNode }) {
         }),
       }).catch(() => {});
     } catch (err: unknown) {
-      if ((err as Error)?.name === 'AbortError') return; // cancelled, don't update state
+      const abortReason = ctrl.signal.reason as { name?: string } | undefined;
+      if (ctrl.signal.aborted && abortReason?.name !== 'TimeoutError') return;
 
       // Diagnostic: canonical account-read failure (fire-and-forget, no financial data)
       void fetch('/api/wallet/diagnostic', {
@@ -391,6 +396,8 @@ export function GmxAccountProvider({ children }: { children: ReactNode }) {
         // lastSuccessUpdated intentionally NOT updated — preserves last good timestamp
         lastUpdated: new Date(),
       }));
+    } finally {
+      clearTimeout(timeoutId);
     }
   }, []);
 

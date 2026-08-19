@@ -569,6 +569,17 @@ export function classifyPositionCountConsistency(
 let gmxApiSdkPromise: Promise<{
   fetchPositionsInfo(args: { address: string }): Promise<unknown[]>;
 }> | null = null;
+const GMX_API_CROSSCHECK_TIMEOUT_MS = 5_000;
+
+export async function readWithTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T | null> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(null), timeoutMs);
+    promise.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      () => { clearTimeout(timer); resolve(null); },
+    );
+  });
+}
 
 /**
  * Official GMX API read used only to cross-check the canonical RPC count.
@@ -580,7 +591,10 @@ async function fetchGmxApiPositionCount(account: string): Promise<number | null>
       new GmxApiSdk({ chainId: arbitrum.id }),
     );
     const sdk = await gmxApiSdkPromise;
-    const positions = await sdk.fetchPositionsInfo({ address: account });
+    const positions = await readWithTimeout(
+      sdk.fetchPositionsInfo({ address: account }),
+      GMX_API_CROSSCHECK_TIMEOUT_MS,
+    );
     return Array.isArray(positions) ? positions.length : null;
   } catch {
     return null;
