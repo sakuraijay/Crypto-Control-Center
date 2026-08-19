@@ -2,8 +2,7 @@
  * #135 — Manual Controlled Canary 기본 의존성 배선 (production 구현).
  *
  * 전부 기존 검증된 모듈을 재사용한다. preflight 경로는 read-only만 —
- * 주문·서명·키 복호화·설정 변경을 유발하는 함수는 executeOrder/closePosition/
- * runEmergencyClose 3개뿐이며, 이는 execute 단계에서만 호출된다.
+ * 주문·서명·키 복호화·설정 변경을 유발하는 함수는 실행 단계에서만 호출된다.
  * Secret/PIN/키/RPC URL은 어떤 반환값에도 포함되지 않는다.
  */
 import { db, workerStateTable } from '@workspace/db';
@@ -32,7 +31,7 @@ import { isLiveTestExecutionLocked } from './liveTestGate';
 import { getStoredPublicSignerAddress, isManualCanarySignerRestoreAllowed } from './delegatedSigner';
 import {
   executeLiveTestOrder, closeLiveTestPosition, fetchAuthoritativeOpenPositions,
-  getStopExecutionCapability, fetchOnchainErc20Decimals,
+  evaluateManualCanaryStopCapability, refreshStopExecutionCapability, fetchOnchainErc20Decimals,
 } from '../workers/liveTestExecutor';
 import { runEmergencyClose } from '../workers/protectionExecutor';
 import { workerManager } from '../workers/aiWorker';
@@ -263,8 +262,8 @@ export function buildDefaultCanaryDeps(): ManualCanaryDeps {
         : outcome(false, failed.map((r) => r.detail).join('; '));
     },
 
-    stopCapability: async () => {
-      const cap = getStopExecutionCapability();
+    stopCapability: async ({ freshCostSnapshotAvailable }) => {
+      const cap = await evaluateManualCanaryStopCapability(freshCostSnapshotAvailable);
       return outcome(cap.available, cap.available ? 'stop 실행 능력 확인' : (cap.reasons[0] ?? 'stop 실행 능력 없음'));
     },
 
@@ -324,12 +323,14 @@ export function buildDefaultCanaryDeps(): ManualCanaryDeps {
      * preflight costSnapshot 경로(read-only)와 분리되어 구조적으로 독립.
      * 기록 실패 시 호출자(executeManualCanaryOpen)가 fail-closed (제출 0회).
      */
-    recordCostEvidenceForExecution: (
+    recordCostEvidenceForExecution: async (
       snapshot: CostSnapshot,
       args: CostSnapshotExpectation,
       nowMs: number,
-    ): boolean => {
-      return recordExecutionEligibleCostEvidence(snapshot, args, nowMs);
+    ): Promise<boolean> => {
+      if (!recordExecutionEligibleCostEvidence(snapshot, args, nowMs)) return false;
+      const stop = await refreshStopExecutionCapability();
+      return stop.available;
     },
 
     executeOrder: executeLiveTestOrder,
@@ -377,7 +378,7 @@ export function buildDefaultCanaryDeps(): ManualCanaryDeps {
   };
 }
 
-/** readiness/refresh 전용 — decimals와 30초 비용 증거만 read-only로 갱신한다. */
+/** readiness/refresh 전용 — decimals와 비용 스냅샷 가용성만 read-only로 확인한다. */
 export async function refreshManualCanaryReadonlyEvidence(): Promise<{
   decimals: Record<string, CheckOutcome>;
   costs: Record<string, { ok: boolean; reason: string | null }>;

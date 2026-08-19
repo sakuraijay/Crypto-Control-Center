@@ -116,6 +116,30 @@ export async function runAllowedPreflightOperation<T>(
   return await callback();
 }
 
+export const CANARY_STATUS_OPERATION_ALLOWLIST = Object.freeze([
+  'clock',
+  'daily_state',
+  'intent_status',
+  'initial_stop_status',
+  'position_readback',
+  'loss_readback',
+  'preflight_check_evaluation',
+] as const);
+
+/**
+ * Status has its own read-only capability boundary. It cannot reuse execution
+ * operations merely because the caller happens to hold ManualCanaryDeps.
+ */
+export async function runAllowedCanaryStatusOperation<T>(
+  operation: string,
+  callback: () => T | Promise<T>,
+): Promise<T> {
+  if (!(CANARY_STATUS_OPERATION_ALLOWLIST as readonly string[]).includes(operation)) {
+    throw new Error(`CANARY_STATUS_OPERATION_DENIED:${operation}`);
+  }
+  return await callback();
+}
+
 // ── 타입 ─────────────────────────────────────────────────────────────────────
 export interface PreflightItem { id: string; label: string; ok: boolean; detail: string }
 
@@ -225,7 +249,7 @@ export interface ManualCanaryPreflightDeps {
     { ok: true; snapshot: CostSnapshot; roundTripCostUsd: number | null } | { ok: false; reason: string }>;
   /** BTC와 ETH 모두의 fresh SDK+onchain decimals 증거가 있어야 한다. */
   canaryDecimalsReady(): Promise<CheckOutcome>;
-  stopCapability(): Promise<CheckOutcome>;
+  stopCapability(args: { freshCostSnapshotAvailable: boolean }): Promise<CheckOutcome>;
   currentPriceUsd(symbol: string): Promise<number | null>;
   accumCanaryLossUsd(): Promise<{ ok: boolean; lossUsd: number | null }>;
   marketAddress(symbol: string): string | null;
@@ -243,8 +267,21 @@ export interface ManualCanaryPreflightDeps {
   casState(key: string, prevRaw: string | null, nextRaw: string): Promise<boolean>;
 }
 
+/** preflight/status 공용 check 읽기 — token ID 생성/CAS 쓰기 capability 제외 */
+export type ManualCanaryCheckDeps = Omit<ManualCanaryPreflightDeps, 'randomId' | 'casState'>;
+
+/** status 단계에 필요한 읽기 전용 capability */
+export interface ManualCanaryStatusDeps extends ManualCanaryCheckDeps {
+  // 상태 판독 (온체인 증거 기반 — API 수락만으로 성공 처리 금지)
+  intentStatus(intentId: string): Promise<{ status: string; orderKey: string | null; txHash: string | null } | null>;
+  initialStopStatus(openIntentId: string): Promise<{ status: string | null; orderKey: string | null }>;
+}
+
 /** 전체 의존성 주입 — 실행 단계 포함 */
 export interface ManualCanaryDeps extends ManualCanaryPreflightDeps {
+  // 상태 판독 (온체인 증거 기반 — API 수락만으로 성공 처리 금지)
+  intentStatus(intentId: string): Promise<{ status: string; orderKey: string | null; txHash: string | null } | null>;
+  initialStopStatus(openIntentId: string): Promise<{ status: string | null; orderKey: string | null }>;
   // 실행 (기존 durable 경로 재사용 — 자동 재제출 없음)
   executeOrder(params: LiveOrderParams): Promise<LiveOrderResult>;
   closePosition(params: {
@@ -255,18 +292,14 @@ export interface ManualCanaryDeps extends ManualCanaryPreflightDeps {
     exactPosition?: ClosePositionBinding | null;
   }): Promise<LiveOrderResult>;
   runEmergencyClose(openIntentId: string): Promise<CheckOutcome>;
-  // 상태 판독 (온체인 증거 기반 — API 수락만으로 성공 처리 금지)
-  intentStatus(intentId: string): Promise<{ status: string; orderKey: string | null; txHash: string | null } | null>;
-  initialStopStatus(openIntentId: string): Promise<{ status: string | null; orderKey: string | null }>;
   /**
-   * #142: 실행 직전 전용 비용 증거 기록.
-   * executeOrder 바로 직전에만 호출 — 기록 불가 시 fail-closed (제출 0회).
-   * production 구현은 recordExecutionEligibleCostEvidence 위임.
+   * #142: 실행 직전 전용 비용 증거 기록 + stop capability 원자적 재평가.
+   * 실행 증거/stop gate 갱신 불가 시 fail-closed (제출 0회).
    * preflight costSnapshot 경로에는 이 메서드가 구조적으로 부재.
    */
   recordCostEvidenceForExecution(snapshot: CostSnapshot, args: {
     market: string; isLong: boolean; orderType: 'MarketIncrease' | 'MarketDecrease'; notionalUsd: number;
-  }, nowMs: number): boolean; // #142: execution-only — structurally unavailable in ManualCanaryPreflightDeps
+  }, nowMs: number): Promise<boolean>; // execution-only — structurally unavailable in preflight/status
 }
 
 // ── worker_state CAS 기본 구현 ────────────────────────────────────────────────
@@ -313,7 +346,7 @@ export function validateCanaryRequest(symbol: unknown, direction: unknown):
  * 실행 능력(executeOrder 등)은 구조적으로 접근 불가.
  */
 async function evaluateAllChecks(
-  deps: ManualCanaryPreflightDeps, symbol: string, direction: 'LONG' | 'SHORT',
+  deps: ManualCanaryCheckDeps, symbol: string, direction: 'LONG' | 'SHORT',
 ): Promise<{ items: PreflightItem[]; priceUsd: number | null; costSnapshot: CostSnapshot | null }> {
   const items: PreflightItem[] = [];
   const push = (id: string, label: string, o: CheckOutcome) =>
@@ -348,8 +381,6 @@ async function evaluateAllChecks(
 
   push('decimals', 'BTC+ETH index token decimals 검증',
     await runAllowedPreflightOperation('readonly', 'decimals', () => deps.canaryDecimalsReady()));
-  push('stop_capability', 'Stop 실행 능력',
-    await runAllowedPreflightOperation('readonly', 'stop_capability', () => deps.stopCapability()));
 
   const cost = await runAllowedPreflightOperation(
     'readonly',
@@ -375,6 +406,13 @@ async function evaluateAllChecks(
     costSnapshot = cost.snapshot;
     push('cost_snapshot', 'fresh cost snapshot', { ok: true, detail: `왕복 비용 $${cost.roundTripCostUsd.toFixed(3)}` });
   }
+
+  push('stop_capability', 'Stop 실행 능력',
+    await runAllowedPreflightOperation(
+      'readonly',
+      'stop_capability',
+      () => deps.stopCapability({ freshCostSnapshotAvailable: costSnapshot !== null }),
+    ));
 
   const loss = await runAllowedPreflightOperation(
     'readonly', 'accum_loss', () => deps.accumCanaryLossUsd(),
@@ -588,21 +626,27 @@ export async function executeManualCanaryOpen(deps: ManualCanaryDeps, body: {
     return reject(`실행 직전 BTC+ETH decimals 재검증 실패 — ${finalDecimals.detail} (제출 0회)`);
   }
 
-  // durable claim 먼저 (제출 전) — 실패 시 제출 0회. OPEN 요청 결속 함께 영속.
+  // #142 review fix: 실행 증거 기록+stop capability 갱신을 daily claim보다 먼저
+  // 완료한다. 실패/throw 시 일일 1회 예산을 소진하지 않고 제출 0회.
+  let evidenceRecorded = false;
+  try {
+    evidenceRecorded = await deps.recordCostEvidenceForExecution(
+      cost.snapshot,
+      { market: marketAddress, isLong, orderType: 'MarketIncrease', notionalUsd: sizeUsd },
+      deps.now().getTime(),
+    );
+  } catch {
+    evidenceRecorded = false;
+  }
+  if (!evidenceRecorded) {
+    return reject('실행 직전 비용 증거/stop capability 갱신 실패 — 제출 0회 (fail-closed)');
+  }
+
+  // durable claim (제출 전) — 실패 시 제출 0회. OPEN 요청 결속 함께 영속.
   const claim = await claimDailyBudget(deps, intentId, {
     symbol: req.symbol, direction: req.direction, collateralUsd, leverage, requestedSizeUsd: sizeUsd,
   });
   if (!claim.ok) return reject(claim.reason);
-
-  // #142: 실행 직전 전용 비용 증거 기록 — 기록 불가 시 fail-closed (제출 0회)
-  const evidenceRecorded = deps.recordCostEvidenceForExecution(
-    cost.snapshot,
-    { market: deps.marketAddress(req.symbol) ?? '', isLong, orderType: 'MarketIncrease', notionalUsd: sizeUsd },
-    deps.now().getTime(),
-  );
-  if (!evidenceRecorded) {
-    return reject('실행 직전 비용 증거 기록 실패 — 제출 0회 (fail-closed)');
-  }
 
   const result = await deps.executeOrder({
     decisionId,
@@ -803,9 +847,12 @@ export interface CanaryStageStatus {
   blockers: CanaryBlocker[];
 }
 
-export async function getCanaryStatus(deps: ManualCanaryDeps): Promise<CanaryStageStatus> {
-  const dayKey = manilaDayKey(deps.now());
-  const loaded = await loadDailyState(deps);
+export async function getCanaryStatus(deps: ManualCanaryStatusDeps): Promise<CanaryStageStatus> {
+  const now = await runAllowedCanaryStatusOperation('clock', () => deps.now());
+  const dayKey = manilaDayKey(now);
+  const loaded = await runAllowedCanaryStatusOperation(
+    'daily_state', () => loadDailyState(deps),
+  );
   const daily = loaded.corrupt ? null : loaded.state;
   const pending = { status: 'PENDING', detail: '대기' };
   const stages: CanaryStageStatus['stages'] = {
@@ -813,24 +860,35 @@ export async function getCanaryStatus(deps: ManualCanaryDeps): Promise<CanarySta
     confirmed: { ...pending }, readback: { ...pending },
   };
   if (daily?.openIntentId) {
-    const open = await deps.intentStatus(daily.openIntentId);
+    const open = await runAllowedCanaryStatusOperation(
+      'intent_status', () => deps.intentStatus(daily.openIntentId as string),
+    );
     stages.open = !open
       ? { status: 'UNKNOWN', detail: 'intent 조회 실패' }
       : { status: open.status, detail: open.status === 'CONFIRMED' ? `온체인 확정 (orderKey ${open.orderKey ? '확보' : '없음'})` : open.status };
     if (open?.status === 'CONFIRMED') {
-      const stop = await deps.initialStopStatus(daily.openIntentId);
+      const stop = await runAllowedCanaryStatusOperation(
+        'initial_stop_status',
+        () => deps.initialStopStatus(daily.openIntentId as string),
+      );
       stages.stop = stop.status === 'ACTIVE' && stop.orderKey
         ? { status: 'ACTIVE', detail: '온체인 orderKey 증거 확인' }
         : { status: stop.status ?? 'MISSING', detail: stop.status ? `미확정 (${stop.status}) — 신규 주문 금지, emergency close만` : 'stop 없음 — emergency close만' };
     }
   }
   if (daily?.closeIntentId) {
-    const close = await deps.intentStatus(daily.closeIntentId);
+    const close = await runAllowedCanaryStatusOperation(
+      'intent_status', () => deps.intentStatus(daily.closeIntentId as string),
+    );
     stages.close = close ? { status: close.status, detail: close.status } : { status: 'UNKNOWN', detail: 'intent 조회 실패' };
     if (close?.status === 'CONFIRMED') {
       stages.confirmed = { status: 'CONFIRMED', detail: '온체인 확정' };
-      const posCount = await deps.openPositionCount();
-      const loss = await deps.accumCanaryLossUsd();
+      const posCount = await runAllowedCanaryStatusOperation(
+        'position_readback', () => deps.openPositionCount(),
+      );
+      const loss = await runAllowedCanaryStatusOperation(
+        'loss_readback', () => deps.accumCanaryLossUsd(),
+      );
       stages.readback = posCount === 0 && loss.ok
         ? { status: 'DONE', detail: `포지션 0 · 누적 손실 $${(loss.lossUsd ?? 0).toFixed(2)}` }
         : { status: 'PENDING', detail: posCount === null ? '포지션 조회 실패' : `포지션 ${posCount}건 / PnL readback ${loss.ok ? '완료' : '실패'}` };
@@ -844,7 +902,10 @@ export async function getCanaryStatus(deps: ManualCanaryDeps): Promise<CanarySta
   try {
     const sym = daily?.open?.symbol ?? MANUAL_CANARY_CAPS.allowedSymbols[0]!;
     const dir = (daily?.open?.direction ?? 'LONG') as 'LONG' | 'SHORT';
-    const eval_ = await evaluateAllChecks(deps, sym, dir);
+    const eval_ = await runAllowedCanaryStatusOperation(
+      'preflight_check_evaluation',
+      () => evaluateAllChecks(deps, sym, dir),
+    );
     const failedItems = eval_.items.filter(i => !i.ok);
     blockers.push(...deriveCanaryBlockers(failedItems));
   } catch {

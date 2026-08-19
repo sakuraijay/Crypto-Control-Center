@@ -48,12 +48,15 @@ import {
   MANUAL_CANARY_CAPS,
   CANARY_CONFIRM_OPEN,
   PREFLIGHT_OPERATION_ALLOWLIST,
+  CANARY_STATUS_OPERATION_ALLOWLIST,
   CANARY_PREFLIGHT_FORBIDDEN_OPERATIONS,
   CANARY_BLOCKER_CATEGORIES,
   runAllowedPreflightOperation,
+  runAllowedCanaryStatusOperation,
   getCanaryStatus,
   type ManualCanaryDeps,
   type ManualCanaryPreflightDeps,
+  type ManualCanaryStatusDeps,
   type CheckOutcome,
 } from '../lib/manualCanary';
 import { manilaDayKey } from '../lib/profitProtection';
@@ -79,7 +82,7 @@ function makeForbiddenCapabilitySpies() {
   const runEmergencyClose = vi.fn(async () => {
     throw new Error('FORBIDDEN: runEmergencyClose must not be called in preflight/preflight-only paths');
   });
-  const recordCostEvidenceForExecution = vi.fn((_snap: unknown, _args: unknown, _nowMs: unknown): boolean => {
+  const recordCostEvidenceForExecution = vi.fn(async (_snap: unknown, _args: unknown, _nowMs: unknown): Promise<boolean> => {
     throw new Error('FORBIDDEN: recordCostEvidenceForExecution must not be called in preflight path');
   });
   const intentStatus = vi.fn(async () => {
@@ -235,7 +238,7 @@ describe('#142 Canary Launch Contract — Success path', () => {
   });
 
   it('execute success: recordCostEvidenceForExecution called exactly 1x just before executeOrder', async () => {
-    const recordEvidence = vi.fn((_s: unknown, _a: unknown, _n: unknown) => true);
+    const recordEvidence = vi.fn(async (_s: unknown, _a: unknown, _n: unknown) => true);
     const executeOrder = vi.fn(async (_params: unknown) => ({
       ok: true, txHash: '0xabc', orderKey: '0xkey', simulated: false, executedAt: NOW.toISOString(),
     }));
@@ -262,11 +265,11 @@ describe('#142 Canary Launch Contract — Success path', () => {
   });
 
   it('execute: recordCostEvidenceForExecution returns false → fail-closed (executeOrder 0 calls)', async () => {
-    const recordEvidence = vi.fn(() => false);
+    const recordEvidence = vi.fn(async () => false);
     const executeOrder = vi.fn(async () => ({
       ok: true, txHash: '0xabc', orderKey: '0xkey', simulated: false, executedAt: NOW.toISOString(),
     }));
-    const { deps } = makeContractDeps({
+    const { deps, state } = makeContractDeps({
       executeOrder: executeOrder as ManualCanaryDeps['executeOrder'],
       recordCostEvidenceForExecution: recordEvidence as ManualCanaryDeps['recordCostEvidenceForExecution'],
     });
@@ -280,6 +283,55 @@ describe('#142 Canary Launch Contract — Success path', () => {
     expect(r.phase).toBe('REJECTED');
     expect(r.reason).toContain('비용 증거');
     expect(executeOrder).toHaveBeenCalledTimes(0); // fail-closed
+    expect(state.get('manualCanaryDaily') ?? null).toBeNull();
+  });
+
+  it('execute: recordCostEvidenceForExecution throws → fail-closed without daily budget consumption', async () => {
+    const recordEvidence = vi.fn(async () => {
+      throw new Error('raw recorder failure must not escape');
+    });
+    const executeOrder = vi.fn(async () => ({
+      ok: true, txHash: '0xabc', orderKey: '0xkey', simulated: false, executedAt: NOW.toISOString(),
+    }));
+    const { deps, state } = makeContractDeps({
+      executeOrder: executeOrder as ManualCanaryDeps['executeOrder'],
+      recordCostEvidenceForExecution: recordEvidence as ManualCanaryDeps['recordCostEvidenceForExecution'],
+    });
+
+    const pf = await runCanaryPreflight(deps, 'BTC', 'LONG');
+    expect(pf.ok).toBe(true);
+    const r = await executeManualCanaryOpen(deps, {
+      preflightId: pf.preflightId,
+      confirm: CANARY_CONFIRM_OPEN,
+      symbol: 'BTC',
+      direction: 'LONG',
+    });
+
+    expect(r.ok).toBe(false);
+    expect(r.phase).toBe('REJECTED');
+    expect(r.reason).not.toContain('raw recorder failure');
+    expect(recordEvidence).toHaveBeenCalledTimes(1);
+    expect(executeOrder).toHaveBeenCalledTimes(0);
+    expect(state.get('manualCanaryDaily') ?? null).toBeNull();
+  });
+
+  it('cold preflight validates cost before stop capability and passes fresh in-request evidence', async () => {
+    const events: string[] = [];
+    const costSnapshot = vi.fn(async () => {
+      events.push('cost');
+      return { ok: true as const, snapshot: {} as never, roundTripCostUsd: 0.25 };
+    });
+    const stopCapability = vi.fn(async ({ freshCostSnapshotAvailable }: { freshCostSnapshotAvailable: boolean }) => {
+      events.push('stop');
+      return freshCostSnapshotAvailable ? OK : FAIL('fresh cost evidence missing');
+    });
+    const { preflightDeps } = makePreflightOnlyDeps({ costSnapshot, stopCapability });
+
+    const pf = await runCanaryPreflight(preflightDeps, 'BTC', 'LONG');
+
+    expect(pf.ok).toBe(true);
+    expect(events).toEqual(['cost', 'stop']);
+    expect(stopCapability).toHaveBeenCalledWith({ freshCostSnapshotAvailable: true });
   });
 
   it('PREFLIGHT_OPERATION_ALLOWLIST is frozen and stable', () => {
@@ -332,6 +384,24 @@ describe('#142 Canary Launch Contract — Success path', () => {
       runAllowedPreflightOperation('readonly', 'clock', callback),
     ).resolves.toBe(42);
     expect(callback).toHaveBeenCalledTimes(1);
+  });
+
+  it('status allowlist is frozen and rejects undeclared operations before callbacks run', async () => {
+    expect(Object.isFrozen(CANARY_STATUS_OPERATION_ALLOWLIST)).toBe(true);
+    expect(CANARY_STATUS_OPERATION_ALLOWLIST).toEqual(expect.arrayContaining([
+      'clock',
+      'daily_state',
+      'intent_status',
+      'initial_stop_status',
+      'position_readback',
+      'loss_readback',
+      'preflight_check_evaluation',
+    ]));
+    const callback = vi.fn();
+    await expect(
+      runAllowedCanaryStatusOperation('nonce_creation', callback),
+    ).rejects.toThrow('CANARY_STATUS_OPERATION_DENIED:nonce_creation');
+    expect(callback).toHaveBeenCalledTimes(0);
   });
 });
 
@@ -572,7 +642,7 @@ describe('#142 Canary Launch Contract — Forbidden capability exact 0 assertion
     const safeExecuteOrder = vi.fn();
     const safeClosePosition = vi.fn();
     const safeRunEmergencyClose = vi.fn();
-    const safeRecordEvidence = vi.fn(() => true);
+    const safeRecordEvidence = vi.fn(async () => true);
     const safeIntentStatus = vi.fn();
     const safeInitialStopStatus = vi.fn();
 
@@ -742,5 +812,22 @@ describe('#142 Canary Launch Contract — HTTP auth failure coverage', () => {
     expect('recordCostEvidenceForExecution' in narrowDeps).toBe(false);
     expect('intentStatus' in narrowDeps).toBe(false);
     expect('initialStopStatus' in narrowDeps).toBe(false);
+  });
+
+  it('status dependency type has reads only and no execution capabilities', () => {
+    const full = makeContractDeps().deps;
+    const { randomId: _randomId, casState: _casState, ...readonlyChecks } =
+      makePreflightOnlyDeps().preflightDeps;
+    const statusDeps: ManualCanaryStatusDeps = {
+      ...readonlyChecks,
+      intentStatus: full.intentStatus,
+      initialStopStatus: full.initialStopStatus,
+    };
+    expect('randomId' in statusDeps).toBe(false);
+    expect('casState' in statusDeps).toBe(false);
+    expect('executeOrder' in statusDeps).toBe(false);
+    expect('closePosition' in statusDeps).toBe(false);
+    expect('runEmergencyClose' in statusDeps).toBe(false);
+    expect('recordCostEvidenceForExecution' in statusDeps).toBe(false);
   });
 });

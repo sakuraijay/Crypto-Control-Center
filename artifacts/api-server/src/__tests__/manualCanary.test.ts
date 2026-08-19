@@ -73,7 +73,7 @@ function makeDeps(overrides: Partial<ManualCanaryDeps> = {}) {
     executeOrder,
     closePosition,
     runEmergencyClose,
-    recordCostEvidenceForExecution: vi.fn((_snap, _args, _nowMs) => true),
+    recordCostEvidenceForExecution: vi.fn(async (_snap, _args, _nowMs) => true),
     intentStatus: async () => ({ status: 'CONFIRMED', orderKey: '0xkey', txHash: '0xabc' }),
     initialStopStatus: async () => ({ status: 'ACTIVE', orderKey: '0xstop' }),
     loadState: async (k) => state.get(k) ?? null,

@@ -499,7 +499,9 @@ async function verifyStopSchemaAgainstSdk(): Promise<boolean> {
  * §11 — 실제 조건에서 stop 실행 능력 재평가. 조회 실패 = 해당 조건 false.
  * 어느 경로에서도 상수 true를 주입하지 않는다.
  */
-export async function refreshStopExecutionCapability(): Promise<StopCapabilityResult> {
+async function collectStopExecutionCapability(
+  freshFeeQuote: boolean,
+): Promise<StopCapabilityResult> {
   // durable 저장소 + 차단 보호 주문
   let blockingProtectionCount: number | null = null;
   let durableStoreOk = false;
@@ -522,7 +524,6 @@ export async function refreshStopExecutionCapability(): Promise<StopCapabilityRe
     inFlightReservedActions: await countInFlightReservedActions(),
   });
   const manualCanary = isManualCanarySignerRestoreAllowed(process.env).allowed;
-  const freshFeeQuote = getExecutionEligibleCostEvidence(Date.now()).fresh;
   let noBlockingIntents = false;
   try { noBlockingIntents = !(await hasBlockingIntents()); } catch { /* fail-closed */ }
 
@@ -558,6 +559,24 @@ export async function refreshStopExecutionCapability(): Promise<StopCapabilityRe
       _protectionRecon.lastPositionsFetchOkAtMs !== null &&
       Date.now() - _protectionRecon.lastPositionsFetchOkAtMs < 10 * 60_000,
   });
+  return derived;
+}
+
+/**
+ * Manual Canary preflight/status preview. The supplied boolean may only come
+ * from the validated in-request cost snapshot; this function performs reads
+ * only and does not mutate the cached execution capability.
+ */
+export async function evaluateManualCanaryStopCapability(
+  freshCostSnapshotAvailable: boolean,
+): Promise<StopCapabilityResult> {
+  return collectStopExecutionCapability(freshCostSnapshotAvailable);
+}
+
+export async function refreshStopExecutionCapability(): Promise<StopCapabilityResult> {
+  const derived = await collectStopExecutionCapability(
+    getExecutionEligibleCostEvidence(Date.now()).fresh,
+  );
   _stopCapability = { ...derived, evaluatedAt: new Date().toISOString() };
   return derived;
 }
