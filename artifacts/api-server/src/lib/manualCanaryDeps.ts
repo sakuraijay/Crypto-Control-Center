@@ -11,7 +11,7 @@ import { eq } from 'drizzle-orm';
 import { getAddress } from 'viem';
 
 import type { ManualCanaryDeps, CheckOutcome } from './manualCanary';
-import { __canaryStateAccess } from './manualCanary';
+import { __canaryStateAccess, CANARY_BLOCKER_CATEGORIES } from './manualCanary';
 import { verifySdkRouterPin } from './gmxLivePreflight';
 import { getDeploymentVerificationState, getCanonicalSnapshot } from './relayActivationStatus';
 import { getUsdcAllowanceForSpender } from './gmxSubaccount';
@@ -22,6 +22,8 @@ import {
   fetchLiveCostSnapshot,
   recordExecutionEligibleCostEvidence,
   validateExecutionEligibleSnapshot,
+  type CostSnapshot,
+  type CostSnapshotExpectation,
   type FetchedCostFields,
 } from './costSnapshot';
 import { resolveIndexTokenDecimals } from './indexTokenDecimals';
@@ -223,6 +225,10 @@ export function buildDefaultCanaryDeps(): ManualCanaryDeps {
       }>;
     },
 
+    /**
+     * #142: read-only costSnapshot — preflight 경로는 recordExecutionEligibleCostEvidence
+     * 를 호출하지 않는다. 실행 직전 비용 증거 기록은 recordCostEvidenceForExecution 전용.
+     */
     costSnapshot: async ({ symbol, isLong, notionalUsd }) => {
       const market = MARKET_BY_SYMBOL_SERVER.get(symbol);
       if (!market) return { ok: false, reason: '시장 미확인' };
@@ -242,7 +248,8 @@ export function buildDefaultCanaryDeps(): ManualCanaryDeps {
         Date.now(),
       );
       if (!v.ok) return { ok: false, reason: v.reason };
-      recordExecutionEligibleCostEvidence(res.snapshot, expected, Date.now());
+      // NOTE: recordExecutionEligibleCostEvidence is NOT called here (read-only path).
+      // It is called exclusively via recordCostEvidenceForExecution just before executeOrder.
       return { ok: true, snapshot: res.snapshot, roundTripCostUsd: v.effectiveRoundTripCostUsd };
     },
 
@@ -289,6 +296,15 @@ export function buildDefaultCanaryDeps(): ManualCanaryDeps {
     mainAddress: () => process.env.GMX_WALLET_ADDRESS ?? '',
     liveTestMode: () => isManualCanarySignerRestoreAllowed(process.env).allowed,
 
+    /**
+     * #142: GITHUB_CI attestation — production은 항상 UNATTESTED fail-closed.
+     * 앱 측 GitHub 자격증명 없음; 비밀값·raw 환경값·RPC URL·주소·서명·raw 오류 미포함.
+     */
+    githubCiAttestation: () => outcome(
+      false,
+      `${CANARY_BLOCKER_CATEGORIES.GITHUB_CI.stableMessage} [${CANARY_BLOCKER_CATEGORIES.GITHUB_CI.attestedStatus}]`,
+    ),
+
     envSubmissionState: () => {
       const locked = isLiveTestExecutionLocked();
       const manual = isManualCanarySignerRestoreAllowed(process.env);
@@ -301,6 +317,19 @@ export function buildDefaultCanaryDeps(): ManualCanaryDeps {
             ? '수동 GMX API Canary 제출 활성 (Worker PAPER·AUTO LIVE 비활성)'
             : `수동 Canary 제출 조건 미충족: ${manual.missing.join(', ')}`,
       };
+    },
+
+    /**
+     * #142: 실행 직전 전용 비용 증거 기록 — executeOrder 바로 직전에만 호출.
+     * preflight costSnapshot 경로(read-only)와 분리되어 구조적으로 독립.
+     * 기록 실패 시 호출자(executeManualCanaryOpen)가 fail-closed (제출 0회).
+     */
+    recordCostEvidenceForExecution: (
+      snapshot: CostSnapshot,
+      args: CostSnapshotExpectation,
+      nowMs: number,
+    ): boolean => {
+      return recordExecutionEligibleCostEvidence(snapshot, args, nowMs);
     },
 
     executeOrder: executeLiveTestOrder,

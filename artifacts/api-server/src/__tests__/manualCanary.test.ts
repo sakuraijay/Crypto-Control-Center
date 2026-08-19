@@ -68,9 +68,12 @@ function makeDeps(overrides: Partial<ManualCanaryDeps> = {}) {
     mainAddress: () => '0x46c27887c5ec5e36b2a21e1ec1bc69e7a593950e',
     liveTestMode: () => true,
     envSubmissionState: () => ({ locked: false, submissionEnabled: true, detail: '활성' }),
+    // #142: tests override to OK so preflight can pass; production is always UNATTESTED
+    githubCiAttestation: () => OK,
     executeOrder,
     closePosition,
     runEmergencyClose,
+    recordCostEvidenceForExecution: vi.fn((_snap, _args, _nowMs) => true),
     intentStatus: async () => ({ status: 'CONFIRMED', orderKey: '0xkey', txHash: '0xabc' }),
     initialStopStatus: async () => ({ status: 'ACTIVE', orderKey: '0xstop' }),
     loadState: async (k) => state.get(k) ?? null,
@@ -82,7 +85,8 @@ function makeDeps(overrides: Partial<ManualCanaryDeps> = {}) {
     },
     ...overrides,
   };
-  return { deps, state, executeOrder, closePosition, runEmergencyClose };
+  return { deps, state, executeOrder, closePosition, runEmergencyClose,
+    recordCostEvidenceForExecution: deps.recordCostEvidenceForExecution as ReturnType<typeof vi.fn> };
 }
 
 async function preflightThenBody(deps: ManualCanaryDeps, symbol = 'BTC', direction = 'LONG') {

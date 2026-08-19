@@ -63,6 +63,16 @@ jobs:
           # 테스트 환경에서는 VAPID 키 없음 → fail-closed 경로 검증
           NODE_ENV: test
 
+      # ── Step 4b: Pin #140/#141 settlement/handoff regression tests ──────────
+      # confirmedOpenStopHandoff (#140) and closeSettlementEvidence (#141) are
+      # pinned in a dedicated step so regressions are immediately visible.
+      # WORKER_ENGINE_MODE remains PAPER; no real network/signing/order/fund actions.
+      - name: Tests — #140 confirmedOpenStopHandoff + #141 closeSettlementEvidence (pinned)
+        id: tests-settlement-handoff
+        run: pnpm --filter @workspace/api-server run test:settlement-handoff
+        env:
+          NODE_ENV: test
+
       # ── Step 5: Regression tests (futures-web) ─────────────────────────────
       - name: Tests — futures-web
         id: tests-web
@@ -77,10 +87,12 @@ jobs:
           echo "=============================="
           echo "CI Quality Gate Summary"
           echo "=============================="
-          echo "- TypeScript (all):      ${{ steps.typecheck.outcome || 'skipped' }}"
-          echo "- Build futures-web:     ${{ steps.build-web.outcome || 'skipped' }}"
-          echo "- Build deploy bundle:   ${{ steps.build-deploy.outcome || 'skipped' }}"
-          echo "- Tests api-server:      ${{ steps.tests-api.outcome || 'skipped' }}"
-          echo "- Tests web:             ${{ steps.tests-web.outcome || 'skipped' }}"
+          echo "- TypeScript (all):              ${{ steps.typecheck.outcome || 'skipped' }}"
+          echo "- Build futures-web:             ${{ steps.build-web.outcome || 'skipped' }}"
+          echo "- Build deploy bundle:           ${{ steps.build-deploy.outcome || 'skipped' }}"
+          echo "- Tests api-server:              ${{ steps.tests-api.outcome || 'skipped' }}"
+          echo "- Tests #140/#141 pinned:        ${{ steps.tests-settlement-handoff.outcome || 'skipped' }}"
+          echo "- Tests web:                     ${{ steps.tests-web.outcome || 'skipped' }}"
           echo ""
           echo "LIVE_EXECUTION_LOCKED=true 는 절대 변경하지 마세요."
+          echo "WORKER_ENGINE_MODE=PAPER 는 절대 변경하지 마세요 (AUTO LIVE 비활성 유지)."
