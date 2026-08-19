@@ -119,7 +119,7 @@ const BOTH_FLAGS = { GMX_API_READONLY_ENABLED: 'true', GMX_API_ORDER_SUBMISSION_
 const MAIN = '0x1111111111111111111111111111111111111111';
 const SUB = '0x2222222222222222222222222222222222222222';
 const USDC = '0xaf88d065e77c8cC2239327C5EDb3A432268e5831';
-const ROUTER = '0x517602BaC704B72993997820981603f5E4901273';
+const ROUTER = '0xfD0596f708d9D950E0eF7b5d191e5F8e55b8a67f';
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });

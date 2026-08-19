@@ -1,5 +1,5 @@
 /**
- * gmxDeploymentManifest — 6C 단계: 감사된 GMX Arbitrum 배포 주소 manifest.
+ * gmxDeploymentManifest — 감사된 GMX Arbitrum 배포 주소 manifest (v2).
  *
  * 목적:
  *  - Production env 주소가 "감사된 공식 주소"와 일치하는지 검증하는 단일 기준.
@@ -8,43 +8,54 @@
  *  - env 주소가 manifest와 다르면 LIVE 활성화 fail-closed.
  *  - 주소 변경은 코드 리뷰 + manifest version 갱신 없이는 불가능하다.
  *
- * 감사 근거 (2026-08-17 KST 확인):
- *  - gmx-synthetics main `deployments/arbitrum/*.json`
- *    commit 95bd0c97385737b3227e314fafb04371991bdf1b (2025-11-17, "add deployments")
- *  - Arbiscan verified (Exact Match, Contract Name=SubaccountGelatoRelayRouter,
- *    compiler v0.8.29) — 신규 0x517602… / 구 0xfD0596… 둘 다 verified.
- *  - 공식 docs(https://docs.gmx.io/docs/api/contracts/addresses/)는 CDN(엣지)별로
- *    다른 내용을 반환하는 것이 관찰됨: 운영자 독립 확인(2026-08-17)에서는 Arbitrum
- *    SubaccountGelatoRelayRouter=0x517602…(artifact와 일치)를 표시했으나, 본 환경
- *    (Cloudflare POP BOM, cache-busting 포함 2회 fetch, 응답 본문 sha256
- *    5e0a3d7dc9843f38fd8f8d46842eb33dc513b5a9fb5ea8251eaafede31d45b43,
- *    date 2026-08-16T21:35Z)에서는 여전히 구주소 0xfD0596…을 반환.
- *    "docs 전체가 구주소"가 아니라 "CDN 응답 불일치 관찰"이 정확한 상태이며,
- *    docsDiscrepancy 필드로 명시 기록한다. 주소 pin 근거는 docs가 아니라
- *    deployment artifact + Arbiscan verified이므로 pin은 영향 없음.
+ * v2 감사 근거 (#131 교차감사, 2026-08-19 UTC 확정):
+ *  Arbitrum 단일체인 Owner Approval·주문 prepare/submit의 유효
+ *  SubaccountGelatoRelayRouter = 0xfD0596f708d9D950E0eF7b5d191e5F8e55b8a67f (구 배포).
+ *  1) GMX 공식 API v2 실측: POST /v1/subaccounts/approval/prepare echo의
+ *     domain.verifyingContract = 0xfD0596… (arbitrum.gmxapi.io, 2026-08-19).
+ *  2) gmx-interface master c233f850007c5 (2026-08-16):
+ *     sdk/src/configs/contracts.ts ARBITRUM = 0xfD0596…; 0x517602…는 저장소 전체 0회.
+ *     validateTypedData.ts는 contracts.ts 유래 허용집합만 수락 — 공식 클라이언트도
+ *     0x517602…를 거부하는 상태.
+ *  3) @gmx-io/sdk 1.7.0 (본 프로젝트 pin): configs/contracts [ARBITRUM]
+ *     SubaccountGelatoRelayRouter = 0xfD0596… (런타임 대조: verifySdkRouterPin).
+ *  4) 온체인 (Arbitrum RPC, 읽기 전용): 두 주소 모두 코드 존재
+ *     (구 22,738 / 신규 21,181 bytes), dataStore·eventEmitter·orderVault·router
+ *     결속 동일, RoleStore(0x3c3d99FD…)에서 CONTROLLER·ROUTER_PLUGIN 둘 다 true,
+ *     subaccountApprovalNonces(main)=0 동일.
+ *  5) gmx-synthetics main a85ea3491c19 (2026-07-31) deployments/arbitrum artifact는
+ *     0x517602… — 즉 "배포·권한 부여 완료, 공식 클라이언트 미전환" 세대 혼합 상태.
+ *     deployments repo 존재 ≠ 유효 경로. 유효 router 확정은 (a) API echo
+ *     (b) interface/SDK pin (c) 온체인 role 3중 일치로만 한다.
+ *
+ *  전환 감지·재감사 경보: 공식 interface/SDK가 0x517602…로 전환하면
+ *  verifySdkRouterPin이 불일치를 감지해 LIVE preflight를 차단하고 명시적
+ *  재감사(ROUTER_REAUDIT_REQUIRED)를 요구한다 — 자동 수용 금지.
  *
  * DataStore/EventEmitter/OrderVault는 docs·artifact 양쪽에서 동일 (docs 명시:
  * "DataStore and RoleStore addresses are permanent").
  */
 
 export const GMX_DEPLOYMENT_MANIFEST = {
-  manifestVersion: 1,
+  manifestVersion: 2,
   chainId: 42161,
-  checkedAt: '2026-08-17',
-  sourceRepo: 'gmx-io/gmx-synthetics',
-  sourceCommit: '95bd0c97385737b3227e314fafb04371991bdf1b',
-  artifactPath: 'deployments/arbitrum/SubaccountGelatoRelayRouter.json',
+  checkedAt: '2026-08-19',
+  sourceRepo: 'gmx-io/gmx-interface (c233f850) + @gmx-io/sdk 1.7.0 + GMX API 실측 + 온체인 RoleStore',
+  sourceCommit: 'c233f850007c5 (interface master, 2026-08-16)',
+  artifactPath: 'sdk/src/configs/contracts.ts [ARBITRUM].SubaccountGelatoRelayRouter',
   docsDiscrepancy:
-    'CDN 응답 불일치 관찰: 운영자 독립 확인(2026-08-17)에서는 공식 docs가 0x517602…(artifact 일치)를 ' +
-    '표시했으나, 본 환경(Cloudflare POP BOM, 2026-08-16T21:35Z, body sha256 5e0a3d7d…d45b43)에서는 ' +
-    '구주소 0xfD0596…을 반환. 주소 pin 근거는 artifact+Arbiscan이며 구주소는 차단 목록 유지. ' +
-    '모든 엣지에서 0x517602… 일관 확인 전 Production env 설정 금지.',
+    '#131 교차감사(2026-08-19)로 해소: docs/deployments의 0x517602…는 배포·권한 부여까지 끝난 ' +
+    '신규 router지만 공식 API·interface·SDK 어느 클라이언트도 아직 사용하지 않는다(세대 혼합). ' +
+    '유효 경로는 구 0xfD0596… — API echo·interface c233f850·sdk 1.7.0·온체인 role 일치. ' +
+    '공식 클라이언트 전환 확인 전 0x517602… 사용 금지(차단 목록 소속, 재감사 필요).',
   addresses: {
-    subaccountGelatoRelayRouter: '0x517602BaC704B72993997820981603f5E4901273',
+    subaccountGelatoRelayRouter: '0xfD0596f708d9D950E0eF7b5d191e5F8e55b8a67f',
     dataStore: '0xFD70de6b91282D8017aA4E741e9Ae325CAb992d8',
     eventEmitter: '0xC8ee91A54287DB53897056e12D9819156D3822Fb',
     orderVault: '0x31eF83a530Fde1B38EE9A18093A333D8Bbbc40D5',
     gelatoRelayRouter: '0xa9090E2fd6cD8Ee397cF3106189A7E1CFAE6C59C',
+    /** preflight 전용 (env 대조 대상 아님) — gmx-synthetics deployments/arbitrum/RoleStore.json, docs 'permanent' */
+    roleStore: '0x3c3d99FD298f679DBC2CEcd132b4eC4d0F5e6e72',
   },
 } as const;
 
@@ -55,9 +66,10 @@ export const GMX_DEPLOYMENT_MANIFEST = {
 export const GMX_BLOCKED_ADDRESSES: ReadonlyMap<string, string> = new Map(
   (
     [
-      // 이전 개발 기준 Arbitrum SubaccountGelatoRelayRouter — 일부 docs CDN 엣지의
-      // 응답에서 관찰된 구주소(docsDiscrepancy 참조), artifact 배포 계보에는 없음
-      ['0xfD0596f708d9D950E0eF7b5d191e5F8e55b8a67f', '구 Arbitrum SubaccountGelatoRelayRouter (docs-legacy, 교체됨)'],
+      // #131 — 신규 배포 router: gmx-synthetics a85ea349 deployments에 존재하고
+      // 온체인 권한(CONTROLLER·ROUTER_PLUGIN)도 부여됐지만, 공식 API·interface·SDK가
+      // 아직 사용하지 않는다. 공식 클라이언트 전환 확인(재감사) 전 사용 금지.
+      ['0x517602BaC704B72993997820981603f5E4901273', '신규 SubaccountGelatoRelayRouter — 공식 클라이언트 미전환 (ROUTER_REAUDIT_REQUIRED)'],
       // gmx-synthetics main artifact 히스토리의 과거 Arbitrum router 배포들
       ['0xdd78aA661e4e3BD1eCAb7E0D5E25AbBbcb71464F', '과거 artifact router (2025-11-05)'],
       ['0xA1D94802EcD642051B677dBF37c8E78ce6dd3784', '과거 artifact router (v2.2, 2025-08-13)'],

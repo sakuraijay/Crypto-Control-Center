@@ -41,7 +41,7 @@ import { createRelayReadonlyClient, __setRelayReadonlyPublicClientFactoryForTest
 import { evaluateActivationGate, type ActivationGateInput } from '../lib/relayActivationGate';
 import { isSignerStorageAccessAllowed } from '../lib/delegatedSigner';
 
-const VALID_TARGET = '0x517602BaC704B72993997820981603f5E4901273'; // 6C: submit target은 manifest router만 허용
+const VALID_TARGET = '0xfD0596f708d9D950E0eF7b5d191e5F8e55b8a67f'; // 6C: submit target은 manifest router만 허용
 const VALID_DATA = '0x1234567890abcdef';
 
 function envOf(flags: Record<string, string>): NodeJS.ProcessEnv {
@@ -321,7 +321,7 @@ describe('6단계 §6 — activation 게이트에 read-only 플래그 요구', (
     GMX_RELAY_NETWORK_ENABLED: 'true', GMX_RELAY_READONLY_NETWORK_ENABLED: 'true',
     GMX_RELAY_MODE: 'LIVE',
     GMX_API_READONLY_ENABLED: 'true', GMX_API_ORDER_SUBMISSION_ENABLED: 'true',
-    GMX_SUBACCOUNT_GELATO_RELAY_ROUTER_ADDRESS: '0x517602BaC704B72993997820981603f5E4901273',
+    GMX_SUBACCOUNT_GELATO_RELAY_ROUTER_ADDRESS: '0xfD0596f708d9D950E0eF7b5d191e5F8e55b8a67f',
     GMX_DATA_STORE_ADDRESS: '0xFD70de6b91282D8017aA4E741e9Ae325CAb992d8',
     GMX_EVENT_EMITTER_ADDRESS: '0xC8ee91A54287DB53897056e12D9819156D3822Fb',
   };

@@ -28,7 +28,7 @@ import {
   signDigestWithDelegatedSigner,
   decryptSensitiveHex,
 } from './delegatedSigner';
-import { SESSION_STATUS, APPROVAL_PURPOSE, getConfiguredMainAccount } from './ownerApprovalSession';
+import { SESSION_STATUS, APPROVAL_PURPOSE, APPROVAL_LIMITS, getConfiguredMainAccount } from './ownerApprovalSession';
 import { GMX_DEPLOYMENT_MANIFEST } from './gmxDeploymentManifest';
 import { USDC_ADDRESS, ZERO_ADDRESS, usdSizeToGmx, usdToUsdcWei } from './gmxContracts';
 import { GMX_API_CHAIN_ID, type GmxApiResult, type GmxApiTransport } from './gmxApiTransport';
@@ -50,6 +50,7 @@ export function __setUsdcCollateralGateForTests(f: CheckUsdcCollateralGateFn | n
 }
 import { runGmxApiSubmitFlow, type GmxSubmitFlowResult } from './gmxApiSubmitFlow';
 import { evaluateActivationGate, type ActivationGateInput } from './relayActivationGate';
+import { isPreflightPassedFresh, getLastPreflight, runGmxLivePreflight } from './gmxLivePreflight';
 
 // ── 주문 요청 (worker 수치 → GMX 1e30/1e6 문자열 변환은 여기서 단일 규칙) ──────
 
@@ -344,9 +345,11 @@ export function verifyOrderTypedDataBinding(view: PreparedOrderView, req: GmxOrd
   }
   const vc = typeof domain.verifyingContract === 'string' ? domain.verifyingContract : '';
   if (!isAddress(vc)) return { ok: false, reason: 'verifyingContract 형식 오류' };
+  // #131 리뷰(Critical) — verifyingContract는 감사된 router 단 하나만 허용.
+  // (manifest의 다른 주소 — DataStore/EventEmitter/OrderVault/RoleStore 등 — 도 전부 거부)
   const manifest = manifestAddressSet();
-  if (!manifest.has(vc.toLowerCase())) {
-    return { ok: false, reason: 'verifyingContract가 감사된 manifest 주소가 아님 — 서명 금지' };
+  if (vc.toLowerCase() !== GMX_DEPLOYMENT_MANIFEST.addresses.subaccountGelatoRelayRouter.toLowerCase()) {
+    return { ok: false, reason: 'verifyingContract가 감사된 SubaccountGelatoRelayRouter가 아님 — 서명 금지 (fail-closed)' };
   }
 
   // 허용 주소 집합 — 미지의 주소가 message에 있으면 서명 금지 (출력 우회/스푸핑 방지)
@@ -647,6 +650,18 @@ export async function executeViaGmxApi(input: ExecuteViaGmxApiInput): Promise<Ex
     const preGate = evaluateActivationGate(input.activation);
     if (!preGate.networkEligible) {
       return { ...(await runGmxApiSubmitFlow(makeFlowInput(input, null, autoCancelHolder))), preBlocked: false, autoCancelEncoded: autoCancelHolder.value };
+    }
+
+    // #131 — read-only 통합 preflight (P1 env/manifest, P2 SDK pin, P3 getCode,
+    // P4 RoleStore CONTROLLER/ROUTER_PLUGIN, P5 nonce readback). 신선(TTL 10분)한
+    // 통과 스냅샷이 없으면 즉석 재실행(전부 read-only)하고, 하나라도 실패하면
+    // 실제 주문 0회 차단. SDK pin 불일치는 ROUTER_REAUDIT_REQUIRED — 자동 수용 금지.
+    {
+      const pf = isPreflightPassedFresh() ? getLastPreflight()! : await runGmxLivePreflight();
+      if (!pf.ok) {
+        const failed = pf.checks.filter((c) => !c.ok).map((c) => `${c.name}: ${c.detail}`);
+        return blocked([`LIVE preflight 미통과 — 실제 주문 0회 차단 (fail-closed): ${failed.join(' | ')}`]);
+      }
     }
 
     if (req.kind === 'OPEN') {

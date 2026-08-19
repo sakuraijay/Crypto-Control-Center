@@ -20,9 +20,9 @@ import { GMX_DEPLOYMENT_MANIFEST, getBlockedAddressReason } from './gmxDeploymen
 export const GMX_SUBACCOUNT_GELATO_RELAY_ROUTER_ARBITRUM_OFFICIAL_DOC =
   GMX_DEPLOYMENT_MANIFEST.addresses.subaccountGelatoRelayRouter;
 export const GMX_DATA_STORE_ARBITRUM_OFFICIAL_DOC = GMX_DEPLOYMENT_MANIFEST.addresses.dataStore;
-/** 구(docs-legacy) router — 차단 목록 소속. 어떤 경로에서도 사용 금지 */
-export const GMX_SUBACCOUNT_GELATO_RELAY_ROUTER_ARBITRUM_LEGACY_BLOCKED =
-  '0xfD0596f708d9D950E0eF7b5d191e5F8e55b8a67f';
+/** 신규 배포 router — 차단 목록 소속 (#131: 공식 클라이언트 미전환, 재감사 전 사용 금지) */
+export const GMX_SUBACCOUNT_GELATO_RELAY_ROUTER_ARBITRUM_NEXT_BLOCKED =
+  '0x517602BaC704B72993997820981603f5E4901273';
 
 export { ARBITRUM_ONE_CHAIN_ID };
 

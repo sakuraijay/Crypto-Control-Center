@@ -18,7 +18,7 @@ import {
 import {
   resolveGmxLiveRelayConfig,
   GMX_SUBACCOUNT_GELATO_RELAY_ROUTER_ARBITRUM_OFFICIAL_DOC,
-  GMX_SUBACCOUNT_GELATO_RELAY_ROUTER_ARBITRUM_LEGACY_BLOCKED,
+  GMX_SUBACCOUNT_GELATO_RELAY_ROUTER_ARBITRUM_NEXT_BLOCKED,
 } from '../lib/gmxLiveConfig';
 import { evaluateActivationGate, type ActivationGateInput } from '../lib/relayActivationGate';
 import { createGelatoHttpTransport, GELATO_API_KEY_SECRET_NAME } from '../lib/relayTransport';
@@ -40,8 +40,12 @@ import {
   getDeploymentVerificationState, __resetDeploymentVerificationForTests,
 } from '../lib/relayActivationStatus';
 
-const NEW_ROUTER = '0x517602BaC704B72993997820981603f5E4901273' as Address;
-const OLD_ROUTER = '0xfD0596f708d9D950E0eF7b5d191e5F8e55b8a67f' as Address;
+// #131 v2 — 유효 router는 0xfD0596(공식 API·interface·SDK pin), 0x517602는
+// 신규 배포지만 공식 클라이언트 미전환 → 차단 목록(재감사 필요) 소속.
+const VALID_ROUTER = '0xfD0596f708d9D950E0eF7b5d191e5F8e55b8a67f' as Address;
+const BLOCKED_NEXT_ROUTER = '0x517602BaC704B72993997820981603f5E4901273' as Address;
+const NEW_ROUTER = VALID_ROUTER;
+const OLD_ROUTER = BLOCKED_NEXT_ROUTER;
 const OWNER = '0x1111111111111111111111111111111111111111' as Address;
 const SUB = '0x2222222222222222222222222222222222222222' as Address;
 const MARKET = '0x47c031236e19d024b42f8AE6780E44A573170703' as Address;
@@ -165,9 +169,9 @@ describe('6C — verifyingContract 교체 시 EIP-712 digest 상이 (구 router 
 
 // ═════════════ §8-5 manifest 검증·차단 목록 ═════════════
 describe('6C — manifest 대조·차단 목록 (fail-closed)', () => {
-  it('OFFICIAL_DOC 상수는 manifest router를 가리키고, 구주소는 차단 목록에 있다', () => {
+  it('OFFICIAL_DOC 상수는 manifest router(0xfD0596)를 가리키고, 미전환 신규 주소(0x517602)는 차단 목록에 있다', () => {
     expect(GMX_SUBACCOUNT_GELATO_RELAY_ROUTER_ARBITRUM_OFFICIAL_DOC).toBe(NEW_ROUTER);
-    expect(getBlockedAddressReason(GMX_SUBACCOUNT_GELATO_RELAY_ROUTER_ARBITRUM_LEGACY_BLOCKED)).toBeTruthy();
+    expect(getBlockedAddressReason(GMX_SUBACCOUNT_GELATO_RELAY_ROUTER_ARBITRUM_NEXT_BLOCKED)).toBeTruthy();
     expect(GMX_BLOCKED_ADDRESSES.size).toBeGreaterThanOrEqual(15);
   });
   it('manifest 일치 env → ok (대소문자 무시)', () => {
@@ -190,7 +194,7 @@ describe('6C — manifest 대조·차단 목록 (fail-closed)', () => {
     // chainId 불일치
     expect(validateEnvAgainstManifest({ ...MANIFEST_ENV, GMX_CHAIN_ID: '43114' }).ok).toBe(false);
   });
-  it('resolveGmxLiveRelayConfig도 차단 주소를 거부한다 (구 router·Avalanche)', () => {
+  it('resolveGmxLiveRelayConfig도 차단 주소를 거부한다 (미전환 신규 router·Avalanche)', () => {
     for (const bad of [OLD_ROUTER, '0xa62BD1cFE2066c5bF4180b4125BBb5116eEA26c9']) {
       const r = resolveGmxLiveRelayConfig({ ...MANIFEST_ENV, GMX_SUBACCOUNT_GELATO_RELAY_ROUTER_ADDRESS: bad } as NodeJS.ProcessEnv);
       expect(r.ok).toBe(false);

@@ -161,7 +161,7 @@ describe('legacy SubaccountRouter 주문 경로 — Production 차단', () => {
 
 /** 최신 relay 구성 완비 (게이트 통과 시나리오용) — 문서 기준 공식 Arbitrum 주소 */
 function setRelayEnv() {
-  process.env.GMX_SUBACCOUNT_GELATO_RELAY_ROUTER_ADDRESS = '0x517602BaC704B72993997820981603f5E4901273';
+  process.env.GMX_SUBACCOUNT_GELATO_RELAY_ROUTER_ADDRESS = '0xfD0596f708d9D950E0eF7b5d191e5F8e55b8a67f';
   process.env.GMX_EVENT_EMITTER_ADDRESS = '0xC8ee91A54287DB53897056e12D9819156D3822Fb';
   process.env.GMX_DATA_STORE_ADDRESS = '0xFD70de6b91282D8017aA4E741e9Ae325CAb992d8';
 }

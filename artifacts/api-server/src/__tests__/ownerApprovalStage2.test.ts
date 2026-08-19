@@ -123,7 +123,7 @@ import { buildMinimalRelayParams } from '../lib/gmxEip712';
 const owner  = privateKeyToAccount(`0x${'11'.repeat(32)}`);
 const other  = privateKeyToAccount(`0x${'22'.repeat(32)}`);
 const signer = privateKeyToAccount(`0x${'33'.repeat(32)}`);
-const ROUTER = '0x517602BaC704B72993997820981603f5E4901273' as Address;
+const ROUTER = '0xfD0596f708d9D950E0eF7b5d191e5F8e55b8a67f' as Address;
 const MARKET = '0x70d95587d40A2caf56bd97485aB3Eec10Bee6336' as Address;
 const USDC   = '0xaf88d065e77c8cC2239327C5EDb3A432268e5831' as Address;
 const NOW    = 1_800_000_000n;

@@ -50,6 +50,7 @@ import { APPROVAL_PURPOSE, SESSION_STATUS } from '../lib/ownerApprovalSession';
 import { reconcileGmxApiTasks, makeProductionDeps } from '../lib/gmxApiStatusReconciler';
 import { getGmxPrepareStartupState } from '../lib/gmxApiPrepareStartup';
 import { sanitizeRpcError } from '../lib/rpcErrorSanitize';
+import { getLastPreflight, isPreflightPassedFresh, runGmxLivePreflight, PREFLIGHT_TTL_MS } from '../lib/gmxLivePreflight';
 
 const router = Router();
 
@@ -427,6 +428,29 @@ router.post('/executor/gmx-api/readiness/refresh', requireOperatorAuth, async (_
       refresh: { readonlyEnabled: t.readonlyEnabled, peerHealth, reconciliation: recon },
       status: snapshot,
     });
+  } catch (e: unknown) {
+    return res.status(500).json({ ok: false, error: sanitizeRpcError(e) });
+  }
+});
+
+// ── #131 LIVE preflight ─────────────────────────────────────────────────────
+// GET — 저장 스냅샷만 노출 (외부 호출 0회, readiness-snapshot 패턴)
+router.get('/executor/live-preflight', requireOperatorAuth, (_req, res) => {
+  const last = getLastPreflight();
+  return res.json({
+    ok: true,
+    preflight: last,
+    fresh: isPreflightPassedFresh(),
+    ttlMs: PREFLIGHT_TTL_MS,
+    manifestVersion: GMX_DEPLOYMENT_MANIFEST.manifestVersion,
+  });
+});
+
+// POST — read-only preflight 실행 (eth_getCode/eth_call만; 서명·제출·상태 변경 0회)
+router.post('/executor/live-preflight/run', requireOperatorAuth, async (_req, res) => {
+  try {
+    const result = await runGmxLivePreflight();
+    return res.json({ ok: true, preflight: result, fresh: isPreflightPassedFresh() });
   } catch (e: unknown) {
     return res.status(500).json({ ok: false, error: sanitizeRpcError(e) });
   }
