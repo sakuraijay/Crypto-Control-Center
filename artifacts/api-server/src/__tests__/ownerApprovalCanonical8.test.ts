@@ -20,7 +20,7 @@ vi.mock('@workspace/db', () => ({
 }));
 
 import { APPROVAL_LIMITS } from '../lib/ownerApprovalSession';
-import { validateGmxPreparedApproval } from '../lib/gmxApiApproval';
+import { validateGmxPreparedApproval, buildGmxPrepareRequestBody } from '../lib/gmxApiApproval';
 import { requiredActionsBeforeOpen, WORST_PATH_ACTIONS, RESERVED_EMERGENCY_ACTIONS } from '../lib/actionBudget';
 import {
   GMX_RELAY_DOMAIN_NAME, GMX_RELAY_DOMAIN_VERSION,
@@ -95,13 +95,60 @@ describe('validateGmxPreparedApproval — canonical 8 정확 일치 강제', () 
     expect(r.ok).toBe(false);
   });
 
-  it('deadline 10분 초과 → 거부', () => {
-    const r = validateGmxPreparedApproval({ raw: approvalRaw({ deadline: String(NOW + 601n) }), expected });
+  it('#130 — API echo deadline=expiresAt(1h) 허용, 최종 메시지 deadline은 10분으로 clamp', () => {
+    const r = validateGmxPreparedApproval({ raw: approvalRaw({ deadline: String(NOW + 3600n), expiresAt: String(NOW + 3600n) }), expected });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.message.deadline).toBe(NOW + BigInt(APPROVAL_LIMITS.SIGNATURE_DEADLINE_SECONDS));
+  });
+
+  it('#130 — echo deadline이 10분 이내면 그대로 사용 (clamp 미적용)', () => {
+    const r = validateGmxPreparedApproval({ raw: approvalRaw({ deadline: String(NOW + 300n) }), expected });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.message.deadline).toBe(NOW + 300n);
+  });
+
+  it('deadline이 expiry 상한(1h) 초과 → 거부', () => {
+    const r = validateGmxPreparedApproval({ raw: approvalRaw({ deadline: String(NOW + 3601n), expiresAt: String(NOW + 3600n) }), expected });
     expect(r.ok).toBe(false);
+  });
+
+  it('deadline > expiresAt → API echo 비정상으로 거부', () => {
+    const r = validateGmxPreparedApproval({ raw: approvalRaw({ deadline: String(NOW + 3600n), expiresAt: String(NOW + 1800n) }), expected });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reasons.join(' ')).toContain('deadline > expiresAt');
   });
 
   it('expiresAt/deadline 과거 → 거부', () => {
     expect(validateGmxPreparedApproval({ raw: approvalRaw({ expiresAt: String(NOW - 1n) }), expected }).ok).toBe(false);
     expect(validateGmxPreparedApproval({ raw: approvalRaw({ deadline: String(NOW - 1n) }), expected }).ok).toBe(false);
+  });
+});
+
+describe('#130 — buildGmxPrepareRequestBody 공식 스키마 계약', () => {
+  const body = buildGmxPrepareRequestBody({ account: MAIN, subaccountAddress: SUB, nowSec: NOW });
+
+  it('필드 집합이 정확히 공식 스키마 5개 (excess property 회귀 방지)', () => {
+    expect(Object.keys(body).sort()).toEqual(['account', 'expiresAt', 'maxAllowedCount', 'shouldAdd', 'subaccountAddress']);
+    // 과거 400 원인이었던 초과 필드가 절대 포함되지 않아야 함
+    expect(body).not.toHaveProperty('chainId');
+    expect(body).not.toHaveProperty('subaccount');
+    expect(body).not.toHaveProperty('expirySeconds');
+    expect(body).not.toHaveProperty('deadline');
+  });
+
+  it('maxAllowedCount는 문자열 "8" (숫자 8은 400 invalid string value)', () => {
+    expect(body.maxAllowedCount).toBe('8');
+    expect(typeof body.maxAllowedCount).toBe('string');
+  });
+
+  it('expiresAt은 절대 unix 초 문자열 = now + 3600', () => {
+    expect(body.expiresAt).toBe(String(NOW + 3600n));
+    expect(typeof body.expiresAt).toBe('string');
+  });
+
+  it('account/subaccountAddress/shouldAdd 결속', () => {
+    expect(body.account).toBe(MAIN);
+    expect(body.subaccountAddress).toBe(SUB);
+    expect(body.shouldAdd).toBe(true);
   });
 });

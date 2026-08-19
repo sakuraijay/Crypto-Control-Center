@@ -36,7 +36,7 @@ import {
   isReconciled,
 } from '../workers/liveTestExecutor';
 import { createGmxApiTransport, type GmxApiTransport } from '../lib/gmxApiTransport';
-import { validateGmxPreparedApproval } from '../lib/gmxApiApproval';
+import { validateGmxPreparedApproval, buildGmxPrepareRequestBody } from '../lib/gmxApiApproval';
 
 const router = Router();
 
@@ -317,9 +317,7 @@ router.post('/executor/subaccount-approval/prepare', requireOperatorAuth, async 
     }
 
     // canonical 강제 — 클라이언트 body의 expirySeconds/maxAllowedCount는 신뢰하지 않는다.
-    // maxAllowedCount=8(감사 예산 6 + 비상 2), expiry=최대 1시간, deadline=10분 고정.
-    const expiry = APPROVAL_LIMITS.DEFAULT_EXPIRY_SECONDS;
-    const maxCount = Number(APPROVAL_LIMITS.CANONICAL_MAX_ALLOWED_COUNT);
+    // maxAllowedCount=8(감사 예산 6 + 비상 2), expiry=최대 1시간, deadline=10분(서버 clamp).
     const nowSec = BigInt(Math.floor(Date.now() / 1000));
 
     // 6G-1 §5 — 공식 GMX API prepareSubaccountApproval이 권위 원천.
@@ -328,13 +326,13 @@ router.post('/executor/subaccount-approval/prepare', requireOperatorAuth, async 
     if (!gmxApi.readonlyEnabled) {
       return res.status(503).json({ ok: false, error: "GMX_API_READONLY_ENABLED !== 'true' — GMX API prepare 불가 (fail-closed)" });
     }
-    const apiRes = await gmxApi.postJson('/subaccounts/approval/prepare', {
-      chainId: ARBITRUM_ONE_CHAIN_ID,
-      account: mainAccount,
-      subaccount: signerAddress,
-      ...(expiry !== undefined ? { expirySeconds: expiry } : {}),
-      ...(maxCount !== undefined ? { maxAllowedCount: maxCount } : {}),
-    }, 'readonly');
+    // #130 — 공식 스키마: account/subaccountAddress/expiresAt(절대,문자열)/shouldAdd/maxAllowedCount(문자열).
+    // chainId·subaccount·expirySeconds·deadline은 excess property로 400 거부됨 (실측).
+    const apiRes = await gmxApi.postJson('/subaccounts/approval/prepare', buildGmxPrepareRequestBody({
+      account: mainAccount as Address,
+      subaccountAddress: signerAddress as Address,
+      nowSec,
+    }), 'readonly');
     if (!apiRes.ok) {
       return res.status(502).json({ ok: false, error: `GMX API approval prepare 실패(${apiRes.kind}) — 세션 생성 0회` });
     }

@@ -352,7 +352,9 @@ describe('6G-1 §5 — validateGmxPreparedApproval', () => {
       [undefined, { verifyingContract: MAIN }],
       [{ nonce: '8' }, undefined],
       [{ expiresAt: String(NOW + 7200n) }, undefined],
-      [{ deadline: String(NOW + 3600n) }, undefined],
+      [{ deadline: String(NOW + 7200n) }, undefined],           // deadline > 1h 상한
+      [{ deadline: String(NOW + 3601n) }, undefined],           // deadline > expiresAt(1h)
+      [{ deadline: String(NOW - 1n) }, undefined],              // deadline 과거
       [{ shouldAdd: false }, undefined],
       [{ desChainId: '1' }, undefined],
       [{ maxAllowedCount: '5' }, undefined],

@@ -20,6 +20,35 @@ import {
 import { APPROVAL_LIMITS } from './ownerApprovalSession';
 import { GMX_API_CHAIN_ID } from './gmxApiTransport';
 
+/**
+ * 공식 GMX API POST /subaccounts/approval/prepare 요청 본문 (#130).
+ *
+ * 실측 스키마(2026-08-18, arbitrum.gmxapi.io / .ai 동일):
+ *  - 필수: account, subaccountAddress, expiresAt(절대 unix 초, 문자열), shouldAdd, maxAllowedCount(문자열)
+ *  - 초과 필드 거부(400): chainId, subaccount, expirySeconds, deadline
+ *  - API echo는 deadline=expiresAt로 응답 (deadline 파라미터 미지원)
+ * canonical 값은 서버가 여기서 고정 생성 — 클라이언트 입력 미신뢰.
+ */
+export function buildGmxPrepareRequestBody(params: {
+  account: Address;
+  subaccountAddress: Address;
+  nowSec: bigint;
+}): {
+  account: string;
+  subaccountAddress: string;
+  expiresAt: string;
+  shouldAdd: boolean;
+  maxAllowedCount: string;
+} {
+  return {
+    account: params.account,
+    subaccountAddress: params.subaccountAddress,
+    expiresAt: (params.nowSec + BigInt(APPROVAL_LIMITS.DEFAULT_EXPIRY_SECONDS)).toString(),
+    shouldAdd: true,
+    maxAllowedCount: APPROVAL_LIMITS.CANONICAL_MAX_ALLOWED_COUNT.toString(),
+  };
+}
+
 export interface GmxPreparedApprovalValidationInput {
   /** GMX API 응답의 typedData (domain/types/message) */
   raw: unknown;
@@ -85,8 +114,13 @@ export function validateGmxPreparedApproval(input: GmxPreparedApprovalValidation
   const now = input.expected.nowSec;
   if (expiresAt === null || expiresAt <= now) reasons.push('expiresAt 없음/과거');
   else if (expiresAt - now > BigInt(APPROVAL_LIMITS.MAX_EXPIRY_SECONDS)) reasons.push('expiry가 canary 상한(1h) 초과');
+  // GMX API는 deadline 파라미터를 받지 않고 echo에 deadline=expiresAt(최대 1h)를 넣는다.
+  // 여기서는 sanity(존재·미래·expiry 상한 이내)만 검증하고, 최종 서명 메시지의
+  // deadline은 아래에서 canary 상한(10분)으로 서버가 clamp한다 — 서명·digest는
+  // clamp된 메시지 기준으로 재계산되므로 결속이 유지된다 (fail-closed).
   if (deadline === null || deadline <= now) reasons.push('deadline 없음/과거');
-  else if (deadline - now > BigInt(APPROVAL_LIMITS.SIGNATURE_DEADLINE_SECONDS)) reasons.push('deadline이 canary 상한(10분) 초과');
+  else if (deadline - now > BigInt(APPROVAL_LIMITS.MAX_EXPIRY_SECONDS)) reasons.push('deadline이 expiry 상한(1h) 초과');
+  else if (expiresAt !== null && deadline > expiresAt) reasons.push('deadline > expiresAt — API echo 비정상');
   // canonical 정확 일치 강제 — 8이 아닌 어떤 값(2/6/9/…)도 변조로 간주 (fail-closed)
   if (maxAllowedCount === null || maxAllowedCount !== APPROVAL_LIMITS.CANONICAL_MAX_ALLOWED_COUNT) {
     reasons.push(`maxAllowedCount ≠ canonical(${APPROVAL_LIMITS.CANONICAL_MAX_ALLOWED_COUNT}) — 변조 의심`);
@@ -97,6 +131,11 @@ export function validateGmxPreparedApproval(input: GmxPreparedApprovalValidation
 
   if (reasons.length > 0) return { ok: false, reasons };
 
+  // 서명 deadline canary 상한(10분) clamp — API echo(deadline=expiresAt, 1h)를
+  // 그대로 서명하지 않는다. clamp된 값이 최종 서명 메시지·digest·세션 저장값.
+  const deadlineCap = now + BigInt(APPROVAL_LIMITS.SIGNATURE_DEADLINE_SECONDS);
+  const clampedDeadline = (deadline as bigint) < deadlineCap ? (deadline as bigint) : deadlineCap;
+
   const message: SubaccountApprovalMessage = {
     subaccount: sub as Address,
     shouldAdd: true,
@@ -105,7 +144,7 @@ export function validateGmxPreparedApproval(input: GmxPreparedApprovalValidation
     actionType: m.actionType as Hex,
     nonce: nonce as bigint,
     desChainId: desChainId as bigint,
-    deadline: deadline as bigint,
+    deadline: clampedDeadline,
     integrationId: m.integrationId as Hex,
   };
 

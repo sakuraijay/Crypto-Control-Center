@@ -182,9 +182,15 @@ describe('#125 PAPER·잠금 상태 Owner Approval prepare (stored_public 경로
     expect(calls).toHaveLength(1);
     expect(calls[0].path).toBe('/subaccounts/approval/prepare');
     expect(calls[0].purpose).toBe('readonly');
-    const body = calls[0].body as { account: string; subaccount: string };
+    // #130 — 공식 스키마 계약: 정확히 5개 필드, 초과 필드(chainId/subaccount/expirySeconds) 없음
+    const body = calls[0].body as { account: string; subaccountAddress: string; expiresAt: string; shouldAdd: boolean; maxAllowedCount: string };
+    expect(Object.keys(body as object).sort()).toEqual(['account', 'expiresAt', 'maxAllowedCount', 'shouldAdd', 'subaccountAddress']);
     expect(body.account).toBe(MAIN);
-    expect(body.subaccount).toBe(EXPECTED_CANARY_SIGNER); // canary 결속
+    expect(body.subaccountAddress).toBe(EXPECTED_CANARY_SIGNER); // canary 결속
+    expect(body.shouldAdd).toBe(true);
+    expect(body.maxAllowedCount).toBe('8');
+    expect(typeof body.expiresAt).toBe('string');
+    expect(/^\d+$/.test(body.expiresAt)).toBe(true);
     // 주문 prepare/submit 0회 (approval prepare 경로 1회뿐)
     expect(calls.every((c) => c.path === '/subaccounts/approval/prepare')).toBe(true);
     // 보안 불변식
