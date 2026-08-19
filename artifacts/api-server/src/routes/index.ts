@@ -12,6 +12,7 @@ import relayRouter from "./relay";
 import gmxapiRouter from "./gmxapi";
 import riskRouter from "./risk";
 import intelRouter from "./intel";
+import canaryRouter from "./canary";
 
 const router: IRouter = Router();
 
@@ -28,5 +29,6 @@ router.use(relayRouter);
 router.use(gmxapiRouter);
 router.use(riskRouter);
 router.use(intelRouter);
+router.use(canaryRouter);
 
 export default router;

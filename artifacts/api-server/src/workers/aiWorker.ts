@@ -380,6 +380,14 @@ class WorkerManager {
 
   /** Task #111 — priceBuffer 마지막 값 + 심볼별 수신 시각 기반 시세 조회 (합성 금지).
    *  다른 심볼만 갱신돼도 이 심볼이 fresh로 판정되지 않도록 per-symbol 시각을 쓴다. */
+  /**
+   * #135 — 수동 Controlled Canary용 공개 시세 조회 (read-only).
+   * priceBuffer 최신값 + per-symbol 수신 시각 기반. 합성/추정 금지.
+   */
+  getPriceQuote(symbol: string): PriceQuote | null {
+    return this.serverPaperQuote(symbol);
+  }
+
   private serverPaperQuote(symbol: string): PriceQuote | null {
     const buf = this.priceBuffer.get(symbol);
     const price = buf && buf.length > 0 ? buf[buf.length - 1] : null;
@@ -1644,6 +1652,14 @@ class WorkerManager {
       if (currentPrice <= 0) return;
 
       if (operatingState === 'LONG' || operatingState === 'SHORT') {
+        // ── #135 구조적 분리 — 자동 Worker의 신규 LIVE 진입(OPEN)은
+        // AUTO_WORKER_LIVE_ENABLED가 정확히 'true'일 때만 허용 (미설정=차단, fail-closed).
+        // 청산/축소(위 위험 액션 경로)는 보호 목적이므로 게이트 대상이 아니다.
+        // Manual Canary(decisionId `manual-canary:*`)는 이 메서드를 거치지 않는 별도 경로.
+        if (process.env.AUTO_WORKER_LIVE_ENABLED !== 'true') {
+          console.info('[AIWorker] LIVE 자동 신규 진입 차단 — AUTO_WORKER_LIVE_ENABLED ≠ true (수동 Canary 분리 게이트, #135)');
+          return;
+        }
         // ── 6H-2A §5 — 정산 미완료 동안 신규 LIVE 진입 차단 (청산은 허용) ──
         const rec = this.lastSettlementReconcile;
         if (!rec || rec.incomplete) {

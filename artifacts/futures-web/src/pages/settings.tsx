@@ -6,6 +6,7 @@ import { ReadinessRefreshCard } from '@/components/ReadinessRefreshCard';
 import { SignerProvisionCard } from '@/components/SignerProvisionCard';
 import { CanaryAllowanceCard } from '@/components/CanaryAllowanceCard';
 import { GmxApiStatusCard } from '@/components/GmxApiStatusCard';
+import { ManualCanaryCard } from '@/components/ManualCanaryCard';
 import type { ReadinessSnapshotView } from '@/lib/relayStatus';
 import { formatConfidencePct } from '@/lib/formatConfidence';
 import { deriveLiveTestDisplay } from '@/lib/liveTestDisplay';
@@ -834,6 +835,8 @@ export default function Settings() {
           <RelayStatusCard snapshot={relaySnapshot} />
           {/* 6G-2 §11 — 공식 GMX API v2 실행 경로 상태 (조회 전용) */}
           <GmxApiStatusCard />
+          {/* #135 — Manual Controlled Canary (운영자 1회 수동 실행, 하드캡 서버 강제) */}
+          <ManualCanaryCard />
 
         </div>
 

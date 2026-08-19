@@ -697,7 +697,7 @@ let _intentReconcileTimer: ReturnType<typeof setInterval> | null = null;
  * decimals() 교차검증 (indexTokenDecimals 모듈). 어느 한쪽 실패/불일치 = null.
  * §13 고지: 여기서 read-only eth_call(decimals()) 1회를 GMX_RPC_URL로 수행한다.
  */
-async function fetchOnchainErc20Decimals(tokenAddress: string): Promise<number | null> {
+export async function fetchOnchainErc20Decimals(tokenAddress: string): Promise<number | null> {
   const url = process.env.GMX_RPC_URL?.trim();
   if (!url) return null;
   try {

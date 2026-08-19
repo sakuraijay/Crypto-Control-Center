@@ -601,3 +601,50 @@ describe('LIVE_EXECUTION_LOCKED 불변 보안 상수', () => {
     expect(result.txHash).toBeNull();
   });
 });
+
+// ── #135 F22 — 자동 Worker LIVE 구조적 분리 게이트 ─────────────────────────────
+describe('#135 AUTO_WORKER_LIVE_ENABLED 게이트 (F22)', () => {
+  const savedEnv = process.env.AUTO_WORKER_LIVE_ENABLED;
+  afterEach(() => {
+    if (savedEnv === undefined) delete process.env.AUTO_WORKER_LIVE_ENABLED;
+    else process.env.AUTO_WORKER_LIVE_ENABLED = savedEnv;
+  });
+
+  it('플래그 미설정 시 tryLiveTestExecution이 즉시 차단·조기 반환한다 (fail-closed)', async () => {
+    delete process.env.AUTO_WORKER_LIVE_ENABLED;
+    const { workerManager } = await import('../workers/aiWorker');
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (workerManager as any).tryLiveTestExecution(
+        { operatingState: 'LONG', confidence: 90, executionType: 'perp_long_open', primarySymbol: 'BTC' },
+        [{ symbol: 'BTC', price: 60000 }], { positionCount: 0 },
+        { liveTestAccumLossUsd: 0, liveTestDbOk: true },
+        { liveTestMode: true, tradingCapital: 100 }, 1,
+      );
+      const blocked = infoSpy.mock.calls.some(c =>
+        String(c[0]).includes('AUTO_WORKER_LIVE_ENABLED'));
+      expect(blocked).toBe(true);
+    } finally {
+      infoSpy.mockRestore();
+    }
+  });
+
+  it("플래그가 'true'가 아닌 값('1', 'TRUE' 등)이어도 차단된다", async () => {
+    process.env.AUTO_WORKER_LIVE_ENABLED = '1';
+    const { workerManager } = await import('../workers/aiWorker');
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (workerManager as any).tryLiveTestExecution(
+        { operatingState: 'SHORT', confidence: 90, executionType: 'perp_short_open', primarySymbol: 'ETH' },
+        [{ symbol: 'ETH', price: 3000 }], { positionCount: 0 },
+        { liveTestAccumLossUsd: 0, liveTestDbOk: true },
+        { liveTestMode: true, tradingCapital: 100 }, 1,
+      );
+      expect(infoSpy.mock.calls.some(c => String(c[0]).includes('AUTO_WORKER_LIVE_ENABLED'))).toBe(true);
+    } finally {
+      infoSpy.mockRestore();
+    }
+  });
+});
