@@ -1,8 +1,6 @@
 import { getAddress } from 'viem';
 import type { CheckOutcome } from './manualCanary';
 import { EXPECTED_CANARY_SIGNER } from './canaryAllowanceInfo';
-import { getStoredPublicSignerAddress } from './delegatedSigner';
-import { getActiveReadySession } from './ownerApprovalSession';
 
 type StoredSignerResult =
   | { ok: true; address: string }
@@ -26,6 +24,17 @@ export interface ManualCanaryOwnerApprovalDeps {
 
 const outcome = (ok: boolean, detail: string): CheckOutcome => ({ ok, detail });
 
+async function loadDefaultDeps(): Promise<ManualCanaryOwnerApprovalDeps> {
+  const [{ getStoredPublicSignerAddress }, { getActiveReadySession }] = await Promise.all([
+    import('./delegatedSigner'),
+    import('./ownerApprovalSession'),
+  ]);
+  return {
+    getStoredSigner: getStoredPublicSignerAddress,
+    getReadySession: getActiveReadySession,
+  };
+}
+
 /**
  * Owner Approval readback is bound directly to the stored public signer.
  * It never decrypts or initializes signer key material.
@@ -36,12 +45,9 @@ export async function checkManualCanaryOwnerApproval(
   injectedDeps?: ManualCanaryOwnerApprovalDeps,
 ): Promise<CheckOutcome> {
   try {
-    // Lazy binding keeps unrelated route tests with narrow delegatedSigner mocks
-    // isolated until this check is actually invoked.
-    const deps = injectedDeps ?? {
-      getStoredSigner: getStoredPublicSignerAddress,
-      getReadySession: getActiveReadySession,
-    };
+    // Keep DB-backed signer/session modules out of import-only and injected-deps
+    // paths so isolated CI tests do not require DATABASE_URL.
+    const deps = injectedDeps ?? await loadDefaultDeps();
     const stored = await deps.getStoredSigner(EXPECTED_CANARY_SIGNER);
     if (!stored.ok) return outcome(false, `저장된 signer 공개주소 조회 실패 — ${stored.reason}`);
 
