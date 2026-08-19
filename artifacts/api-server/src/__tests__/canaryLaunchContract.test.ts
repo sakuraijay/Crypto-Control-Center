@@ -414,6 +414,79 @@ describe('#142 Canary Launch Contract — Success path', () => {
     expect(daily.launchReservation).toBeNull();
   });
 
+  it('unresolved reservation blocks day-rollover launches until the prior owner releases', async () => {
+    let currentNow = new Date('2026-08-19T15:59:59.000Z'); // Manila 23:59:59
+    let releaseA!: () => void;
+    let markARecording!: () => void;
+    const aRecording = new Promise<void>((resolve) => { markARecording = resolve; });
+    const aRelease = new Promise<void>((resolve) => { releaseA = resolve; });
+    const recordEvidence = vi.fn<ManualCanaryDeps['recordCostEvidenceForExecution']>(
+      async (_snapshot, _expected) => {
+        if (recordEvidence.mock.calls.length === 1) {
+          markARecording();
+          await aRelease;
+        }
+        return true;
+      },
+    );
+    const executeOrder = vi.fn<ManualCanaryDeps['executeOrder']>(async () => ({
+      ok: true, txHash: '0xabc', orderKey: '0xkey', simulated: false, executedAt: currentNow.toISOString(),
+    }));
+    const { deps, state } = makeContractDeps({
+      now: () => currentNow,
+      marketAddress: (symbol) => symbol === 'BTC'
+        ? '0x' + 'b'.repeat(40)
+        : '0x' + 'e'.repeat(40),
+      recordCostEvidenceForExecution: recordEvidence,
+      executeOrder,
+    });
+
+    const preflightA = await runCanaryPreflight(deps, 'BTC', 'LONG');
+    expect(preflightA.ok).toBe(true);
+    const launchA = executeManualCanaryOpen(deps, {
+      preflightId: preflightA.preflightId,
+      confirm: CANARY_CONFIRM_OPEN,
+      symbol: 'BTC',
+      direction: 'LONG',
+    });
+    await aRecording; // A owns the day-D reservation, before evidence activation returns.
+
+    currentNow = new Date('2026-08-19T16:00:01.000Z'); // Manila day D+1
+    const blockedB = await runCanaryPreflight(deps, 'ETH', 'SHORT');
+    expect(blockedB.ok).toBe(false);
+    expect(blockedB.items.find((item) => item.id === 'daily_budget')).toMatchObject({ ok: false });
+    expect(recordEvidence).toHaveBeenCalledTimes(1);
+    expect(executeOrder).toHaveBeenCalledTimes(0);
+
+    releaseA();
+    const resultA = await launchA;
+    expect(resultA.ok).toBe(false);
+    expect(resultA.phase).toBe('REJECTED');
+    expect(resultA.reason).toContain('예약 상태');
+    expect(executeOrder).toHaveBeenCalledTimes(0);
+    const released = JSON.parse(state.get('manualCanaryDaily')!);
+    expect(released.opens).toBe(0);
+    expect(released.launchReservation).toBeNull();
+
+    // Only after old-day owner release may the new-day request activate evidence.
+    const preflightB = await runCanaryPreflight(deps, 'ETH', 'SHORT');
+    expect(preflightB.ok).toBe(true);
+    const resultB = await executeManualCanaryOpen(deps, {
+      preflightId: preflightB.preflightId,
+      confirm: CANARY_CONFIRM_OPEN,
+      symbol: 'ETH',
+      direction: 'SHORT',
+    });
+    expect(resultB.ok).toBe(true);
+    expect(recordEvidence).toHaveBeenCalledTimes(2);
+    expect(recordEvidence.mock.calls[1]![1]).toMatchObject({
+      market: '0x' + 'e'.repeat(40),
+      isLong: false,
+    });
+    expect(executeOrder).toHaveBeenCalledTimes(1);
+    expect(executeOrder.mock.calls[0]![0]).toMatchObject({ symbol: 'ETH', isLong: false });
+  });
+
   it('PREFLIGHT_OPERATION_ALLOWLIST is frozen and stable', () => {
     expect(Object.isFrozen(PREFLIGHT_OPERATION_ALLOWLIST)).toBe(true);
     expect(Object.isFrozen(PREFLIGHT_OPERATION_ALLOWLIST.readonly)).toBe(true);

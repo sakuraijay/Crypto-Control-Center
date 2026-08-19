@@ -444,11 +444,8 @@ async function evaluateAllChecks(
   } else {
     const daily = dailyRes.state;
     const used = daily && daily.dayKey === dayKey ? daily.opens : 0;
-    const reserved = Boolean(
-      daily
-      && daily.dayKey === dayKey
-      && daily.launchReservation,
-    );
+    // 날짜가 달라도 미해결 launch owner는 새 preflight를 차단한다.
+    const reserved = Boolean(daily?.launchReservation);
     push('daily_budget', `일일 주문 ${MANUAL_CANARY_CAPS.maxOrdersPerDay}회`,
       used >= MANUAL_CANARY_CAPS.maxOrdersPerDay
         ? { ok: false, detail: `오늘(${dayKey}) 이미 ${used}회 사용` }
@@ -565,11 +562,13 @@ async function reserveDailyLaunch(
   if (loaded.corrupt) return { ok: false, reason: '일일 상태 레코드 손상 — 새 예약 금지 (fail-closed)' };
   const prev = loaded.state;
   const prevRaw = loaded.raw;
+  // 날짜가 바뀌어도 unresolved reservation을 절대 덮어쓰지 않는다.
+  // 기존 owner가 release/resolve하기 전까지 모든 새 launch를 차단한다.
+  if (prev?.launchReservation) {
+    return { ok: false, reason: '다른 Canary 실행 예약 진행/조사 필요 — 제출 0회 (fail-closed)' };
+  }
   if (prev && prev.dayKey === dayKey && prev.opens >= MANUAL_CANARY_CAPS.maxOrdersPerDay) {
     return { ok: false, reason: `일일 ${MANUAL_CANARY_CAPS.maxOrdersPerDay}회 소진 (${dayKey})` };
-  }
-  if (prev && prev.dayKey === dayKey && prev.launchReservation) {
-    return { ok: false, reason: '다른 Canary 실행 예약 진행/조사 필요 — 제출 0회 (fail-closed)' };
   }
   const base = prev && prev.dayKey === dayKey ? prev : emptyDailyState(dayKey);
   const next: DailyCanaryState = {
