@@ -1,8 +1,9 @@
 /**
  * GmxAccountContext — GMX V2 온체인 계정 데이터 (Read-only)
  *
- * 연결된 지갑 주소를 기준으로 Arbitrum RPC (GMX V2 PositionReader)에서
- * 실제 온체인 포지션을 조회합니다.
+ * 서버에 설정된 공개 owner 주소를 기준으로 Arbitrum RPC (GMX V2
+ * PositionReader)에서 실제 온체인 포지션을 조회합니다. 브라우저 지갑이나
+ * signer 연결은 필요하지 않습니다.
  *
  * 보안 원칙:
  *   ✅ eth_call / RPC read-only 조회만 허용
@@ -18,7 +19,6 @@ import {
   createContext, useCallback, useContext, useEffect,
   useRef, useState, ReactNode,
 } from 'react';
-import { useWallet } from './WalletContext';
 
 // ── Positions are fetched via the API server proxy (/api/gmx/positions) ───────
 //
@@ -78,14 +78,13 @@ export interface GmxOnchainPosition {
    */
   leverage:      number | null;
   /**
-   * Liquidation price in USD from the GMX subgraph.
-   * null when the subgraph does not expose the field or returns 0/null.
-   * Never estimated — only real subgraph values are stored here.
+   * Liquidation price in USD when an authoritative source exposes it.
+   * The current PositionReader path returns null; it is never estimated.
    */
   liquidationPrice: number | null;
   /**
    * Unrealized PnL in USD.
-   * Computed from: sizeInTokens (subgraph) + current mark price (/api/gmx/prices).
+   * Computed from: sizeInTokens (PositionReader) + current mark price (/api/gmx/prices).
    * null when either data source is unavailable — never estimated.
    */
   unrealizedPnlUsd: number | null;
@@ -107,12 +106,17 @@ export interface GmxAccountState {
   positions:   GmxOnchainPosition[];
   status:      GmxAccountLoadStatus;
   error:       string | null;
-  /** Timestamp of the most recent SUCCESSFUL subgraph response — never overwritten on failure */
+  /** Timestamp of the most recent successful authoritative RPC response. */
   lastSuccessUpdated: Date | null;
   /** Timestamp of the most recent fetch attempt (success or failure) */
   lastUpdated: Date | null;
-  /** Duration of the last successful subgraph round-trip in milliseconds */
+  /** Duration of the last successful account read in milliseconds. */
   lastFetchMs: number | null;
+  /** Read-only balances for the configured account; null when RPC is unavailable. */
+  ethBalance: string | null;
+  usdcBalance: string | null;
+  /** Official GMX API count cross-check for the authoritative RPC snapshot. */
+  apiConsistency: 'matched' | 'mismatch' | 'unavailable' | 'rpc-unavailable' | null;
 }
 
 interface GmxAccountContextType extends GmxAccountState {
@@ -178,8 +182,6 @@ async function getMarketSymbols(): Promise<Record<string, string>> {
 const POLL_INTERVAL_MS = 30_000;
 
 export function GmxAccountProvider({ children }: { children: ReactNode }) {
-  const wallet = useWallet();
-
   const [state, setState] = useState<GmxAccountState>({
     positions:          [],
     status:             'idle',
@@ -187,11 +189,14 @@ export function GmxAccountProvider({ children }: { children: ReactNode }) {
     lastSuccessUpdated: null,
     lastUpdated:        null,
     lastFetchMs:        null,
+    ethBalance:         null,
+    usdcBalance:        null,
+    apiConsistency:     null,
   });
 
   const abortRef = useRef<AbortController | null>(null);
 
-  const fetchPositions = useCallback(async (address: string) => {
+  const fetchPositions = useCallback(async () => {
     // Cancel any in-flight request
     abortRef.current?.abort();
     const ctrl = new AbortController();
@@ -208,17 +213,25 @@ export function GmxAccountProvider({ children }: { children: ReactNode }) {
         getMarketSymbols(),
         fetch('/api/gmx/prices', { signal: AbortSignal.timeout(5_000) }).catch(() => null),
         fetch(
-          `/api/gmx/positions?account=${encodeURIComponent(address.toLowerCase())}`,
+          '/api/gmx/positions',
           { signal: ctrl.signal },
         ),
       ]);
 
       if (!posRes.ok) throw new Error(`Positions proxy HTTP ${posRes.status}`);
 
-      const { positions: rawPositions, source } = await posRes.json() as {
+      const response = await posRes.json() as {
         positions: ProxyPosition[];
         source:    'rpc' | 'unavailable';
+        fetchedAtMs?: number;
+        apiCrosscheck?: {
+          ok: boolean;
+          positionCount: number | null;
+          consistency: 'matched' | 'mismatch' | 'unavailable' | 'rpc-unavailable';
+        };
+        balances?: { source: 'rpc' | 'unavailable'; eth: string | null; usdc: string | null };
       };
+      const { positions: rawPositions, source } = response;
 
       // When RPC is unavailable, keep the existing positions on-screen rather
       // than replacing them with an empty array.  The user sees their last
@@ -231,13 +244,14 @@ export function GmxAccountProvider({ children }: { children: ReactNode }) {
           // lastSuccessUpdated NOT updated — preserves the last good timestamp
           lastUpdated: new Date(),
           lastFetchMs: Date.now() - fetchStart,
+          ethBalance: response.balances?.eth ?? prev.ethBalance,
+          usdcBalance: response.balances?.usdc ?? prev.usdcBalance,
+          apiConsistency: response.apiCrosscheck?.consistency ?? null,
         }));
         void fetch('/api/wallet/diagnostic', {
           method:  'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            walletConnected:    true,
-            addressFingerprint: `${address.slice(0, 6)}\u2026${address.slice(-4)}`,
             subgraphOk:         false,
             positionCount:      0,
             lastRefreshAt:      new Date().toISOString(),
@@ -273,7 +287,7 @@ export function GmxAccountProvider({ children }: { children: ReactNode }) {
             ? sizeUsd / collateralUsd
             : null;
 
-        // Liquidation price: from subgraph only — never estimated
+        // Liquidation price: authoritative source only — never estimated
         // GMX V2 stores liquidationPrice with 30-decimal precision (same as sizeInUsd)
         const rawLiqPrice = p.liquidationPrice;
         const liquidationPrice =
@@ -326,25 +340,30 @@ export function GmxAccountProvider({ children }: { children: ReactNode }) {
       });
 
       const now = new Date();
+      const apiConsistency = response.apiCrosscheck?.consistency ?? null;
+      const consistencyWarning = apiConsistency === 'mismatch'
+        ? `RPC/API position count mismatch (${positions.length} vs ${response.apiCrosscheck?.positionCount ?? 'unknown'})`
+        : null;
       setState({
         positions,
         status:             'ok',
-        error:              null,
-        lastSuccessUpdated: now,  // only updated on success
+        error:              consistencyWarning,
+        lastSuccessUpdated: response.fetchedAtMs ? new Date(response.fetchedAtMs) : now,
         lastUpdated:        now,
         lastFetchMs:        Date.now() - fetchStart,
+        ethBalance:         response.balances?.eth ?? null,
+        usdcBalance:        response.balances?.usdc ?? null,
+        apiConsistency,
       });
 
       // ── Diagnostic snapshot — boolean flags only, no financial amounts ──────
-      // subgraphOk = true when the server proxy reached the subgraph (source='subgraph').
+      // `subgraphOk` is a legacy diagnostic field; true now means canonical RPC success.
       // Even 'unavailable' (all upstream sources failed) is a valid outcome —
       // it clears the "fetch failed" error log and gives a meaningful diagnostic signal.
       void fetch('/api/wallet/diagnostic', {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          walletConnected:    true,
-          addressFingerprint: `${address.slice(0, 6)}\u2026${address.slice(-4)}`,
           subgraphOk:         source === 'rpc',
           positionCount:      positions.length,
           lastRefreshAt:      now.toISOString(),
@@ -353,7 +372,7 @@ export function GmxAccountProvider({ children }: { children: ReactNode }) {
     } catch (err: unknown) {
       if ((err as Error)?.name === 'AbortError') return; // cancelled, don't update state
 
-      // Diagnostic: subgraph failure (fire-and-forget, no financial data)
+      // Diagnostic: canonical account-read failure (fire-and-forget, no financial data)
       void fetch('/api/wallet/diagnostic', {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -375,26 +394,19 @@ export function GmxAccountProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  // ── Trigger fetch when wallet connects on Arbitrum ────────────────────────
+  // ── Server-configured public account polling; no browser wallet required ──
   useEffect(() => {
-    if (!(wallet.status === 'connected' && wallet.isArbitrum && wallet.address)) {
-      // Wallet disconnected or wrong network — reset state
-      abortRef.current?.abort();
-      setState({ positions: [], status: 'idle', error: null, lastSuccessUpdated: null, lastUpdated: null, lastFetchMs: null });
-      return;
-    }
-
-    fetchPositions(wallet.address);
-    const t = setInterval(() => fetchPositions(wallet.address!), POLL_INTERVAL_MS);
+    fetchPositions();
+    const t = setInterval(() => fetchPositions(), POLL_INTERVAL_MS);
     return () => {
       clearInterval(t);
       abortRef.current?.abort();
     };
-  }, [wallet.status, wallet.isArbitrum, wallet.address, fetchPositions]);
+  }, [fetchPositions]);
 
   const refresh = useCallback(() => {
-    if (wallet.address && wallet.isArbitrum) fetchPositions(wallet.address);
-  }, [wallet.address, wallet.isArbitrum, fetchPositions]);
+    fetchPositions();
+  }, [fetchPositions]);
 
   return (
     <GmxAccountContext.Provider value={{ ...state, refresh }}>

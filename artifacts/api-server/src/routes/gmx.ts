@@ -308,9 +308,9 @@ export { ensurePoller as ensureGmxPoller };
 
 // ── Positions proxy — Arbitrum RPC ────────────────────────────────────────────
 //
-// Browser → GET /api/gmx/positions?account=0x…
+// Browser → GET /api/gmx/positions (server-configured owner account)
 //         → server queries Arbitrum RPC (GMX V2 PositionReader)
-//         → { positions: SubgraphPosition[], source: "rpc" }
+//         → { positions: CanonicalPosition[], source: "rpc" }
 //         → { positions: [], source: "unavailable" } on RPC failure
 //
 // "unavailable" is returned only when RPC fails — the browser must NOT
@@ -328,6 +328,8 @@ import {
   keccak256,
   encodeAbiParameters,
   parseAbiParameters,
+  formatEther,
+  formatUnits,
 } from "viem";
 import { arbitrum } from "viem/chains";
 
@@ -336,6 +338,17 @@ import { arbitrum } from "viem/chains";
 // DataStore: confirmed via Reader.dataStore() → getAccountPositions returns 200
 const POSITION_READER_ADDRESS = "0x5Ca84c34a381434786738735265b9f3FD814b824" as const;
 const DATASTORE_ADDRESS       = "0xfd70de6b91282d8017aa4e741e9ae325cab992d8" as const;
+const ARBITRUM_USDC_ADDRESS   = "0xaf88d065e77c8cc2239327c5edb3a432268e5831" as const;
+
+const ERC20_BALANCE_ABI = [
+  {
+    name: "balanceOf",
+    type: "function" as const,
+    stateMutability: "view" as const,
+    inputs: [{ name: "account", type: "address" as const }],
+    outputs: [{ name: "balance", type: "uint256" as const }],
+  },
+] as const;
 
 // Arbitrum public RPC nodes (confirmed reachable from Replit sandbox)
 const ARBITRUM_RPC_URLS = [
@@ -400,7 +413,7 @@ const POSITION_READER_ABI = [
 // All position reads go through Arbitrum RPC (GMX V2 PositionReader). See fetchFromRpc().
 
 /** Raw position shape from Arbitrum RPC normaliser. */
-type SubgraphPosition = {
+type CanonicalPosition = {
   id:               string;
   account:          string;
   market:           string;
@@ -415,12 +428,27 @@ type SubgraphPosition = {
 };
 
 export interface PositionsResult {
-  positions: SubgraphPosition[];
+  positions: CanonicalPosition[];
   /**
    * 'rpc'         — Arbitrum RPC via GMX V2 PositionReader (only active source)
    * 'unavailable' — RPC failed; browser MUST keep showing last known positions
    */
   source: 'rpc' | 'unavailable';
+  /** Server request time for stale-data detection; never an on-chain block timestamp. */
+  fetchedAtMs: number;
+  /** Whether the server-configured owner account or an explicit development query was used. */
+  accountSource: 'configured' | 'query';
+  /** Read-only GMX API count cross-check; never used as execution evidence. */
+  apiCrosscheck: {
+    ok: boolean;
+    positionCount: number | null;
+    consistency: 'matched' | 'mismatch' | 'unavailable' | 'rpc-unavailable';
+  };
+  balances: {
+    source: 'rpc' | 'unavailable';
+    eth: string | null;
+    usdc: string | null;
+  };
 }
 
 /** Per-account position cache. */
@@ -429,14 +457,14 @@ const POSITIONS_CACHE_TTL         = 30_000; // successful fetch
 const POSITIONS_UNAVAILABLE_TTL   =  5_000; // failure — retry sooner
 
 // ── LIVE TEST server-side verification cache ──────────────────────────────────
-// Short TTL to keep data fresh for every AI cycle without hammering the subgraph.
+// Short TTL to keep data fresh for every AI cycle without hammering Arbitrum RPC.
 const LIVE_TEST_VERIFY_TTL_OK  = 30_000; // success: cache 30s
 const LIVE_TEST_VERIFY_TTL_ERR =  3_000; // failure: retry sooner (fail-closed window)
 
 interface LiveTestServerData {
   /** Number of active on-chain GMX positions. 999 = fail-closed sentinel. */
   positionCount: number;
-  /** true = authoritative server-side subgraph/RPC query succeeded. false = fail-closed. */
+  /** Legacy field name: true only when authoritative server-side RPC succeeded. */
   subgraphOk: boolean;
   fetchedAt: number;
   expiresAt: number;
@@ -473,7 +501,7 @@ export async function fetchServerLiveTestData(): Promise<{ positionCount: number
   }
 
   // Use RPC directly (GMX V2 PositionReader contract on Arbitrum).
-  const positions: SubgraphPosition[] | null = await fetchFromRpc(walletAddress);
+  const positions: CanonicalPosition[] | null = await fetchFromRpc(walletAddress);
   const ok = positions !== null;
 
   if (ok && positions !== null) {
@@ -485,7 +513,7 @@ export async function fetchServerLiveTestData(): Promise<{ positionCount: number
     return { positionCount, subgraphOk: true };
   }
 
-  // Both upstreams failed → fail-closed (sentinel 999 blocks LIVE TEST immediately)
+  // Authoritative RPC failed → fail-closed (sentinel 999 blocks LIVE TEST immediately)
   liveTestServerCache = {
     positionCount: 999, subgraphOk: false,
     fetchedAt: Date.now(), expiresAt: Date.now() + LIVE_TEST_VERIFY_TTL_ERR,
@@ -495,6 +523,98 @@ export async function fetchServerLiveTestData(): Promise<{ positionCount: number
 
 function isValidAddress(addr: string): boolean {
   return /^0x[0-9a-fA-F]{40}$/.test(addr);
+}
+
+export type PositionsAccountResolution =
+  | { ok: true; account: string; source: 'configured' | 'query' }
+  | { ok: false; status: 400 | 403 | 503; error: string };
+
+/**
+ * Resolve the canonical read-only account without requiring a browser wallet.
+ * A configured owner account wins; an explicit mismatched query is rejected so
+ * the personal dashboard cannot silently switch to a different account.
+ */
+export function resolvePositionsAccount(
+  queryValue: unknown,
+  configuredValue: string | undefined,
+): PositionsAccountResolution {
+  const query = typeof queryValue === 'string' ? queryValue.trim().toLowerCase() : '';
+  const configured = configuredValue?.trim().toLowerCase() ?? '';
+
+  if (query && !isValidAddress(query)) {
+    return { ok: false, status: 400, error: 'Invalid account address — must be 0x + 40 hex chars' };
+  }
+  if (configured && !isValidAddress(configured)) {
+    return { ok: false, status: 503, error: 'Configured GMX account is invalid' };
+  }
+  if (configured) {
+    if (query && query !== configured) {
+      return { ok: false, status: 403, error: 'Requested account does not match configured GMX account' };
+    }
+    return { ok: true, account: configured, source: 'configured' };
+  }
+  if (query) return { ok: true, account: query, source: 'query' };
+  return { ok: false, status: 503, error: 'GMX_WALLET_ADDRESS is not configured' };
+}
+
+export function classifyPositionCountConsistency(
+  rpcCount: number | null,
+  apiCount: number | null,
+): PositionsResult['apiCrosscheck']['consistency'] {
+  if (rpcCount === null) return apiCount === null ? 'unavailable' : 'rpc-unavailable';
+  if (apiCount === null) return 'unavailable';
+  return rpcCount === apiCount ? 'matched' : 'mismatch';
+}
+
+let gmxApiSdkPromise: Promise<{
+  fetchPositionsInfo(args: { address: string }): Promise<unknown[]>;
+}> | null = null;
+
+/**
+ * Official GMX API read used only to cross-check the canonical RPC count.
+ * No signer, key material, order method, or delegated account is initialized.
+ */
+async function fetchGmxApiPositionCount(account: string): Promise<number | null> {
+  try {
+    gmxApiSdkPromise ??= import('@gmx-io/sdk/v2').then(({ GmxApiSdk }) =>
+      new GmxApiSdk({ chainId: arbitrum.id }),
+    );
+    const sdk = await gmxApiSdkPromise;
+    const positions = await sdk.fetchPositionsInfo({ address: account });
+    return Array.isArray(positions) ? positions.length : null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchAccountBalancesFromRpc(
+  account: string,
+): Promise<PositionsResult['balances']> {
+  for (const rpcUrl of ARBITRUM_RPC_URLS) {
+    try {
+      const client = createPublicClient({
+        chain: arbitrum,
+        transport: http(rpcUrl, { timeout: 8_000 }),
+      });
+      const [ethWei, usdcRaw] = await Promise.all([
+        client.getBalance({ address: account as `0x${string}` }),
+        client.readContract({
+          address: ARBITRUM_USDC_ADDRESS,
+          abi: ERC20_BALANCE_ABI,
+          functionName: 'balanceOf',
+          args: [account as `0x${string}`],
+        }),
+      ]);
+      return {
+        source: 'rpc',
+        eth: formatEther(ethWei),
+        usdc: formatUnits(usdcRaw, 6),
+      };
+    } catch {
+      // Try the next read-only RPC endpoint.
+    }
+  }
+  return { source: 'unavailable', eth: null, usdc: null };
 }
 
 /**
@@ -529,11 +649,11 @@ export async function fetchServerOpenPositions(): Promise<
 }
 
 /**
- * Primary (and only): read positions on-chain via GMX V2 PositionReader on Arbitrum.
+ * Authoritative read: positions on-chain via GMX V2 PositionReader on Arbitrum.
  * Uses viem for proper ABI decode. liquidationPrice is not available on-chain
  * without oracle data, so it is left null.
  */
-async function fetchFromRpc(account: string): Promise<SubgraphPosition[] | null> {
+async function fetchFromRpc(account: string): Promise<CanonicalPosition[] | null> {
   for (const rpcUrl of ARBITRUM_RPC_URLS) {
     try {
       const client = createPublicClient({
@@ -559,7 +679,7 @@ async function fetchFromRpc(account: string): Promise<SubgraphPosition[] | null>
         ],
       }) as unknown as RawPos[];
 
-      // Normalise on-chain data to the SubgraphPosition shape.
+      // Normalise on-chain data to the canonical API response shape.
       // Position key = keccak256(account || market || collateralToken || isLong) — matches GMX V2 spec.
       return rawPositions.map(pos => {
         const positionKey = keccak256(
@@ -595,9 +715,11 @@ async function fetchFromRpc(account: string): Promise<SubgraphPosition[] | null>
 }
 
 /**
- * GET /api/gmx/positions?account=0x…
+ * GET /api/gmx/positions[?account=0x…]
  *
- * Returns active GMX V2 positions for the given wallet address.
+ * Returns active GMX V2 positions for the server-configured owner account.
+ * An explicit query is development-only when no owner is configured, or must
+ * exactly match the configured account.
  * Data source: Arbitrum RPC (GMX V2 PositionReader).
  *
  * When source = "unavailable" the browser MUST NOT clear displayed positions —
@@ -606,12 +728,9 @@ async function fetchFromRpc(account: string): Promise<SubgraphPosition[] | null>
  * Cache TTL: 30 s on success, 5 s on unavailable (so the next poll retries quickly).
  */
 router.get("/gmx/positions", async (req, res) => {
-  const account = String(req.query.account ?? "").toLowerCase();
-  if (!isValidAddress(account)) {
-    return res
-      .status(400)
-      .json({ error: "Invalid account address — must be 0x + 40 hex chars" });
-  }
+  const resolved = resolvePositionsAccount(req.query.account, process.env.GMX_WALLET_ADDRESS);
+  if (!resolved.ok) return res.status(resolved.status).json({ error: resolved.error });
+  const { account } = resolved;
 
   // Serve from cache when fresh
   const cached = positionsCache.get(account);
@@ -620,10 +739,31 @@ router.get("/gmx/positions", async (req, res) => {
     return res.json(cached.data);
   }
 
-  // Arbitrum RPC via GMX V2 PositionReader — only active data source.
+  // The GMX API request is a read-only count cross-check only. RPC remains the
+  // sole source for exact position identity/size and all execution evidence.
+  const apiCountPromise = fetchGmxApiPositionCount(account);
+  const balancesPromise = fetchAccountBalancesFromRpc(account);
   const rpcPositions = await fetchFromRpc(account);
+  const [apiPositionCount, balances] = await Promise.all([apiCountPromise, balancesPromise]);
+  const consistency = classifyPositionCountConsistency(
+    rpcPositions?.length ?? null,
+    apiPositionCount,
+  );
+  const apiCrosscheck: PositionsResult['apiCrosscheck'] = {
+    ok: apiPositionCount !== null,
+    positionCount: apiPositionCount,
+    consistency,
+  };
+  const fetchedAtMs = Date.now();
   if (rpcPositions != null) {
-    const result: PositionsResult = { positions: rpcPositions, source: "rpc" };
+    const result: PositionsResult = {
+      positions: rpcPositions,
+      source: "rpc",
+      fetchedAtMs,
+      accountSource: resolved.source,
+      apiCrosscheck,
+      balances,
+    };
     positionsCache.set(account, { data: result, expiresAt: Date.now() + POSITIONS_CACHE_TTL });
     res.setHeader("Cache-Control", "no-cache");
     return res.json(result);
@@ -631,7 +771,14 @@ router.get("/gmx/positions", async (req, res) => {
 
   // 2. RPC failed — return empty with unavailable signal.
   // Short cache TTL so the next browser poll retries in 5 s, not 30 s.
-  const result: PositionsResult = { positions: [], source: "unavailable" };
+  const result: PositionsResult = {
+    positions: [],
+    source: "unavailable",
+    fetchedAtMs,
+    accountSource: resolved.source,
+    apiCrosscheck,
+    balances,
+  };
   positionsCache.set(account, { data: result, expiresAt: Date.now() + POSITIONS_UNAVAILABLE_TTL });
   res.setHeader("Cache-Control", "no-cache");
   return res.json(result);
