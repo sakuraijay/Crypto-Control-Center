@@ -27,7 +27,7 @@ const validFields: FetchedCostFields = {
   estimatedExitPriceImpactUsd: 0.05, fundingFeeUsd: 0.01, borrowingFeeUsd: 0.005,
   estimatedExitFeeUsd: 0.26,
   fundingRatePerHourFraction: 0.00001, borrowingRatePerHourFraction: 0.000005,
-  blockNumber: null, apiTimestamp: null,
+  blockNumber: null, apiTimestamp: NOW.toISOString(),
 };
 
 const req = { market: MARKET, isLong: true, orderType: 'MarketIncrease' as const, notionalUsd: 100, now: NOW };
@@ -105,6 +105,15 @@ describe('§11-2·3 PAPER 비용 조회 (PAPER_GMX_ESTIMATE)', () => {
       },
     });
     expect(r.ok).toBe(false);
+  });
+
+  it('3c. upstream 관측 시각 누락은 로컬 now로 대체하지 않고 실패한다', async () => {
+    const r = await fetchPaperCostSnapshot(req, {
+      readonlyEnabled: true,
+      fetchCosts: async () => ({ ...validFields, apiTimestamp: null }),
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain('관측 시각 부재');
   });
 
   it('LIVE와 PAPER는 동일 조회 경로, source 태그만 다름', async () => {

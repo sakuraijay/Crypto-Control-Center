@@ -23,6 +23,9 @@ import { manilaDayKey } from '../lib/profitProtection';
 // ── 주입식 제출 함수 ──────────────────────────────────────────────────────────
 
 export interface ProtectionSubmitRequest {
+  parentOpenIntentId: string;
+  /** 서버가 확인한 Manual Canary OPEN lineage에서만 true. */
+  manualCanary: boolean;
   purpose: ProtectionPurpose;
   symbol: string;
   marketAddress: string;
@@ -56,6 +59,8 @@ export interface ConfirmedOpenEvidence {
   isLong: boolean;
   /** authoritative readback으로 확인된 실제 포지션 크기 (USD) */
   confirmedSizeUsd: number;
+  /** parentOpenIntentId가 Manual Canary 결정적 ID인 경우에만 설정한다. */
+  manualCanary?: true;
 }
 
 export interface InitialStopPlanInput {
@@ -122,6 +127,8 @@ export async function createInitialStopAfterOpenConfirmed(
   let outcome: ProtectionSubmitOutcome;
   try {
     outcome = await _submitFn({
+      parentOpenIntentId: o.parentOpenIntentId,
+      manualCanary: o.manualCanary === true,
       purpose: 'INITIAL_STOP', symbol: o.symbol, marketAddress: o.marketAddress,
       isLong: o.isLong, sizeDeltaUsd: o.confirmedSizeUsd,
       triggerPriceUsd: input.triggerPriceUsd, acceptablePriceUsd: input.acceptablePriceUsd,
@@ -165,6 +172,7 @@ export interface EmergencyCloseInput {
   /** authoritative 전체 포지션 크기 (초과 금지·전량) */
   fullSizeUsd: number;
   reason: string;
+  manualCanary?: true;
   now?: Date;
 }
 
@@ -206,6 +214,8 @@ export async function runEmergencyClose(input: EmergencyCloseInput): Promise<Sto
   let outcome: ProtectionSubmitOutcome;
   try {
     outcome = await _submitFn({
+      parentOpenIntentId: input.parentOpenIntentId,
+      manualCanary: input.manualCanary === true,
       purpose: 'EMERGENCY_CLOSE', symbol: input.symbol, marketAddress: input.marketAddress,
       isLong: input.isLong, sizeDeltaUsd: input.fullSizeUsd,
       triggerPriceUsd: null, acceptablePriceUsd: null, protectionId: id,

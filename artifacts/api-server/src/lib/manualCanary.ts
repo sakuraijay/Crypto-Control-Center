@@ -93,7 +93,8 @@ export interface ManualCanaryDeps {
   openPositions(): Promise<Array<{ marketAddress: string; isLong: boolean; sizeUsd: number }> | null>;
   costSnapshot(args: { symbol: string; isLong: boolean; notionalUsd: number }): Promise<
     { ok: true; snapshot: CostSnapshot; roundTripCostUsd: number | null } | { ok: false; reason: string }>;
-  decimalsReady(symbol: string): Promise<CheckOutcome>;
+  /** BTC와 ETH 모두의 fresh SDK+onchain decimals 증거가 있어야 한다. */
+  canaryDecimalsReady(): Promise<CheckOutcome>;
   stopCapability(): Promise<CheckOutcome>;
   currentPriceUsd(symbol: string): Promise<number | null>;
   accumCanaryLossUsd(): Promise<{ ok: boolean; lossUsd: number | null }>;
@@ -179,7 +180,7 @@ async function evaluateAllChecks(
     : posCount === 0 ? { ok: true, detail: '0건' }
     : { ok: false, detail: `${posCount}건 — 동시 ${MANUAL_CANARY_CAPS.maxOpenPositions}개 캡 위반` });
 
-  push('decimals', 'index token decimals 검증', await deps.decimalsReady(symbol));
+  push('decimals', 'BTC+ETH index token decimals 검증', await deps.canaryDecimalsReady());
   push('stop_capability', 'Stop 실행 능력', await deps.stopCapability());
 
   const cost = await deps.costSnapshot({ symbol, isLong: direction === 'LONG', notionalUsd: MANUAL_CANARY_CAPS.maxNotionalUsd });
@@ -376,6 +377,13 @@ export async function executeManualCanaryOpen(deps: ManualCanaryDeps, body: {
   if (cost.roundTripCostUsd === null) return reject('최종 크기 왕복 비용 산정 불가 — 상한 검증 불가 (제출 0회)');
   if (cost.roundTripCostUsd > MANUAL_CANARY_CAPS.maxRoundTripCostUsd) {
     return reject(`최종 크기 왕복 비용 $${cost.roundTripCostUsd.toFixed(3)} > 상한 $${MANUAL_CANARY_CAPS.maxRoundTripCostUsd} — 명시 거부`);
+  }
+
+  // durable claim 및 execute 직전 BTC+ETH 권위 decimals를 다시 확인한다.
+  // 선택 심볼만 통과하거나 preflight 시점의 UI 상태만 믿는 경로를 금지한다.
+  const finalDecimals = await deps.canaryDecimalsReady();
+  if (!finalDecimals.ok) {
+    return reject(`실행 직전 BTC+ETH decimals 재검증 실패 — ${finalDecimals.detail} (제출 0회)`);
   }
 
   // durable claim 먼저 (제출 전) — 실패 시 제출 0회. OPEN 요청 결속 함께 영속.

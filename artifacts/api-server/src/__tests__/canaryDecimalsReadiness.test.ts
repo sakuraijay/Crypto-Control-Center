@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { deriveCanaryDecimalsReadiness } from '../routes/gmxapi';
+import { deriveCanaryDecimalsReadiness } from '../lib/canaryDecimalsReadiness';
 import { MARKET_BY_SYMBOL_SERVER } from '../lib/gmxMarkets';
 
 const fresh = (tokenAddress: string, source = 'sdk+onchain') => ({

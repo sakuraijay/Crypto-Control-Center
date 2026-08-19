@@ -686,12 +686,14 @@ class WorkerManager {
     const prices = getCachedPrices();
     if (!prices || prices.length === 0) return;
 
-    let anyAdvanced = false;
+    let latestAdvancedObservedAt = 0;
+    const receivedAt = Date.now();
 
     for (const tick of prices) {
       const sym = tick.tokenSymbol;
       if (!WORKER_SYMBOLS.includes(sym)) continue;
       if (tick.priceUsd <= 0) continue;
+      if (!Number.isFinite(tick.updatedAt) || tick.updatedAt <= 0 || tick.updatedAt > receivedAt + 5_000) continue;
 
       // #120 P0 — stale 캐시 재인증 금지: upstream tick(updatedAt)이 실제로
       // 전진했을 때만 버퍼·신선도를 갱신한다. 전량 폐기로 캐시가 동결되면
@@ -700,16 +702,18 @@ class WorkerManager {
       const lastSeen = this.lastTickUpdatedAtBySymbol.get(sym) ?? 0;
       if (!(tick.updatedAt > lastSeen)) continue;
       this.lastTickUpdatedAtBySymbol.set(sym, tick.updatedAt);
-      anyAdvanced = true;
+      latestAdvancedObservedAt = Math.max(latestAdvancedObservedAt, tick.updatedAt);
 
       const buf = this.priceBuffer.get(sym) ?? [];
       buf.push(tick.priceUsd);
       if (buf.length > MAX_PRICE_HISTORY) buf.shift();
-      this.priceAtBySymbol.set(sym, Date.now()); // Task #111 — per-symbol 신선도 (새 관측시각)
+      this.priceAtBySymbol.set(sym, tick.updatedAt);
       this.priceBuffer.set(sym, buf);
     }
 
-    if (anyAdvanced) this.lastPriceAt = Date.now();
+    if (latestAdvancedObservedAt > 0) {
+      this.lastPriceAt = Math.max(this.lastPriceAt, latestAdvancedObservedAt);
+    }
   }
 
   /** 현재 가격 버퍼에서 SymbolAnalysis 배열을 빌드한다. */

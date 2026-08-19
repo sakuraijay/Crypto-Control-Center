@@ -14,7 +14,6 @@ import type { ManualCanaryDeps, CheckOutcome } from './manualCanary';
 import { __canaryStateAccess } from './manualCanary';
 import { verifySdkRouterPin } from './gmxLivePreflight';
 import { getDeploymentVerificationState, getCanonicalSnapshot } from './relayActivationStatus';
-import { getActiveReadySession } from './ownerApprovalSession';
 import { getUsdcAllowanceForSpender } from './gmxSubaccount';
 import { resolveSdkSyntheticsRouter, EXPECTED_CANARY_SIGNER, CANARY_ALLOWANCE_AMOUNT_UNITS } from './canaryAllowanceInfo';
 import { countBlockingIntentsOrNull, listRecentIntents } from './executionIntents';
@@ -37,8 +36,10 @@ import { runEmergencyClose } from '../workers/protectionExecutor';
 import { workerManager } from '../workers/aiWorker';
 import { db as _db, executionIntentsTable, protectionOrdersTable, tradesTable } from '@workspace/db';
 import { buildFreshExecutionCostBreakdown } from './manualCanaryCostFetcher';
+import { checkManualCanaryOwnerApproval } from './manualCanaryOwnerApproval';
 
 const ARBITRUM_CHAIN_ID = 42161;
+const MANUAL_CANARY_REFRESH_SYMBOLS = ['BTC', 'ETH'] as const;
 
 function outcome(ok: boolean, detail: string): CheckOutcome { return { ok, detail }; }
 
@@ -86,6 +87,23 @@ async function fetchMeasuredCanaryCosts(args: {
   };
 }
 
+async function resolveCanarySymbolDecimals(symbol: string): Promise<CheckOutcome> {
+  const market = MARKET_BY_SYMBOL_SERVER.get(symbol);
+  if (!market) return outcome(false, `${symbol} 시장 미확인`);
+  try {
+    const r = await resolveIndexTokenDecimals({
+      chainId: ARBITRUM_CHAIN_ID,
+      marketAddress: market.marketToken,
+      fetchOnchainDecimals: fetchOnchainErc20Decimals,
+    });
+    return r.ok
+      ? outcome(true, `${symbol} SDK+온체인 교차검증 완료`)
+      : outcome(false, `${symbol}: ${r.reason}`);
+  } catch {
+    return outcome(false, `${symbol} decimals 검증 실패 (fail-closed)`);
+  }
+}
+
 export function buildDefaultCanaryDeps(): ManualCanaryDeps {
   return {
     now: () => new Date(),
@@ -126,27 +144,10 @@ export function buildDefaultCanaryDeps(): ManualCanaryDeps {
     },
 
     ownerApproval: async (nowMs: number) => {
-      try {
-        const owner = process.env.GMX_WALLET_ADDRESS ?? null;
-        const session = await getActiveReadySession({
-          expectedOwner: owner ? getAddress(owner) : null,
-          expectedSubaccount: getAddress(EXPECTED_CANARY_SIGNER),
-          canonicalNonce: null,
-        });
-        if (!session) return outcome(false, 'READY Owner Approval 없음 — 새 Prepare+MetaMask 서명 필요');
-        if (session.maxAllowedCount !== '8') return outcome(false, `maxAllowedCount ${session.maxAllowedCount} ≠ 8`);
-        const deadlineMs = Number(session.deadline) * 1000;
-        if (!Number.isFinite(deadlineMs) || deadlineMs <= nowMs) {
-          return outcome(false, 'Owner Approval deadline 만료 — 자동 사용 금지, 새 Prepare+서명 필요');
-        }
-        const expiresMs = Number(session.expiresAt) * 1000;
-        if (!Number.isFinite(expiresMs) || expiresMs <= nowMs) {
-          return outcome(false, 'Owner Approval expiresAt 경과 — 새 Prepare+서명 필요');
-        }
-        return outcome(true, `READY 세션 유효 (nonce ${session.approvalNonce}, deadline까지 ${Math.floor((deadlineMs - nowMs) / 1000)}s)`);
-      } catch {
-        return outcome(false, 'Owner Approval 조회 실패 (fail-closed)');
-      }
+      return checkManualCanaryOwnerApproval(
+        nowMs,
+        process.env.GMX_WALLET_ADDRESS ?? null,
+      );
     },
 
     allowance: async () => {
@@ -228,18 +229,14 @@ export function buildDefaultCanaryDeps(): ManualCanaryDeps {
       return { ok: true, snapshot: res.snapshot, roundTripCostUsd: v.effectiveRoundTripCostUsd };
     },
 
-    decimalsReady: async (symbol: string) => {
-      const market = MARKET_BY_SYMBOL_SERVER.get(symbol);
-      if (!market) return outcome(false, '시장 미확인');
-      try {
-        const r = await resolveIndexTokenDecimals({
-          chainId: ARBITRUM_CHAIN_ID, marketAddress: market.marketToken,
-          fetchOnchainDecimals: fetchOnchainErc20Decimals,
-        });
-        return r.ok ? outcome(true, 'SDK+온체인 교차검증 완료') : outcome(false, r.reason);
-      } catch {
-        return outcome(false, 'decimals 검증 실패 (fail-closed)');
-      }
+    canaryDecimalsReady: async () => {
+      const results = await Promise.all(
+        MANUAL_CANARY_REFRESH_SYMBOLS.map(resolveCanarySymbolDecimals),
+      );
+      const failed = results.filter((r) => !r.ok);
+      return failed.length === 0
+        ? outcome(true, 'BTC+ETH SDK+온체인 교차검증 완료')
+        : outcome(false, failed.map((r) => r.detail).join('; '));
     },
 
     stopCapability: async () => {
@@ -304,6 +301,7 @@ export function buildDefaultCanaryDeps(): ManualCanaryDeps {
           parentOpenIntentId: openIntentId, positionKey,
           symbol: p.marketAddress, marketAddress: p.marketAddress, isLong: p.isLong,
           fullSizeUsd: p.sizeUsd, reason: '#135 manual canary emergency close (운영자 요청)',
+          manualCanary: true,
         });
         return outcome(r.ok, r.ok ? 'emergency close 제출' : (('reason' in r && r.reason) || 'emergency close 실패'));
       } catch {
@@ -342,7 +340,7 @@ export async function refreshManualCanaryReadonlyEvidence(): Promise<{
   const decimals: Record<string, CheckOutcome> = {};
   const costs: Record<string, { ok: boolean; reason: string | null }> = {};
   for (const symbol of MANUAL_CANARY_REFRESH_SYMBOLS) {
-    decimals[symbol] = await deps.decimalsReady(symbol);
+    decimals[symbol] = await resolveCanarySymbolDecimals(symbol);
     const cost = await deps.costSnapshot({
       symbol,
       isLong: true,
@@ -352,5 +350,3 @@ export async function refreshManualCanaryReadonlyEvidence(): Promise<{
   }
   return { decimals, costs };
 }
-
-const MANUAL_CANARY_REFRESH_SYMBOLS = ['BTC', 'ETH'] as const;

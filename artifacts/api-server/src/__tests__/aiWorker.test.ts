@@ -97,6 +97,7 @@ vi.mock('../routes/gmx', () => ({
 // 모킹 이후 실제 모듈 import
 import { workerManager } from '../workers/aiWorker';
 import { runAiEngine }   from '../workers/stateEngine';
+import { getCachedPrices } from '../routes/gmx';
 import { db }            from '@workspace/db';
 
 // ── 최소 유효 AI 결정 (CASH — 가장 안전한 기본값) ──────────────────────────────
@@ -139,6 +140,8 @@ function resetWorker() {
   wm.lastLiveTestMode        = false;
   wm.lastLiveTestDbOk        = true;
   wm.lastPriceAt             = 0;
+  (wm.priceAtBySymbol as Map<string, number>).clear();
+  (wm.lastTickUpdatedAtBySymbol as Map<string, number>).clear();
 
   const pb = wm.priceBuffer as Map<string, number[]>;
   pb.clear();
@@ -159,6 +162,39 @@ function resetWorker() {
   if (cTimer) clearTimeout(cTimer);
   wm.cycleTimer = null;
 }
+
+describe('upstream price timestamp binding', () => {
+  it('does not re-stamp a stale-but-newly-received tick with local now', () => {
+    resetWorker();
+    const observedAt = Date.now() - 120_000;
+    vi.mocked(getCachedPrices).mockReturnValue([{
+      tokenSymbol: 'ETH',
+      priceUsd: 3_000,
+      updatedAt: observedAt,
+    }] as never);
+    const wm = workerManager as unknown as {
+      updatePriceBuffers(): void;
+      priceAtBySymbol: Map<string, number>;
+    };
+    wm.updatePriceBuffers();
+    expect(wm.priceAtBySymbol.get('ETH')).toBe(observedAt);
+    expect(workerManager.getPriceQuote('ETH')!.ageMs).toBeGreaterThanOrEqual(119_000);
+  });
+
+  it('rejects ticks without a valid upstream timestamp', () => {
+    resetWorker();
+    vi.mocked(getCachedPrices).mockReturnValue([{
+      tokenSymbol: 'ETH',
+      priceUsd: 3_000,
+    }] as never);
+    const wm = workerManager as unknown as {
+      updatePriceBuffers(): void;
+      priceAtBySymbol: Map<string, number>;
+    };
+    wm.updatePriceBuffers();
+    expect(wm.priceAtBySymbol.has('ETH')).toBe(false);
+  });
+});
 
 // ── DB 행 헬퍼 ────────────────────────────────────────────────────────────────
 

@@ -12,6 +12,7 @@
  */
 import { vi, describe, it, expect, beforeEach, afterEach, afterAll } from 'vitest';
 import request from 'supertest';
+import { readFileSync } from 'node:fs';
 
 // DB 미접속 격리 mock — readiness.http.test.ts와 동일 패턴
 vi.mock('@workspace/db', () => {
@@ -121,6 +122,11 @@ describe('GET /api/executor/gmx-api/status', () => {
 });
 
 describe('POST /api/executor/gmx-api/readiness/refresh', () => {
+  it('route source에 durable task reconciliation 호출이 없다', () => {
+    const source = readFileSync(new URL('../routes/gmxapi.ts', import.meta.url), 'utf8');
+    expect(source).not.toMatch(/reconcileGmxApiTasks|makeProductionDeps/);
+  });
+
   it('PIN 없음 → 401; 잘못된 Content-Type → 415', async () => {
     const noPin = await request(app)
       .post('/api/executor/gmx-api/readiness/refresh')
@@ -143,7 +149,7 @@ describe('POST /api/executor/gmx-api/readiness/refresh', () => {
     expect(res.status).toBe(200);
     expect(res.body.refresh.readonlyEnabled).toBe(false);
     expect(res.body.refresh.peerHealth).toBeNull();
-    expect(res.body.refresh.reconciliation.scanned).toBe(0);
+    expect(res.body.refresh.reconciliation).toMatchObject({ ran: false, readOnly: true });
     expect(calls.length).toBe(0);
   });
 
@@ -156,9 +162,9 @@ describe('POST /api/executor/gmx-api/readiness/refresh', () => {
       .set('content-type', 'application/json').send({});
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
-    // 허용된 호출: GET /markets/tickers, POST /orders/txns/status(기존 task 조회)만
+    // 허용된 호출: GET /markets/tickers 및 read-only evidence 조회만
     for (const c of calls) {
-      expect(['/markets/tickers', '/orders/txns/status']).toContain(c.path);
+      expect(c.path).toBe('/markets/tickers');
     }
     expect(calls.some(c => c.path.includes('prepare') || c.path.includes('submit'))).toBe(false);
     // 응답에 최신 스냅샷 동봉

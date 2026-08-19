@@ -52,7 +52,7 @@ function makeDeps(overrides: Partial<ManualCanaryDeps> = {}) {
       { marketAddress: '0x47c031236e19d024b42f8ae6780e44a573170703', isLong: true, sizeUsd: 18.4 },
     ],
     costSnapshot: async () => ({ ok: true, snapshot: {} as never, roundTripCostUsd: 0.25 }),
-    decimalsReady: async () => OK,
+    canaryDecimalsReady: async () => OK,
     stopCapability: async () => OK,
     currentPriceUsd: async () => 60000,
     accumCanaryLossUsd: async () => ({ ok: true, lossUsd: 0.5 }),
@@ -177,7 +177,7 @@ describe('#135 Manual Controlled Canary — 장애주입', () => {
   });
 
   it('F9 decimals 미검증 → FAIL', async () => {
-    const { deps } = makeDeps({ decimalsReady: async () => FAIL('교차검증 실패') });
+    const { deps } = makeDeps({ canaryDecimalsReady: async () => FAIL('BTC/ETH 교차검증 실패') });
     expect(failedIds((await runCanaryPreflight(deps, 'ETH', 'LONG')).items)).toContain('decimals');
   });
 
@@ -243,6 +243,19 @@ describe('#135 Manual Controlled Canary — 장애주입', () => {
     expect(r.phase).toBe('REJECTED');
     expect(r.failures.map(f => f.id)).toContain('rpc');
     expect(executeOrder).not.toHaveBeenCalled();
+  });
+
+  it('F15b durable claim 직전 BTC+ETH decimals 재검증 실패 → 예산 미소진·제출 0회', async () => {
+    let checks = 0;
+    const { deps, state, executeOrder } = makeDeps({
+      canaryDecimalsReady: async () => (++checks >= 3 ? FAIL('ETH evidence stale') : OK),
+    });
+    const body = await preflightThenBody(deps);
+    const r = await executeManualCanaryOpen(deps, body);
+    expect(r.phase).toBe('REJECTED');
+    expect(r.reason).toContain('BTC+ETH decimals');
+    expect(executeOrder).not.toHaveBeenCalled();
+    expect(state.get('manualCanaryDaily') ?? null).toBeNull();
   });
 
   it('F16 가격 드리프트 0.5% 초과 → 거부 (시장가 추격 방지)', async () => {

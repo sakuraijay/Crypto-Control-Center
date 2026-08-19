@@ -82,6 +82,13 @@ vi.mock('../lib/delegatedSigner', () => ({
     writeContract: vi.fn().mockResolvedValue('0xTxSubmitted'),
   }),
   getSignerEthBalance:      vi.fn().mockResolvedValue({ ethWei: 5_000_000_000_000_000n, ethFormatted: '0.005', readyForGas: true }),
+  isManualCanarySignerRestoreAllowed: vi.fn((env: NodeJS.ProcessEnv) => ({
+    allowed:
+      env.WORKER_ENGINE_MODE === 'PAPER'
+      && env.AUTO_WORKER_LIVE_ENABLED !== 'true'
+      && env.GMX_API_ORDER_SUBMISSION_ENABLED === 'true',
+    missing: [],
+  })),
 }));
 
 vi.mock('../lib/gmxSubaccount', () => ({
@@ -325,6 +332,32 @@ describe('checkCentralExecutionGate — fail-closed 조합', () => {
   });
 });
 
+describe('보호 주문 Manual Canary lineage 결속', () => {
+  it('parent OPEN 결정적 ID + Manual PAPER posture가 모두 맞아야 true', async () => {
+    process.env.WORKER_ENGINE_MODE = 'PAPER';
+    process.env.AUTO_WORKER_LIVE_ENABLED = 'false';
+    process.env.GMX_API_ORDER_SUBMISSION_ENABLED = 'true';
+    const { isManualCanaryProtectionRequest } = await import('../workers/liveTestExecutor');
+    expect(isManualCanaryProtectionRequest({
+      manualCanary: true,
+      parentOpenIntentId: 'intent:open:manual-canary:2026-08-19',
+    })).toBe(true);
+    expect(isManualCanaryProtectionRequest({
+      manualCanary: false,
+      parentOpenIntentId: 'intent:open:manual-canary:2026-08-19',
+    })).toBe(false);
+    expect(isManualCanaryProtectionRequest({
+      manualCanary: true,
+      parentOpenIntentId: 'intent:open:worker-cycle-1',
+    })).toBe(false);
+    process.env.AUTO_WORKER_LIVE_ENABLED = 'true';
+    expect(isManualCanaryProtectionRequest({
+      manualCanary: true,
+      parentOpenIntentId: 'intent:open:manual-canary:2026-08-19',
+    })).toBe(false);
+  });
+});
+
 describe('executeLiveTestOrder — 중앙 게이트 통합 (writeContract 도달 차단)', () => {
   function orderParams() {
     const now = Date.now();
@@ -344,7 +377,7 @@ describe('executeLiveTestOrder — 중앙 게이트 통합 (writeContract 도달
           fundingFeeUsd: 0.005, borrowingFeeUsd: 0,
           fundingRatePerHourFraction: 0.00001, borrowingRatePerHourFraction: 0.000005,
           estimatedExitFeeUsd: 0.206, totalEstimatedRoundTripCostUsd: 0.427,
-          source: 'GMX_API' as const, blockNumber: null, apiTimestamp: null,
+          source: 'GMX_API' as const, blockNumber: null, apiTimestamp: new Date(now).toISOString(),
           fetchedAt: new Date(now).toISOString(), expiresAt: new Date(now + 60_000).toISOString(),
         },
         liquidityCapUsd: 50_000, tierNotionalCapUsd: 30,

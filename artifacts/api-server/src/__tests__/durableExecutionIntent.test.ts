@@ -225,7 +225,7 @@ function testSizingContext() {
       fundingFeeUsd: 0.005, borrowingFeeUsd: 0,
       fundingRatePerHourFraction: 0.00001, borrowingRatePerHourFraction: 0.000005,
       estimatedExitFeeUsd: 0.206, totalEstimatedRoundTripCostUsd: 0.427,
-      source: 'GMX_API' as const, blockNumber: null, apiTimestamp: null,
+      source: 'GMX_API' as const, blockNumber: null, apiTimestamp: new Date(now).toISOString(),
       fetchedAt: new Date(now).toISOString(), expiresAt: new Date(now + 60_000).toISOString(),
     },
     liquidityCapUsd: 50_000, tierNotionalCapUsd: 30,

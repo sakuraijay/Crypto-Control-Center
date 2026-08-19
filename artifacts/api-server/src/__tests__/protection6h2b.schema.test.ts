@@ -200,7 +200,7 @@ describe('§10 실행 적격 30초 창', () => {
     fundingFeeUsd: 0, borrowingFeeUsd: 0, estimatedExitFeeUsd: 0.1,
     fundingRatePerHourFraction: 0, borrowingRatePerHourFraction: 0,
     totalEstimatedRoundTripCostUsd: 0.25, source: 'GMX_API',
-    blockNumber: null, apiTimestamp: null,
+    blockNumber: null, apiTimestamp: new Date(nowMs - ageMs).toISOString(),
     fetchedAt: new Date(nowMs - ageMs).toISOString(),
     expiresAt: new Date(nowMs - ageMs + COST_SNAPSHOT_TTL_MS).toISOString(),
   });
@@ -225,11 +225,19 @@ describe('§10 실행 적격 30초 창', () => {
     expect(validateExecutionEligibleSnapshot(null, expected, now).ok).toBe(false);
     expect(validateExecutionEligibleSnapshot(mkSnap(1_000, now), { ...expected, isLong: false }, now).ok).toBe(false);
   });
+  it('upstream 관측 시각 부재/로컬 fetchedAt 불일치 → 부적격', () => {
+    expect(validateExecutionEligibleSnapshot({ ...mkSnap(1_000, now), apiTimestamp: null }, expected, now).ok).toBe(false);
+    expect(validateExecutionEligibleSnapshot({
+      ...mkSnap(1_000, now),
+      fetchedAt: new Date(now).toISOString(),
+    }, expected, now).ok).toBe(false);
+  });
 });
 
 // ── §11 capability 파생 ──────────────────────────────────────────────────────
 describe('§11 stop 실행 능력 파생', () => {
   const allOk = {
+    initialStopHandoffReady: true,
     schemaVerified: true, transportConfigured: true, signerReady: true,
     durableStoreOk: true, reconciliationOk: true,
     actionBudgetSufficient: true, actionBudgetRemaining: 10,
@@ -246,6 +254,7 @@ describe('§11 stop 실행 능력 파생', () => {
   it('각 단일 조건 실패 → false + 사유', () => {
     for (const [k, v] of [
       ['schemaVerified', false], ['transportConfigured', false], ['signerReady', false],
+      ['initialStopHandoffReady', false],
       ['durableStoreOk', false], ['reconciliationOk', false], ['actionBudgetSufficient', false],
       ['freshFeeQuote', false], ['uncoveredCount', 1], ['uncoveredCount', null],
       ['blockingProtectionCount', 2], ['blockingProtectionCount', null], ['executionUnlocked', false],

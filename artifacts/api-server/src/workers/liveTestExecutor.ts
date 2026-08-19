@@ -508,6 +508,10 @@ export async function refreshStopExecutionCapability(): Promise<StopCapabilityRe
   try { noBlockingIntents = !(await hasBlockingIntents()); } catch { /* fail-closed */ }
 
   const derived = deriveStopExecutionCapability({
+    // createInitialStopAfterOpenConfirmed()는 검증됐지만 production caller가 아직 없다.
+    // 이 값은 실제 confirmed-OPEN handoff가 구현·검증되기 전까지 false여야 하며,
+    // 그 전에는 transport가 구성되어도 Manual Canary OPEN을 절대 admit하지 않는다.
+    initialStopHandoffReady: false,
     schemaVerified: await verifyStopSchemaAgainstSdk(), // 설치된 SDK enum 실시간 대조
     transportConfigured:
       resolveGmxEventEmitterAddress().ok &&
@@ -764,6 +768,15 @@ export function verifyPriceConversionGolden(): boolean {
 
 let _protectionWired = false;
 
+export function isManualCanaryProtectionRequest(
+  req: Pick<ProtectionSubmitRequest, 'manualCanary' | 'parentOpenIntentId'>,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return req.manualCanary === true
+    && req.parentOpenIntentId.startsWith('intent:open:manual-canary:')
+    && isManualCanarySignerRestoreAllowed(env).allowed;
+}
+
 /**
  * 실제 보호 주문 제출 함수 결선 — executeViaGmxApi 경로 재사용 (activation gate·
  * durable intent·단일 submit 규칙 전부 그대로 적용). LIVE 잠금이면 gate가 차단
@@ -822,8 +835,9 @@ export function wireProtectionExecution(): void {
       }
     }
 
+    const manualCanary = isManualCanaryProtectionRequest(req);
     const activationArgs = {
-      kind: 'CLOSE' as const, liveTestMode: true, manualCanary: false,
+      kind: 'CLOSE' as const, liveTestMode: true, manualCanary,
       dbOk: true, rpcOk: Boolean(process.env.GMX_RPC_URL),
       selfIntentId: null,
     };
