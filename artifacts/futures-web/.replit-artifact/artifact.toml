@@ -14,15 +14,6 @@ localPort = 25285
 [services.development]
 run = "pnpm --filter @workspace/futures-web run dev"
 
-[services.production]
-build = [ "pnpm", "--filter", "@workspace/futures-web", "run", "build" ]
-serve = "static"
-publicDir = "artifacts/futures-web/dist/public"
-
-[[services.production.rewrites]]
-from = "/*"
-to = "/index.html"
-
 [services.env]
 PORT = "25285"
 BASE_PATH = "/futures-web/"

@@ -8,7 +8,8 @@
     "typecheck:libs": "tsc --build",
     "typecheck": "pnpm run typecheck:libs && pnpm -r --filter \"./artifacts/**\" --filter \"./scripts\" --if-present run typecheck",
     "test": "pnpm -r --if-present run test",
-    "build:deploy": "pnpm --filter @workspace/futures-web run build && pnpm --filter @workspace/api-server run build",
+    "verify:deployment-topology": "node scripts/verify-deployment-topology.mjs",
+    "build:deploy": "pnpm run verify:deployment-topology && pnpm --filter @workspace/futures-web run build && pnpm --filter @workspace/api-server run build",
     "start:deploy": "NODE_ENV=production node --enable-source-maps artifacts/api-server/dist/index.mjs"
   },
   "private": true,
