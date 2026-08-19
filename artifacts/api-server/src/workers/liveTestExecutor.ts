@@ -574,9 +574,14 @@ export async function evaluateManualCanaryStopCapability(
 }
 
 export async function refreshStopExecutionCapability(): Promise<StopCapabilityResult> {
-  const derived = await collectStopExecutionCapability(
-    getExecutionEligibleCostEvidence(Date.now()).fresh,
-  );
+  const derived = _stopCapabilityTestOverride === null
+    ? await collectStopExecutionCapability(
+      getExecutionEligibleCostEvidence(Date.now()).fresh,
+    )
+    : {
+      available: _stopCapabilityTestOverride,
+      reasons: _stopCapabilityTestOverride ? [] : ['테스트 override: stop 실행 능력 비활성'],
+    };
   _stopCapability = { ...derived, evaluatedAt: new Date().toISOString() };
   return derived;
 }

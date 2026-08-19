@@ -19,19 +19,20 @@ import { countBlockingIntentsOrNull, listRecentIntents } from './executionIntent
 import { countOpenRelayTasksOrNull, listUnresolvedTasks } from './relayLifecycle';
 import {
   fetchLiveCostSnapshot,
-  recordExecutionEligibleCostEvidence,
   validateExecutionEligibleSnapshot,
   type CostSnapshot,
   type CostSnapshotExpectation,
   type FetchedCostFields,
 } from './costSnapshot';
+import { activateManualCanaryExecutionEvidence } from './manualCanaryExecutionEvidence';
 import { resolveIndexTokenDecimals } from './indexTokenDecimals';
 import { MARKET_BY_SYMBOL_SERVER } from './gmxMarkets';
 import { isLiveTestExecutionLocked } from './liveTestGate';
 import { getStoredPublicSignerAddress, isManualCanarySignerRestoreAllowed } from './delegatedSigner';
 import {
   executeLiveTestOrder, closeLiveTestPosition, fetchAuthoritativeOpenPositions,
-  evaluateManualCanaryStopCapability, refreshStopExecutionCapability, fetchOnchainErc20Decimals,
+  evaluateManualCanaryStopCapability, refreshStopExecutionCapability, isStopExecutionAvailable,
+  fetchOnchainErc20Decimals,
 } from '../workers/liveTestExecutor';
 import { runEmergencyClose } from '../workers/protectionExecutor';
 import { workerManager } from '../workers/aiWorker';
@@ -328,9 +329,10 @@ export function buildDefaultCanaryDeps(): ManualCanaryDeps {
       args: CostSnapshotExpectation,
       nowMs: number,
     ): Promise<boolean> => {
-      if (!recordExecutionEligibleCostEvidence(snapshot, args, nowMs)) return false;
-      const stop = await refreshStopExecutionCapability();
-      return stop.available;
+      return activateManualCanaryExecutionEvidence(snapshot, args, nowMs, {
+        refreshStopCapability: refreshStopExecutionCapability,
+        isStopCapabilityAvailable: isStopExecutionAvailable,
+      });
     },
 
     executeOrder: executeLiveTestOrder,

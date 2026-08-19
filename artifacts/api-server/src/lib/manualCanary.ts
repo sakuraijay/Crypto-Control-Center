@@ -169,6 +169,16 @@ export interface DailyCanaryState {
     symbol: string; direction: 'LONG' | 'SHORT';
     collateralUsd: number; leverage: number; requestedSizeUsd: number;
   } | null;
+  /**
+   * OPEN launch ownership reservation. A request must win this durable CAS
+   * before it may publish process-global execution cost evidence.
+   */
+  launchReservation?: {
+    id: string;
+    openIntentId: string;
+    reservedAt: string;
+    open: NonNullable<DailyCanaryState['open']>;
+  } | null;
 }
 
 export interface CheckOutcome { ok: boolean; detail: string }
@@ -434,9 +444,17 @@ async function evaluateAllChecks(
   } else {
     const daily = dailyRes.state;
     const used = daily && daily.dayKey === dayKey ? daily.opens : 0;
-    push('daily_budget', `일일 주문 ${MANUAL_CANARY_CAPS.maxOrdersPerDay}회`, used >= MANUAL_CANARY_CAPS.maxOrdersPerDay
-      ? { ok: false, detail: `오늘(${dayKey}) 이미 ${used}회 사용` }
-      : { ok: true, detail: `잔여 ${MANUAL_CANARY_CAPS.maxOrdersPerDay - used}회` });
+    const reserved = Boolean(
+      daily
+      && daily.dayKey === dayKey
+      && daily.launchReservation,
+    );
+    push('daily_budget', `일일 주문 ${MANUAL_CANARY_CAPS.maxOrdersPerDay}회`,
+      used >= MANUAL_CANARY_CAPS.maxOrdersPerDay
+        ? { ok: false, detail: `오늘(${dayKey}) 이미 ${used}회 사용` }
+        : reserved
+          ? { ok: false, detail: 'Canary 실행 예약 진행/조사 필요 — 새 실행 금지 (fail-closed)' }
+          : { ok: true, detail: `잔여 ${MANUAL_CANARY_CAPS.maxOrdersPerDay - used}회` });
   }
 
   const env = await runAllowedPreflightOperation(
@@ -517,28 +535,127 @@ async function loadDailyState(deps: Pick<ManualCanaryPreflightDeps, 'loadState'>
   } catch { return { corrupt: true, state: null, raw }; }
 }
 
-/** 제출 전 durable claim — CAS 실패/예산 소진/상태 손상 = fail-closed */
-export async function claimDailyBudget(
-  deps: ManualCanaryDeps, openIntentId: string,
-  openBinding: DailyCanaryState['open'] = null,
-): Promise<{ ok: true } | { ok: false; reason: string }> {
+type DailyClaimResult = { ok: true } | { ok: false; reason: string };
+
+function emptyDailyState(dayKey: string): DailyCanaryState {
+  return {
+    dayKey,
+    opens: 0,
+    openIntentId: null,
+    closeIntentId: null,
+    emergencyCloseUsed: false,
+    openedAt: null,
+    open: null,
+    launchReservation: null,
+  };
+}
+
+/**
+ * Durable launch-owner reservation. Only the CAS winner may record the
+ * process-global execution evidence used by OPEN and initial-stop handoff.
+ */
+async function reserveDailyLaunch(
+  deps: ManualCanaryDeps,
+  reservationId: string,
+  openIntentId: string,
+  openBinding: NonNullable<DailyCanaryState['open']>,
+): Promise<DailyClaimResult> {
   const dayKey = manilaDayKey(deps.now());
   const loaded = await loadDailyState(deps);
-  if (loaded.corrupt) return { ok: false, reason: '일일 상태 레코드 손상 — 새 claim 금지 (fail-closed)' };
+  if (loaded.corrupt) return { ok: false, reason: '일일 상태 레코드 손상 — 새 예약 금지 (fail-closed)' };
   const prev = loaded.state;
   const prevRaw = loaded.raw;
   if (prev && prev.dayKey === dayKey && prev.opens >= MANUAL_CANARY_CAPS.maxOrdersPerDay) {
     return { ok: false, reason: `일일 ${MANUAL_CANARY_CAPS.maxOrdersPerDay}회 소진 (${dayKey})` };
   }
+  if (prev && prev.dayKey === dayKey && prev.launchReservation) {
+    return { ok: false, reason: '다른 Canary 실행 예약 진행/조사 필요 — 제출 0회 (fail-closed)' };
+  }
+  const base = prev && prev.dayKey === dayKey ? prev : emptyDailyState(dayKey);
   const next: DailyCanaryState = {
-    dayKey, opens: (prev && prev.dayKey === dayKey ? prev.opens : 0) + 1,
-    openIntentId, closeIntentId: null, emergencyCloseUsed: false,
-    openedAt: deps.now().toISOString(),
-    open: openBinding,
+    ...base,
+    launchReservation: {
+      id: reservationId,
+      openIntentId,
+      reservedAt: deps.now().toISOString(),
+      open: openBinding,
+    },
   };
   const casOk = await deps.casState(STATE_KEY_DAILY, prevRaw, JSON.stringify(next));
-  if (!casOk) return { ok: false, reason: '일일 예산 durable claim 경합/실패 — 제출 0회 (fail-closed)' };
+  if (!casOk) return { ok: false, reason: 'Canary 실행 예약 CAS 경합/실패 — 제출 0회 (fail-closed)' };
   return { ok: true };
+}
+
+async function commitDailyLaunch(
+  deps: ManualCanaryDeps,
+  reservationId: string,
+): Promise<DailyClaimResult> {
+  const dayKey = manilaDayKey(deps.now());
+  const loaded = await loadDailyState(deps);
+  if (loaded.corrupt || !loaded.state || loaded.state.dayKey !== dayKey) {
+    return { ok: false, reason: 'Canary 실행 예약 상태 조회 실패 — 제출 0회 (fail-closed)' };
+  }
+  const current = loaded.state;
+  const reservation = current.launchReservation;
+  if (!reservation || reservation.id !== reservationId) {
+    return { ok: false, reason: 'Canary 실행 예약 소유권 불일치 — 제출 0회 (fail-closed)' };
+  }
+  if (current.opens >= MANUAL_CANARY_CAPS.maxOrdersPerDay) {
+    return { ok: false, reason: `일일 ${MANUAL_CANARY_CAPS.maxOrdersPerDay}회 소진 (${dayKey})` };
+  }
+  const next: DailyCanaryState = {
+    ...current,
+    opens: current.opens + 1,
+    openIntentId: reservation.openIntentId,
+    closeIntentId: null,
+    emergencyCloseUsed: false,
+    openedAt: deps.now().toISOString(),
+    open: reservation.open,
+    launchReservation: null,
+  };
+  const casOk = await deps.casState(STATE_KEY_DAILY, loaded.raw, JSON.stringify(next));
+  if (!casOk) return { ok: false, reason: 'Canary 실행 예약 commit 경합/실패 — 제출 0회 (fail-closed)' };
+  return { ok: true };
+}
+
+async function releaseDailyLaunch(
+  deps: ManualCanaryDeps,
+  reservationId: string,
+): Promise<boolean> {
+  const loaded = await loadDailyState(deps);
+  if (loaded.corrupt || !loaded.state) return false;
+  const current = loaded.state;
+  if (!current.launchReservation || current.launchReservation.id !== reservationId) return false;
+  const next: DailyCanaryState = {
+    ...current,
+    launchReservation: null,
+    ...(current.opens === 0
+      ? { openIntentId: null, openedAt: null, open: null }
+      : {}),
+  };
+  return deps.casState(STATE_KEY_DAILY, loaded.raw, JSON.stringify(next));
+}
+
+/** 제출 전 durable claim — reservation+commit CAS, 실패/예산 소진/손상 = fail-closed */
+export async function claimDailyBudget(
+  deps: ManualCanaryDeps, openIntentId: string,
+  openBinding: DailyCanaryState['open'] = null,
+): Promise<DailyClaimResult> {
+  const binding = openBinding ?? {
+    symbol: 'BTC',
+    direction: 'LONG' as const,
+    collateralUsd: MANUAL_CANARY_CAPS.maxCollateralUsd,
+    leverage: MANUAL_CANARY_CAPS.maxLeverage,
+    requestedSizeUsd: MANUAL_CANARY_CAPS.maxNotionalUsd,
+  };
+  const reservationId = `claim:${deps.randomId()}`;
+  const reserved = await reserveDailyLaunch(deps, reservationId, openIntentId, binding);
+  if (!reserved.ok) return reserved;
+  const committed = await commitDailyLaunch(deps, reservationId);
+  if (!committed.ok) {
+    await releaseDailyLaunch(deps, reservationId).catch(() => false);
+  }
+  return committed;
 }
 
 // ── Execute (2단계) ──────────────────────────────────────────────────────────
@@ -626,8 +743,15 @@ export async function executeManualCanaryOpen(deps: ManualCanaryDeps, body: {
     return reject(`실행 직전 BTC+ETH decimals 재검증 실패 — ${finalDecimals.detail} (제출 0회)`);
   }
 
-  // #142 review fix: 실행 증거 기록+stop capability 갱신을 daily claim보다 먼저
-  // 완료한다. 실패/throw 시 일일 1회 예산을 소진하지 않고 제출 0회.
+  const openBinding: NonNullable<DailyCanaryState['open']> = {
+    symbol: req.symbol, direction: req.direction, collateralUsd, leverage, requestedSizeUsd: sizeUsd,
+  };
+  const reservationId = `launch:${deps.randomId()}`;
+  const reserved = await reserveDailyLaunch(deps, reservationId, intentId, openBinding);
+  if (!reserved.ok) return reject(reserved.reason);
+
+  // Durable reservation owner만 전역 실행 증거를 갱신한다. 실패/throw는 예약을
+  // 해제하고 일일 opens를 0으로 유지한다.
   let evidenceRecorded = false;
   try {
     evidenceRecorded = await deps.recordCostEvidenceForExecution(
@@ -639,14 +763,16 @@ export async function executeManualCanaryOpen(deps: ManualCanaryDeps, body: {
     evidenceRecorded = false;
   }
   if (!evidenceRecorded) {
+    await releaseDailyLaunch(deps, reservationId).catch(() => false);
     return reject('실행 직전 비용 증거/stop capability 갱신 실패 — 제출 0회 (fail-closed)');
   }
 
-  // durable claim (제출 전) — 실패 시 제출 0회. OPEN 요청 결속 함께 영속.
-  const claim = await claimDailyBudget(deps, intentId, {
-    symbol: req.symbol, direction: req.direction, collateralUsd, leverage, requestedSizeUsd: sizeUsd,
-  });
-  if (!claim.ok) return reject(claim.reason);
+  // Evidence가 준비된 동일 reservation owner만 일일 1회 claim을 확정한다.
+  const committed = await commitDailyLaunch(deps, reservationId);
+  if (!committed.ok) {
+    await releaseDailyLaunch(deps, reservationId).catch(() => false);
+    return reject(committed.reason);
+  }
 
   const result = await deps.executeOrder({
     decisionId,

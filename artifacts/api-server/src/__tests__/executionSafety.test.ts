@@ -166,6 +166,68 @@ describe('legacy SubaccountRouter 주문 경로 — Production 차단', () => {
   });
 });
 
+describe('#142 Manual Canary execution evidence integration', () => {
+  it('production activator binds matching market/direction and enables the cached stop gate', async () => {
+    const nowMs = Date.now();
+    const at = new Date(nowMs).toISOString();
+    const market = '0x' + 'b'.repeat(40);
+    const expected = {
+      market,
+      isLong: true,
+      orderType: 'MarketIncrease' as const,
+      notionalUsd: 20,
+    };
+    const snapshot = {
+      ...expected,
+      positionFeeUsd: 0.05,
+      executionFeeUsd: 0.05,
+      estimatedPriceImpactUsd: 0.02,
+      fundingFeeUsd: 0.01,
+      borrowingFeeUsd: 0.01,
+      estimatedExitFeeUsd: 0.05,
+      estimatedExitPriceImpactUsd: 0.02,
+      fundingRatePerHourFraction: 0,
+      borrowingRatePerHourFraction: 0,
+      totalEstimatedRoundTripCostUsd: 0.21,
+      source: 'GMX_API' as const,
+      blockNumber: 123,
+      apiTimestamp: at,
+      fetchedAt: at,
+      expiresAt: new Date(nowMs + 60_000).toISOString(),
+    };
+    const {
+      __setStopExecutionAvailabilityForTests,
+      isStopExecutionAvailable,
+      refreshStopExecutionCapability,
+    } = await import('../workers/liveTestExecutor');
+    const {
+      __resetExecutionEligibleCostEvidenceForTests,
+      getExecutionEligibleCostEvidence,
+    } = await import('../lib/costSnapshot');
+    const { activateManualCanaryExecutionEvidence } =
+      await import('../lib/manualCanaryExecutionEvidence');
+
+    __resetExecutionEligibleCostEvidenceForTests();
+    __setStopExecutionAvailabilityForTests(true);
+    const activated = await activateManualCanaryExecutionEvidence(
+      snapshot,
+      expected,
+      nowMs,
+      {
+        refreshStopCapability: refreshStopExecutionCapability,
+        isStopCapabilityAvailable: isStopExecutionAvailable,
+      },
+    );
+
+    expect(activated).toBe(true);
+    expect(isStopExecutionAvailable()).toBe(true);
+    expect(getExecutionEligibleCostEvidence(nowMs)).toMatchObject({
+      fresh: true,
+      evidence: { market, isLong: true },
+    });
+  });
+});
+
 /** 최신 relay 구성 완비 (게이트 통과 시나리오용) — 문서 기준 공식 Arbitrum 주소 */
 function setRelayEnv() {
   process.env.GMX_SUBACCOUNT_GELATO_RELAY_ROUTER_ADDRESS = '0xfD0596f708d9D950E0eF7b5d191e5F8e55b8a67f';

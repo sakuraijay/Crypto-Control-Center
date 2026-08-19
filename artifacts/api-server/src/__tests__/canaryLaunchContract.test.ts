@@ -283,7 +283,9 @@ describe('#142 Canary Launch Contract — Success path', () => {
     expect(r.phase).toBe('REJECTED');
     expect(r.reason).toContain('비용 증거');
     expect(executeOrder).toHaveBeenCalledTimes(0); // fail-closed
-    expect(state.get('manualCanaryDaily') ?? null).toBeNull();
+    const daily = JSON.parse(state.get('manualCanaryDaily')!);
+    expect(daily.opens).toBe(0);
+    expect(daily.launchReservation).toBeNull();
   });
 
   it('execute: recordCostEvidenceForExecution throws → fail-closed without daily budget consumption', async () => {
@@ -312,7 +314,9 @@ describe('#142 Canary Launch Contract — Success path', () => {
     expect(r.reason).not.toContain('raw recorder failure');
     expect(recordEvidence).toHaveBeenCalledTimes(1);
     expect(executeOrder).toHaveBeenCalledTimes(0);
-    expect(state.get('manualCanaryDaily') ?? null).toBeNull();
+    const daily = JSON.parse(state.get('manualCanaryDaily')!);
+    expect(daily.opens).toBe(0);
+    expect(daily.launchReservation).toBeNull();
   });
 
   it('cold preflight validates cost before stop capability and passes fresh in-request evidence', async () => {
@@ -332,6 +336,82 @@ describe('#142 Canary Launch Contract — Success path', () => {
     expect(pf.ok).toBe(true);
     expect(events).toEqual(['cost', 'stop']);
     expect(stopCapability).toHaveBeenCalledWith({ freshCostSnapshotAvailable: true });
+  });
+
+  it('durable launch reservation prevents a CAS loser from overwriting the winner evidence', async () => {
+    let btcCostCalls = 0;
+    let releaseA!: () => void;
+    let markAPaused!: () => void;
+    const aPaused = new Promise<void>((resolve) => { markAPaused = resolve; });
+    const aRelease = new Promise<void>((resolve) => { releaseA = resolve; });
+    const costSnapshot = vi.fn(async ({ symbol }: { symbol: string; isLong: boolean; notionalUsd: number }) => {
+      if (symbol === 'BTC') {
+        btcCostCalls += 1;
+        // BTC preflight, execute recheck, then final-size fetch.
+        if (btcCostCalls === 3) {
+          markAPaused();
+          await aRelease;
+        }
+      }
+      return { ok: true as const, snapshot: {} as never, roundTripCostUsd: 0.25 };
+    });
+    const recordEvidence = vi.fn<ManualCanaryDeps['recordCostEvidenceForExecution']>(async () => true);
+    const executeOrder = vi.fn<ManualCanaryDeps['executeOrder']>(async () => ({
+      ok: true, txHash: '0xabc', orderKey: '0xkey', simulated: false, executedAt: NOW.toISOString(),
+    }));
+    const { deps, state } = makeContractDeps({
+      costSnapshot,
+      marketAddress: (symbol) => symbol === 'BTC'
+        ? '0x' + 'b'.repeat(40)
+        : '0x' + 'e'.repeat(40),
+      recordCostEvidenceForExecution: recordEvidence as ManualCanaryDeps['recordCostEvidenceForExecution'],
+      executeOrder: executeOrder as ManualCanaryDeps['executeOrder'],
+    });
+
+    const preflightA = await runCanaryPreflight(deps, 'BTC', 'LONG');
+    expect(preflightA.ok).toBe(true);
+    const launchA = executeManualCanaryOpen(deps, {
+      preflightId: preflightA.preflightId,
+      confirm: CANARY_CONFIRM_OPEN,
+      symbol: 'BTC',
+      direction: 'LONG',
+    });
+    await aPaused;
+
+    // A already authenticated its preflight but has not reserved the daily owner.
+    // B installs a new valid preflight, wins the durable reservation, and submits.
+    const preflightB = await runCanaryPreflight(deps, 'ETH', 'SHORT');
+    expect(preflightB.ok).toBe(true);
+    const resultB = await executeManualCanaryOpen(deps, {
+      preflightId: preflightB.preflightId,
+      confirm: CANARY_CONFIRM_OPEN,
+      symbol: 'ETH',
+      direction: 'SHORT',
+    });
+    expect(resultB.ok).toBe(true);
+
+    releaseA();
+    const resultA = await launchA;
+    expect(resultA.ok).toBe(false);
+    expect(resultA.phase).toBe('REJECTED');
+    expect(resultA.reason).toMatch(/소진|예약/);
+
+    // Only reservation winner B may publish evidence or reach executeOrder.
+    expect(recordEvidence).toHaveBeenCalledTimes(1);
+    expect(recordEvidence.mock.calls[0]![1]).toMatchObject({
+      market: '0x' + 'e'.repeat(40),
+      isLong: false,
+    });
+    expect(executeOrder).toHaveBeenCalledTimes(1);
+    expect(executeOrder.mock.calls[0]![0]).toMatchObject({
+      symbol: 'ETH',
+      marketAddress: '0x' + 'e'.repeat(40),
+      isLong: false,
+    });
+    const daily = JSON.parse(state.get('manualCanaryDaily')!);
+    expect(daily.opens).toBe(1);
+    expect(daily.open).toMatchObject({ symbol: 'ETH', direction: 'SHORT' });
+    expect(daily.launchReservation).toBeNull();
   });
 
   it('PREFLIGHT_OPERATION_ALLOWLIST is frozen and stable', () => {
