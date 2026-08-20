@@ -43,6 +43,9 @@ import { countOpenRelayTasksOrNull } from "./lib/relayLifecycle";
 import { countUnboundNoncesOrNull } from "./lib/relayNonce";
 import { getActiveRevokeSession } from "./lib/revokeSession";
 import type { Delegate } from "./lib/bootstrapServer";
+import { attachDevWebProxy, type DevWebProxyHandle } from "./lib/devWebProxy";
+
+let devWebProxy: DevWebProxyHandle | null = null;
 
 export interface StartupHooks {
   /** 부트스트랩 서버 — graceful shutdown 시 close()에 사용 */
@@ -67,6 +70,11 @@ export function startServer({ httpServer, setDelegate, isShuttingDown }: Startup
     }
     attachStaticServing(app, staticDir);
     logger.info({ staticDir }, "Static frontend serving enabled (production)");
+  } else {
+    // Replit artifact router의 공개 경로는 Development에서도 API 8080이 소유한다.
+    // Vite 25285를 직접 route owner로 되돌리면 Production에서 router-level 500이
+    // 재발하므로, 개발 환경에서만 HTTP/HMR WebSocket을 내부 Vite로 전달한다.
+    devWebProxy = attachDevWebProxy(app, httpServer);
   }
 
   // Start internal executor RPC health monitor (non-blocking)
@@ -187,6 +195,8 @@ export function startServer({ httpServer, setDelegate, isShuttingDown }: Startup
 
 /** index.ts가 신호 수신 시 호출 — worker 정지 등 본체 자원 정리 */
 export function stopServices(): void {
+  devWebProxy?.close();
+  devWebProxy = null;
   stopPeriodicIntentReconciliation();
   stopPeriodicGmxApiReconciliation();
   workerManager.stop();
