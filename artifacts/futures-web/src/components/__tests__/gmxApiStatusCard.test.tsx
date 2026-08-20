@@ -15,7 +15,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
-import { GmxApiStatusCard } from '../GmxApiStatusCard';
+import { GmxApiStatusCard, PaperCostDetails } from '../GmxApiStatusCard';
 import {
   fetchGmxApiStatus, postGmxApiReadinessRefresh, classifyGmxApiHttpFailure,
   type GmxApiStatusView,
@@ -161,9 +161,20 @@ const STATUS_FIXTURE: GmxApiStatusView = {
         borrowingFeeUsd: 0.000363,
         estimatedExitFeeUsd: 0.012,
         estimatedExitPriceImpactUsd: 0,
+        tradingFeesUsd: 0.024,
+        priceImpactTotalUsd: 0,
+        carryCostUsd: 0.000824,
+        otherCostUsd: 0,
         effectiveRoundTripCostUsd: 0.453011,
+        totalCostRatePct: 2.265055,
         capDeltaUsd: 0.053011,
+        capExcessUsd: 0.053011,
+        requiredCostReductionUsd: 0.053011,
+        requiredCostReductionPct: 11.701923,
+        breakEvenGrossMoveUsd: 0.453011,
+        breakEvenGrossMovePct: 2.265055,
         withinCap: false,
+        blockReason: 'BTC round-trip 비용이 고정 $0.40 cap을 $0.053011 초과',
         source: 'GMX_API',
         apiTimestamp: '2026-04-25T22:13:16.000Z',
         fetchedAt: '2026-04-25T22:13:16.000Z',
@@ -188,9 +199,20 @@ const STATUS_FIXTURE: GmxApiStatusView = {
         borrowingFeeUsd: 0.001,
         estimatedExitFeeUsd: 0.01,
         estimatedExitPriceImpactUsd: 0,
+        tradingFeesUsd: 0.02,
+        priceImpactTotalUsd: 0,
+        carryCostUsd: 0.002,
+        otherCostUsd: 0,
         effectiveRoundTripCostUsd: 0.122,
+        totalCostRatePct: 0.61,
         capDeltaUsd: -0.278,
+        capExcessUsd: 0,
+        requiredCostReductionUsd: 0,
+        requiredCostReductionPct: 0,
+        breakEvenGrossMoveUsd: 0.122,
+        breakEvenGrossMovePct: 0.61,
         withinCap: true,
+        blockReason: null,
         source: 'GMX_API',
         apiTimestamp: '2026-04-25T22:13:16.000Z',
         fetchedAt: '2026-04-25T22:13:16.000Z',
@@ -331,6 +353,10 @@ describe('소스 계약 (§11 규칙)', () => {
       'Blocker IDs',
       'Manual-action HOLD',
       'BLOCKED · CAP EXCEEDED',
+      'notional 대비',
+      'cap 충족 필요 절감',
+      '비용 회수 최소 gross move/edge',
+      '기타/보수 조정',
     ]) expect(cardSrc).toContain(label);
     expect(cardSrc).toContain('비용 상한은 서버 고정 $0.40');
     expect(cardSrc).toContain('통과 가능한 주문 크기를 제안하거나 상한을 완화하지 않습니다');
@@ -464,6 +490,9 @@ describe('GmxApiStatusCard — PAPER runtime fixture', () => {
     expect(btc.effectiveRoundTripCostUsd).toBe(0.453011);
     expect(btc.capUsd).toBe(0.4);
     expect(btc.capDeltaUsd).toBe(0.053011);
+    expect(btc.totalCostRatePct).toBe(2.265055);
+    expect(btc.requiredCostReductionUsd).toBe(0.053011);
+    expect(btc.breakEvenGrossMovePct).toBe(2.265055);
     expect(btc.withinCap).toBe(false);
     expect(STATUS_FIXTURE.paperRuntimeReadiness!.blockerIds).toContain('btc_cost_cap');
   });
@@ -474,5 +503,46 @@ describe('GmxApiStatusCard — PAPER runtime fixture', () => {
     expect(evidence.decimals.ETH.source).toBe('sdk+onchain');
     expect(evidence.manualActionHolds[0].id).toBe('owner_approval');
     expect(evidence.boundary).toBe('READ_ONLY_NOT_EXECUTION_AUTHORIZATION');
+  });
+
+  it('stale 비용은 금액·비율·source를 렌더하지 않고 차단 사유만 표시한다', () => {
+    const fresh = STATUS_FIXTURE.paperRuntimeReadiness!.costs.BTC;
+    const stale = {
+      ...fresh,
+      state: 'stale' as const,
+      fresh: false,
+      failureId: null,
+      blockReason: 'COST_BTC_STALE — read-only 비용 snapshot이 만료됨',
+      positionFeeUsd: null,
+      executionFeeUsd: null,
+      estimatedPriceImpactUsd: null,
+      fundingFeeUsd: null,
+      borrowingFeeUsd: null,
+      estimatedExitFeeUsd: null,
+      estimatedExitPriceImpactUsd: null,
+      tradingFeesUsd: null,
+      priceImpactTotalUsd: null,
+      carryCostUsd: null,
+      otherCostUsd: null,
+      effectiveRoundTripCostUsd: null,
+      totalCostRatePct: null,
+      capDeltaUsd: null,
+      capExcessUsd: null,
+      requiredCostReductionUsd: null,
+      requiredCostReductionPct: null,
+      breakEvenGrossMoveUsd: null,
+      breakEvenGrossMovePct: null,
+      withinCap: null,
+      source: null,
+      apiTimestamp: null,
+      fetchedAt: null,
+    };
+
+    const html = renderToStaticMarkup(<PaperCostDetails symbol="BTC" cost={stale} />);
+    expect(html).toContain('COST_BTC_STALE');
+    expect(html).not.toContain('$0.453011');
+    expect(html).not.toContain('notional 대비');
+    expect(html).not.toContain('source');
+    expect(html).not.toContain('gross move');
   });
 });

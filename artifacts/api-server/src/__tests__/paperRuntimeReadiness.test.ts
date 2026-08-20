@@ -43,7 +43,7 @@ function costSnapshot(symbol: 'BTC' | 'ETH'): CostSnapshot {
     borrowingFeeUsd: 0.000363,
     estimatedExitFeeUsd: 0.012,
     estimatedExitPriceImpactUsd: 0,
-    totalEstimatedRoundTripCostUsd: 0.453011,
+    totalEstimatedRoundTripCostUsd: 0.453012,
     source: 'GMX_API',
     blockNumber: null,
     apiTimestamp: new Date(observedAtMs).toISOString(),
@@ -76,13 +76,13 @@ function canaryResult(options: {
           ok: true as const,
           reason: null,
           snapshot: costSnapshot('BTC'),
-          roundTripCostUsd: 0.453011,
+          roundTripCostUsd: 0.453012,
         },
       ETH: {
         ok: true as const,
         reason: null,
         snapshot: costSnapshot('ETH'),
-        roundTripCostUsd: 0.2,
+        roundTripCostUsd: 0.453012,
       },
     },
     decimalsSnapshot: [
@@ -191,10 +191,21 @@ describe('PAPER runtime readiness cycle', () => {
     });
     expect(status.deployment.state).toBe('verified');
     expect(status.rpc).toMatchObject({ state: 'verified', chainId: 42161 });
-    expect(status.costs.BTC.effectiveRoundTripCostUsd).toBe(0.453011);
+    expect(status.costs.BTC.effectiveRoundTripCostUsd).toBe(0.453012);
     expect(status.costs.BTC.capUsd).toBe(0.4);
-    expect(status.costs.BTC.capDeltaUsd).toBeCloseTo(0.053011, 6);
+    expect(status.costs.BTC.capDeltaUsd).toBeCloseTo(0.053012, 6);
+    expect(status.costs.BTC.capExcessUsd).toBeCloseTo(0.053012, 6);
+    expect(status.costs.BTC.totalCostRatePct).toBeCloseTo((0.453012 / 20) * 100, 8);
+    expect(status.costs.BTC.requiredCostReductionUsd).toBeCloseTo(0.053012, 6);
+    expect(status.costs.BTC.requiredCostReductionPct).toBeCloseTo((0.053012 / 0.453012) * 100, 8);
+    expect(status.costs.BTC.breakEvenGrossMoveUsd).toBe(0.453012);
+    expect(status.costs.BTC.breakEvenGrossMovePct).toBeCloseTo((0.453012 / 20) * 100, 8);
+    expect(status.costs.BTC.tradingFeesUsd).toBe(0.024);
+    expect(status.costs.BTC.priceImpactTotalUsd).toBe(0);
+    expect(status.costs.BTC.carryCostUsd).toBeCloseTo(0.000824, 9);
+    expect(status.costs.BTC.otherCostUsd).toBe(0);
     expect(status.costs.BTC.withinCap).toBe(false);
+    expect(status.costs.BTC.blockReason).toContain('고정 $0.40 cap');
     expect(status.blockerIds).toContain('btc_cost_cap');
 
     // Diagnostic cache must never create execution-eligible authorization.
@@ -248,6 +259,18 @@ describe('PAPER runtime readiness cycle', () => {
     expect(stale.deployment.state).toBe('stale');
     expect(stale.rpc.state).toBe('stale');
     expect(stale.costs.BTC.state).toBe('stale');
+    expect(stale.costs.BTC).toMatchObject({
+      effectiveRoundTripCostUsd: null,
+      totalCostRatePct: null,
+      capExcessUsd: null,
+      requiredCostReductionUsd: null,
+      requiredCostReductionPct: null,
+      breakEvenGrossMoveUsd: null,
+      breakEvenGrossMovePct: null,
+      positionFeeUsd: null,
+      source: null,
+    });
+    expect(stale.costs.BTC.blockReason).toContain('COST_BTC_STALE');
 
     __resetPaperRuntimeReadinessForTests();
     const failedDeps = depsFrom();
@@ -287,6 +310,37 @@ describe('PAPER runtime readiness cycle', () => {
       state: 'not_evaluated',
       failureId: 'RPC_READONLY_DISABLED',
     });
+  });
+
+  it('invalid cost snapshot은 파생값 전체를 비우고 fail-closed 차단 사유만 남긴다', async () => {
+    const result = canaryResult();
+    const btcCost = result.costs.BTC;
+    if (!btcCost.ok || !btcCost.snapshot) throw new Error('BTC fixture snapshot required');
+    btcCost.snapshot.positionFeeUsd = Number.NaN;
+
+    const status = await runPaperRuntimeReadinessCycle({
+      deps: depsFrom(result),
+      forceDeployment: true,
+    });
+
+    expect(status.costs.BTC.state).toBe('failed');
+    expect(status.costs.BTC.failureId).toBe('COST_BTC_INVALID');
+    expect(status.costs.BTC).toMatchObject({
+      positionFeeUsd: null,
+      executionFeeUsd: null,
+      effectiveRoundTripCostUsd: null,
+      totalCostRatePct: null,
+      capExcessUsd: null,
+      requiredCostReductionUsd: null,
+      requiredCostReductionPct: null,
+      breakEvenGrossMoveUsd: null,
+      breakEvenGrossMovePct: null,
+      withinCap: null,
+      source: null,
+    });
+    expect(status.costs.BTC.blockReason).toContain('COST_BTC_INVALID');
+    expect(status.blockerIds).toContain('btc_cost_snapshot');
+    expect(getExecutionEligibleCostEvidence(NOW).fresh).toBe(false);
   });
 
   it('stop→restart 중 진행 중 cycle을 보존하고 외부 read를 겹치지 않는다', async () => {

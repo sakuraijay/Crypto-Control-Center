@@ -86,6 +86,64 @@ function fmtUsd(value: number | null, digits = 6): string {
   return value === null || !Number.isFinite(value) ? '—' : `$${value.toFixed(digits)}`;
 }
 
+function fmtPct(value: number | null, digits = 3): string {
+  return value === null || !Number.isFinite(value) ? '—' : `${value.toFixed(digits)}%`;
+}
+
+type PaperReadinessView = NonNullable<GmxApiStatusView['paperRuntimeReadiness']>;
+type PaperCostView = PaperReadinessView['costs']['BTC'];
+
+export function PaperCostDetails({
+  symbol,
+  cost,
+}: {
+  symbol: 'BTC' | 'ETH';
+  cost: PaperCostView;
+}) {
+  const overCap = cost.withinCap === false;
+  const usable = cost.state === 'verified'
+    && cost.fresh
+    && cost.effectiveRoundTripCostUsd !== null;
+
+  if (!usable) {
+    return (
+      <p className="text-[10px] text-amber-300" data-testid={`paper-cost-${symbol.toLowerCase()}-blocked`}>
+        {cost.blockReason ?? cost.failureId ?? `${symbol} 비용 snapshot 사용 불가`}
+      </p>
+    );
+  }
+
+  return (
+    <>
+      <p className={cn('font-mono text-[12px]', overCap ? 'text-red-300' : 'text-foreground')}>
+        총 {fmtUsd(cost.effectiveRoundTripCostUsd)} · notional 대비 {fmtPct(cost.totalCostRatePct)}
+        {' · '}cap {fmtUsd(cost.capUsd)} · 초과 {fmtUsd(cost.capExcessUsd)}
+      </p>
+      <p className="font-mono text-[10px] text-muted-foreground leading-relaxed">
+        거래수수료 {fmtUsd(cost.tradingFeesUsd)} · 가스 {fmtUsd(cost.executionFeeUsd)}
+        {' · '}price impact {fmtUsd(cost.priceImpactTotalUsd)}
+        {' · '}funding/borrowing {fmtUsd(cost.carryCostUsd)}
+        {' · '}기타/보수 조정 {fmtUsd(cost.otherCostUsd)}
+      </p>
+      <p className="font-mono text-[10px] text-muted-foreground leading-relaxed">
+        raw: entry {fmtUsd(cost.positionFeeUsd)} · exit {fmtUsd(cost.estimatedExitFeeUsd)}
+        {' · '}entry impact {fmtUsd(cost.estimatedPriceImpactUsd)}
+        {' · '}exit impact {fmtUsd(cost.estimatedExitPriceImpactUsd)}
+        {' · '}funding {fmtUsd(cost.fundingFeeUsd)}
+        {' · '}borrowing {fmtUsd(cost.borrowingFeeUsd)}
+      </p>
+      <p className="text-[10px] text-muted-foreground">
+        cap 충족 필요 절감 {fmtUsd(cost.requiredCostReductionUsd)} ({fmtPct(cost.requiredCostReductionPct)})
+        {' · '}비용 회수 최소 gross move/edge {fmtUsd(cost.breakEvenGrossMoveUsd)} ({fmtPct(cost.breakEvenGrossMovePct)})
+      </p>
+      <p className="text-[10px] text-muted-foreground">
+        source {cost.source ?? '—'} · fetched {cost.fetchedAt ?? '—'} · observed {fmtEpochMs(cost.observedAtMs)} · age {fmtAge(cost.ageMs)}
+      </p>
+      {cost.blockReason && <p className="text-[10px] text-red-300">{cost.blockReason}</p>}
+    </>
+  );
+}
+
 export function GmxApiStatusCard() {
   const [pin, setPin] = useState('');
   const [status, setStatus] = useState<GmxApiStatusView | null>(null);
@@ -398,24 +456,7 @@ export function GmxApiStatusCard() {
                           : 'BLOCKED · CAP EXCEEDED'}
                     </Badge>
                   </div>
-                  <p className={cn('font-mono text-[12px]', overCap ? 'text-red-300' : 'text-foreground')}>
-                    effective {fmtUsd(cost.effectiveRoundTripCostUsd)} {cost.effectiveRoundTripCostUsd === null ? '' : 'vs'} cap {fmtUsd(cost.capUsd)}
-                    {cost.capDeltaUsd !== null && (
-                      <span> · delta {cost.capDeltaUsd >= 0 ? '+' : ''}{fmtUsd(cost.capDeltaUsd)}</span>
-                    )}
-                  </p>
-                  <p className="font-mono text-[10px] text-muted-foreground leading-relaxed">
-                    entry {fmtUsd(cost.positionFeeUsd)} · execution {fmtUsd(cost.executionFeeUsd)}
-                    {' · '}impact {fmtUsd(cost.estimatedPriceImpactUsd)}
-                    {' · '}funding {fmtUsd(cost.fundingFeeUsd)}
-                    {' · '}borrowing {fmtUsd(cost.borrowingFeeUsd)}
-                    {' · '}exit {fmtUsd(cost.estimatedExitFeeUsd)}
-                    {' · '}exit impact {fmtUsd(cost.estimatedExitPriceImpactUsd)}
-                  </p>
-                  <p className="text-[10px] text-muted-foreground">
-                    state {evidenceLabel(cost.state)} · observed {fmtEpochMs(cost.observedAtMs)} · age {fmtAge(cost.ageMs)}
-                    {cost.failureId ? ` · ${cost.failureId}` : ''}
-                  </p>
+                  <PaperCostDetails symbol={symbol} cost={cost} />
                 </div>
               );
             })}

@@ -14,6 +14,8 @@ import { vi, describe, it, expect, beforeEach, afterEach, afterAll } from 'vites
 import request from 'supertest';
 import { readFileSync } from 'node:fs';
 
+const dbWriteCalls = vi.hoisted(() => [] as string[]);
+
 // DB 미접속 격리 mock — readiness.http.test.ts와 동일 패턴
 vi.mock('@workspace/db', () => {
   function chain(getResult: () => unknown) {
@@ -29,9 +31,18 @@ vi.mock('@workspace/db', () => {
   return {
     db: {
       select: () => chain(() => []),
-      insert: () => chain(() => []),
-      update: () => chain(() => []),
-      delete: () => chain(() => []),
+      insert: () => {
+        dbWriteCalls.push('insert');
+        return chain(() => []);
+      },
+      update: () => {
+        dbWriteCalls.push('update');
+        return chain(() => []);
+      },
+      delete: () => {
+        dbWriteCalls.push('delete');
+        return chain(() => []);
+      },
     },
     tradesTable: {}, strategyConfigTable: {}, aiDecisionsTable: {},
     liveApprovalsTable: {}, workerStateTable: {}, relayTasksTable: {},
@@ -42,6 +53,7 @@ vi.mock('@workspace/db', () => {
 
 import app from '../app';
 import { __setGmxApiRouteTransportForTests } from '../routes/gmxapi';
+import { getExecutionEligibleCostEvidence } from '../lib/costSnapshot';
 import type { GmxApiTransport } from '../lib/gmxApiTransport';
 
 const PIN = 'test-pin-123456';
@@ -67,6 +79,7 @@ function makeSpyTransport(readonlyEnabled: boolean) {
 }
 
 beforeEach(() => {
+  dbWriteCalls.length = 0;
   process.env.OPERATOR_MASTER_PIN = PIN;
   delete process.env.DELEGATED_SIGNER_ENABLED;
   delete process.env.GMX_API_READONLY_ENABLED;
@@ -123,7 +136,34 @@ describe('GET /api/executor/gmx-api/status', () => {
     expect(typeof s.paperRuntimeReadiness.paperMode).toBe('boolean');
     expect(s.paperRuntimeReadiness).toHaveProperty('decimals.BTC.state');
     expect(s.paperRuntimeReadiness).toHaveProperty('costs.BTC.capUsd', 0.4);
+    expect(s.paperRuntimeReadiness.costs.BTC).toMatchObject({
+      effectiveRoundTripCostUsd: null,
+      totalCostRatePct: null,
+      capExcessUsd: null,
+      requiredCostReductionUsd: null,
+      requiredCostReductionPct: null,
+      breakEvenGrossMoveUsd: null,
+      breakEvenGrossMovePct: null,
+      source: null,
+    });
+    expect(s.paperRuntimeReadiness.costs.BTC.blockReason).toContain('COST_BTC_NOT_EVALUATED');
     expect(s.paperRuntimeReadiness).toHaveProperty('blockerIds');
+  });
+
+  it('인증 GET은 외부 transport·DB write·execution-eligible evidence를 건드리지 않는다', async () => {
+    const { t, calls } = makeSpyTransport(true);
+    __setGmxApiRouteTransportForTests(t);
+    const before = getExecutionEligibleCostEvidence(Date.now());
+
+    const res = await request(app)
+      .get('/api/executor/gmx-api/status')
+      .set('x-operator-pin', PIN);
+
+    expect(res.status).toBe(200);
+    expect(calls).toEqual([]);
+    expect(dbWriteCalls).toEqual([]);
+    expect(getExecutionEligibleCostEvidence(Date.now())).toEqual(before);
+    expect(before).toEqual({ fresh: false, evidence: null });
   });
 
   it('Gelato Enterprise/Gas Tank/API key 문구 0건 + PIN/Secret 미노출', async () => {

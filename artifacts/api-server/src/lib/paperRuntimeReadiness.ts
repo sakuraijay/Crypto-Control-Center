@@ -9,6 +9,7 @@
 import {
   COST_SNAPSHOT_TTL_MS,
   sanitizeCostError,
+  validateCostSnapshot,
   type CostSnapshot,
 } from './costSnapshot';
 import { MANUAL_CANARY_CAPS } from './manualCanaryCaps';
@@ -117,9 +118,20 @@ export interface PaperCostEvidenceView extends PaperEvidenceMeta {
   borrowingFeeUsd: number | null;
   estimatedExitFeeUsd: number | null;
   estimatedExitPriceImpactUsd: number | null;
+  tradingFeesUsd: number | null;
+  priceImpactTotalUsd: number | null;
+  carryCostUsd: number | null;
+  otherCostUsd: number | null;
   effectiveRoundTripCostUsd: number | null;
+  totalCostRatePct: number | null;
   capDeltaUsd: number | null;
+  capExcessUsd: number | null;
+  requiredCostReductionUsd: number | null;
+  requiredCostReductionPct: number | null;
+  breakEvenGrossMoveUsd: number | null;
+  breakEvenGrossMovePct: number | null;
   withinCap: boolean | null;
+  blockReason: string | null;
   source: string | null;
   apiTimestamp: string | null;
   fetchedAt: string | null;
@@ -356,11 +368,20 @@ function updateCanaryEvidence(
 
     const costResult = result.costs[symbol];
     if (costResult?.ok) {
+      const market = MARKET_BY_SYMBOL_SERVER.get(symbol)?.marketToken;
+      const validated = market
+        ? validateCostSnapshot(costResult.snapshot, {
+          market,
+          isLong: true,
+          orderType: 'MarketIncrease',
+          notionalUsd: PAPER_COST_NOTIONAL_USD,
+        }, atMs)
+        : { ok: false as const, reason: `${symbol} market registry 없음` };
       const observedAtMs = Date.parse(costResult.snapshot.apiTimestamp ?? '');
-      if (Number.isFinite(observedAtMs) && observedAtMs > 0) {
+      if (validated.ok && Number.isFinite(observedAtMs) && observedAtMs > 0) {
         setSuccess(costState[symbol], atMs, {
           snapshot: { ...costResult.snapshot },
-          effectiveRoundTripCostUsd: costResult.roundTripCostUsd,
+          effectiveRoundTripCostUsd: validated.effectiveRoundTripCostUsd,
           observedAtMs,
         }, '공식 GMX read-only 비용 성분 관측 완료');
       } else {
@@ -368,8 +389,10 @@ function updateCanaryEvidence(
         setFailure(
           costState[symbol],
           atMs,
-          `COST_${symbol}_OBSERVED_AT_INVALID`,
-          'upstream 비용 관측 시각 비정상',
+          `COST_${symbol}_INVALID`,
+          validated.ok
+            ? 'upstream 비용 관측 시각 비정상'
+            : sanitizeCostError(validated.reason),
         );
       }
     } else {
@@ -534,10 +557,47 @@ export async function runPaperRuntimeReadinessCycle(
 function costView(symbol: CanarySymbol, nowMs: number): PaperCostEvidenceView {
   const entry = costState[symbol];
   const meta = evidenceMeta(entry, nowMs, COST_SNAPSHOT_TTL_MS);
-  const observation = entry.lastGood;
+  const cap = MANUAL_CANARY_CAPS.maxRoundTripCostUsd;
+  const usable = meta.state === 'verified' && entry.lastGood !== null;
+  const observation = usable ? entry.lastGood : null;
   const snapshot = observation?.snapshot ?? null;
   const total = observation?.effectiveRoundTripCostUsd ?? null;
-  const cap = MANUAL_CANARY_CAPS.maxRoundTripCostUsd;
+  const tradingFees = snapshot
+    ? snapshot.positionFeeUsd + snapshot.estimatedExitFeeUsd
+    : null;
+  const priceImpactTotal = snapshot
+    ? snapshot.estimatedPriceImpactUsd + snapshot.estimatedExitPriceImpactUsd
+    : null;
+  const carryCost = snapshot
+    ? snapshot.fundingFeeUsd + snapshot.borrowingFeeUsd
+    : null;
+  const displayedComponentSum = snapshot && tradingFees !== null
+    && priceImpactTotal !== null && carryCost !== null
+    ? tradingFees + snapshot.executionFeeUsd + priceImpactTotal + carryCost
+    : null;
+  const rawOtherCost = total !== null && displayedComponentSum !== null
+    ? total - displayedComponentSum
+    : null;
+  const otherCost = rawOtherCost !== null && Math.abs(rawOtherCost) < 0.00001
+    ? 0
+    : rawOtherCost;
+  const totalCostRatePct = total !== null
+    ? (total / PAPER_COST_NOTIONAL_USD) * 100
+    : null;
+  const capDelta = total !== null ? total - cap : null;
+  const capExcess = capDelta !== null ? Math.max(0, capDelta) : null;
+  const requiredReductionPct = total !== null && capExcess !== null
+    ? (total === 0 ? 0 : (capExcess / total) * 100)
+    : null;
+  const blockReason = meta.state === 'verified'
+    ? (capExcess !== null && capExcess > 0
+      ? `${symbol} round-trip 비용이 고정 $${cap.toFixed(2)} cap을 $${capExcess.toFixed(6)} 초과`
+      : null)
+    : meta.state === 'stale'
+      ? `COST_${symbol}_STALE — read-only 비용 snapshot이 만료됨`
+      : meta.state === 'failed'
+        ? `${meta.failureId ?? `COST_${symbol}_FAILED`} — ${meta.detail ?? '비용 snapshot 검증 실패'}`
+        : `COST_${symbol}_NOT_EVALUATED — read-only 비용 snapshot 미평가`;
   return {
     ...meta,
     symbol,
@@ -552,9 +612,20 @@ function costView(symbol: CanarySymbol, nowMs: number): PaperCostEvidenceView {
     borrowingFeeUsd: snapshot?.borrowingFeeUsd ?? null,
     estimatedExitFeeUsd: snapshot?.estimatedExitFeeUsd ?? null,
     estimatedExitPriceImpactUsd: snapshot?.estimatedExitPriceImpactUsd ?? null,
+    tradingFeesUsd: tradingFees,
+    priceImpactTotalUsd: priceImpactTotal,
+    carryCostUsd: carryCost,
+    otherCostUsd: otherCost,
     effectiveRoundTripCostUsd: total,
-    capDeltaUsd: total === null ? null : total - cap,
+    totalCostRatePct,
+    capDeltaUsd: capDelta,
+    capExcessUsd: capExcess,
+    requiredCostReductionUsd: capExcess,
+    requiredCostReductionPct: requiredReductionPct,
+    breakEvenGrossMoveUsd: total,
+    breakEvenGrossMovePct: totalCostRatePct,
     withinCap: total === null ? null : total <= cap,
+    blockReason,
     source: snapshot?.source ?? null,
     apiTimestamp: snapshot?.apiTimestamp ?? null,
     fetchedAt: snapshot?.fetchedAt ?? null,

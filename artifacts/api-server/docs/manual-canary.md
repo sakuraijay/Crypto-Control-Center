@@ -100,3 +100,17 @@ GMX_API_ORDER_SUBMISSION_ENABLED=false 유지. 실제 canary는 별도 운영자
   timer를 예약하지 않는다.
 - 이 진단과 회귀 테스트는 DB-free dependency injection을 사용한다. HWM,
   거래자본, 주문, execution-eligible cost evidence는 변경하지 않는다.
+
+## PAPER 비용 경제성 파생값
+
+- fresh/verified read-only cost snapshot에서만 거래수수료, 가스, 진입·청산
+  price impact, funding/borrowing, 기타 보수 조정과 총액을 표시한다.
+- 총 비용률은 `roundTripCost / $20`, cap 초과액은
+  `max(0, roundTripCost - $0.40)`, 필요 절감률은
+  `cap 초과액 / roundTripCost`로만 계산한다.
+- 비용 회수 최소 gross move/edge는 총비용 USD와 `$20` 대비 총 비용률이다.
+  이는 수익 보장이나 주문 크기 확대 제안이 아니다.
+- snapshot이 missing/stale/invalid이면 비용 성분·총액·비율·절감값·손익분기값과
+  source를 모두 비우고 fail-closed `blockReason`만 표시한다.
+- 이 파생값은 process-memory 표시 전용이며 `$0.40` cap, HARD_STOP, HWM,
+  거래자본, LIVE/PAPER 잠금이나 execution-eligible evidence를 변경하지 않는다.
