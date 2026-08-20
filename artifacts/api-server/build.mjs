@@ -46,10 +46,35 @@ function githubEventHeadSha() {
   }
 }
 
+function handoverRefShas() {
+  try {
+    const refs = git([
+      "for-each-ref",
+      "--format=%(objectname)",
+      "refs/remotes/*/codex/handover-20260820",
+    ]);
+    return refs ? refs.split(/\r?\n/).map((sha) => sha.toLowerCase()) : [];
+  } catch {
+    return [];
+  }
+}
+
+function headParentShas() {
+  try {
+    const fields = git(["rev-list", "--parents", "-n", "1", "HEAD"])
+      .toLowerCase()
+      .split(/\s+/);
+    return fields.slice(1);
+  } catch {
+    return [];
+  }
+}
+
 function resolveReleaseSha() {
   const candidates = [
     githubEventHeadSha(),
-    (() => { try { return git(["rev-parse", "origin/codex/handover-20260820"]).toLowerCase(); } catch { return null; } })(),
+    ...handoverRefShas(),
+    ...headParentShas(),
     (() => { try { return git(["rev-parse", "HEAD"]).toLowerCase(); } catch { return null; } })(),
   ];
   for (const sha of [...new Set(candidates)]) {
