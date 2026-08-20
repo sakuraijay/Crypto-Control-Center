@@ -68,7 +68,7 @@ export function lookupSdkIndexToken(
     ?? Object.entries(markets).find(([k]) => k.toLowerCase() === checksummed.toLowerCase())?.[1];
   if (!entry) return { ok: false, reason: 'SDK market registry에 없는 market — 차단 (추측 금지)' };
   const idx = entry.indexTokenAddress;
-  const tokens = (TOKENS as Record<number, Array<{ address: string; decimals: number; synthetic?: boolean }>>)[chainId] ?? [];
+  const tokens = (TOKENS as Record<number, Array<{ address: string; decimals: number; isSynthetic?: boolean }>>)[chainId] ?? [];
   const tok = tokens.find((t) => t.address.toLowerCase() === idx.toLowerCase());
   if (!tok) return { ok: false, reason: 'SDK token metadata에 없는 index token — 차단' };
   if (!Number.isInteger(tok.decimals) || tok.decimals < 0 || tok.decimals > 30) {
@@ -78,7 +78,7 @@ export function lookupSdkIndexToken(
     ok: true,
     indexTokenAddress: idx,
     sdkDecimals: tok.decimals,
-    synthetic: tok.synthetic === true,
+    synthetic: tok.isSynthetic === true,
   };
 }
 
