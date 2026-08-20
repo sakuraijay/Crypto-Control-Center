@@ -9,10 +9,13 @@ const fresh = (tokenAddress: string, source = 'sdk+onchain') => ({
 });
 
 describe('Manual Canary decimals readiness', () => {
-  it('requires exact fresh SDK+onchain evidence for both BTC and ETH', () => {
+  it('accepts exact fresh synthetic BTC and ERC-20 ETH evidence', () => {
     const btc = MARKET_BY_SYMBOL_SERVER.get('BTC')!.indexToken;
     const eth = MARKET_BY_SYMBOL_SERVER.get('ETH')!.indexToken;
-    expect(deriveCanaryDecimalsReadiness([fresh(btc), fresh(eth)])).toEqual({
+    expect(deriveCanaryDecimalsReadiness([
+      fresh(btc, 'sdk-synthetic+onchain-no-code'),
+      fresh(eth),
+    ])).toEqual({
       BTC: true,
       ETH: true,
     });

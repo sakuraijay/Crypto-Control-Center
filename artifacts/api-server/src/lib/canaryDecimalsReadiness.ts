@@ -1,5 +1,10 @@
 import { MARKET_BY_SYMBOL_SERVER } from './gmxMarkets';
 
+const EXECUTION_ELIGIBLE_DECIMALS_SOURCES = new Set([
+  'sdk+onchain',
+  'sdk-synthetic+onchain-no-code',
+]);
+
 export function deriveCanaryDecimalsReadiness(entries: Array<{
   tokenAddress: string;
   stale: boolean;
@@ -7,7 +12,7 @@ export function deriveCanaryDecimalsReadiness(entries: Array<{
 }>): Record<'BTC' | 'ETH', boolean> {
   const freshValidated = new Set(
     entries
-      .filter((entry) => !entry.stale && entry.source === 'sdk+onchain')
+      .filter((entry) => !entry.stale && EXECUTION_ELIGIBLE_DECIMALS_SOURCES.has(entry.source))
       .map((entry) => entry.tokenAddress.toLowerCase()),
   );
   return {
