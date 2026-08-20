@@ -51,6 +51,19 @@ const STATUS_FIXTURE: GmxApiStatusView = {
   gmxTaskCounts: {},
   recentGmxTasks: [],
   readyForControlledCanary: false,
+  stopExecutionAvailable: false,
+  stopCapability: {
+    available: false,
+    reasons: [
+      'delegated signer 비활성/미초기화',
+      '실행 잠금 상태 (LIVE 잠금/emergency stop)',
+    ],
+    evaluatedAt: '2026-08-20T18:08:22.454Z',
+    scope: 'LIVE_STOP_EXECUTION',
+    boundary: 'READ_ONLY_STATUS_NOT_EXECUTION_AUTHORIZATION',
+    paperMode: true,
+    schemaPin: { sdk: '@gmx-io/sdk@1.7.0', stopLossDecrease: 6 },
+  },
   // 6G-3 §7 신규 항목
   prepareStageCounts: { PREPARED: 0, PREPARE_REQUESTED: 0, API_PREPARED: 0, SUBMITTING: 0, UNRESOLVED: 0 },
   oldestBlockingTaskAt: null,
@@ -310,8 +323,10 @@ describe('소스 계약 (§11 규칙)', () => {
     for (const label of [
       'PAPER Runtime Readiness Evidence',
       'READ-ONLY / NOT EXECUTION AUTHORIZATION',
+      'PAPER evidence는 LIVE Stop capability를 설명만 하며',
       'Deployment evidence',
       'Arbitrum RPC evidence',
+      'Scheduler next / failure',
       'index decimals',
       'Blocker IDs',
       'Manual-action HOLD',
@@ -324,6 +339,23 @@ describe('소스 계약 (§11 규칙)', () => {
   it('진단 UI는 자동 polling·sign/execute/preflight endpoint를 추가하지 않는다', () => {
     expect(cardSrc).not.toMatch(/setInterval/);
     expect(libSrc).not.toMatch(/\/sign|\/execute|\/preflight|\/prepare|\/submit/);
+  });
+
+  it('Stop capability는 PAPER에서 전체 사유와 비권한 경계를 보존한다', () => {
+    const stop = STATUS_FIXTURE.stopCapability!;
+    expect(stop.available).toBe(false);
+    expect(stop.paperMode).toBe(true);
+    expect(stop.scope).toBe('LIVE_STOP_EXECUTION');
+    expect(stop.boundary).toBe('READ_ONLY_STATUS_NOT_EXECUTION_AUTHORIZATION');
+    expect(stop.reasons).toEqual([
+      'delegated signer 비활성/미초기화',
+      '실행 잠금 상태 (LIVE 잠금/emergency stop)',
+    ]);
+    for (const marker of [
+      'LIVE Stop 실행 능력',
+      'Stop capability 판정 근거',
+      '이 읽기 전용 status 자체는 실행 승인이 아닙니다',
+    ]) expect(cardSrc).toContain(marker);
   });
 
   it('settlement 섹션은 읽기 전용 — 액션 버튼·브라우저 상태 저장 없음', () => {

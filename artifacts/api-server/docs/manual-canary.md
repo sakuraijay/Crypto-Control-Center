@@ -81,3 +81,22 @@ PIN·서명·암호문·개인키·RPC URL은 응답/로그/DB 평문에 절대 
 Production은 PAPER + LIVE_TEST_EXECUTION_LOCKED=true +
 GMX_API_ORDER_SUBMISSION_ENABLED=false 유지. 실제 canary는 별도 운영자 승인 후
 플래그 순서(readiness refresh 포함)를 따라야 한다.
+
+## PAPER readiness와 Stop capability 진단
+
+- `GET /api/executor/gmx-api/status`는 process-memory snapshot만 표시하며 외부
+  호출, DB 상태 전이, signer 접근, 서명, prepare/submit을 수행하지 않는다.
+- `paperRuntimeReadiness.boundary`는 항상
+  `READ_ONLY_NOT_EXECUTION_AUTHORIZATION`이다. Deployment/RPC/decimals/cost가
+  모두 verified여도 `readyForControlledCanary`나 Stop 실행 권한을 만들지 않는다.
+- Stop capability는 LIVE Stop 실행 전제조건의 순수 파생 상태다. UI는
+  `stopCapability.reasons` 전체와 평가 시각을 표시한다. PAPER에서 signer,
+  submission, 실행 잠금 등 독립 LIVE 조건이 미충족이면 불가가 정상이다.
+- scheduler는 45초 주기로 동작하며 process restart 시 cache를
+  `not_evaluated`에서 다시 구성한다. 같은 process의 timer, explicit refresh,
+  stop→restart 세대는 단일 active promise에 합류해 외부 read를 겹치지 않는다.
+- 실패 후 retry는 이전 cycle이 종료된 뒤 새 cycle 한 번으로만 수행한다.
+  중복 start는 새 scheduler를 만들지 않고, 정지된 이전 generation은 다음
+  timer를 예약하지 않는다.
+- 이 진단과 회귀 테스트는 DB-free dependency injection을 사용한다. HWM,
+  거래자본, 주문, execution-eligible cost evidence는 변경하지 않는다.

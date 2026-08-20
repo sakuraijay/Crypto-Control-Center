@@ -327,6 +327,110 @@ describe('PAPER runtime readiness cycle', () => {
     stopPaperRuntimeReadinessScheduler();
     expect(maxActiveReads).toBe(1);
   });
+
+  it('동시 explicit refresh 호출은 하나의 active cycle에 합류한다', async () => {
+    const result = canaryResult();
+    let releaseRead: (() => void) | null = null;
+    let activeReads = 0;
+    let maxActiveReads = 0;
+    const readGate = new Promise<void>((resolve) => {
+      releaseRead = resolve;
+    });
+    const deps = depsFrom(result);
+    deps.refreshCanary = vi.fn(async () => {
+      activeReads += 1;
+      maxActiveReads = Math.max(maxActiveReads, activeReads);
+      await readGate;
+      activeReads -= 1;
+      return {
+        decimals: result.decimals,
+        costs: result.costs,
+      };
+    });
+
+    const first = runPaperRuntimeReadinessCycle({ deps, forceDeployment: true });
+    await vi.waitFor(() => expect(deps.refreshCanary).toHaveBeenCalledTimes(1));
+    const joined = [
+      runPaperRuntimeReadinessCycle({ deps, forceDeployment: true }),
+      runPaperRuntimeReadinessCycle({ deps, forceDeployment: true }),
+    ];
+
+    expect(deps.refreshCanary).toHaveBeenCalledTimes(1);
+    releaseRead!();
+    const statuses = await Promise.all([first, ...joined]);
+
+    expect(deps.refreshCanary).toHaveBeenCalledTimes(1);
+    expect(maxActiveReads).toBe(1);
+    expect(statuses.every((status) =>
+      status.boundary === 'READ_ONLY_NOT_EXECUTION_AUTHORIZATION')).toBe(true);
+    expect(getExecutionEligibleCostEvidence(NOW)).toEqual({
+      fresh: false,
+      evidence: null,
+    });
+  });
+
+  it('process reset 뒤 scheduler가 evidence를 한 번만 안전하게 재구성한다', async () => {
+    const deps = depsFrom();
+    await runPaperRuntimeReadinessCycle({ deps, forceDeployment: true });
+    expect(getPaperRuntimeReadinessSnapshot(NOW, ENV).deployment.state).toBe('verified');
+
+    __resetPaperRuntimeReadinessForTests();
+    const cold = getPaperRuntimeReadinessSnapshot(NOW, ENV);
+    expect(cold.deployment.state).toBe('not_evaluated');
+    expect(cold.rpc.state).toBe('not_evaluated');
+    expect(cold.scheduler.running).toBe(false);
+
+    startPaperRuntimeReadinessScheduler({ deps, forceDeployment: true });
+    startPaperRuntimeReadinessScheduler({ deps, forceDeployment: true });
+    await vi.waitFor(() => {
+      expect(getPaperRuntimeReadinessSnapshot(NOW, ENV).scheduler.inFlight).toBe(false);
+      expect(getPaperRuntimeReadinessSnapshot(NOW, ENV).deployment.state).toBe('verified');
+    });
+    stopPaperRuntimeReadinessScheduler();
+
+    expect(deps.refreshCanary).toHaveBeenCalledTimes(2);
+    expect(deps.refreshDeployment).toHaveBeenCalledTimes(2);
+    expect(getExecutionEligibleCostEvidence(NOW)).toEqual({
+      fresh: false,
+      evidence: null,
+    });
+  });
+
+  it('실패 후 명시적 retry도 이전 cycle 종료 뒤 한 번만 수행한다', async () => {
+    const result = canaryResult();
+    let activeReads = 0;
+    let maxActiveReads = 0;
+    const deps = depsFrom(result);
+    deps.refreshCanary = vi.fn()
+      .mockImplementationOnce(async () => {
+        activeReads += 1;
+        maxActiveReads = Math.max(maxActiveReads, activeReads);
+        activeReads -= 1;
+        throw new Error('injected readonly failure');
+      })
+      .mockImplementationOnce(async () => {
+        activeReads += 1;
+        maxActiveReads = Math.max(maxActiveReads, activeReads);
+        activeReads -= 1;
+        return {
+          decimals: result.decimals,
+          costs: result.costs,
+        };
+      });
+
+    const failed = await runPaperRuntimeReadinessCycle({ deps, forceDeployment: true });
+    expect(failed.scheduler.lastFailureId).toBe('PAPER_READINESS_REFRESH_ERROR');
+
+    const retried = await Promise.all([
+      runPaperRuntimeReadinessCycle({ deps, forceDeployment: true }),
+      runPaperRuntimeReadinessCycle({ deps, forceDeployment: true }),
+    ]);
+
+    expect(deps.refreshCanary).toHaveBeenCalledTimes(2);
+    expect(maxActiveReads).toBe(1);
+    expect(retried.every((status) => status.deployment.state === 'verified')).toBe(true);
+    expect(getExecutionEligibleCostEvidence(NOW).fresh).toBe(false);
+  });
 });
 
 describe('structural safety contract', () => {
@@ -342,5 +446,6 @@ describe('structural safety contract', () => {
     expect(source).not.toMatch(/recordExecutionEligibleCostEvidence/);
     expect(source).not.toMatch(/initializeDelegatedSigner|decrypt|runGmxLivePreflight/);
     expect(source).not.toMatch(/prepareOrder|submitOrder|executeLiveTestOrder|fundTransfer/);
+    expect(source).not.toMatch(/readyForControlledCanary|stopExecutionAvailable|refreshStopExecutionCapability/);
   });
 });

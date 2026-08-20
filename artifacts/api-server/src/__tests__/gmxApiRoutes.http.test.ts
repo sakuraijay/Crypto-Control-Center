@@ -111,6 +111,12 @@ describe('GET /api/executor/gmx-api/status', () => {
     expect(s).toHaveProperty('settlementReconcile');
     expect(s).toHaveProperty('legacyZeroFeeCount');
     expect(s).toHaveProperty('unsettledLiveTradeCount');
+    expect(s.stopCapability).toMatchObject({
+      scope: 'LIVE_STOP_EXECUTION',
+      boundary: 'READ_ONLY_STATUS_NOT_EXECUTION_AUTHORIZATION',
+    });
+    expect(typeof s.stopCapability.paperMode).toBe('boolean');
+    expect(Array.isArray(s.stopCapability.reasons)).toBe(true);
     expect(s.paperRuntimeReadiness).toMatchObject({
       boundary: 'READ_ONLY_NOT_EXECUTION_AUTHORIZATION',
     });

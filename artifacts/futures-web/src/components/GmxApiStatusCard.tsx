@@ -232,14 +232,32 @@ export function GmxApiStatusCard() {
                 : '실패 — LIVE 차단')
               : '미시도 — LIVE 차단'} />
           {/* ── 6H-2B §12 — stop 실행 능력·보호 주문·action 예산 (조회 전용) ── */}
-          <Row label="Stop 실행 능력"
+          <Row label="LIVE Stop 실행 능력"
             tone={s.stopCapability?.available ? 'ok' : 'muted'}
             value={s.stopCapability
-              ? `${s.stopCapability.available ? '가능' : '불가'}${s.stopCapability.available ? '' : ` — ${s.stopCapability.reasons[0] ?? ''}`}`
+              ? `${s.stopCapability.available ? '가능' : '불가'} · ${s.stopCapability.paperMode ? '현재 PAPER' : '현재 LIVE'} · status는 권한 아님`
               : String(s.stopExecutionAvailable ?? false)} />
           {s.stopCapability && (
-            <Row label="Stop 스키마 pin" tone="muted"
-              value={`${s.stopCapability.schemaPin.sdk} · StopLossDecrease=${s.stopCapability.schemaPin.stopLossDecrease}`} />
+            <>
+              <Row label="Stop 평가 시각 / 경계" tone="muted"
+                value={`${fmtEpochMs(s.stopCapability.evaluatedAt ? Date.parse(s.stopCapability.evaluatedAt) : null)} · ${s.stopCapability.boundary}`} />
+              <Row label="Stop 스키마 pin" tone="muted"
+                value={`${s.stopCapability.schemaPin.sdk} · StopLossDecrease=${s.stopCapability.schemaPin.stopLossDecrease}`} />
+              <div className="sm:col-span-2 space-y-1 py-1" data-testid="stop-capability-reasons">
+                <p className="text-[10px] font-semibold text-muted-foreground">
+                  Stop capability 판정 근거 ({s.stopCapability.scope})
+                </p>
+                {s.stopCapability.reasons.length === 0 ? (
+                  <p className="text-[10px] text-emerald-300">
+                    모든 Stop 실행 전제조건 충족 · 단, 이 읽기 전용 status 자체는 실행 승인이 아닙니다.
+                  </p>
+                ) : (
+                  s.stopCapability.reasons.map((reason) => (
+                    <p key={reason} className="text-[10px] text-amber-300">• {reason}</p>
+                  ))
+                )}
+              </div>
+            </>
           )}
           <Row label="보호 주문 (차단/전체)"
             tone={s.blockingProtectionCount === null || s.blockingProtectionCount === undefined ? 'warn'
@@ -312,6 +330,9 @@ export function GmxApiStatusCard() {
               <p className="text-[10px] text-muted-foreground">
                 서버 background cache · 외부 호출은 scheduler만 수행 · GET status는 저장값만 표시
               </p>
+              <p className="text-[10px] text-sky-200">
+                PAPER evidence는 LIVE Stop capability를 설명만 하며, LIVE 권한·signer·submission을 활성화하지 않습니다.
+              </p>
             </div>
             <Badge tone="warn">READ-ONLY / NOT EXECUTION AUTHORIZATION</Badge>
           </div>
@@ -325,7 +346,12 @@ export function GmxApiStatusCard() {
             <Row
               label="Background scheduler"
               tone={s.paperRuntimeReadiness.scheduler.running ? 'ok' : 'muted'}
-              value={`${s.paperRuntimeReadiness.scheduler.running ? 'RUNNING' : 'STOPPED'} · 마지막 ${fmtEpochMs(s.paperRuntimeReadiness.scheduler.lastCompletedAtMs)}`}
+              value={`${s.paperRuntimeReadiness.scheduler.running ? 'RUNNING' : 'STOPPED'} · ${s.paperRuntimeReadiness.scheduler.inFlight ? 'IN-FLIGHT' : 'IDLE'} · 마지막 ${fmtEpochMs(s.paperRuntimeReadiness.scheduler.lastCompletedAtMs)}`}
+            />
+            <Row
+              label="Scheduler next / failure"
+              tone={s.paperRuntimeReadiness.scheduler.lastFailureId ? 'warn' : 'muted'}
+              value={`다음 ${fmtEpochMs(s.paperRuntimeReadiness.scheduler.nextRefreshAtMs)} · ${s.paperRuntimeReadiness.scheduler.lastFailureId ?? 'failure 없음'}`}
             />
             <Row
               label="Deployment evidence"

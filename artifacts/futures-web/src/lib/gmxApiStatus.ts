@@ -51,6 +51,9 @@ export interface GmxApiStatusView {
     available: boolean;
     reasons: string[];
     evaluatedAt: string | null;
+    scope: 'LIVE_STOP_EXECUTION';
+    boundary: 'READ_ONLY_STATUS_NOT_EXECUTION_AUTHORIZATION';
+    paperMode: boolean;
     schemaPin: { sdk: string; stopLossDecrease: number };
   };
   protectionCounts?: Record<string, number> | null;
