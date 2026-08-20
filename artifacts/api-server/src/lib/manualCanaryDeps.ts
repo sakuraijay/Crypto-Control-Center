@@ -108,6 +108,57 @@ async function resolveCanarySymbolDecimals(symbol: string): Promise<CheckOutcome
   }
 }
 
+/**
+ * PAPER runtime 진단과 Manual Canary preflight가 공유하는 순수 read-only 비용 조회.
+ *
+ * 이 함수에는 DB, signer, preflight token, intent/order/protection 생성, 서명·제출
+ * 능력이 없다. 실행 직전 전용 recordExecutionEligibleCostEvidence도 호출하지 않는다.
+ */
+export async function fetchManualCanaryReadonlyCost(args: {
+  symbol: string;
+  isLong: boolean;
+  notionalUsd: number;
+}): Promise<
+  | { ok: true; snapshot: CostSnapshot; roundTripCostUsd: number }
+  | { ok: false; reason: string }
+> {
+  const market = MARKET_BY_SYMBOL_SERVER.get(args.symbol);
+  if (!market) return { ok: false, reason: '시장 미확인' };
+  const res = await fetchLiveCostSnapshot(
+    {
+      market: market.marketToken,
+      isLong: args.isLong,
+      orderType: 'MarketIncrease',
+      notionalUsd: args.notionalUsd,
+      now: new Date(),
+    },
+    {
+      readonlyEnabled: process.env.GMX_API_READONLY_ENABLED === 'true',
+      fetchCosts: ({ market: marketAddress, isLong: side, notionalUsd: size }) =>
+        fetchMeasuredCanaryCosts({
+          market: marketAddress,
+          symbol: args.symbol,
+          isLong: side,
+          notionalUsd: size,
+        }),
+    },
+  );
+  if (!res.ok) return { ok: false, reason: res.reason };
+  const expected = {
+    market: market.marketToken,
+    isLong: args.isLong,
+    orderType: 'MarketIncrease' as const,
+    notionalUsd: args.notionalUsd,
+  };
+  const validated = validateExecutionEligibleSnapshot(res.snapshot, expected, Date.now());
+  if (!validated.ok) return { ok: false, reason: validated.reason };
+  return {
+    ok: true,
+    snapshot: res.snapshot,
+    roundTripCostUsd: validated.effectiveRoundTripCostUsd,
+  };
+}
+
 export function buildDefaultCanaryDeps(): ManualCanaryDeps {
   return {
     now: () => new Date(),
@@ -231,29 +282,7 @@ export function buildDefaultCanaryDeps(): ManualCanaryDeps {
      * #142: read-only costSnapshot — preflight 경로는 recordExecutionEligibleCostEvidence
      * 를 호출하지 않는다. 실행 직전 비용 증거 기록은 recordCostEvidenceForExecution 전용.
      */
-    costSnapshot: async ({ symbol, isLong, notionalUsd }) => {
-      const market = MARKET_BY_SYMBOL_SERVER.get(symbol);
-      if (!market) return { ok: false, reason: '시장 미확인' };
-      const res = await fetchLiveCostSnapshot(
-        { market: market.marketToken, isLong, orderType: 'MarketIncrease', notionalUsd, now: new Date() },
-        {
-          readonlyEnabled: process.env.GMX_API_READONLY_ENABLED === 'true',
-          fetchCosts: ({ market: marketAddress, isLong: side, notionalUsd: size }) =>
-            fetchMeasuredCanaryCosts({ market: marketAddress, symbol, isLong: side, notionalUsd: size }),
-        },
-      );
-      if (!res.ok) return { ok: false, reason: res.reason };
-      const expected = { market: market.marketToken, isLong, orderType: 'MarketIncrease' as const, notionalUsd };
-      const v = validateExecutionEligibleSnapshot(
-        res.snapshot,
-        expected,
-        Date.now(),
-      );
-      if (!v.ok) return { ok: false, reason: v.reason };
-      // NOTE: recordExecutionEligibleCostEvidence is NOT called here (read-only path).
-      // It is called exclusively via recordCostEvidenceForExecution just before executeOrder.
-      return { ok: true, snapshot: res.snapshot, roundTripCostUsd: v.effectiveRoundTripCostUsd };
-    },
+    costSnapshot: fetchManualCanaryReadonlyCost,
 
     canaryDecimalsReady: async () => {
       const results = await Promise.all(
@@ -382,19 +411,36 @@ export function buildDefaultCanaryDeps(): ManualCanaryDeps {
 /** readiness/refresh 전용 — decimals와 비용 스냅샷 가용성만 read-only로 확인한다. */
 export async function refreshManualCanaryReadonlyEvidence(): Promise<{
   decimals: Record<string, CheckOutcome>;
-  costs: Record<string, { ok: boolean; reason: string | null }>;
+  costs: Record<string,
+    | { ok: true; reason: null; snapshot: CostSnapshot; roundTripCostUsd: number }
+    | { ok: false; reason: string; snapshot: null; roundTripCostUsd: null }
+  >;
 }> {
-  const deps = buildDefaultCanaryDeps();
   const decimals: Record<string, CheckOutcome> = {};
-  const costs: Record<string, { ok: boolean; reason: string | null }> = {};
+  const costs: Record<string,
+    | { ok: true; reason: null; snapshot: CostSnapshot; roundTripCostUsd: number }
+    | { ok: false; reason: string; snapshot: null; roundTripCostUsd: null }
+  > = {};
   for (const symbol of MANUAL_CANARY_REFRESH_SYMBOLS) {
     decimals[symbol] = await resolveCanarySymbolDecimals(symbol);
-    const cost = await deps.costSnapshot({
+    const cost = await fetchManualCanaryReadonlyCost({
       symbol,
       isLong: true,
       notionalUsd: 20,
     });
-    costs[symbol] = { ok: cost.ok, reason: cost.ok ? null : cost.reason };
+    costs[symbol] = cost.ok
+      ? {
+        ok: true,
+        reason: null,
+        snapshot: cost.snapshot,
+        roundTripCostUsd: cost.roundTripCostUsd,
+      }
+      : {
+        ok: false,
+        reason: cost.reason,
+        snapshot: null,
+        roundTripCostUsd: null,
+      };
   }
   return { decimals, costs };
 }

@@ -62,6 +62,30 @@ function fmtExpires(expiresAt: string | number | null): string {
   try { return new Date(n * 1000).toLocaleString(); } catch { return '—'; }
 }
 
+function evidenceTone(state: 'not_evaluated' | 'verified' | 'stale' | 'failed'): Tone {
+  if (state === 'verified') return 'ok';
+  if (state === 'failed') return 'error';
+  if (state === 'stale') return 'warn';
+  return 'muted';
+}
+
+function evidenceLabel(state: 'not_evaluated' | 'verified' | 'stale' | 'failed'): string {
+  if (state === 'verified') return 'VERIFIED';
+  if (state === 'failed') return 'FAILED';
+  if (state === 'stale') return 'STALE';
+  return 'NOT EVALUATED';
+}
+
+function fmtAge(ageMs: number | null): string {
+  if (ageMs === null) return '—';
+  if (ageMs < 60_000) return `${Math.round(ageMs / 1000)}초`;
+  return `${Math.round(ageMs / 60_000)}분`;
+}
+
+function fmtUsd(value: number | null, digits = 6): string {
+  return value === null || !Number.isFinite(value) ? '—' : `$${value.toFixed(digits)}`;
+}
+
 export function GmxApiStatusCard() {
   const [pin, setPin] = useState('');
   const [status, setStatus] = useState<GmxApiStatusView | null>(null);
@@ -273,6 +297,127 @@ export function GmxApiStatusCard() {
           {s.executionEligibleCostMaxAgeMs !== undefined && (
             <Row label="실행 적격 비용 창" tone="muted" value={`${Math.round(s.executionEligibleCostMaxAgeMs / 1000)}초 (표시 cache와 별도)`} />
           )}
+        </div>
+      )}
+
+      {/* PAPER runtime diagnostics — execution authorization cache와 구조적으로 분리 */}
+      {s?.paperRuntimeReadiness && (
+        <div
+          className="space-y-3 rounded-md border border-sky-500/30 bg-sky-500/5 p-3"
+          data-testid="paper-runtime-readiness"
+        >
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div>
+              <p className="text-[11px] font-semibold text-sky-300">PAPER Runtime Readiness Evidence</p>
+              <p className="text-[10px] text-muted-foreground">
+                서버 background cache · 외부 호출은 scheduler만 수행 · GET status는 저장값만 표시
+              </p>
+            </div>
+            <Badge tone="warn">READ-ONLY / NOT EXECUTION AUTHORIZATION</Badge>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6">
+            <Row
+              label="PAPER / Read-only"
+              tone={s.paperRuntimeReadiness.paperMode && s.paperRuntimeReadiness.readonlyEnabled ? 'ok' : 'error'}
+              value={`${s.paperRuntimeReadiness.paperMode ? 'PAPER' : 'NOT PAPER'} · ${s.paperRuntimeReadiness.readonlyEnabled ? 'READ-ONLY ON' : 'READ-ONLY OFF'}`}
+            />
+            <Row
+              label="Background scheduler"
+              tone={s.paperRuntimeReadiness.scheduler.running ? 'ok' : 'muted'}
+              value={`${s.paperRuntimeReadiness.scheduler.running ? 'RUNNING' : 'STOPPED'} · 마지막 ${fmtEpochMs(s.paperRuntimeReadiness.scheduler.lastCompletedAtMs)}`}
+            />
+            <Row
+              label="Deployment evidence"
+              tone={evidenceTone(s.paperRuntimeReadiness.deployment.state)}
+              value={`${evidenceLabel(s.paperRuntimeReadiness.deployment.state)} · age ${fmtAge(s.paperRuntimeReadiness.deployment.ageMs)}${s.paperRuntimeReadiness.deployment.failureId ? ` · ${s.paperRuntimeReadiness.deployment.failureId}` : ''}`}
+            />
+            <Row
+              label="Arbitrum RPC evidence"
+              tone={evidenceTone(s.paperRuntimeReadiness.rpc.state)}
+              value={`${evidenceLabel(s.paperRuntimeReadiness.rpc.state)} · chain ${s.paperRuntimeReadiness.rpc.chainId ?? '—'} · age ${fmtAge(s.paperRuntimeReadiness.rpc.ageMs)}${s.paperRuntimeReadiness.rpc.failureId ? ` · ${s.paperRuntimeReadiness.rpc.failureId}` : ''}`}
+            />
+            {(['BTC', 'ETH'] as const).map((symbol) => {
+              const decimals = s.paperRuntimeReadiness!.decimals[symbol];
+              return (
+                <Row
+                  key={`paper-decimals-${symbol}`}
+                  label={`${symbol} index decimals`}
+                  tone={evidenceTone(decimals.state)}
+                  value={`${decimals.decimals ?? '—'} · ${decimals.source ?? evidenceLabel(decimals.state)} · age ${fmtAge(decimals.ageMs)}${decimals.failureId ? ` · ${decimals.failureId}` : ''}`}
+                />
+              );
+            })}
+          </div>
+
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-2">
+            {(['BTC', 'ETH'] as const).map((symbol) => {
+              const cost = s.paperRuntimeReadiness!.costs[symbol];
+              const overCap = cost.withinCap === false;
+              return (
+                <div
+                  key={`paper-cost-${symbol}`}
+                  className="rounded border border-border/60 bg-background/50 p-2 space-y-1"
+                  data-testid={`paper-cost-${symbol.toLowerCase()}`}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-[11px] font-semibold">
+                      {symbol} LONG · ${cost.notionalUsd} · {cost.holdingHours}h
+                    </span>
+                    <Badge tone={cost.state !== 'verified' ? evidenceTone(cost.state) : overCap ? 'error' : 'ok'}>
+                      {cost.state !== 'verified'
+                        ? evidenceLabel(cost.state)
+                        : cost.withinCap
+                          ? 'WITHIN CAP'
+                          : 'BLOCKED · CAP EXCEEDED'}
+                    </Badge>
+                  </div>
+                  <p className={cn('font-mono text-[12px]', overCap ? 'text-red-300' : 'text-foreground')}>
+                    effective {fmtUsd(cost.effectiveRoundTripCostUsd)} {cost.effectiveRoundTripCostUsd === null ? '' : 'vs'} cap {fmtUsd(cost.capUsd)}
+                    {cost.capDeltaUsd !== null && (
+                      <span> · delta {cost.capDeltaUsd >= 0 ? '+' : ''}{fmtUsd(cost.capDeltaUsd)}</span>
+                    )}
+                  </p>
+                  <p className="font-mono text-[10px] text-muted-foreground leading-relaxed">
+                    entry {fmtUsd(cost.positionFeeUsd)} · execution {fmtUsd(cost.executionFeeUsd)}
+                    {' · '}impact {fmtUsd(cost.estimatedPriceImpactUsd)}
+                    {' · '}funding {fmtUsd(cost.fundingFeeUsd)}
+                    {' · '}borrowing {fmtUsd(cost.borrowingFeeUsd)}
+                    {' · '}exit {fmtUsd(cost.estimatedExitFeeUsd)}
+                    {' · '}exit impact {fmtUsd(cost.estimatedExitPriceImpactUsd)}
+                  </p>
+                  <p className="text-[10px] text-muted-foreground">
+                    state {evidenceLabel(cost.state)} · observed {fmtEpochMs(cost.observedAtMs)} · age {fmtAge(cost.ageMs)}
+                    {cost.failureId ? ` · ${cost.failureId}` : ''}
+                  </p>
+                </div>
+              );
+            })}
+          </div>
+
+          <p className="text-[10px] text-muted-foreground">
+            경제성 진단 입력은 LONG · $20 · 1h 관측 시나리오입니다. 비용 상한은 서버 고정 $0.40이며,
+            이 화면은 통과 가능한 주문 크기를 제안하거나 상한을 완화하지 않습니다.
+          </p>
+
+          <div className="space-y-1">
+            <p className="text-[10px] font-semibold text-muted-foreground">Blocker IDs</p>
+            <div className="flex flex-wrap gap-1" data-testid="paper-runtime-blocker-ids">
+              {s.paperRuntimeReadiness.blockerIds.map((id) => (
+                <Badge key={id} tone="warn">{id}</Badge>
+              ))}
+            </div>
+          </div>
+
+          <div className="space-y-1" data-testid="paper-runtime-holds">
+            <p className="text-[10px] font-semibold text-muted-foreground">Manual-action HOLD · requested 2026-08-20T13:59:15Z</p>
+            {s.paperRuntimeReadiness.manualActionHolds.map((hold) => (
+              <div key={hold.id} className="rounded border border-amber-500/20 bg-amber-500/5 px-2 py-1 text-[10px]">
+                <span className="font-mono text-amber-300">{hold.id}</span>
+                <span className="text-muted-foreground"> · 필요: {hold.requiredAction} · 재개: {hold.resumeCondition}</span>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 

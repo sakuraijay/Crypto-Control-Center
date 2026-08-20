@@ -92,6 +92,91 @@ export interface GmxApiStatusView {
   };
   uncoveredStopCount?: number | null;
   executionEligibleCostMaxAgeMs?: number;
+  /**
+   * PAPER background diagnostic cache. This evidence is display-only and never
+   * execution authorization; unknown/stale/failed values remain fail-closed.
+   */
+  paperRuntimeReadiness?: {
+    boundary: 'READ_ONLY_NOT_EXECUTION_AUTHORIZATION';
+    paperMode: boolean;
+    readonlyEnabled: boolean;
+    scheduler: {
+      running: boolean;
+      inFlight: boolean;
+      intervalMs: number;
+      lastAttemptAtMs: number | null;
+      lastCompletedAtMs: number | null;
+      lastSuccessAtMs: number | null;
+      nextRefreshAtMs: number | null;
+      lastFailureId: string | null;
+    };
+    decimals: Record<'BTC' | 'ETH', {
+      state: 'not_evaluated' | 'verified' | 'stale' | 'failed';
+      attemptedAtMs: number | null;
+      observedAtMs: number | null;
+      ageMs: number | null;
+      fresh: boolean;
+      failureId: string | null;
+      detail: string | null;
+      decimals: number | null;
+      source: string | null;
+      tokenAddress: string | null;
+    }>;
+    deployment: {
+      state: 'not_evaluated' | 'verified' | 'stale' | 'failed';
+      attemptedAtMs: number | null;
+      observedAtMs: number | null;
+      ageMs: number | null;
+      fresh: boolean;
+      failureId: string | null;
+      detail: string | null;
+      manifestVersion: number | null;
+    };
+    rpc: {
+      state: 'not_evaluated' | 'verified' | 'stale' | 'failed';
+      attemptedAtMs: number | null;
+      observedAtMs: number | null;
+      ageMs: number | null;
+      fresh: boolean;
+      failureId: string | null;
+      detail: string | null;
+      chainId: number | null;
+    };
+    costs: Record<'BTC' | 'ETH', {
+      state: 'not_evaluated' | 'verified' | 'stale' | 'failed';
+      attemptedAtMs: number | null;
+      observedAtMs: number | null;
+      ageMs: number | null;
+      fresh: boolean;
+      failureId: string | null;
+      detail: string | null;
+      symbol: 'BTC' | 'ETH';
+      direction: 'LONG';
+      notionalUsd: number;
+      holdingHours: number;
+      capUsd: number;
+      positionFeeUsd: number | null;
+      executionFeeUsd: number | null;
+      estimatedPriceImpactUsd: number | null;
+      fundingFeeUsd: number | null;
+      borrowingFeeUsd: number | null;
+      estimatedExitFeeUsd: number | null;
+      estimatedExitPriceImpactUsd: number | null;
+      effectiveRoundTripCostUsd: number | null;
+      capDeltaUsd: number | null;
+      withinCap: boolean | null;
+      source: string | null;
+      apiTimestamp: string | null;
+      fetchedAt: string | null;
+    }>;
+    blockerIds: string[];
+    manualActionHolds: Array<{
+      id: string;
+      requestedAt: string;
+      requiredAction: string;
+      resumeCondition: string;
+    }>;
+  };
   // 6G-3 §7 — prepare 단계 관측 (조회 전용; null = 조회 실패, "미설정" 위장 금지)
   prepareStageCounts: Record<string, number> | null;
   oldestBlockingTaskAt: string | null;

@@ -111,6 +111,13 @@ describe('GET /api/executor/gmx-api/status', () => {
     expect(s).toHaveProperty('settlementReconcile');
     expect(s).toHaveProperty('legacyZeroFeeCount');
     expect(s).toHaveProperty('unsettledLiveTradeCount');
+    expect(s.paperRuntimeReadiness).toMatchObject({
+      boundary: 'READ_ONLY_NOT_EXECUTION_AUTHORIZATION',
+    });
+    expect(typeof s.paperRuntimeReadiness.paperMode).toBe('boolean');
+    expect(s.paperRuntimeReadiness).toHaveProperty('decimals.BTC.state');
+    expect(s.paperRuntimeReadiness).toHaveProperty('costs.BTC.capUsd', 0.4);
+    expect(s.paperRuntimeReadiness).toHaveProperty('blockerIds');
   });
 
   it('Gelato Enterprise/Gas Tank/API key 문구 0건 + PIN/Secret 미노출', async () => {

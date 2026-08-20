@@ -57,6 +57,10 @@ import { sanitizeRpcError } from '../lib/rpcErrorSanitize';
 import { getLastPreflight, isPreflightPassedFresh, runGmxLivePreflight, PREFLIGHT_TTL_MS } from '../lib/gmxLivePreflight';
 import { refreshManualCanaryReadonlyEvidence } from '../lib/manualCanaryDeps';
 import { deriveCanaryDecimalsReadiness } from '../lib/canaryDecimalsReadiness';
+import {
+  getPaperRuntimeReadinessSnapshot,
+  runPaperRuntimeReadinessCycle,
+} from '../lib/paperRuntimeReadiness';
 
 const router = Router();
 
@@ -164,6 +168,7 @@ async function buildGmxApiStatusSnapshot() {
   const gmxConfigOk = resolveGmxLiveRelayConfig().ok;
   const manualCanaryPosture = isManualCanarySignerRestoreAllowed(env);
   const executionCostEvidence = getExecutionEligibleCostEvidence(Date.now());
+  const paperRuntimeReadiness = getPaperRuntimeReadinessSnapshot(Date.now(), env);
   const feeEstimateFresh =
     fe.attempted && fe.ok && fe.atMs !== null && Date.now() - fe.atMs < 10 * 60_000;
 
@@ -326,6 +331,7 @@ async function buildGmxApiStatusSnapshot() {
     feeEstimate: { attempted: fe.attempted, ok: fe.ok, atMs: fe.atMs, fresh: feeEstimateFresh },
     manualCanaryPosture,
     executionEligibleCostEvidence: executionCostEvidence,
+    paperRuntimeReadiness,
     lastReadinessRefresh: {
       attempted: lastRefresh.attempted, atMs: lastRefresh.atMs,
       ok: lastRefresh.ok, basis: lastRefresh.basis,
@@ -435,6 +441,13 @@ router.post('/executor/gmx-api/readiness/refresh', requireOperatorAuth, async (_
     const canaryEvidence = t.readonlyEnabled
       ? await refreshManualCanaryReadonlyEvidence()
       : { decimals: {}, costs: {} };
+    const paperRuntimeReadiness =
+      t.readonlyEnabled && process.env.WORKER_ENGINE_MODE === 'PAPER'
+        ? await runPaperRuntimeReadinessCycle({
+          forceDeployment: true,
+          preloadedCanary: canaryEvidence,
+        })
+        : getPaperRuntimeReadinessSnapshot();
     const stopCapability = await refreshStopExecutionCapability();
 
     const snapshot = await buildGmxApiStatusSnapshot();
@@ -449,6 +462,7 @@ router.post('/executor/gmx-api/readiness/refresh', requireOperatorAuth, async (_
           reason: 'readiness refresh에서는 durable reconciliation을 실행하지 않음',
         },
         canaryEvidence,
+        paperRuntimeReadiness,
         stopCapability,
       },
       status: snapshot,

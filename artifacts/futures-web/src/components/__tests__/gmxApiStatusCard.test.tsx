@@ -67,6 +67,130 @@ const STATUS_FIXTURE: GmxApiStatusView = {
   settlementReconcile: { ok: true, unsettledCount: 0, settledNow: 0, incomplete: false, reasons: [] },
   legacyZeroFeeCount: 0,
   unsettledLiveTradeCount: 0,
+  paperRuntimeReadiness: {
+    boundary: 'READ_ONLY_NOT_EXECUTION_AUTHORIZATION',
+    paperMode: true,
+    readonlyEnabled: true,
+    scheduler: {
+      running: true,
+      inFlight: false,
+      intervalMs: 45_000,
+      lastAttemptAtMs: 1_777_000_000_000,
+      lastCompletedAtMs: 1_777_000_000_000,
+      lastSuccessAtMs: null,
+      nextRefreshAtMs: 1_777_000_045_000,
+      lastFailureId: 'PAPER_READINESS_INCOMPLETE',
+    },
+    decimals: {
+      BTC: {
+        state: 'verified',
+        attemptedAtMs: 1_777_000_000_000,
+        observedAtMs: 1_776_999_997_000,
+        ageMs: 3_000,
+        fresh: true,
+        failureId: null,
+        detail: 'verified',
+        decimals: 8,
+        source: 'sdk-synthetic+onchain-no-code',
+        tokenAddress: '0x0000000000000000000000000000000000000001',
+      },
+      ETH: {
+        state: 'verified',
+        attemptedAtMs: 1_777_000_000_000,
+        observedAtMs: 1_776_999_997_000,
+        ageMs: 3_000,
+        fresh: true,
+        failureId: null,
+        detail: 'verified',
+        decimals: 18,
+        source: 'sdk+onchain',
+        tokenAddress: '0x0000000000000000000000000000000000000002',
+      },
+    },
+    deployment: {
+      state: 'not_evaluated',
+      attemptedAtMs: null,
+      observedAtMs: null,
+      ageMs: null,
+      fresh: false,
+      failureId: 'DEPLOYMENT_READONLY_DISABLED',
+      detail: 'not evaluated',
+      manifestVersion: null,
+    },
+    rpc: {
+      state: 'not_evaluated',
+      attemptedAtMs: null,
+      observedAtMs: null,
+      ageMs: null,
+      fresh: false,
+      failureId: 'RPC_READONLY_DISABLED',
+      detail: 'not evaluated',
+      chainId: null,
+    },
+    costs: {
+      BTC: {
+        state: 'verified',
+        attemptedAtMs: 1_777_000_000_000,
+        observedAtMs: 1_776_999_996_000,
+        ageMs: 4_000,
+        fresh: true,
+        failureId: null,
+        detail: 'observed',
+        symbol: 'BTC',
+        direction: 'LONG',
+        notionalUsd: 20,
+        holdingHours: 1,
+        capUsd: 0.4,
+        positionFeeUsd: 0.012,
+        executionFeeUsd: 0.428188,
+        estimatedPriceImpactUsd: 0,
+        fundingFeeUsd: 0.000461,
+        borrowingFeeUsd: 0.000363,
+        estimatedExitFeeUsd: 0.012,
+        estimatedExitPriceImpactUsd: 0,
+        effectiveRoundTripCostUsd: 0.453011,
+        capDeltaUsd: 0.053011,
+        withinCap: false,
+        source: 'GMX_API',
+        apiTimestamp: '2026-04-25T22:13:16.000Z',
+        fetchedAt: '2026-04-25T22:13:16.000Z',
+      },
+      ETH: {
+        state: 'verified',
+        attemptedAtMs: 1_777_000_000_000,
+        observedAtMs: 1_776_999_996_000,
+        ageMs: 4_000,
+        fresh: true,
+        failureId: null,
+        detail: 'observed',
+        symbol: 'ETH',
+        direction: 'LONG',
+        notionalUsd: 20,
+        holdingHours: 1,
+        capUsd: 0.4,
+        positionFeeUsd: 0.01,
+        executionFeeUsd: 0.1,
+        estimatedPriceImpactUsd: 0,
+        fundingFeeUsd: 0.001,
+        borrowingFeeUsd: 0.001,
+        estimatedExitFeeUsd: 0.01,
+        estimatedExitPriceImpactUsd: 0,
+        effectiveRoundTripCostUsd: 0.122,
+        capDeltaUsd: -0.278,
+        withinCap: true,
+        source: 'GMX_API',
+        apiTimestamp: '2026-04-25T22:13:16.000Z',
+        fetchedAt: '2026-04-25T22:13:16.000Z',
+      },
+    },
+    blockerIds: ['deployment', 'rpc', 'btc_cost_cap', 'owner_approval'],
+    manualActionHolds: [{
+      id: 'owner_approval',
+      requestedAt: '2026-08-20T13:59:15Z',
+      requiredAction: 'owner payload 승인',
+      resumeCondition: '최신 상태 재검증',
+    }],
+  },
 };
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -182,6 +306,26 @@ describe('소스 계약 (§11 규칙)', () => {
     ]) expect(cardSrc).toContain(label);
   });
 
+  it('PAPER runtime 진단 라벨·고정 경계·HOLD가 카드 소스에 존재한다', () => {
+    for (const label of [
+      'PAPER Runtime Readiness Evidence',
+      'READ-ONLY / NOT EXECUTION AUTHORIZATION',
+      'Deployment evidence',
+      'Arbitrum RPC evidence',
+      'index decimals',
+      'Blocker IDs',
+      'Manual-action HOLD',
+      'BLOCKED · CAP EXCEEDED',
+    ]) expect(cardSrc).toContain(label);
+    expect(cardSrc).toContain('비용 상한은 서버 고정 $0.40');
+    expect(cardSrc).toContain('통과 가능한 주문 크기를 제안하거나 상한을 완화하지 않습니다');
+  });
+
+  it('진단 UI는 자동 polling·sign/execute/preflight endpoint를 추가하지 않는다', () => {
+    expect(cardSrc).not.toMatch(/setInterval/);
+    expect(libSrc).not.toMatch(/\/sign|\/execute|\/preflight|\/prepare|\/submit/);
+  });
+
   it('settlement 섹션은 읽기 전용 — 액션 버튼·브라우저 상태 저장 없음', () => {
     // 정산 관련 코드에 action 버튼이나 persist 패턴 없어야 함
     expect(cardSrc).not.toMatch(/onClick.*settl|settl.*onClick/i);
@@ -276,5 +420,27 @@ describe('GmxApiStatusCard — Settlement Evidence 렌더 케이스', () => {
     // blocker sanitization: prefix 제거 + slice(0, 80)
     expect(cardSrc).toContain('.slice(0, 80)');
     expect(cardSrc).toContain('LIVE_SETTLEMENT_INCOMPLETE');
+  });
+});
+
+describe('GmxApiStatusCard — PAPER runtime fixture', () => {
+  it('$0.453011 BTC LONG $20/1h는 $0.40 cap 초과로 유지된다', () => {
+    const btc = STATUS_FIXTURE.paperRuntimeReadiness!.costs.BTC;
+    expect(btc.direction).toBe('LONG');
+    expect(btc.notionalUsd).toBe(20);
+    expect(btc.holdingHours).toBe(1);
+    expect(btc.effectiveRoundTripCostUsd).toBe(0.453011);
+    expect(btc.capUsd).toBe(0.4);
+    expect(btc.capDeltaUsd).toBe(0.053011);
+    expect(btc.withinCap).toBe(false);
+    expect(STATUS_FIXTURE.paperRuntimeReadiness!.blockerIds).toContain('btc_cost_cap');
+  });
+
+  it('허용 decimals source와 manual HOLD ID를 보존한다', () => {
+    const evidence = STATUS_FIXTURE.paperRuntimeReadiness!;
+    expect(evidence.decimals.BTC.source).toBe('sdk-synthetic+onchain-no-code');
+    expect(evidence.decimals.ETH.source).toBe('sdk+onchain');
+    expect(evidence.manualActionHolds[0].id).toBe('owner_approval');
+    expect(evidence.boundary).toBe('READ_ONLY_NOT_EXECUTION_AUTHORIZATION');
   });
 });

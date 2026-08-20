@@ -906,8 +906,8 @@ describe('#142 production preflight wiring — signer and cost immutability', ()
   const signerStart = source.indexOf('signerBinding: async () =>');
   const signerEnd = source.indexOf('ownerApproval: async', signerStart);
   const signerBindingSource = source.slice(signerStart, signerEnd);
-  const costStart = source.indexOf('costSnapshot: async');
-  const costEnd = source.indexOf('canaryDecimalsReady: async', costStart);
+  const costStart = source.indexOf('export async function fetchManualCanaryReadonlyCost');
+  const costEnd = source.indexOf('export function buildDefaultCanaryDeps', costStart);
   const costSnapshotSource = source.slice(costStart, costEnd);
 
   it('signerBinding contains reads only and no decrypt/provision/sign/mutation capability', () => {

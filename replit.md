@@ -186,3 +186,26 @@ ai.ts       — POST/GET /api/ai/decisions (persist AI decision log)
 - Internal Replit Executor (`/api/executor/*`) is the default execution path. GMX One-Click on-chain execution is task #32.
 - Mobile-specific tasks (push notifications, mobile Settings UI) are cancelled — focus is the web terminal.
 - **모든 에이전트 메시지/상태 보고/설명은 한국어로 작성.** (Agent language: Korean only)
+
+## Agent user-input and HOLD policy
+
+- 사용자 입력 또는 수동 조작이 필요하면 요청 시각, 필요한 행동, 재개 조건을 기록하고 기다린다.
+- 1시간 동안 응답이 없어도 승인으로 추정하거나 필요한 행동을 우회하지 않는다. 해당 항목만 안전한 `HOLD`로 전환하고, 의존하지 않는 개발·테스트·문서화만 계속한다.
+- 사용자가 돌아오면 현재 코드, 배포, CI, 잠금, signer 및 보안 상태를 먼저 다시 검증한 뒤 최신 사실에 따라 재개한다.
+- LIVE 잠금 해제, 실제 서명·주문·자금 이동, Owner Approval, delegated signer 활성화/복호화, DB 초기화·삭제, HWM 또는 trading capital 변경, force push, rebase/history rewrite, PR merge는 항상 별도의 명시적 승인이 필요하다. 1시간 규칙으로 절대 우회하지 않는다.
+
+### Current manual-action HOLDs
+
+Request recorded at: `2026-08-20T13:59:15Z`
+
+| HOLD | Required action | Resume condition |
+|---|---|---|
+| Owner Approval | 운영자가 현재 owner-wallet payload를 명시적으로 승인 | 사용자 복귀 후 release SHA, PAPER/LIVE 잠금, payload, deployment 재검증 |
+| MetaMask signature | 운영자가 정확한 payload를 직접 검토하고 서명 | 최신 보안 상태 재검증 후 wallet 사용 가능 확인 |
+| Delegated signer activation | binding/revocation 검토 후 별도 활성화 승인 | 최신 read-only signer/deployment 검사와 명시적 승인 |
+| LIVE Canary | 모든 blocker 해소 후 bounded Canary 별도 승인 | 최신 CI/release/deployment/RPC/decimals/cost/stop evidence와 안전 검토 |
+| Real orders/funds | 정확한 주문/자금 action 별도 승인 | action-specific 승인; 시간 경과로 추정 금지 |
+
+이 HOLD들은 독립적인 PAPER read-only diagnostics를 막지 않는다. Owner Approval 준비,
+MetaMask 호출, signer 초기화/복호화, preflight token, 서명, prepare/submit, 주문,
+자금 이동, DB write, HWM 또는 trading capital 변경을 자동으로 유발해서는 안 된다.

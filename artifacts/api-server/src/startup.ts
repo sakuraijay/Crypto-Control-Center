@@ -44,6 +44,10 @@ import { countUnboundNoncesOrNull } from "./lib/relayNonce";
 import { getActiveRevokeSession } from "./lib/revokeSession";
 import type { Delegate } from "./lib/bootstrapServer";
 import { attachDevWebProxy, type DevWebProxyHandle } from "./lib/devWebProxy";
+import {
+  startPaperRuntimeReadinessScheduler,
+  stopPaperRuntimeReadinessScheduler,
+} from "./lib/paperRuntimeReadiness";
 
 let devWebProxy: DevWebProxyHandle | null = null;
 
@@ -180,6 +184,12 @@ export function startServer({ httpServer, setDelegate, isShuttingDown }: Startup
         logger.info({ complete: s.complete, reasons: s.reasons }, "Relay startup reconciliation recorded");
       }).catch(() => {});
 
+      // PAPER diagnostics only: process-memory evidence warm-up via public read-only
+      // calls. Exact PAPER + GMX API read-only gates are enforced inside the
+      // scheduler; other modes perform zero external calls. This is not execution
+      // authorization and does not mutate DB/signer/preflight/order state.
+      startPaperRuntimeReadinessScheduler();
+
       // Start the 24/7 AI Worker after migrations complete
       // so the worker can read/write DB.
       void workerManager.start();
@@ -199,5 +209,6 @@ export function stopServices(): void {
   devWebProxy = null;
   stopPeriodicIntentReconciliation();
   stopPeriodicGmxApiReconciliation();
+  stopPaperRuntimeReadinessScheduler();
   workerManager.stop();
 }
