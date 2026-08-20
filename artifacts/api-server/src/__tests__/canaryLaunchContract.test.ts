@@ -903,12 +903,19 @@ describe('#142 production preflight wiring — signer and cost immutability', ()
     new URL('../lib/manualCanaryDeps.ts', import.meta.url),
     'utf8',
   );
+  const readonlySource = readFileSync(
+    new URL('../lib/manualCanaryReadonlyEvidence.ts', import.meta.url),
+    'utf8',
+  );
   const signerStart = source.indexOf('signerBinding: async () =>');
   const signerEnd = source.indexOf('ownerApproval: async', signerStart);
   const signerBindingSource = source.slice(signerStart, signerEnd);
-  const costStart = source.indexOf('export async function fetchManualCanaryReadonlyCost');
-  const costEnd = source.indexOf('export function buildDefaultCanaryDeps', costStart);
-  const costSnapshotSource = source.slice(costStart, costEnd);
+  const costStart = readonlySource.indexOf('export async function fetchManualCanaryReadonlyCost');
+  const costEnd = readonlySource.indexOf(
+    'export async function refreshManualCanaryReadonlyEvidence',
+    costStart,
+  );
+  const costSnapshotSource = readonlySource.slice(costStart, costEnd);
 
   it('signerBinding contains reads only and no decrypt/provision/sign/mutation capability', () => {
     expect(signerBindingSource).toContain('db.select()');
@@ -921,6 +928,7 @@ describe('#142 production preflight wiring — signer and cost immutability', ()
   it('preflight costSnapshot does not record execution-eligible evidence', () => {
     expect(costSnapshotSource).toContain('fetchLiveCostSnapshot');
     expect(costSnapshotSource).not.toContain('recordExecutionEligibleCostEvidence(');
+    expect(source).toContain("from './manualCanaryReadonlyEvidence'");
   });
 });
 

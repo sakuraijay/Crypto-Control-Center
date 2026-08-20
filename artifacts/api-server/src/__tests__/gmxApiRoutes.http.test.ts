@@ -55,10 +55,57 @@ import app from '../app';
 import { __setGmxApiRouteTransportForTests } from '../routes/gmxapi';
 import { getExecutionEligibleCostEvidence } from '../lib/costSnapshot';
 import type { GmxApiTransport } from '../lib/gmxApiTransport';
+import {
+  __getGmxApiReadinessCoordinatorStateForTests,
+  __resetGmxApiReadinessCoordinatorForTests,
+  __setGmxApiReadinessCoordinatorDepsForTests,
+  type CoordinatorDeps,
+} from '../lib/gmxApiReadinessCoordinator';
+import {
+  __resetPaperRuntimeReadinessForTests,
+  getPaperRuntimeReadinessSnapshot,
+  startPaperRuntimeReadinessScheduler,
+  stopPaperRuntimeReadinessScheduler,
+} from '../lib/paperRuntimeReadiness';
+import { getStopExecutionCapability } from '../workers/liveTestExecutor';
+import type { ManualCanaryReadonlyEvidence } from '../lib/manualCanaryReadonlyEvidence';
+import {
+  __setManualCanaryReadonlyReadersForTests,
+  refreshManualCanaryReadonlyEvidence,
+} from '../lib/manualCanaryReadonlyEvidence';
 
 const PIN = 'test-pin-123456';
 const savedPin = process.env.OPERATOR_MASTER_PIN;
 const savedSigner = process.env.DELEGATED_SIGNER_ENABLED;
+const savedWorkerMode = process.env.WORKER_ENGINE_MODE;
+
+const emptyCanaryEvidence = (): ManualCanaryReadonlyEvidence => ({
+  decimals: {},
+  costs: {},
+});
+
+let coordinatorEnv: NodeJS.ProcessEnv;
+let coordinatorTransport: GmxApiTransport;
+let refreshCanarySpy: ReturnType<typeof vi.fn<CoordinatorDeps['refreshCanary']>>;
+let runPaperCycleSpy: ReturnType<typeof vi.fn<CoordinatorDeps['runPaperCycle']>>;
+let refreshStopSpy: ReturnType<typeof vi.fn<CoordinatorDeps['refreshStopCapability']>>;
+
+function installCoordinatorDeps(
+  overrides: Partial<CoordinatorDeps> = {},
+): void {
+  __setGmxApiReadinessCoordinatorDepsForTests({
+    env: coordinatorEnv,
+    createTransport: () => coordinatorTransport,
+    createPeerTransport: () => coordinatorTransport,
+    refreshCanary: refreshCanarySpy,
+    runPaperCycle: runPaperCycleSpy,
+    getPaperSnapshot: (nowMs, env) =>
+      getPaperRuntimeReadinessSnapshot(nowMs, env),
+    refreshStopCapability: refreshStopSpy,
+    getStopCapability: getStopExecutionCapability,
+    ...overrides,
+  });
+}
 
 function makeSpyTransport(readonlyEnabled: boolean) {
   const calls: Array<{ method: string; path: string }> = [];
@@ -79,22 +126,44 @@ function makeSpyTransport(readonlyEnabled: boolean) {
 }
 
 beforeEach(() => {
+  __resetPaperRuntimeReadinessForTests();
+  __resetGmxApiReadinessCoordinatorForTests();
   dbWriteCalls.length = 0;
   process.env.OPERATOR_MASTER_PIN = PIN;
+  process.env.WORKER_ENGINE_MODE = 'PAPER';
   delete process.env.DELEGATED_SIGNER_ENABLED;
   delete process.env.GMX_API_READONLY_ENABLED;
   delete process.env.GMX_API_ORDER_SUBMISSION_ENABLED;
   // 로컬 shared env(LIVE_TEST_EXECUTION_LOCKED=false 등)에 좌우되지 않도록 제거 — 미설정=잠금(fail-closed) 기본값을 검증
   delete process.env.LIVE_TEST_EXECUTION_LOCKED;
+  coordinatorEnv = {
+    ...process.env,
+    WORKER_ENGINE_MODE: 'PAPER',
+    GMX_API_READONLY_ENABLED: 'true',
+  };
+  coordinatorTransport = makeSpyTransport(true).t;
+  refreshCanarySpy = vi.fn<CoordinatorDeps['refreshCanary']>(
+    async () => emptyCanaryEvidence());
+  runPaperCycleSpy = vi.fn<CoordinatorDeps['runPaperCycle']>(async () =>
+    getPaperRuntimeReadinessSnapshot(Date.now(), coordinatorEnv));
+  refreshStopSpy = vi.fn<CoordinatorDeps['refreshStopCapability']>(
+    async () => getStopExecutionCapability());
+  installCoordinatorDeps();
 });
 afterEach(() => {
+  stopPaperRuntimeReadinessScheduler();
   __setGmxApiRouteTransportForTests(null);
+  __resetGmxApiReadinessCoordinatorForTests();
+  __resetPaperRuntimeReadinessForTests();
+  __setManualCanaryReadonlyReadersForTests(null);
 });
 afterAll(() => {
   if (savedPin === undefined) delete process.env.OPERATOR_MASTER_PIN;
   else process.env.OPERATOR_MASTER_PIN = savedPin;
   if (savedSigner === undefined) delete process.env.DELEGATED_SIGNER_ENABLED;
   else process.env.DELEGATED_SIGNER_ENABLED = savedSigner;
+  if (savedWorkerMode === undefined) delete process.env.WORKER_ENGINE_MODE;
+  else process.env.WORKER_ENGINE_MODE = savedWorkerMode;
 });
 
 describe('GET /api/executor/gmx-api/status', () => {
@@ -207,6 +276,10 @@ describe('POST /api/executor/gmx-api/readiness/refresh', () => {
     expect(res.body.refresh.peerHealth).toBeNull();
     expect(res.body.refresh.reconciliation).toMatchObject({ ran: false, readOnly: true });
     expect(calls.length).toBe(0);
+    expect(refreshCanarySpy).not.toHaveBeenCalled();
+    expect(runPaperCycleSpy).not.toHaveBeenCalled();
+    expect(refreshStopSpy).not.toHaveBeenCalled();
+    expect(dbWriteCalls).toEqual([]);
   });
 
   it('readonly 켜짐 → 공개 GET/status 조회만 — prepare/submit POST 0회', async () => {
@@ -223,7 +296,202 @@ describe('POST /api/executor/gmx-api/readiness/refresh', () => {
       expect(c.path).toBe('/markets/tickers');
     }
     expect(calls.some(c => c.path.includes('prepare') || c.path.includes('submit'))).toBe(false);
+    expect(refreshCanarySpy).toHaveBeenCalledTimes(1);
+    expect(runPaperCycleSpy).toHaveBeenCalledTimes(1);
+    expect(refreshStopSpy).toHaveBeenCalledTimes(1);
+    expect(dbWriteCalls).toEqual([]);
     // 응답에 최신 스냅샷 동봉
     expect(res.body.status.readyForControlledCanary).toBe(false);
+  });
+
+  it('동시 HTTP/HTTP refresh가 같은 generation을 공유하고 canary read를 한 번만 수행한다', async () => {
+    const { t, calls } = makeSpyTransport(true);
+    coordinatorTransport = t;
+    __setGmxApiRouteTransportForTests(t);
+    let releaseFirstRead: (() => void) | null = null;
+    let activeReads = 0;
+    let maxActiveReads = 0;
+    const readerCalls: string[] = [];
+    __setManualCanaryReadonlyReadersForTests({
+      resolveDecimals: async (symbol) => {
+        activeReads += 1;
+        maxActiveReads = Math.max(maxActiveReads, activeReads);
+        readerCalls.push(`decimals:${symbol}`);
+        if (symbol === 'BTC') {
+          await new Promise<void>((resolve) => { releaseFirstRead = resolve; });
+        }
+        activeReads -= 1;
+        return { ok: true, detail: `${symbol} test decimals` };
+      },
+      fetchCost: async ({ symbol }) => {
+        activeReads += 1;
+        maxActiveReads = Math.max(maxActiveReads, activeReads);
+        readerCalls.push(`cost:${symbol}`);
+        await Promise.resolve();
+        activeReads -= 1;
+        return { ok: false, reason: `${symbol} test cost unavailable` };
+      },
+    });
+    refreshCanarySpy.mockImplementation(refreshManualCanaryReadonlyEvidence);
+    installCoordinatorDeps();
+
+    const responsesPromise = Promise.all([
+      request(app)
+        .post('/api/executor/gmx-api/readiness/refresh')
+        .set('x-operator-pin', PIN)
+        .set('content-type', 'application/json').send({}),
+      request(app)
+        .post('/api/executor/gmx-api/readiness/refresh')
+        .set('x-operator-pin', PIN)
+        .set('content-type', 'application/json').send({}),
+    ]);
+
+    await vi.waitFor(() => {
+      expect(refreshCanarySpy).toHaveBeenCalledTimes(1);
+      expect(__getGmxApiReadinessCoordinatorStateForTests().joinCount).toBe(1);
+    });
+    releaseFirstRead!();
+    const [first, second] = await responsesPromise;
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(first.body.refresh.generation).toBe(second.body.refresh.generation);
+    expect(runPaperCycleSpy).toHaveBeenCalledTimes(1);
+    expect(refreshStopSpy).toHaveBeenCalledTimes(1);
+    expect(maxActiveReads).toBe(1);
+    expect(readerCalls).toEqual([
+      'decimals:BTC',
+      'cost:BTC',
+      'decimals:ETH',
+      'cost:ETH',
+    ]);
+    expect(calls).toEqual([{ method: 'GET', path: '/markets/tickers' }]);
+    expect(dbWriteCalls).toEqual([]);
+  });
+
+  it('scheduler refresh 중 HTTP refresh가 합류해 canary external read를 중복하지 않는다', async () => {
+    const { t, calls } = makeSpyTransport(true);
+    coordinatorTransport = t;
+    __setGmxApiRouteTransportForTests(t);
+    let releaseRead: (() => void) | null = null;
+    let activeReads = 0;
+    let maxActiveReads = 0;
+    refreshCanarySpy.mockImplementation(async () => {
+      activeReads += 1;
+      maxActiveReads = Math.max(maxActiveReads, activeReads);
+      await new Promise<void>((resolve) => { releaseRead = resolve; });
+      activeReads -= 1;
+      return emptyCanaryEvidence();
+    });
+    installCoordinatorDeps();
+
+    startPaperRuntimeReadinessScheduler();
+    await vi.waitFor(() => expect(refreshCanarySpy).toHaveBeenCalledTimes(1));
+    expect(getPaperRuntimeReadinessSnapshot(
+      Date.now(),
+      coordinatorEnv,
+    ).scheduler.inFlight).toBe(true);
+
+    const httpPromise = request(app)
+      .post('/api/executor/gmx-api/readiness/refresh')
+      .set('x-operator-pin', PIN)
+      .set('content-type', 'application/json').send({})
+      .then((response) => response);
+    await vi.waitFor(() => {
+      expect(__getGmxApiReadinessCoordinatorStateForTests()).toEqual({
+        active: true,
+        joinCount: 1,
+      });
+    });
+    expect(calls).toHaveLength(2);
+    expect(calls.every((call) =>
+      call.method === 'GET' && call.path === '/markets/tickers')).toBe(true);
+    expect(refreshCanarySpy).toHaveBeenCalledTimes(1);
+
+    releaseRead!();
+    const response = await httpPromise;
+    await vi.waitFor(() => expect(
+      getPaperRuntimeReadinessSnapshot(
+        Date.now(),
+        coordinatorEnv,
+      ).scheduler.inFlight,
+    ).toBe(false));
+
+    expect(response.status).toBe(200);
+    expect(refreshCanarySpy).toHaveBeenCalledTimes(1);
+    expect(runPaperCycleSpy).toHaveBeenCalledTimes(1);
+    expect(refreshStopSpy).toHaveBeenCalledTimes(1);
+    expect(maxActiveReads).toBe(1);
+    expect(calls).toHaveLength(2);
+    expect(calls.every((call) =>
+      call.method === 'GET' && call.path === '/markets/tickers')).toBe(true);
+    expect(dbWriteCalls).toEqual([]);
+  });
+
+  it('peer health → canary → PAPER evidence → Stop capability 순서를 직렬화한다', async () => {
+    const order: string[] = [];
+    const { t } = makeSpyTransport(true);
+    const orderedTransport = {
+      ...t,
+      async getJson(path: string) {
+        order.push('peer');
+        return { ok: true, data: {}, peerHost: 'peer-a' };
+      },
+    } as GmxApiTransport;
+    coordinatorTransport = orderedTransport;
+    __setGmxApiRouteTransportForTests(orderedTransport);
+    installCoordinatorDeps({
+      createTransport: () => orderedTransport,
+      createPeerTransport: () => orderedTransport,
+      refreshCanary: async () => {
+        order.push('canary');
+        return emptyCanaryEvidence();
+      },
+      runPaperCycle: async () => {
+        order.push('paper');
+        return getPaperRuntimeReadinessSnapshot(Date.now(), coordinatorEnv);
+      },
+      refreshStopCapability: async () => {
+        order.push('stop');
+        return getStopExecutionCapability();
+      },
+    });
+
+    const res = await request(app)
+      .post('/api/executor/gmx-api/readiness/refresh')
+      .set('x-operator-pin', PIN)
+      .set('content-type', 'application/json').send({});
+
+    expect(res.status).toBe(200);
+    expect(order).toEqual(['peer', 'canary', 'paper', 'stop']);
+    expect(dbWriteCalls).toEqual([]);
+  });
+
+  it('LIVE에서도 read-only 상태만 반환하고 submit/order capability를 얻지 않는다', async () => {
+    process.env.WORKER_ENGINE_MODE = 'LIVE';
+    coordinatorEnv = {
+      ...coordinatorEnv,
+      WORKER_ENGINE_MODE: 'LIVE',
+    };
+    const { t, calls } = makeSpyTransport(true);
+    coordinatorTransport = t;
+    __setGmxApiRouteTransportForTests(t);
+    installCoordinatorDeps();
+    const before = getExecutionEligibleCostEvidence(Date.now());
+
+    const res = await request(app)
+      .post('/api/executor/gmx-api/readiness/refresh')
+      .set('x-operator-pin', PIN)
+      .set('content-type', 'application/json').send({});
+
+    expect(res.status).toBe(200);
+    expect(refreshCanarySpy).toHaveBeenCalledTimes(1);
+    expect(runPaperCycleSpy).not.toHaveBeenCalled();
+    expect(res.body.status.submissionEnabled).toBe(false);
+    expect(res.body.status.signerEnabled).toBe(false);
+    expect(res.body.status.readyForControlledCanary).toBe(false);
+    expect(calls.every((call) => call.method === 'GET')).toBe(true);
+    expect(dbWriteCalls).toEqual([]);
+    expect(getExecutionEligibleCostEvidence(Date.now())).toEqual(before);
   });
 });

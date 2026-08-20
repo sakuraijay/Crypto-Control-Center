@@ -501,5 +501,33 @@ describe('structural safety contract', () => {
     expect(source).not.toMatch(/initializeDelegatedSigner|decrypt|runGmxLivePreflight/);
     expect(source).not.toMatch(/prepareOrder|submitOrder|executeLiveTestOrder|fundTransfer/);
     expect(source).not.toMatch(/readyForControlledCanary|stopExecutionAvailable|refreshStopExecutionCapability/);
+    expect(source).toContain("import('./manualCanaryReadonlyEvidence')");
+    expect(source).not.toContain("import('./manualCanaryDeps')");
+  });
+
+  it('PAPER readonly adapter import graph root에 DB/signer/execution modules가 없다', () => {
+    const source = readFileSync(
+      new URL('../lib/manualCanaryReadonlyEvidence.ts', import.meta.url),
+      'utf8',
+    );
+    const imports = (source.match(/^import[\s\S]*?from\s+['"][^'"]+['"];?$/gm) ?? [])
+      .join('\n');
+    expect(imports).not.toMatch(
+      /@workspace\/db|drizzle|delegatedSigner|executionIntent|relayLifecycle|liveTestExecutor|protectionExecutor|aiWorker|executionEvidence|ownerApproval|manualCanaryDeps/,
+    );
+    expect(source).not.toMatch(
+      /\b(?:db\.(?:insert|update|delete)|recordExecutionEligibleCostEvidence|prepare|submit|placeOrder|closePosition)\s*\(/,
+    );
+    expect(source).toContain('fetchLiveCostSnapshot');
+    expect(source).toContain('resolveIndexTokenDecimals');
+  });
+
+  it('readiness route는 execution-heavy manualCanaryDeps에서 evidence를 import하지 않는다', () => {
+    const source = readFileSync(
+      new URL('../routes/gmxapi.ts', import.meta.url),
+      'utf8',
+    );
+    expect(source).toContain("from '../lib/gmxApiReadinessCoordinator'");
+    expect(source).not.toContain("from '../lib/manualCanaryDeps'");
   });
 });

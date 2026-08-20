@@ -44,9 +44,9 @@ const ACCEPTED_DECIMALS_SOURCES = new Set([
 type CanarySymbol = (typeof SYMBOLS)[number];
 export type PaperEvidenceDisplayState = 'not_evaluated' | 'verified' | 'stale' | 'failed';
 
-type ManualCanaryDepsModule = typeof import('./manualCanaryDeps');
+type ManualCanaryReadonlyModule = typeof import('./manualCanaryReadonlyEvidence');
 type CanaryRefreshResult = Awaited<
-  ReturnType<ManualCanaryDepsModule['refreshManualCanaryReadonlyEvidence']>
+  ReturnType<ManualCanaryReadonlyModule['refreshManualCanaryReadonlyEvidence']>
 >;
 
 interface EvidenceAttempt<T> {
@@ -207,6 +207,7 @@ let rpcState = emptyAttempt<RpcObservation>();
 
 let running = false;
 let inFlight = false;
+let coordinatorInFlight = false;
 let timer: ReturnType<typeof setTimeout> | null = null;
 let activeCyclePromise: Promise<PaperRuntimeReadinessView> | null = null;
 let schedulerGeneration = 0;
@@ -220,7 +221,7 @@ const DEFAULT_DEPS: PaperReadinessCycleDeps = {
   env: process.env,
   nowMs: () => Date.now(),
   refreshCanary: async () => {
-    const deps = await import('./manualCanaryDeps');
+    const deps = await import('./manualCanaryReadonlyEvidence');
     return deps.refreshManualCanaryReadonlyEvidence();
   },
   decimalsSnapshot: getDecimalsCacheSnapshot,
@@ -554,6 +555,10 @@ export async function runPaperRuntimeReadinessCycle(
   }
 }
 
+export function setPaperRuntimeReadinessCoordinatorInFlight(value: boolean): void {
+  coordinatorInFlight = value;
+}
+
 function costView(symbol: CanarySymbol, nowMs: number): PaperCostEvidenceView {
   const entry = costState[symbol];
   const meta = evidenceMeta(entry, nowMs, COST_SNAPSHOT_TTL_MS);
@@ -676,7 +681,7 @@ export function getPaperRuntimeReadinessSnapshot(
     readonlyEnabled: env.GMX_API_READONLY_ENABLED === 'true',
     scheduler: {
       running,
-      inFlight,
+      inFlight: inFlight || coordinatorInFlight,
       intervalMs: PAPER_READINESS_REFRESH_INTERVAL_MS,
       lastAttemptAtMs,
       lastCompletedAtMs,
@@ -719,7 +724,16 @@ function launchScheduledCycle(
   options: PaperReadinessCycleOptions,
 ): void {
   if (!running || generation !== schedulerGeneration) return;
-  void runPaperRuntimeReadinessCycle(options)
+  const scheduledRun = options.deps
+    ? runPaperRuntimeReadinessCycle(options)
+    : import('./gmxApiReadinessCoordinator')
+      .then(({ runGmxApiReadinessRefresh }) =>
+        runGmxApiReadinessRefresh({
+          forceDeployment: options.forceDeployment,
+        }))
+      .then((result) => result.paperRuntimeReadiness);
+  void scheduledRun
+    .catch(() => undefined)
     .finally(() => scheduleNext(generation, options));
 }
 
@@ -746,6 +760,7 @@ export function stopPaperRuntimeReadinessScheduler(): void {
 
 export function __resetPaperRuntimeReadinessForTests(): void {
   stopPaperRuntimeReadinessScheduler();
+  coordinatorInFlight = false;
   decimalsState = { BTC: emptyAttempt(), ETH: emptyAttempt() };
   costState = { BTC: emptyAttempt(), ETH: emptyAttempt() };
   deploymentState = emptyAttempt();
