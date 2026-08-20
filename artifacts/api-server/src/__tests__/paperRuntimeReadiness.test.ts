@@ -337,6 +337,8 @@ describe('structural safety contract', () => {
     );
     expect(source).not.toMatch(/@workspace\/db/);
     expect(source).not.toMatch(/\bdb\.(insert|update|delete)\b/);
+    expect(source).not.toMatch(/^import\s+(?!type\b).*from\s+['"]\.\/manualCanary(?:Deps)?['"];?$/m);
+    expect(source).toContain("import { MANUAL_CANARY_CAPS } from './manualCanaryCaps'");
     expect(source).not.toMatch(/recordExecutionEligibleCostEvidence/);
     expect(source).not.toMatch(/initializeDelegatedSigner|decrypt|runGmxLivePreflight/);
     expect(source).not.toMatch(/prepareOrder|submitOrder|executeLiveTestOrder|fundTransfer/);

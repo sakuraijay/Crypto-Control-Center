@@ -28,20 +28,10 @@ import type { ClosePositionBinding } from './executionIntents';
 import type { CostSnapshot } from '../lib/costSnapshot';
 import { computeStopTrigger } from './stopLossPlan';
 import { manilaDayKey } from './profitProtection';
+import { MANUAL_CANARY_CAPS } from './manualCanaryCaps';
 
 // ── 하드캡 (동결 — UI/요청 입력으로 확대 불가) ────────────────────────────────
-export const MANUAL_CANARY_CAPS = Object.freeze({
-  maxCollateralUsd: 10,
-  maxLeverage: 2,
-  maxNotionalUsd: 20,
-  maxOpenPositions: 1,
-  maxAccumLossUsd: 3,
-  maxOrdersPerDay: 1,
-  maxRoundTripCostUsd: 0.4,       // RiskEngine보다 엄격한 왕복 비용 상한
-  maxPriceDriftFraction: 0.005,   // preflight 대비 실행 시 0.5% — 시장가 추격 방지
-  allowedSymbols: ['BTC', 'ETH'] as readonly string[],
-  preflightTtlMs: 120_000,
-});
+export { MANUAL_CANARY_CAPS } from './manualCanaryCaps';
 
 export const CANARY_CONFIRM_OPEN = 'EXECUTE-CANARY-OPEN';
 export const CANARY_CONFIRM_CLOSE = 'EXECUTE-CANARY-CLOSE';

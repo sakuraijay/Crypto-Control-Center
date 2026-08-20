@@ -11,10 +11,7 @@ import {
   sanitizeCostError,
   type CostSnapshot,
 } from './costSnapshot';
-import { MANUAL_CANARY_CAPS } from './manualCanary';
-import {
-  refreshManualCanaryReadonlyEvidence,
-} from './manualCanaryDeps';
+import { MANUAL_CANARY_CAPS } from './manualCanaryCaps';
 import {
   DECIMALS_VERIFIED_MAX_AGE_MS,
   getDecimalsCacheSnapshot,
@@ -46,7 +43,10 @@ const ACCEPTED_DECIMALS_SOURCES = new Set([
 type CanarySymbol = (typeof SYMBOLS)[number];
 export type PaperEvidenceDisplayState = 'not_evaluated' | 'verified' | 'stale' | 'failed';
 
-type CanaryRefreshResult = Awaited<ReturnType<typeof refreshManualCanaryReadonlyEvidence>>;
+type ManualCanaryDepsModule = typeof import('./manualCanaryDeps');
+type CanaryRefreshResult = Awaited<
+  ReturnType<ManualCanaryDepsModule['refreshManualCanaryReadonlyEvidence']>
+>;
 
 interface EvidenceAttempt<T> {
   evaluated: boolean;
@@ -207,7 +207,10 @@ let lastFailureId: string | null = null;
 const DEFAULT_DEPS: PaperReadinessCycleDeps = {
   env: process.env,
   nowMs: () => Date.now(),
-  refreshCanary: refreshManualCanaryReadonlyEvidence,
+  refreshCanary: async () => {
+    const deps = await import('./manualCanaryDeps');
+    return deps.refreshManualCanaryReadonlyEvidence();
+  },
   decimalsSnapshot: getDecimalsCacheSnapshot,
   createReadonlyClient: createRelayReadonlyClient,
   refreshDeployment: refreshDeploymentReadOnlyEvidence,
