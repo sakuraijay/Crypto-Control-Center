@@ -752,9 +752,9 @@ let _intentReconcileTimer: ReturnType<typeof setInterval> | null = null;
 // ── 6H-2B §5·§6 — 보호 주문 production wiring ────────────────────────────────
 
 /**
- * 6H-2C §3 — 인덱스 토큰 decimals 권위 소스: SDK metadata + 온체인 ERC-20
- * decimals() 교차검증 (indexTokenDecimals 모듈). 어느 한쪽 실패/불일치 = null.
- * §13 고지: 여기서 read-only eth_call(decimals()) 1회를 GMX_RPC_URL로 수행한다.
+ * 6H-2C §3 — 인덱스 토큰 decimals 권위 소스: 일반 ERC-20은 SDK metadata +
+ * 온체인 decimals(), synthetic placeholder는 SDK synthetic metadata + 온체인
+ * no-code를 교차검증한다. 어느 한쪽 실패/불일치 = null.
  */
 export async function fetchOnchainErc20Decimals(tokenAddress: string): Promise<number | null> {
   const url = process.env.GMX_RPC_URL?.trim();
@@ -769,6 +769,19 @@ export async function fetchOnchainErc20Decimals(tokenAddress: string): Promise<n
       functionName: 'decimals',
     });
     return typeof v === 'number' ? v : Number(v);
+  } catch { return null; }
+}
+
+/** synthetic index token placeholder 검증용 Arbitrum bytecode 존재 여부. */
+export async function fetchOnchainCodePresence(tokenAddress: string): Promise<boolean | null> {
+  const url = process.env.GMX_RPC_URL?.trim();
+  if (!url) return null;
+  try {
+    const client = createPublicClient({ chain: arbitrum, transport: http(url, { timeout: 8_000 }) });
+    const chainId = await client.getChainId();
+    if (chainId !== ARBITRUM_CHAIN_ID) return null;
+    const code = await client.getBytecode({ address: tokenAddress as `0x${string}` });
+    return code !== undefined && code !== '0x';
   } catch { return null; }
 }
 
@@ -787,6 +800,7 @@ async function resolveIndexTokenDecimalsEvidence(marketAddress: string): Promise
     chainId: ARBITRUM_CHAIN_ID,
     marketAddress,
     fetchOnchainDecimals: fetchOnchainErc20Decimals,
+    fetchOnchainCode: fetchOnchainCodePresence,
   });
   if (!res.ok) {
     console.error(`[LiveTestExecutor] decimals 확보 실패 — ${res.reason}`);

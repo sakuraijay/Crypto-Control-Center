@@ -32,7 +32,7 @@ import { getStoredPublicSignerAddress, isManualCanarySignerRestoreAllowed } from
 import {
   executeLiveTestOrder, closeLiveTestPosition, fetchAuthoritativeOpenPositions,
   evaluateManualCanaryStopCapability, refreshStopExecutionCapability, isStopExecutionAvailable,
-  fetchOnchainErc20Decimals,
+  fetchOnchainErc20Decimals, fetchOnchainCodePresence,
 } from '../workers/liveTestExecutor';
 import { runEmergencyClose } from '../workers/protectionExecutor';
 import { workerManager } from '../workers/aiWorker';
@@ -98,6 +98,7 @@ async function resolveCanarySymbolDecimals(symbol: string): Promise<CheckOutcome
       chainId: ARBITRUM_CHAIN_ID,
       marketAddress: market.marketToken,
       fetchOnchainDecimals: fetchOnchainErc20Decimals,
+      fetchOnchainCode: fetchOnchainCodePresence,
     });
     return r.ok
       ? outcome(true, `${symbol} SDK+온체인 교차검증 완료`)
