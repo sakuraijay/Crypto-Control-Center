@@ -10,9 +10,21 @@ import type { Express, RequestHandler } from "express";
 import { logger } from "./logger";
 
 const WEB_PREFIX = "/futures-web";
-const UPSTREAM_HOST = "127.0.0.1";
-const UPSTREAM_PORT = 25285;
-const HTTP_TIMEOUT_MS = 10_000;
+const DEFAULT_UPSTREAM_HOST = "127.0.0.1";
+const DEFAULT_UPSTREAM_PORT = 25285;
+const DEFAULT_HTTP_TIMEOUT_MS = 10_000;
+
+export interface DevWebProxyOptions {
+  targetHost?: string;
+  targetPort?: number;
+  timeoutMs?: number;
+}
+
+interface DevWebProxyTarget {
+  host: string;
+  port: number;
+  timeoutMs: number;
+}
 
 export interface DevWebProxyHandle {
   enabled: boolean;
@@ -25,16 +37,24 @@ function matchesWebPath(url: string | undefined): boolean {
   return path === WEB_PREFIX || path.startsWith(`${WEB_PREFIX}/`);
 }
 
-function targetHostHeader(): string {
-  return `${UPSTREAM_HOST}:${UPSTREAM_PORT}`;
+function resolveTarget(options: DevWebProxyOptions): DevWebProxyTarget {
+  return {
+    host: options.targetHost ?? DEFAULT_UPSTREAM_HOST,
+    port: options.targetPort ?? DEFAULT_UPSTREAM_PORT,
+    timeoutMs: options.timeoutMs ?? DEFAULT_HTTP_TIMEOUT_MS,
+  };
 }
 
-function forwardedHeaders(req: IncomingMessage): OutgoingHttpHeaders {
+function targetHostHeader(target: DevWebProxyTarget): string {
+  return `${target.host}:${target.port}`;
+}
+
+function forwardedHeaders(req: IncomingMessage, target: DevWebProxyTarget): OutgoingHttpHeaders {
   const headers: OutgoingHttpHeaders = {};
   for (const [name, value] of Object.entries(req.headers)) {
     if (value !== undefined) headers[name] = value;
   }
-  headers.host = targetHostHeader();
+  headers.host = targetHostHeader(target);
   if (req.headers.host) headers["x-forwarded-host"] = req.headers.host;
   headers["x-forwarded-proto"] = "http";
   if (req.socket.remoteAddress) headers["x-forwarded-for"] = req.socket.remoteAddress;
@@ -42,7 +62,8 @@ function forwardedHeaders(req: IncomingMessage): OutgoingHttpHeaders {
   return headers;
 }
 
-export function createDevWebProxyMiddleware(): RequestHandler {
+export function createDevWebProxyMiddleware(options: DevWebProxyOptions = {}): RequestHandler {
+  const target = resolveTarget(options);
   return (req, res, next) => {
     const upstreamPath = req.originalUrl || req.url;
     if (!matchesWebPath(upstreamPath)) {
@@ -51,12 +72,12 @@ export function createDevWebProxyMiddleware(): RequestHandler {
     }
 
     const upstream = requestUpstream({
-      hostname: UPSTREAM_HOST,
-      port: UPSTREAM_PORT,
+      hostname: target.host,
+      port: target.port,
       method: req.method,
       path: upstreamPath,
-      headers: forwardedHeaders(req),
-      timeout: HTTP_TIMEOUT_MS,
+      headers: forwardedHeaders(req, target),
+      timeout: target.timeoutMs,
     }, (upstreamResponse) => {
       res.statusCode = upstreamResponse.statusCode ?? 502;
       for (const [name, value] of Object.entries(upstreamResponse.headers)) {
@@ -84,7 +105,7 @@ export function createDevWebProxyMiddleware(): RequestHandler {
   };
 }
 
-function websocketHeaders(req: IncomingMessage): string {
+function websocketHeaders(req: IncomingMessage, target: DevWebProxyTarget): string {
   const lines: string[] = [];
   const raw = req.rawHeaders;
   for (let index = 0; index < raw.length; index += 2) {
@@ -93,7 +114,7 @@ function websocketHeaders(req: IncomingMessage): string {
     if (!name || value === undefined || name.toLowerCase() === "host") continue;
     lines.push(`${name}: ${value}`);
   }
-  lines.push(`Host: ${targetHostHeader()}`);
+  lines.push(`Host: ${targetHostHeader(target)}`);
   if (req.headers.host) lines.push(`X-Forwarded-Host: ${req.headers.host}`);
   if (req.socket.remoteAddress) lines.push(`X-Forwarded-For: ${req.socket.remoteAddress}`);
   lines.push("X-Forwarded-Proto: http");
@@ -111,18 +132,23 @@ function rejectUpgrade(socket: Duplex, status: number, message: string): void {
   }
 }
 
-function proxyUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void {
+function proxyUpgrade(
+  req: IncomingMessage,
+  socket: Duplex,
+  head: Buffer,
+  target: DevWebProxyTarget,
+): void {
   if (!matchesWebPath(req.url)) {
     rejectUpgrade(socket, 404, "Not Found");
     return;
   }
 
-  const upstream = connect({ host: UPSTREAM_HOST, port: UPSTREAM_PORT });
+  const upstream = connect({ host: target.host, port: target.port });
   let connected = false;
   upstream.once("connect", () => {
     connected = true;
     const requestLine = `${req.method ?? "GET"} ${req.url} HTTP/${req.httpVersion}`;
-    upstream.write(`${requestLine}\r\n${websocketHeaders(req)}\r\n\r\n`);
+    upstream.write(`${requestLine}\r\n${websocketHeaders(req, target)}\r\n\r\n`);
     if (head.length > 0) upstream.write(head);
     socket.pipe(upstream).pipe(socket);
   });
@@ -138,17 +164,22 @@ export function attachDevWebProxy(
   app: Express,
   httpServer: Server,
   env: NodeJS.ProcessEnv = process.env,
+  options: DevWebProxyOptions = {},
 ): DevWebProxyHandle {
   if (env["NODE_ENV"] === "production") {
     return { enabled: false, close: () => {} };
   }
 
-  app.use(createDevWebProxyMiddleware());
+  const target = resolveTarget(options);
+  app.use(createDevWebProxyMiddleware(options));
   const onUpgrade = (req: IncomingMessage, socket: Duplex, head: Buffer) => {
-    proxyUpgrade(req, socket, head);
+    proxyUpgrade(req, socket, head, target);
   };
   httpServer.on("upgrade", onUpgrade);
-  logger.info({ target: `http://${targetHostHeader()}${WEB_PREFIX}/` }, "Futures Web development proxy enabled");
+  logger.info(
+    { target: `http://${targetHostHeader(target)}${WEB_PREFIX}/` },
+    "Futures Web development proxy enabled",
+  );
 
   return {
     enabled: true,

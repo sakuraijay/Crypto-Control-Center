@@ -17,6 +17,14 @@ async function listen(server: Server, port = 0): Promise<number> {
   return address.port;
 }
 
+async function closeTracked(server: Server): Promise<void> {
+  const index = servers.indexOf(server);
+  if (index >= 0) servers.splice(index, 1);
+  await new Promise<void>((resolve, reject) => {
+    server.close((err) => err ? reject(err) : resolve());
+  });
+}
+
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => {
     server.close(() => resolve());
@@ -29,19 +37,24 @@ describe("Development Futures Web proxy", () => {
       res.setHeader("content-type", "application/json");
       res.end(JSON.stringify({ url: req.url, host: req.headers.host }));
     });
-    await listen(upstream, 25285);
+    const upstreamPort = await listen(upstream);
 
     const app = express();
     app.get("/api/healthz", (_req, res) => res.json({ status: "ok" }));
     const proxyServer = createServer(app);
-    const handle = attachDevWebProxy(app, proxyServer, { NODE_ENV: "development" });
+    const handle = attachDevWebProxy(
+      app,
+      proxyServer,
+      { NODE_ENV: "development" },
+      { targetPort: upstreamPort },
+    );
     const port = await listen(proxyServer);
 
     const webResponse = await fetch(`http://127.0.0.1:${port}/futures-web/dashboard?tab=risk`);
     expect(webResponse.status).toBe(200);
     expect(await webResponse.json()).toEqual({
       url: "/futures-web/dashboard?tab=risk",
-      host: "127.0.0.1:25285",
+      host: `127.0.0.1:${upstreamPort}`,
     });
 
     const apiResponse = await fetch(`http://127.0.0.1:${port}/api/healthz`);
@@ -62,9 +75,18 @@ describe("Development Futures Web proxy", () => {
   });
 
   it("returns a bounded 502 when the Vite server is unavailable", async () => {
+    const closedUpstream = createServer();
+    const unavailablePort = await listen(closedUpstream);
+    await closeTracked(closedUpstream);
+
     const app = express();
     const proxyServer = createServer(app);
-    attachDevWebProxy(app, proxyServer, { NODE_ENV: "development" });
+    attachDevWebProxy(
+      app,
+      proxyServer,
+      { NODE_ENV: "development" },
+      { targetPort: unavailablePort },
+    );
     const port = await listen(proxyServer);
 
     const response = await fetch(`http://127.0.0.1:${port}/futures-web/`);
@@ -82,11 +104,16 @@ describe("Development Futures Web proxy", () => {
         "Upgrade: websocket\r\n\r\nproxy-ok",
       );
     });
-    await listen(upstream, 25285);
+    const upstreamPort = await listen(upstream);
 
     const app = express();
     const proxyServer = createServer(app);
-    attachDevWebProxy(app, proxyServer, { NODE_ENV: "development" });
+    attachDevWebProxy(
+      app,
+      proxyServer,
+      { NODE_ENV: "development" },
+      { targetPort: upstreamPort },
+    );
     const port = await listen(proxyServer);
 
     const response = await new Promise<string>((resolve, reject) => {
