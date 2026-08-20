@@ -16,7 +16,8 @@
  * #142 — ManualCanaryPreflightDeps: preflight/evaluate 경로에는 실행 능력이
  *  구조적으로 없다 (executeOrder·closePosition·runEmergencyClose 등 완전 부재).
  *  PREFLIGHT_OPERATION_ALLOWLIST: 동결 allowlist — readonly check 와 preflight-token
- *  CAS만 포함. GITHUB_CI blocker는 앱 측 자격증명 없이 UNATTESTED fail-closed.
+ *  CAS만 포함. GITHUB_CI는 빌드에 결속된 PR-head SHA의 공개 Actions 결과를
+ *  자격증명 없이 제한 시간 내 재검증하며, 불명/실패는 UNATTESTED fail-closed.
  */
 import { db, workerStateTable } from '@workspace/db';
 import { and, eq } from 'drizzle-orm';
@@ -267,11 +268,11 @@ export interface ManualCanaryPreflightDeps {
   liveTestMode(): boolean;
   envSubmissionState(): { locked: boolean; submissionEnabled: boolean; detail: string };
   /**
-   * #142: GITHUB_CI attestation check — 앱 측 GitHub 자격증명 없이 UNATTESTED fail-closed.
-   * production은 항상 { ok: false, detail: UNATTESTED }를 반환해야 한다.
-   * 테스트에서만 override 허용 (forbidden capability 검증용).
+   * #142/#143: GITHUB_CI attestation check — 앱 측 GitHub 자격증명 없이
+   * 빌드 결속 SHA의 공개 Actions 성공을 검증한다. 네트워크/응답/결속 불명은
+   * UNATTESTED fail-closed. 테스트에서는 주입 결과로 계약을 검증한다.
    */
-  githubCiAttestation(): CheckOutcome;
+  githubCiAttestation(): CheckOutcome | Promise<CheckOutcome>;
   // durable state — preflight token CAS만 허용 (daily claim CAS는 실행 단계 전용)
   loadState(key: string): Promise<string | null>;
   casState(key: string, prevRaw: string | null, nextRaw: string): Promise<boolean>;
@@ -468,9 +469,9 @@ async function evaluateAllChecks(
     ? { ok: true, detail: `$${priceUsd.toFixed(2)}` }
     : { ok: false, detail: '가격 조회 실패' });
 
-  // #142: GITHUB_CI check — 앱 측 자격증명 없이 UNATTESTED fail-closed
+  // #142/#143: build-bound public GitHub Actions attestation (credential-free)
   // 비밀값·raw 환경값·RPC URL·주소·서명·raw 오류 미포함
-  // production은 deps.githubCiAttestation()이 항상 UNATTESTED를 반환한다.
+  // 네트워크/응답/배포 SHA 결속이 불명확하면 UNATTESTED fail-closed.
   push('github_ci', 'GitHub CI 인증 상태',
     await runAllowedPreflightOperation('readonly', 'github_ci', () => deps.githubCiAttestation()));
 

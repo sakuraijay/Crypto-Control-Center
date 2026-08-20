@@ -4,15 +4,75 @@ import { fileURLToPath } from "node:url";
 import { build as esbuild } from "esbuild";
 import esbuildPluginPino from "esbuild-plugin-pino";
 import { rm } from "node:fs/promises";
+import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 
 // Plugins (e.g. 'esbuild-plugin-pino') may use `require` to resolve dependencies
 globalThis.require = createRequire(import.meta.url);
 
 const artifactDir = path.dirname(fileURLToPath(import.meta.url));
+const repoDir = path.resolve(artifactDir, "../..");
+
+const RELEASE_SHA_PATTERN = /^[0-9a-f]{40}$/;
+const CRITICAL_RELEASE_PATHS = [
+  ".github/workflows/ci.yml",
+  ".replit",
+  "pnpm-lock.yaml",
+  "package.json",
+  "artifacts/api-server/build.mjs",
+  "artifacts/api-server/package.json",
+  "artifacts/api-server/src/lib",
+  "artifacts/api-server/src/routes/canary.ts",
+  "artifacts/api-server/src/routes/gmxapi.ts",
+  "artifacts/api-server/src/routes/livetest.ts",
+  "artifacts/api-server/src/workers/liveTestExecutor.ts",
+  "artifacts/api-server/src/workers/protectionExecutor.ts",
+  "lib/db",
+];
+
+function git(args) {
+  return execFileSync("git", args, { cwd: repoDir, encoding: "utf8" }).trim();
+}
+
+function githubEventHeadSha() {
+  const eventPath = process.env.GITHUB_EVENT_PATH;
+  if (!eventPath) return null;
+  try {
+    const event = JSON.parse(readFileSync(eventPath, "utf8"));
+    const sha = event?.pull_request?.head?.sha;
+    return typeof sha === "string" ? sha.toLowerCase() : null;
+  } catch {
+    return null;
+  }
+}
+
+function resolveReleaseSha() {
+  const candidates = [
+    githubEventHeadSha(),
+    (() => { try { return git(["rev-parse", "origin/codex/handover-20260820"]).toLowerCase(); } catch { return null; } })(),
+    (() => { try { return git(["rev-parse", "HEAD"]).toLowerCase(); } catch { return null; } })(),
+  ];
+  for (const sha of [...new Set(candidates)]) {
+    if (typeof sha !== "string" || !RELEASE_SHA_PATTERN.test(sha)) continue;
+    try {
+      execFileSync("git", ["merge-base", "--is-ancestor", sha, "HEAD"], { cwd: repoDir, stdio: "ignore" });
+      execFileSync("git", ["diff", "--quiet", sha, "--", ...CRITICAL_RELEASE_PATHS], {
+        cwd: repoDir,
+        stdio: "ignore",
+      });
+      return sha;
+    } catch {
+      // A stale tracking ref or PR merge parent may legitimately differ. Try the
+      // next locally available candidate, but never accept one with a critical diff.
+    }
+  }
+  throw new Error("Canary release SHA could not be bound to the local security-critical source");
+}
 
 async function buildAll() {
   const distDir = path.resolve(artifactDir, "dist");
   await rm(distDir, { recursive: true, force: true });
+  const canaryReleaseSha = resolveReleaseSha();
 
   await esbuild({
     entryPoints: [path.resolve(artifactDir, "src/index.ts")],
@@ -22,6 +82,9 @@ async function buildAll() {
     outdir: distDir,
     outExtension: { ".js": ".mjs" },
     logLevel: "info",
+    define: {
+      __CANARY_RELEASE_SHA__: JSON.stringify(canaryReleaseSha),
+    },
     // Some packages may not be bundleable, so we externalize them, we can add more here as needed.
     // Some of the packages below may not be imported or installed, but we're adding them in case they are in the future.
     // Examples of unbundleable packages:

@@ -10,7 +10,7 @@ import { eq } from 'drizzle-orm';
 import { getAddress } from 'viem';
 
 import type { ManualCanaryDeps, CheckOutcome } from './manualCanary';
-import { __canaryStateAccess, CANARY_BLOCKER_CATEGORIES } from './manualCanary';
+import { __canaryStateAccess } from './manualCanary';
 import { verifySdkRouterPin } from './gmxLivePreflight';
 import { getDeploymentVerificationState, getCanonicalSnapshot } from './relayActivationStatus';
 import { getUsdcAllowanceForSpender } from './gmxSubaccount';
@@ -39,6 +39,7 @@ import { workerManager } from '../workers/aiWorker';
 import { db as _db, executionIntentsTable, protectionOrdersTable, tradesTable } from '@workspace/db';
 import { buildFreshExecutionCostBreakdown } from './manualCanaryCostFetcher';
 import { checkManualCanaryOwnerApproval } from './manualCanaryOwnerApproval';
+import { checkGitHubCiAttestation } from './githubCiAttestation';
 
 const ARBITRUM_CHAIN_ID = 42161;
 const MANUAL_CANARY_REFRESH_SYMBOLS = ['BTC', 'ETH'] as const;
@@ -297,13 +298,10 @@ export function buildDefaultCanaryDeps(): ManualCanaryDeps {
     liveTestMode: () => isManualCanarySignerRestoreAllowed(process.env).allowed,
 
     /**
-     * #142: GITHUB_CI attestation — production은 항상 UNATTESTED fail-closed.
-     * 앱 측 GitHub 자격증명 없음; 비밀값·raw 환경값·RPC URL·주소·서명·raw 오류 미포함.
+     * #142/#143: build-bound public Actions attestation. No GitHub credential is
+     * read; unavailable/mismatch/timeout remains UNATTESTED fail-closed.
      */
-    githubCiAttestation: () => outcome(
-      false,
-      `${CANARY_BLOCKER_CATEGORIES.GITHUB_CI.stableMessage} [${CANARY_BLOCKER_CATEGORIES.GITHUB_CI.attestedStatus}]`,
-    ),
+    githubCiAttestation: () => checkGitHubCiAttestation(),
 
     envSubmissionState: () => {
       const locked = isLiveTestExecutionLocked();
