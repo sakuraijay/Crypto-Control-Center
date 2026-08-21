@@ -132,17 +132,22 @@ export function clampDailyTargetWeb(value: unknown): number {
 /** Server sync state for the debounced PUT /api/data/strategy call. */
 export type ProfileName = 'conservative' | 'aggressive';
 
-export interface RiskProfileStatus {
+export interface DesiredRiskProfileStatus {
   name: ProfileName;
   version: 'risk-profile/v1';
   requestedAt: string;
-  appliedAt: string | null;
-  derivedLimits?: Record<string, unknown>;
+}
+
+export interface AppliedRiskProfileStatus {
+  name: ProfileName;
+  version: 'risk-profile/v1';
+  appliedAt: string;
+  derivedLimits: Record<string, unknown>;
 }
 
 export interface RiskProfileResponse {
-  desired: RiskProfileStatus;
-  applied: RiskProfileStatus;
+  desired: DesiredRiskProfileStatus;
+  applied: AppliedRiskProfileStatus;
   pending: boolean;
   safeBoundary: boolean;
   reason: string | null;

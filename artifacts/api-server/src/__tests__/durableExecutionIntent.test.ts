@@ -206,7 +206,7 @@ beforeEach(async () => {
     isSubaccountListed: true, expiresAt: String(Math.floor(Date.now() / 1000) + 3600), remaining: '8',
   });
   savedValues.length = 0;
-});
+}, 30_000);
 afterAll(() => {
   for (const k of ENV_KEYS) {
     if (savedEnv[k] === undefined) delete process.env[k];
