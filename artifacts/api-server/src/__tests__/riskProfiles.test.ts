@@ -1,4 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+// The profile derivation/validation contract must remain usable in CI without DATABASE_URL.
+vi.mock("@workspace/db", () => {
+  throw new Error("risk profile pure-path test must not load @workspace/db");
+});
 import {
   RISK_PROFILE_VERSION,
   applyRiskProfileToLimits,

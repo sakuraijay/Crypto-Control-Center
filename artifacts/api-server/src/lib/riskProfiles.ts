@@ -1,14 +1,4 @@
-import {
-  db,
-  pool,
-  executionIntentsTable,
-  liveApprovalsTable,
-  protectionOrdersTable,
-  relayTasksTable,
-  tradesTable,
-  workerStateTable,
-  type DatabasePoolClient,
-} from "@workspace/db";
+import type { DatabasePoolClient } from "@workspace/db";
 import { and, eq, inArray } from "drizzle-orm";
 import { RISK_POLICY } from "./riskPolicy";
 import type { RiskLimits } from "../workers/serverTypes";
@@ -262,12 +252,14 @@ function toSnapshot(
 }
 
 async function readState(key: string): Promise<string | null> {
+  const { db, workerStateTable } = await import("@workspace/db");
   const rows = await db.select({ value: workerStateTable.value })
     .from(workerStateTable).where(eq(workerStateTable.key, key)).limit(1);
   return rows[0]?.value ?? null;
 }
 
 async function writeState(key: string, value: unknown): Promise<void> {
+  const { db, workerStateTable } = await import("@workspace/db");
   await db.insert(workerStateTable)
     .values({ key, value: JSON.stringify(value), updatedAt: new Date() })
     .onConflictDoUpdate({
@@ -338,6 +330,14 @@ async function inspectSafeBoundaryWithClient(client: DatabasePoolClient): Promis
 
 async function inspectSafeBoundary(): Promise<{ safe: boolean; reason: string | null }> {
   try {
+    const {
+      db,
+      executionIntentsTable,
+      liveApprovalsTable,
+      protectionOrdersTable,
+      relayTasksTable,
+      tradesTable,
+    } = await import("@workspace/db");
     const [openTrades, approvals, intents, relayTasks, protectionOrders, pendingClose] = await Promise.all([
       db.select({ id: tradesTable.id }).from(tradesTable)
         .where(and(eq(tradesTable.action, "OPEN"), eq(tradesTable.closeTime, 0))).limit(1),
@@ -409,6 +409,7 @@ export async function getRiskProfileStatus(base: RiskLimits): Promise<RiskProfil
 export async function promoteRiskProfileAtSafeBoundary(
   base: RiskLimits,
 ): Promise<RiskProfileStatus> {
+  const { pool } = await import("@workspace/db");
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
