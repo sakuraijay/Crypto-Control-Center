@@ -19,7 +19,10 @@ import {
   resolveIndexTokenDecimals,
 } from './indexTokenDecimals';
 import { MARKET_BY_SYMBOL_SERVER } from './gmxMarkets';
-import { buildFreshExecutionCostBreakdown } from './manualCanaryCostFetcher';
+import {
+  buildFreshExecutionCostObservation,
+  type CostReadinessAttemptDiagnostics,
+} from './manualCanaryCostFetcher';
 
 export const MANUAL_CANARY_READONLY_SYMBOLS = ['BTC', 'ETH'] as const;
 export type ManualCanaryReadonlySymbol = (typeof MANUAL_CANARY_READONLY_SYMBOLS)[number];
@@ -32,14 +35,14 @@ export interface ReadonlyCheckOutcome {
 export interface ManualCanaryReadonlyEvidence {
   decimals: Record<string, ReadonlyCheckOutcome>;
   costs: Record<string,
-    | { ok: true; reason: null; snapshot: CostSnapshot; roundTripCostUsd: number }
-    | { ok: false; reason: string; snapshot: null; roundTripCostUsd: null }
+    | { ok: true; reason: null; snapshot: CostSnapshot; roundTripCostUsd: number; diagnostics?: CostReadinessAttemptDiagnostics }
+    | { ok: false; reason: string; snapshot: null; roundTripCostUsd: null; diagnostics?: CostReadinessAttemptDiagnostics }
   >;
 }
 
 export type ManualCanaryReadonlyCostResult =
-  | { ok: true; snapshot: CostSnapshot; roundTripCostUsd: number }
-  | { ok: false; reason: string };
+  | { ok: true; snapshot: CostSnapshot; roundTripCostUsd: number; diagnostics?: CostReadinessAttemptDiagnostics }
+  | { ok: false; reason: string; diagnostics?: CostReadinessAttemptDiagnostics };
 
 export interface ManualCanaryReadonlyReaders {
   resolveDecimals(symbol: string): Promise<ReadonlyCheckOutcome>;
@@ -77,15 +80,17 @@ async function fetchMeasuredCanaryCosts(args: {
   symbol: string;
   isLong: boolean;
   notionalUsd: number;
-}): Promise<FetchedCostFields> {
+}, onDiagnostics?: (diagnostics: CostReadinessAttemptDiagnostics) => void): Promise<FetchedCostFields> {
   if (injectedCostFetcher) return injectedCostFetcher(args);
-  const cost = await buildFreshExecutionCostBreakdown({
+  const observation = await buildFreshExecutionCostObservation({
     marketToken: args.market,
     symbol: args.symbol,
     isLong: args.isLong,
     notionalUsd: args.notionalUsd,
     holdingHours: 1,
   });
+  const cost = observation?.breakdown ?? null;
+  if (observation) onDiagnostics?.(observation.diagnostics);
   const impact = cost?.impactDetail;
   const required = [
     cost?.entryFeeUsd,
@@ -185,6 +190,7 @@ export async function fetchManualCanaryReadonlyCost(args: {
 }): Promise<ManualCanaryReadonlyCostResult> {
   const market = MARKET_BY_SYMBOL_SERVER.get(args.symbol);
   if (!market) return { ok: false, reason: '시장 미확인' };
+  let diagnostics: CostReadinessAttemptDiagnostics | undefined;
   const result = await fetchLiveCostSnapshot(
     {
       market: market.marketToken,
@@ -201,10 +207,10 @@ export async function fetchManualCanaryReadonlyCost(args: {
           symbol: args.symbol,
           isLong,
           notionalUsd,
-        }),
+        }, (value) => { diagnostics = value; }),
     },
   );
-  if (!result.ok) return { ok: false, reason: result.reason };
+  if (!result.ok) return { ok: false, reason: result.reason, diagnostics };
   const expected = {
     market: market.marketToken,
     isLong: args.isLong,
@@ -216,11 +222,12 @@ export async function fetchManualCanaryReadonlyCost(args: {
     expected,
     Date.now(),
   );
-  if (!validated.ok) return { ok: false, reason: validated.reason };
+  if (!validated.ok) return { ok: false, reason: validated.reason, diagnostics };
   return {
     ok: true,
     snapshot: result.snapshot,
     roundTripCostUsd: validated.effectiveRoundTripCostUsd,
+    diagnostics,
   };
 }
 
@@ -245,12 +252,14 @@ export async function refreshManualCanaryReadonlyEvidence(
         reason: null,
         snapshot: cost.snapshot,
         roundTripCostUsd: cost.roundTripCostUsd,
+        diagnostics: cost.diagnostics,
       }
       : {
         ok: false,
         reason: cost.reason,
         snapshot: null,
         roundTripCostUsd: null,
+        diagnostics: cost.diagnostics,
       };
   }
   return { decimals, costs };

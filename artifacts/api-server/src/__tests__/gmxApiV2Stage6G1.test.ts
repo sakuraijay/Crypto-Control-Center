@@ -173,6 +173,8 @@ describe('6G-1 §3 — gmxApiTransport peer·플래그·failover·단일 제출'
     const t = createGmxApiTransport(BOTH_FLAGS);
     const r = await t.getJson('/markets');
     expect(r.ok).toBe(true);
+    expect(r.attemptCount).toBe(2);
+    expect(r.failoverCount).toBe(1);
     expect(fetchSpy).toHaveBeenCalledTimes(2);
     const hosts = fetchSpy.mock.calls.map((c: unknown[]) => new URL(String(c[0])).host);
     expect(new Set(hosts).size).toBe(2); // 서로 다른 peer

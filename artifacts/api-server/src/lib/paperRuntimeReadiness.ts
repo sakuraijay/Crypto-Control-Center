@@ -105,6 +105,20 @@ export interface PaperRpcEvidenceView extends PaperEvidenceMeta {
   chainId: number | null;
 }
 
+export interface PaperCostReadinessDiagnosticsView {
+  failures: Array<{
+    component: string;
+    sourceId: string;
+    failureClass: string;
+    peerHost: string | null;
+  }>;
+  attemptCount: number;
+  failoverCount: number;
+  lastAttemptAtMs: number | null;
+  lastSuccessAtMs: number | null;
+  lastFailureAtMs: number | null;
+}
+
 export interface PaperCostEvidenceView extends PaperEvidenceMeta {
   symbol: CanarySymbol;
   direction: 'LONG';
@@ -135,6 +149,7 @@ export interface PaperCostEvidenceView extends PaperEvidenceMeta {
   source: string | null;
   apiTimestamp: string | null;
   fetchedAt: string | null;
+  diagnostics: PaperCostReadinessDiagnosticsView;
 }
 
 export interface PaperRuntimeReadinessView {
@@ -201,6 +216,18 @@ let decimalsState: Record<CanarySymbol, EvidenceAttempt<DecimalsObservation>> = 
 let costState: Record<CanarySymbol, EvidenceAttempt<CostObservation>> = {
   BTC: emptyAttempt(),
   ETH: emptyAttempt(),
+};
+const emptyCostDiagnostics = (): PaperCostReadinessDiagnosticsView => ({
+  failures: [],
+  attemptCount: 0,
+  failoverCount: 0,
+  lastAttemptAtMs: null,
+  lastSuccessAtMs: null,
+  lastFailureAtMs: null,
+});
+let costDiagnosticsState: Record<CanarySymbol, PaperCostReadinessDiagnosticsView> = {
+  BTC: emptyCostDiagnostics(),
+  ETH: emptyCostDiagnostics(),
 };
 let deploymentState = emptyAttempt<DeploymentObservation>();
 let rpcState = emptyAttempt<RpcObservation>();
@@ -368,6 +395,17 @@ function updateCanaryEvidence(
     }
 
     const costResult = result.costs[symbol];
+    const reportedDiagnostics = costResult?.diagnostics;
+    const previousDiagnostics = costDiagnosticsState[symbol];
+    const attemptAtMs = reportedDiagnostics?.attemptedAtMs ?? atMs;
+    costDiagnosticsState[symbol] = {
+      failures: reportedDiagnostics?.failures.map((failure) => ({ ...failure })) ?? [],
+      attemptCount: reportedDiagnostics?.attemptCount ?? 0,
+      failoverCount: reportedDiagnostics?.failoverCount ?? 0,
+      lastAttemptAtMs: attemptAtMs,
+      lastSuccessAtMs: previousDiagnostics.lastSuccessAtMs,
+      lastFailureAtMs: previousDiagnostics.lastFailureAtMs,
+    };
     if (costResult?.ok) {
       const market = MARKET_BY_SYMBOL_SERVER.get(symbol)?.marketToken;
       const validated = market
@@ -380,6 +418,8 @@ function updateCanaryEvidence(
         : { ok: false as const, reason: `${symbol} market registry 없음` };
       const observedAtMs = Date.parse(costResult.snapshot.apiTimestamp ?? '');
       if (validated.ok && Number.isFinite(observedAtMs) && observedAtMs > 0) {
+        costDiagnosticsState[symbol].lastSuccessAtMs = attemptAtMs;
+        costDiagnosticsState[symbol].failures = [];
         setSuccess(costState[symbol], atMs, {
           snapshot: { ...costResult.snapshot },
           effectiveRoundTripCostUsd: validated.effectiveRoundTripCostUsd,
@@ -387,6 +427,15 @@ function updateCanaryEvidence(
         }, '공식 GMX read-only 비용 성분 관측 완료');
       } else {
         allObserved = false;
+        costDiagnosticsState[symbol].lastFailureAtMs = attemptAtMs;
+        if (costDiagnosticsState[symbol].failures.length === 0) {
+          costDiagnosticsState[symbol].failures = [{
+            component: 'snapshotValidation',
+            sourceId: 'EXECUTION_COST_SNAPSHOT',
+            failureClass: 'validation',
+            peerHost: null,
+          }];
+        }
         setFailure(
           costState[symbol],
           atMs,
@@ -398,6 +447,15 @@ function updateCanaryEvidence(
       }
     } else {
       allObserved = false;
+      costDiagnosticsState[symbol].lastFailureAtMs = attemptAtMs;
+      if (costDiagnosticsState[symbol].failures.length === 0) {
+        costDiagnosticsState[symbol].failures = [{
+          component: 'unknown',
+          sourceId: 'EXECUTION_COST_READINESS',
+          failureClass: 'unavailable',
+          peerHost: null,
+        }];
+      }
       setFailure(
         costState[symbol],
         atMs,
@@ -634,6 +692,10 @@ function costView(symbol: CanarySymbol, nowMs: number): PaperCostEvidenceView {
     source: snapshot?.source ?? null,
     apiTimestamp: snapshot?.apiTimestamp ?? null,
     fetchedAt: snapshot?.fetchedAt ?? null,
+    diagnostics: {
+      ...costDiagnosticsState[symbol],
+      failures: costDiagnosticsState[symbol].failures.map((failure) => ({ ...failure })),
+    },
   };
 }
 
@@ -763,6 +825,7 @@ export function __resetPaperRuntimeReadinessForTests(): void {
   coordinatorInFlight = false;
   decimalsState = { BTC: emptyAttempt(), ETH: emptyAttempt() };
   costState = { BTC: emptyAttempt(), ETH: emptyAttempt() };
+  costDiagnosticsState = { BTC: emptyCostDiagnostics(), ETH: emptyCostDiagnostics() };
   deploymentState = emptyAttempt();
   rpcState = emptyAttempt();
   lastAttemptAtMs = null;

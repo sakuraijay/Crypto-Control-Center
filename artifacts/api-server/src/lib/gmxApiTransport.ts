@@ -46,7 +46,7 @@ export type GmxApiErrorKind =
   | 'decode';       // Content-Type/JSON/구조 오류 (submit이면 ambiguous)
 
 export type GmxApiResult<T> =
-  | { ok: true; data: T; peerHost: string }
+  | { ok: true; data: T; peerHost: string; attemptCount?: number; failoverCount?: number }
   | {
       ok: false;
       kind: GmxApiErrorKind;
@@ -56,6 +56,8 @@ export type GmxApiResult<T> =
       /** sanitize된 고정 문구만 — URL query/서명/payload 전문 금지 */
       message: string;
       peerHost: string | null;
+      attemptCount?: number;
+      failoverCount?: number;
     };
 
 export type GmxApiIntent = 'readonly' | 'submit';
@@ -215,39 +217,52 @@ export function createGmxApiTransport(
   async function call<T>(path: string, method: 'GET' | 'POST', body: unknown, intent: GmxApiIntent): Promise<GmxApiResult<T>> {
     if (!peersValid) {
       return { ok: false, kind: 'config', httpStatus: null, ambiguous: false,
-        message: 'GMX API peer allowlist 위반 — 호출 차단 (fail-closed)', peerHost: null };
+        message: 'GMX API peer allowlist 위반 — 호출 차단 (fail-closed)', peerHost: null,
+        attemptCount: 0, failoverCount: 0 };
     }
     if (!isSafePath(path)) {
       return { ok: false, kind: 'config', httpStatus: null, ambiguous: false,
-        message: 'GMX API path 형식 위반 — 호출 차단 (fail-closed)', peerHost: null };
+        message: 'GMX API path 형식 위반 — 호출 차단 (fail-closed)', peerHost: null,
+        attemptCount: 0, failoverCount: 0 };
     }
     if (intent === 'submit') {
       if (!submissionEnabled) {
         return { ok: false, kind: 'config', httpStatus: null, ambiguous: false,
-          message: `${GMX_API_SUBMISSION_FLAG}!=true — 제출 차단 (fail-closed)`, peerHost: null };
+          message: `${GMX_API_SUBMISSION_FLAG}!=true — 제출 차단 (fail-closed)`, peerHost: null,
+          attemptCount: 0, failoverCount: 0 };
       }
       // submit: 단일 peer(첫 번째), 정확히 1회 — 자동 peer 재시도 금지
-      return callOnce<T>({
+      const result = await callOnce<T>({
         base: peers[0], path, method, body, fetchImpl,
         maxResponseBytes: GMX_API_MAX_SUBMIT_RESPONSE_BYTES,
       });
+      return { ...result, attemptCount: 1, failoverCount: 0 };
     }
     if (!readonlyEnabled) {
       return { ok: false, kind: 'config', httpStatus: null, ambiguous: false,
-        message: `${GMX_API_READONLY_FLAG}!=true — 조회 차단 (fail-closed)`, peerHost: null };
+        message: `${GMX_API_READONLY_FLAG}!=true — 조회 차단 (fail-closed)`, peerHost: null,
+        attemptCount: 0, failoverCount: 0 };
     }
     // readonly: peer 순차 시도 — network/timeout/5xx에서만 failover
     let last: GmxApiResult<T> | null = null;
+    let attemptCount = 0;
     for (const base of peers) {
+      attemptCount += 1;
       const r = await callOnce<T>({
         base, path, method, body, fetchImpl,
         maxResponseBytes: GMX_API_MAX_READONLY_RESPONSE_BYTES,
       });
-      if (r.ok) return r;
+      if (r.ok) return { ...r, attemptCount, failoverCount: Math.max(0, attemptCount - 1) };
       last = r;
-      if (!isFailoverEligible(r.kind)) return r; // 4xx/429/decode/config는 즉시 반환
+      if (!isFailoverEligible(r.kind)) {
+        return { ...r, attemptCount, failoverCount: Math.max(0, attemptCount - 1) };
+      } // 4xx/429/decode/config는 즉시 반환
     }
-    return last as GmxApiResult<T>;
+    return {
+      ...(last as GmxApiResult<T>),
+      attemptCount,
+      failoverCount: Math.max(0, attemptCount - 1),
+    };
   }
 
   return {

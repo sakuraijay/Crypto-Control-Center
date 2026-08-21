@@ -71,6 +71,17 @@ function canaryResult(options: {
           reason: 'COST_DATA_UNAVAILABLE',
           snapshot: null,
           roundTripCostUsd: null,
+          diagnostics: {
+            failures: [{
+              component: 'funding',
+              sourceId: 'GMX_API_MARKETS_TICKERS',
+              failureClass: 'timeout' as const,
+              peerHost: 'arbitrum.gmxapi.ai',
+            }],
+            attemptCount: 2,
+            failoverCount: 1,
+            attemptedAtMs: NOW - 500,
+          },
         }
         : {
           ok: true as const,
@@ -341,6 +352,33 @@ describe('PAPER runtime readiness cycle', () => {
     expect(status.costs.BTC.blockReason).toContain('COST_BTC_INVALID');
     expect(status.blockerIds).toContain('btc_cost_snapshot');
     expect(getExecutionEligibleCostEvidence(NOW).fresh).toBe(false);
+  });
+
+  it('비용 실패 성분·안전한 source·응답 분류·failover와 시각을 보존한다', async () => {
+    const status = await runPaperRuntimeReadinessCycle({
+      deps: depsFrom(canaryResult({ costFailure: true })),
+      forceDeployment: true,
+    });
+
+    expect(status.costs.BTC).toMatchObject({
+      state: 'failed',
+      effectiveRoundTripCostUsd: null,
+      capDeltaUsd: null,
+      withinCap: null,
+      diagnostics: {
+        failures: [{
+          component: 'funding',
+          sourceId: 'GMX_API_MARKETS_TICKERS',
+          failureClass: 'timeout',
+          peerHost: 'arbitrum.gmxapi.ai',
+        }],
+        attemptCount: 2,
+        failoverCount: 1,
+        lastAttemptAtMs: NOW - 500,
+        lastSuccessAtMs: null,
+        lastFailureAtMs: NOW - 500,
+      },
+    });
   });
 
   it('stop→restart 중 진행 중 cycle을 보존하고 외부 read를 겹치지 않는다', async () => {
