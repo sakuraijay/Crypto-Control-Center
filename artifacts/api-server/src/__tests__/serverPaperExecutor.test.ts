@@ -87,6 +87,17 @@ const BASE_OPEN = {
   tpPriceUsd: 52_000,
   openPositionCount: 0,
   entriesManilaDay: 0,
+  riskProfileSnapshot: {
+    name: 'conservative' as const,
+    version: 'risk-profile/v1' as const,
+    appliedAt: '2026-08-21T00:00:00.000Z',
+    derivedLimits: {
+      immediateEntryThreshold: 80, maxRiskPerTradePct: 0.75, reserveCashPct: 20,
+      maxMarginPerTradeUsd: 334, maxConcurrentPositions: 1, cooldownMinutes: 30,
+      maxLeverage: 3, maxTotalExposureUsd: 3_000,
+      allocatedTradingCapitalUsd: 1_000, maxRiskPerTradeUsd: 7.5,
+    },
+  },
 };
 
 /** 서버 OPEN 행 fixture (managed_by='SERVER', close_time=0) */

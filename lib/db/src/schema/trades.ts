@@ -1,4 +1,4 @@
-import { pgTable, text, numeric, bigint, timestamp, boolean, integer } from "drizzle-orm/pg-core";
+import { pgTable, text, numeric, bigint, timestamp, boolean, integer, jsonb } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
@@ -82,6 +82,10 @@ export const tradesTable = pgTable("trades", {
   stopPriceUsd:          numeric("stop_price_usd",        { precision: 18, scale: 8 }),
   /** 서버 관리 take-profit (USD, null = TP 없음) — OPEN 행에만 */
   takeProfitPriceUsd:    numeric("take_profit_price_usd", { precision: 18, scale: 8 }),
+  /** 진입/청산 당시 적용된 버전 프로필과 파생 한도 불변 스냅샷 */
+  riskProfileSnapshot:   jsonb("risk_profile_snapshot"),
+  /** 서버 PAPER 미청산 슬롯. 1 또는 2이며 partial unique index가 최종 강제한다. */
+  paperPositionSlot:     integer("paper_position_slot"),
 
   // ── CLOSE 결산 결속 필드 (0030 — additive, nullable) ────────────────────────
   /**

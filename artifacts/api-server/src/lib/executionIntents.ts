@@ -37,6 +37,7 @@ export interface NewIntent {
   isLong:        boolean;
   sizeUsd:       number;
   collateralUsd: number;
+  riskProfileSnapshot?: import('../workers/serverTypes').AppliedRiskProfileSnapshot;
 }
 
 /**
@@ -116,6 +117,7 @@ export async function createPreparedIntent(intent: NewIntent): Promise<CreateInt
         txHash:        null,
         status:        'PREPARED',
         error:         null,
+        riskProfileSnapshot: intent.riskProfileSnapshot ?? null,
       })
       .onConflictDoNothing() // 대상 미지정: PK 충돌 + 단일 활성 intent 인덱스 충돌 모두 0행 처리
       .returning({ id: executionIntentsTable.id });
@@ -157,6 +159,7 @@ async function createPreparedCloseIntent(intent: NewCloseIntent): Promise<Create
           txHash:        null,
           status:        'PREPARED',
           error:         null,
+          riskProfileSnapshot: intent.riskProfileSnapshot ?? null,
           // CLOSE 결속 필드 (0030)
           closeAccount:              b.account.toLowerCase(),
           closeMarketAddress:        b.marketAddress.toLowerCase(),
@@ -190,6 +193,7 @@ async function createPreparedCloseIntent(intent: NewCloseIntent): Promise<Create
           closeTime:                 0,
           testMode:                  true,
           settlementStatus:          'UNSETTLED',
+          riskProfileSnapshot:       intent.riskProfileSnapshot ?? null,
           // CLOSE 결속 필드 (0030)
           settlementAccount:         b.account.toLowerCase(),
           settlementMarketAddress:   b.marketAddress.toLowerCase(),

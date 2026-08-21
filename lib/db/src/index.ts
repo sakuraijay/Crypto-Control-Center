@@ -12,6 +12,7 @@ if (!process.env.DATABASE_URL) {
 
 export const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 export const db = drizzle(pool, { schema });
+export type DatabasePoolClient = pg.PoolClient;
 
 export * from "./schema";
 
@@ -697,6 +698,50 @@ const MIGRATIONS: { name: string; sql: string }[] = [
       ALTER TABLE execution_intents ADD COLUMN IF NOT EXISTS close_settlement_trade_id      text;
       CREATE UNIQUE INDEX IF NOT EXISTS execution_intents_close_settlement_trade_uq
         ON execution_intents (close_settlement_trade_id) WHERE close_settlement_trade_id IS NOT NULL;
+    `,
+  },
+  {
+    name: "0031_risk_profiles",
+    sql: `
+      ALTER TABLE trades ADD COLUMN IF NOT EXISTS risk_profile_snapshot jsonb;
+      ALTER TABLE trades ADD COLUMN IF NOT EXISTS paper_position_slot integer;
+      ALTER TABLE execution_intents ADD COLUMN IF NOT EXISTS risk_profile_snapshot jsonb;
+
+      DO $risk_profile_slot_check$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint WHERE conname = 'trades_paper_position_slot_check'
+        ) THEN
+          ALTER TABLE trades
+            ADD CONSTRAINT trades_paper_position_slot_check
+            CHECK (paper_position_slot IS NULL OR paper_position_slot IN (1, 2));
+        END IF;
+      END
+      $risk_profile_slot_check$;
+
+      UPDATE trades
+      SET paper_position_slot = 1
+      WHERE managed_by = 'SERVER'
+        AND action = 'OPEN'
+        AND close_time = 0
+        AND paper_position_slot IS NULL;
+
+      DROP INDEX IF EXISTS trades_server_single_open_uq;
+
+      CREATE UNIQUE INDEX IF NOT EXISTS trades_server_open_slot_uq
+        ON trades (paper_position_slot)
+        WHERE managed_by = 'SERVER'
+          AND action = 'OPEN'
+          AND close_time = 0
+          AND paper_position_slot IS NOT NULL;
+
+      CREATE UNIQUE INDEX IF NOT EXISTS trades_server_open_symbol_uq
+        ON trades ((upper(symbol)))
+        WHERE managed_by = 'SERVER' AND action = 'OPEN' AND close_time = 0;
+
+      CREATE INDEX IF NOT EXISTS trades_risk_profile_name_idx
+        ON trades ((risk_profile_snapshot->>'name'))
+        WHERE risk_profile_snapshot IS NOT NULL;
     `,
   },
   // Add future migrations here in chronological order.

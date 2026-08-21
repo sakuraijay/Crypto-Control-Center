@@ -1,4 +1,4 @@
-import { pgTable, text, integer, numeric, boolean, timestamp } from "drizzle-orm/pg-core";
+import { pgTable, text, integer, numeric, boolean, timestamp, jsonb } from "drizzle-orm/pg-core";
 
 /**
  * execution_intents — LIVE 주문 durable execution intent.
@@ -27,6 +27,8 @@ export const executionIntentsTable = pgTable("execution_intents", {
   txHash:        text("tx_hash"),
   status:        text("status").notNull(),               // PREPARED | SUBMITTED | CONFIRMED | FAILED | CANCELLED | UNRESOLVED
   error:         text("error"),
+  /** 주문 의도 생성 당시 적용된 버전 프로필과 파생 한도 불변 스냅샷 */
+  riskProfileSnapshot: jsonb("risk_profile_snapshot"),
   // ── 온체인 판정 근거 (migration 0012) ──────────────────────────────────────
   /** GMX order key (bytes32 hex) — OrderCreated 이벤트 topic1에서 추출 */
   orderKey:          text("order_key"),

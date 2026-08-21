@@ -140,6 +140,7 @@ export function assertLegacyOrderPathAllowed(): void {
   }
 }
 import { USDC_ADDRESS } from '../lib/gmxContracts';
+import type { AppliedRiskProfileSnapshot } from './serverTypes';
 
 // ── 감사로그 키 ────────────────────────────────────────────────────────────────
 const AUDIT_LOG_KEY     = 'orderAuditLog';
@@ -169,6 +170,62 @@ export interface AuditLogEntry {
   gateChecks:   Record<string, boolean>;
   submittedAt:  string;
   confirmedAt:  string | null;
+  /** 주문 경로가 사용한 불변 프로필/파생한도 감사 스냅샷 */
+  riskProfileSnapshot: AppliedRiskProfileSnapshot;
+}
+
+type AuditLogEntryInput =
+  Omit<AuditLogEntry, 'riskProfileSnapshot'>
+  & { riskProfileSnapshot?: AppliedRiskProfileSnapshot };
+
+const auditProfileByDecisionId = new Map<string, AppliedRiskProfileSnapshot>();
+const FALLBACK_NON_AI_AUDIT_PROFILE: AppliedRiskProfileSnapshot = {
+  name: 'conservative',
+  version: 'risk-profile/v1',
+  appliedAt: '1970-01-01T00:00:00.000Z',
+  derivedLimits: {
+    immediateEntryThreshold: 80,
+    maxRiskPerTradePct: 0.75,
+    reserveCashPct: 100,
+    maxMarginPerTradeUsd: 0,
+    maxConcurrentPositions: 1,
+    cooldownMinutes: 30,
+    maxLeverage: 1,
+    maxTotalExposureUsd: 0,
+    allocatedTradingCapitalUsd: 0,
+    maxRiskPerTradeUsd: 0,
+  },
+};
+
+function isValidRiskProfileSnapshot(value: unknown): value is AppliedRiskProfileSnapshot {
+  if (!value || typeof value !== 'object') return false;
+  const profile = value as Partial<AppliedRiskProfileSnapshot>;
+  if ((profile.name !== 'conservative' && profile.name !== 'aggressive')
+    || profile.version !== 'risk-profile/v1'
+    || typeof profile.appliedAt !== 'string'
+    || !Number.isFinite(Date.parse(profile.appliedAt))
+    || !profile.derivedLimits) return false;
+  const d = profile.derivedLimits;
+  const numbers = [
+    d.immediateEntryThreshold, d.maxRiskPerTradePct, d.reserveCashPct,
+    d.maxMarginPerTradeUsd, d.maxConcurrentPositions, d.cooldownMinutes,
+    d.maxLeverage, d.maxTotalExposureUsd, d.allocatedTradingCapitalUsd,
+    d.maxRiskPerTradeUsd,
+  ];
+  if (!numbers.every(value => Number.isFinite(value) && value >= 0)) return false;
+  if (d.maxLeverage > 3 || d.maxConcurrentPositions < 1 || d.maxConcurrentPositions > 2) return false;
+  if (profile.name === 'conservative') {
+    return d.immediateEntryThreshold === 80
+      && d.maxRiskPerTradePct === 0.75
+      && d.maxConcurrentPositions === 1;
+  }
+  return d.immediateEntryThreshold === 70
+    && d.maxRiskPerTradePct === 1
+    && d.reserveCashPct === 10
+    && d.maxMarginPerTradeUsd <= 500
+    && d.maxConcurrentPositions === 2
+    && d.cooldownMinutes === 10
+    && d.maxTotalExposureUsd <= 3_000;
 }
 
 // ── Stop coverage 영속 저장 (6H-2 §8) ─────────────────────────────────────────
@@ -280,10 +337,20 @@ async function mutateAuditLog(
 }
 
 /** @returns 저장 성공 여부. 실패는 삼키지 않고 호출자에게 알린다. */
-async function appendAuditLog(entry: AuditLogEntry): Promise<boolean> {
+async function appendAuditLog(entry: AuditLogEntryInput): Promise<boolean> {
+  const riskProfileSnapshot =
+    entry.riskProfileSnapshot ?? auditProfileByDecisionId.get(entry.decisionId);
+  if (!riskProfileSnapshot) {
+    console.error('[LiveTestExecutor] 프로필 스냅샷 없음 — 감사로그 저장 차단');
+    return false;
+  }
+  const complete: AuditLogEntry = {
+    ...entry,
+    riskProfileSnapshot,
+  };
   // 최대 500개 보존 (FIFO). 락 안에서 최신 로그를 다시 읽으므로
   // intent 판정 동기화가 바꾼 terminal 상태를 되돌리지 않는다.
-  return mutateAuditLog(entries => [...entries, entry].slice(-500));
+  return mutateAuditLog(entries => [...entries, complete].slice(-500));
 }
 
 export async function getAuditLog(limit = 100): Promise<AuditLogEntry[]> {
@@ -1296,6 +1363,7 @@ export async function loadEmergencyStopFromDb(): Promise<void> {
 
 export interface LiveOrderParams {
   decisionId:    string;
+  riskProfileSnapshot?: import('./serverTypes').AppliedRiskProfileSnapshot;
   cycleNumber:   number;
   symbol:        string;
   marketAddress: string;
@@ -1331,6 +1399,7 @@ export interface OrderSizingContext {
   defensiveMode: boolean;
   canaryActive: boolean;
   operatorApprovedNotionalCapUsd?: number | null;
+  riskBudgetPct?: number;
 }
 
 /** 마지막 사이징 강제 결과 — ExecutorStatus/UI 노출용 */
@@ -1384,6 +1453,31 @@ export interface LiveOrderResult {
 export async function executeLiveTestOrder(params: LiveOrderParams): Promise<LiveOrderResult> {
   const executedAt = new Date().toISOString();
   const entryId    = `live-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  if (params.riskProfileSnapshot !== undefined && !isValidRiskProfileSnapshot(params.riskProfileSnapshot)) {
+    return {
+      ok: false, txHash: null, orderKey: null, simulated: false,
+      error: '[LIVE TEST] 위험 프로필 스냅샷 없음/손상 — 주문 차단 (fail-closed)',
+      executedAt,
+    };
+  }
+  if (params.riskProfileSnapshot === undefined
+    && !(process.env.WORKER_ENGINE_MODE === 'PAPER' && params.sizingContext?.canaryActive === true)
+    && process.env.NODE_ENV !== 'test'
+    && process.env.VITEST === undefined) {
+    return {
+      ok: false, txHash: null, orderKey: null, simulated: false,
+      error: '[LIVE TEST] AI 위험 프로필 스냅샷 없음 — 주문 차단 (fail-closed)',
+      executedAt,
+    };
+  }
+  auditProfileByDecisionId.set(
+    params.decisionId,
+    params.riskProfileSnapshot ?? FALLBACK_NON_AI_AUDIT_PROFILE,
+  );
+  if (auditProfileByDecisionId.size > 500) {
+    const oldest = auditProfileByDecisionId.keys().next().value;
+    if (oldest) auditProfileByDecisionId.delete(oldest);
+  }
 
   // Emergency Stop
   if (_emergencyStop) {
@@ -1392,7 +1486,7 @@ export async function executeLiveTestOrder(params: LiveOrderParams): Promise<Liv
 
   // 잠금 확인 (빠른 경로)
   if (isLiveTestExecutionLocked()) {
-    const entry: AuditLogEntry = {
+    const entry: AuditLogEntryInput = {
       id: entryId, decisionId: params.decisionId, cycleNumber: params.cycleNumber,
       symbol: params.symbol, orderType: 'MarketIncrease', isLong: params.isLong,
       sizeUsd: params.sizeUsd, collateralUsd: params.collateralUsd,
@@ -1478,7 +1572,7 @@ export async function executeLiveTestOrder(params: LiveOrderParams): Promise<Liv
 
   const gateResult = checkLiveTestGate(gateInput);
   if (!gateResult.allowed) {
-    const entry: AuditLogEntry = {
+    const entry: AuditLogEntryInput = {
       id: entryId, decisionId: params.decisionId, cycleNumber: params.cycleNumber,
       symbol: params.symbol, orderType: 'MarketIncrease', isLong: params.isLong,
       sizeUsd: params.sizeUsd, collateralUsd: params.collateralUsd,
@@ -1538,6 +1632,7 @@ export async function executeLiveTestOrder(params: LiveOrderParams): Promise<Liv
     liveMode: true,
     canaryActive: params.sizingContext.canaryActive,
     operatorApprovedNotionalCapUsd: params.sizingContext.operatorApprovedNotionalCapUsd ?? null,
+    riskBudgetPct: params.sizingContext.riskBudgetPct,
     expected: { market: params.marketAddress, isLong: params.isLong, orderType: 'MarketIncrease' },
     now: new Date(),
   });
@@ -1663,6 +1758,7 @@ export async function executeLiveTestOrder(params: LiveOrderParams): Promise<Liv
     id: intentId, decisionId: params.decisionId, cycleNumber: params.cycleNumber,
     symbol: params.symbol, orderType: 'open', isLong: params.isLong,
     sizeUsd: finalSizeUsd, collateralUsd: finalCollateralUsd,
+    riskProfileSnapshot: params.riskProfileSnapshot,
   });
   if (intentCreated !== 'created') {
     const msg = intentCreated === 'duplicate'
@@ -1706,6 +1802,7 @@ export async function executeLiveTestOrder(params: LiveOrderParams): Promise<Liv
 
 export interface ClosePositionParams {
   decisionId:      string;
+  riskProfileSnapshot?: import('./serverTypes').AppliedRiskProfileSnapshot;
   cycleNumber:     number;
   symbol:          string;
   marketAddress:   string;
@@ -1730,6 +1827,27 @@ export interface ClosePositionParams {
 export async function closeLiveTestPosition(params: ClosePositionParams): Promise<LiveOrderResult> {
   const executedAt = new Date().toISOString();
   const entryId    = `close-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  if (params.riskProfileSnapshot !== undefined && !isValidRiskProfileSnapshot(params.riskProfileSnapshot)) {
+    return {
+      ok: false, txHash: null, orderKey: null, simulated: false,
+      error: '[LIVE TEST] 위험 프로필 스냅샷 없음/손상 — 청산 주문 차단 (fail-closed)',
+      executedAt,
+    };
+  }
+  if (params.riskProfileSnapshot === undefined
+    && params.manualCanary !== true
+    && process.env.NODE_ENV !== 'test'
+    && process.env.VITEST === undefined) {
+    return {
+      ok: false, txHash: null, orderKey: null, simulated: false,
+      error: '[LIVE TEST] AI 위험 프로필 스냅샷 없음 — 청산 주문 차단 (fail-closed)',
+      executedAt,
+    };
+  }
+  auditProfileByDecisionId.set(
+    params.decisionId,
+    params.riskProfileSnapshot ?? FALLBACK_NON_AI_AUDIT_PROFILE,
+  );
 
   if (_emergencyStop) {
     return { ok: false, txHash: null, orderKey: null, simulated: false, error: 'Emergency Stop', executedAt };
@@ -1908,6 +2026,7 @@ export async function closeLiveTestPosition(params: ClosePositionParams): Promis
     symbol: params.symbol, orderType: 'close', isLong: params.isLong,
     sizeUsd: params.sizeUsd, collateralUsd: 0,
     closeBinding,
+    riskProfileSnapshot: params.riskProfileSnapshot,
   };
   const intentCreated = await createPreparedIntent(closeIntent);
   if (intentCreated !== 'created') {

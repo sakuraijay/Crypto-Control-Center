@@ -59,6 +59,10 @@ import {
   reconcileStartupCloseIntent,
   type ServerPaperExecStatus, type PriceQuote,
 } from "./serverPaperExecutor";
+import {
+  applyRiskProfileToLimits,
+  promoteRiskProfileAtSafeBoundary,
+} from "../lib/riskProfiles";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -462,6 +466,8 @@ class WorkerManager {
       tpPriceUsd:        decision.tpPrice ?? null,
       // paperState.positions는 trades 전체(서버 행 포함)에서 파생 — 서버 행 수와 큰 쪽 사용
       openPositionCount: Math.max(paperState.positions.length, serverOpenRows.length),
+      maxConcurrentPositions: decision.riskProfile.derivedLimits.maxConcurrentPositions,
+      riskProfileSnapshot: decision.riskProfile,
       entriesManilaDay:  paperState.entriesManilaDay,
     });
     if (result.ok) {
@@ -1098,6 +1104,17 @@ class WorkerManager {
       // 사이클마다 PENDING 세트를 DB에서 재구성 — 승인/거절/만료된 항목 자동 제거
       await this.loadPendingApprovals();
 
+      // 프로필 변경은 사이클 시작의 안전 경계에서만 승격한다. API는 desired만 기록하며
+      // Worker 외 다른 경로는 applied를 변경할 수 없다.
+      const [baseLimits, paperState] = await Promise.all([
+        this.loadStrategyLimits(),
+        this.loadPaperState(),
+      ]);
+      const riskProfileStatus = await promoteRiskProfileAtSafeBoundary(baseLimits);
+      const riskProfile = riskProfileStatus.applied;
+      const limits = applyRiskProfileToLimits(baseLimits, riskProfile);
+      this.lastLimitsUsed = limits;
+
       const analyses = this.buildAnalyses();
 
       // 데이터 신선도 — 가격이 60초 이상 오래됐으면 CASH로 처리
@@ -1118,16 +1135,6 @@ class WorkerManager {
         };
         return;
       }
-
-      // ── 사용자 설정 + PAPER 운용 상태를 DB에서 로드 ────────────────────────────
-      // ⚠️ LIVE 실제 계정 데이터와 절대 혼합하지 않음 (지갑 미연결 = PAPER 데이터 전용)
-      const [limits, paperState] = await Promise.all([
-        this.loadStrategyLimits(),
-        this.loadPaperState(),
-      ]);
-
-      // 이번 사이클에 사용된 설정 저장 (상태 엔드포인트 노출용)
-      this.lastLimitsUsed = limits;
 
       // ── 기간 PnL 갱신 (equity 기준점 기반, UTC) ─────────────────────────────
       // ⚠️ 반드시 cooldown/거래한도 게이트보다 먼저 수행 — 게이트 조기 반환 시에도
@@ -1243,6 +1250,7 @@ class WorkerManager {
           dailyEntryCount:      paperState.entriesManilaDay,
           consecutiveLossCount: paperState.consecutiveLosses,
           openPositionCount:    paperState.positions.length,
+          maxConcurrentPositions: riskProfile.derivedLimits.maxConcurrentPositions,
           dbOk:                 this.riskDbOk && paperState.liveTestDbOk,
           feeDataOk:            true,  // PAPER: 수수료 0 정의. LIVE 실행 경로는 별도 fee 게이트.
           marketDataFresh:      dataFreshMs < 120_000,
@@ -1314,6 +1322,7 @@ class WorkerManager {
         // Server-authoritative on-chain position count (RPC → 999 fail-closed).
         // Never uses browser-posted data; see fetchServerLiveTestData() in gmx.ts.
         livePositionCount: liveTestData.positionCount,
+        immediateEntryThreshold: riskProfile.derivedLimits.immediateEntryThreshold,
       });
 
       // ── RiskEngine 강제 (6H-1) — LONG/SHORT 결정 veto + 레버리지 클램프 ────
@@ -1433,6 +1442,7 @@ class WorkerManager {
                 orderType: 'MarketIncrease',
               },
               now: nowSizing,
+              riskBudgetPct: riskProfile.derivedLimits.maxRiskPerTradePct,
             });
             if (paperEnf.ok) {
               engineResult.sizeUsd = paperEnf.finalNotionalUsd;
@@ -1509,6 +1519,7 @@ class WorkerManager {
         paperOrderId:  null,
         source:        "server_worker",
         testMode:      testModeActive,
+        riskProfile,
         ...engineResult,
       };
 
@@ -1704,10 +1715,12 @@ class WorkerManager {
           tierNotionalCapUsd: LIVE_TEST_CAPS.maxCapitalUsd,
           defensiveMode: this.lastRiskEvaluation?.sizeFactor != null && this.lastRiskEvaluation.sizeFactor < 1,
           canaryActive: true, // LIVE TEST = Canary 하드캡 우선순위 적용 (§11)
+            riskBudgetPct: decision.riskProfile.derivedLimits.maxRiskPerTradePct,
         };
 
         const result = await executeLiveTestOrder({
           decisionId:        decision.id,
+          riskProfileSnapshot: decision.riskProfile,
           cycleNumber:       cycleNum,
           symbol:            primarySymbol,
           marketAddress:     market.marketToken,
@@ -1872,6 +1885,7 @@ class WorkerManager {
       }
       const result = await closeLiveTestPosition({
         decisionId: `${decision.id}:closeall:${intent.positionKey}`,
+        riskProfileSnapshot: decision.riskProfile,
         cycleNumber: cycleNum, symbol,
         marketAddress: intent.marketAddress, isLong: intent.isLong,
         sizeUsd: intent.closeSizeUsd, currentPriceUsd: price, mainAddress,
@@ -1957,6 +1971,7 @@ class WorkerManager {
       }
       const result = await closeLiveTestPosition({
         decisionId: idempotencyKey,
+        riskProfileSnapshot: decision.riskProfile,
         cycleNumber: cycleNum, symbol,
         marketAddress: p.marketAddress, isLong: p.isLong,
         sizeUsd: reduction.reduceSizeUsd, currentPriceUsd: price, mainAddress,

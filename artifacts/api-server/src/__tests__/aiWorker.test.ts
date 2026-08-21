@@ -70,6 +70,37 @@ vi.mock('../workers/stateEngine', () => ({
   runAiEngine: vi.fn(),
 }));
 
+vi.mock('../lib/riskProfiles', () => ({
+  applyRiskProfileToLimits: (base: Record<string, unknown>) => base,
+  promoteRiskProfileAtSafeBoundary: async (base: Record<string, unknown>) => ({
+    desired: {
+      name: 'conservative',
+      version: 'risk-profile/v1',
+      requestedAt: '2026-08-21T00:00:00.000Z',
+    },
+    applied: {
+      name: 'conservative',
+      version: 'risk-profile/v1',
+      appliedAt: '2026-08-21T00:00:00.000Z',
+      derivedLimits: {
+        immediateEntryThreshold: 80,
+        maxRiskPerTradePct: 0.75,
+        reserveCashPct: Number(base.reserveCashPct ?? 20),
+        maxMarginPerTradeUsd: Number(base.maxMarginPerTrade ?? 334),
+        maxConcurrentPositions: 1,
+        cooldownMinutes: Number(base.cooldownMinutes ?? 30),
+        maxLeverage: Math.min(Number(base.maxLeverage ?? 3), 3),
+        maxTotalExposureUsd: Number(base.maxTotalExposureUSDT ?? 3_000),
+        allocatedTradingCapitalUsd: Number(base.tradingCapital ?? 1_000),
+        maxRiskPerTradeUsd: Number(base.tradingCapital ?? 1_000) * 0.0075,
+      },
+    },
+    pending: false,
+    safeBoundary: true,
+    reason: null,
+  }),
+}));
+
 vi.mock('../workers/indicators', () => ({
   computeIndicators: vi.fn(() => ({
     rsi14: 50, ema9: 50000, ema21: 50000, emaCross: 'neutral',
