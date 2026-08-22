@@ -83,7 +83,7 @@ describe('Regime Strategy v2 advanced candle technical features', () => {
   });
 
   it('표본 부족은 값을 합성하지 않고 DEGRADED/null로 표시한다', () => {
-    const result = computeCandleTechnicalSnapshot(trend(30));
+    const result = computeCandleTechnicalSnapshot(trend(20));
     expect(result.quality).toBe('DEGRADED');
     expect(result.ema.macro).toBeNull();
     expect(result.directionalIndex).toBeNull();
