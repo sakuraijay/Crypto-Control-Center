@@ -56,8 +56,9 @@ function frame(timeframe: StrategyTimeframe, series = candles(timeframe)): Candl
 }
 
 function allFrames(): Record<StrategyTimeframe, CandleFrameInput> {
-  return Object.fromEntries(STRATEGY_TIMEFRAMES.map(timeframe => [timeframe, frame(timeframe)]))
-    as Record<StrategyTimeframe, CandleFrameInput>;
+  return Object.fromEntries(
+    STRATEGY_TIMEFRAMES.map(timeframe => [timeframe, frame(timeframe)]),
+  ) as Record<StrategyTimeframe, CandleFrameInput>;
 }
 
 describe('Regime Strategy v2 Phase 1 candle foundation', () => {
