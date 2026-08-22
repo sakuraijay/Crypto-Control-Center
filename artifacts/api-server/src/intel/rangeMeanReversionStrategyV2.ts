@@ -155,8 +155,8 @@ export function evaluateRangeMeanReversion(
   const failedUp = input.structure15m.breakout.state === 'FAILED_UP';
   const longConfirmations = [patterns.bullishRejection, patterns.longLowerWick, patterns.bullishEngulfing];
   const shortConfirmations = [patterns.bearishRejection, patterns.longUpperWick, patterns.bearishEngulfing];
-  const longStrength = Math.max(...longConfirmations);
-  const shortStrength = Math.max(...shortConfirmations);
+  const longStrength = Math.max(...longConfirmations.map(value => value ?? 0));
+  const shortStrength = Math.max(...shortConfirmations.map(value => value ?? 0));
   const longConfirmed = longBoundary && zScore <= -config.minimumZScoreMagnitude
     && (failedDown || longStrength >= config.confirmationStrengthMin);
   const shortConfirmed = shortBoundary && zScore >= config.minimumZScoreMagnitude
