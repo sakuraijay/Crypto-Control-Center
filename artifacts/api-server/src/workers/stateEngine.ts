@@ -278,7 +278,7 @@ export interface EngineInput {
 
 export function runAiEngine(
   input: EngineInput,
-): Omit<import('./serverTypes').ServerAiDecision, 'id' | 'createdAt' | 'paperExecuted' | 'paperOrderId' | 'source' | 'riskProfile'> {
+): Omit<import('./serverTypes').ServerAiDecision, 'id' | 'createdAt' | 'paperExecuted' | 'paperOrderId' | 'source' | 'riskProfile' | 'strategyEnsembleShadow'> {
   const {
     cycleNumber, prevState, analyses, positions, account,
     limits, engineState, consecutiveLosses, dataFreshMs,

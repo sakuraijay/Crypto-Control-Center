@@ -176,4 +176,6 @@ export interface ServerAiDecision {
   testMode?: boolean;
   /** 사이클 시작에 확정된 불변 프로필/파생 한도 감사 스냅샷 */
   riskProfile: AppliedRiskProfileSnapshot;
+  /** Regime-Aware Strategy Ensemble v2의 주문 불가 SHADOW explainability 봉투 */
+  strategyEnsembleShadow: import('../intel/strategyShadowWorkerEnvelopeV2').StrategyShadowWorkerEnvelope;
 }

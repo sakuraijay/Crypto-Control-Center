@@ -52,6 +52,7 @@ import {
 } from "../lib/riskEngineState";
 import { manilaDayStartIso, manilaWeekStartIso, msUntilNextManilaDay } from "../lib/manilaTime";
 import { runIntelServiceCycle, stopIntelService, resumeIntelService } from "../intel/intelService";
+import { buildStrategyShadowWorkerEnvelope } from "../intel/strategyShadowWorkerEnvelopeV2";
 import {
   openServerPaperPosition, closeServerPaperPosition, reduceServerPaper70,
   requestServerPaperCloseAll, loadPendingCloseFromDb, manageServerPaperTick,
@@ -1512,14 +1513,32 @@ class WorkerManager {
       this.prevState = engineResult.operatingState;
 
       // 전체 결정 객체 조립
+      const decisionId = crypto.randomUUID();
+      const decisionCreatedAt = new Date().toISOString();
+      const strategyEnsembleShadow = buildStrategyShadowWorkerEnvelope({
+        cycleNumber: cycleNum,
+        generatedAt: Date.parse(decisionCreatedAt),
+        expectedSymbols: analyses.map(analysis => analysis.symbol),
+        records: [],
+        existingAi: {
+          decisionId,
+          action: engineResult.operatingState === 'LONG' ? 'LONG'
+            : engineResult.operatingState === 'SHORT' ? 'SHORT' : 'NO_TRADE',
+          confidence: engineResult.confidence,
+          primarySymbol: engineResult.primarySymbol,
+          createdAt: decisionCreatedAt,
+        },
+        notEvaluatedReason: 'MTF Strategy Ensemble runner evidence 미연결 — SHADOW 결과 미생성',
+      });
       const decision: ServerAiDecision = {
-        id:          crypto.randomUUID(),
-        createdAt:   new Date().toISOString(),
+        id:          decisionId,
+        createdAt:   decisionCreatedAt,
         paperExecuted: false,
         paperOrderId:  null,
         source:        "server_worker",
         testMode:      testModeActive,
         riskProfile,
+        strategyEnsembleShadow,
         ...engineResult,
       };
 
