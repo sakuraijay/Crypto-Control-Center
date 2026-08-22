@@ -1525,7 +1525,8 @@ class WorkerManager {
           action: engineResult.operatingState === 'LONG' ? 'LONG'
             : engineResult.operatingState === 'SHORT' ? 'SHORT' : 'NO_TRADE',
           confidence: engineResult.confidence,
-          primarySymbol: engineResult.primarySymbol,
+          primarySymbol: typeof engineResult.primarySymbol === 'string'
+            && engineResult.primarySymbol.trim() ? engineResult.primarySymbol : null,
           createdAt: decisionCreatedAt,
         },
         notEvaluatedReason: 'MTF Strategy Ensemble runner evidence 미연결 — SHADOW 결과 미생성',

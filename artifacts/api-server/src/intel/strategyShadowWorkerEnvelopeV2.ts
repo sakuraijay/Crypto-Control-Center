@@ -105,11 +105,15 @@ function safeEnvelope(
 export function buildStrategyShadowWorkerEnvelope(
   input: StrategyShadowWorkerEnvelopeInput,
 ): StrategyShadowWorkerEnvelope {
-  const expectedSymbols = [...new Set(input.expectedSymbols.map(normalizeSymbol))].sort();
+  const rawExpectedSymbols: unknown[] = Array.isArray(input.expectedSymbols) ? input.expectedSymbols : [];
+  const expectedSymbols = [...new Set(rawExpectedSymbols
+    .filter((symbol): symbol is string => typeof symbol === 'string')
+    .map(normalizeSymbol))].sort();
   const issues: string[] = [];
   if (!Number.isInteger(input.cycleNumber) || input.cycleNumber <= 0) issues.push('cycle number INVALID');
   if (!finite(input.generatedAt) || input.generatedAt <= 0) issues.push('generatedAt INVALID');
-  if (!Array.isArray(input.expectedSymbols) || input.expectedSymbols.some(symbol => !symbol.trim())) {
+  if (!Array.isArray(input.expectedSymbols)
+    || rawExpectedSymbols.some(symbol => typeof symbol !== 'string' || !symbol.trim())) {
     issues.push('expected symbols INVALID');
   }
   if (!input.existingAi.decisionId.trim()) issues.push('existing AI decision ID INVALID');
@@ -120,7 +124,9 @@ export function buildStrategyShadowWorkerEnvelope(
   const createdAtMs = Date.parse(input.existingAi.createdAt);
   if (!finite(createdAtMs) || createdAtMs > input.generatedAt) issues.push('existing AI createdAt INVALID');
   if (input.existingAi.primarySymbol !== null
-    && !expectedSymbols.includes(normalizeSymbol(input.existingAi.primarySymbol))) {
+    && (typeof input.existingAi.primarySymbol !== 'string'
+      || !input.existingAi.primarySymbol.trim()
+      || !expectedSymbols.includes(normalizeSymbol(input.existingAi.primarySymbol)))) {
     issues.push('existing AI primary symbol INVALID');
   }
   if (!Array.isArray(input.records)) issues.push('shadow records 배열 필요');

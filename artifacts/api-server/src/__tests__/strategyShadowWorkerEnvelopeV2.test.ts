@@ -94,6 +94,12 @@ describe('Strategy Shadow worker envelope v2', () => {
     expect(result.status).toBe('BLOCKED');
   });
 
+  it('legacy fixture의 undefined primary symbol도 throw 없이 BLOCKED한다', () => {
+    const malformed = { ...input().existingAi, primarySymbol: undefined } as unknown as StrategyShadowWorkerEnvelopeInput['existingAi'];
+    expect(() => buildStrategyShadowWorkerEnvelope(input({ existingAi: malformed }))).not.toThrow();
+    expect(buildStrategyShadowWorkerEnvelope(input({ existingAi: malformed })).status).toBe('BLOCKED');
+  });
+
   it('envelope ID는 기존 worker decision ID에 결정론적으로 결속된다', () => {
     expect(buildStrategyShadowWorkerEnvelope(input()).envelopeId).toBe('worker-41:STRATEGY_SHADOW');
   });
