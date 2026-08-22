@@ -2,6 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildMultiTimeframeCandleSet,
+  CANDLE_FOUNDATION_CONFIG_VERSION,
   CandleFoundationConfig,
   CandleFrameInput,
   STRATEGY_TIMEFRAMES,
@@ -14,7 +15,7 @@ import { Candle, TIMEFRAME_MS } from '../intel/types';
 const NOW = 1_800_000_000_000; // exact 4h boundary
 
 const TEST_CONFIG: CandleFoundationConfig = {
-  version: 'test/v1',
+  version: CANDLE_FOUNDATION_CONFIG_VERSION,
   closeGraceMs: 0,
   trustedSources: ['gmx-official-api'],
   frames: {
@@ -164,5 +165,22 @@ describe('Regime Strategy v2 Phase 1 candle foundation', () => {
     expect(issues.join(' ')).toContain('trustedSources');
     expect(issues.join(' ')).toContain('minCount가 expectedCount 초과');
     expect(issues.join(' ')).toContain('maxStaleIntervals 오류');
+  });
+
+  it('foundation config의 version과 exact key 계약을 엄격히 검증한다', () => {
+    const wrongVersion = { ...TEST_CONFIG, version: 'test/v2' };
+    expect(validateCandleFoundationConfig(wrongVersion).join(' ')).toContain('지원하지 않는 foundation config version');
+
+    const unknown = { ...TEST_CONFIG, fallbackSource: 'legacy' };
+    expect(validateCandleFoundationConfig(unknown as CandleFoundationConfig).join(' ')).toContain('알 수 없는 필드');
+
+    const frameUnknown = {
+      ...TEST_CONFIG,
+      frames: {
+        ...TEST_CONFIG.frames,
+        '15m': { ...TEST_CONFIG.frames['15m'], allowPartial: true },
+      },
+    };
+    expect(validateCandleFoundationConfig(frameUnknown as CandleFoundationConfig).join(' ')).toContain('알 수 없는 필드');
   });
 });

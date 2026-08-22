@@ -11,6 +11,7 @@ import { Candle, TIMEFRAME_MS, Timeframe } from './types';
 export const STRATEGY_TIMEFRAMES = ['15m', '1h', '4h'] as const;
 export type StrategyTimeframe = typeof STRATEGY_TIMEFRAMES[number];
 export type CandleFoundationQuality = 'GOOD' | 'DEGRADED' | 'INVALID';
+export const CANDLE_FOUNDATION_CONFIG_VERSION = 'regime-candle-foundation/v1' as const;
 
 export interface CandleFramePolicy {
   expectedCount: number;
@@ -27,7 +28,7 @@ export interface CandleFoundationConfig {
 }
 
 export const DEFAULT_CANDLE_FOUNDATION_CONFIG: CandleFoundationConfig = Object.freeze({
-  version: 'regime-candle-foundation/v1',
+  version: CANDLE_FOUNDATION_CONFIG_VERSION,
   closeGraceMs: 2_000,
   trustedSources: Object.freeze(['gmx-official-api']),
   frames: Object.freeze({
@@ -75,11 +76,31 @@ const isFiniteNumber = (value: unknown): value is number =>
 const isPositiveInteger = (value: unknown): value is number =>
   typeof value === 'number' && Number.isInteger(value) && value > 0;
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+const validateExactKeys = (
+  value: Record<string, unknown>,
+  expected: readonly string[],
+  path: string,
+  issues: string[],
+): void => {
+  const expectedSet = new Set(expected);
+  for (const key of Object.keys(value)) {
+    if (!expectedSet.has(key)) issues.push(`${path}.${key} 알 수 없는 필드`);
+  }
+  for (const key of expected) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) issues.push(`${path}.${key} 누락`);
+  }
+};
+
 /** Runtime validation keeps research knobs configurable without accepting unsafe values. */
 export function validateCandleFoundationConfig(config: CandleFoundationConfig): string[] {
   const issues: string[] = [];
-  if (typeof config.version !== 'string' || config.version.trim().length === 0) {
-    issues.push('config version 누락');
+  if (!isRecord(config)) return ['foundation config 객체 필요'];
+  validateExactKeys(config, ['version', 'closeGraceMs', 'trustedSources', 'frames'], 'config', issues);
+  if (config.version !== CANDLE_FOUNDATION_CONFIG_VERSION) {
+    issues.push(`지원하지 않는 foundation config version: ${String(config.version)}`);
   }
   if (!isFiniteNumber(config.closeGraceMs) || config.closeGraceMs < 0 || config.closeGraceMs > 60_000) {
     issues.push('closeGraceMs 범위 오류');
@@ -88,12 +109,22 @@ export function validateCandleFoundationConfig(config: CandleFoundationConfig): 
     || config.trustedSources.some(source => typeof source !== 'string' || source.trim().length === 0)) {
     issues.push('trustedSources 누락/오류');
   }
+  if (!isRecord(config.frames)) {
+    issues.push('frames 객체 필요');
+    return issues;
+  }
+  validateExactKeys(config.frames, STRATEGY_TIMEFRAMES, 'config.frames', issues);
   for (const timeframe of STRATEGY_TIMEFRAMES) {
-    const policy = config.frames?.[timeframe];
+    const policy = config.frames[timeframe];
     if (!policy) {
       issues.push(`${timeframe} policy 누락`);
       continue;
     }
+    if (!isRecord(policy)) {
+      issues.push(`${timeframe} policy 객체 필요`);
+      continue;
+    }
+    validateExactKeys(policy, ['expectedCount', 'minCount', 'maxStaleIntervals'], `config.frames.${timeframe}`, issues);
     if (!isPositiveInteger(policy.expectedCount)) issues.push(`${timeframe} expectedCount 오류`);
     if (!isPositiveInteger(policy.minCount)) issues.push(`${timeframe} minCount 오류`);
     if (isPositiveInteger(policy.expectedCount) && isPositiveInteger(policy.minCount)
