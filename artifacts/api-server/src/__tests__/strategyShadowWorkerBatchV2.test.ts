@@ -23,7 +23,7 @@ function cost(isLong: boolean, total = 0.48, overrides: Partial<CostSnapshot> = 
     fundingFeeUsd: 0.03,
     borrowingFeeUsd: 0.02,
     estimatedExitFeeUsd: 0.1,
-    estimatedExitPriceImpactUsd: 0.08,
+    estimatedExitPriceImpactUsd: total - 0.4,
     fundingRatePerHourFraction: 0.0001,
     borrowingRatePerHourFraction: 0.0001,
     totalEstimatedRoundTripCostUsd: total,
@@ -118,7 +118,7 @@ describe('Strategy SHADOW worker batch bridge', () => {
       market: MARKET, notionalUsd: 20, long: cost(true, 0.4), short: cost(false, 0.5),
     }, NOW);
     expect(result.reasons).toEqual([]);
-    expect(result.expectedCostsBps).toBe(250);
+    expect(result.expectedCostsBps).toBeCloseTo(250, 8);
   });
 
   it('returns null instead of inventing zero when either direction is absent', () => {
