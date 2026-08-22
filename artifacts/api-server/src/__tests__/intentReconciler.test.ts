@@ -99,6 +99,7 @@ function mockClient(over: Partial<OnchainClient> = {}): OnchainClient & { calls:
     getChainId: async () => { calls.chainId++; return 42161; },
     getTransactionReceipt: async () => { calls.receipt++; return null; },
     getOrderResolutionLogs: async () => { calls.logs++; return []; },
+    getLatestBlockNumber: async () => 471n,
     ...over,
   };
 }

@@ -120,6 +120,24 @@ export interface RiskLimits {
   readonly testMaxPositions?: 1;
 }
 
+export interface AppliedRiskProfileSnapshot {
+  name: 'conservative' | 'aggressive';
+  version: 'risk-profile/v1';
+  appliedAt: string;
+  derivedLimits: {
+    immediateEntryThreshold: number;
+    maxRiskPerTradePct: number;
+    reserveCashPct: number;
+    maxMarginPerTradeUsd: number;
+    maxConcurrentPositions: number;
+    cooldownMinutes: number;
+    maxLeverage: number;
+    maxTotalExposureUsd: number;
+    allocatedTradingCapitalUsd: number;
+    maxRiskPerTradeUsd: number;
+  };
+}
+
 /** Full AI decision record produced by one engine cycle. */
 export interface ServerAiDecision {
   id: string;
@@ -156,4 +174,6 @@ export interface ServerAiDecision {
   source: 'server_worker';
   /** True when this decision was produced while LIVE TEST MODE was active */
   testMode?: boolean;
+  /** 사이클 시작에 확정된 불변 프로필/파생 한도 감사 스냅샷 */
+  riskProfile: AppliedRiskProfileSnapshot;
 }

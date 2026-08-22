@@ -20,6 +20,8 @@ export const DEFAULT_STOP_DISTANCE_FRACTION = 0.01;
 
 /** stop trigger와 청산가 사이 최소 분리 간격 (fraction of price) */
 export const MIN_STOP_LIQUIDATION_GAP_FRACTION = 0.005;
+/** Stop trigger 체결 허용가격 — trigger 대비 불리한 방향 0.5%. */
+export const STOP_ACCEPTABLE_SLIPPAGE_FRACTION = 0.005;
 
 export interface StopPlan {
   triggerPriceUsd: number;
@@ -42,6 +44,14 @@ export function computeStopTrigger(args: {
     ? args.entryPriceUsd * (1 - dist)
     : args.entryPriceUsd * (1 + dist);
   return { ok: true, plan: { triggerPriceUsd, stopDistanceFraction: dist, isLong: args.isLong } };
+}
+
+/** INITIAL_STOP acceptable price. Long 청산은 trigger 아래, short 청산은 위로 둔다. */
+export function computeStopAcceptablePrice(triggerPriceUsd: number, isLong: boolean): number | null {
+  if (!fin(triggerPriceUsd) || triggerPriceUsd <= 0) return null;
+  return isLong
+    ? triggerPriceUsd * (1 - STOP_ACCEPTABLE_SLIPPAGE_FRACTION)
+    : triggerPriceUsd * (1 + STOP_ACCEPTABLE_SLIPPAGE_FRACTION);
 }
 
 /** stop trigger가 청산가와 충분히 분리됐는지 (§8) — 불충분 시 OPEN 금지 */
@@ -122,6 +132,11 @@ export interface StopCoverageRecord {
   status: StopCoverageStatus;
   stopOrderKey: string | null;  // 중복 생성 금지 근거
   triggerPriceUsd: number | null;
+  /** OPEN 전에 서버가 확정한 stop 제출 결속값. 구 레코드 호환을 위해 optional. */
+  acceptablePriceUsd?: number | null;
+  marketAddress?: string;
+  symbol?: string;
+  isLong?: boolean;
   updatedAt: string;
 }
 

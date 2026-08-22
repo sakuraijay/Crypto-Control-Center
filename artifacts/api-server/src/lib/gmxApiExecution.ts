@@ -575,9 +575,16 @@ export function buildActivationInput(d: ActivationSourceDeps): ActivationGateInp
 // ── §5 실행 오케스트레이터 ────────────────────────────────────────────────────
 
 export interface OpenPositionEvidence {
+  /** GMX V2 canonical position key from PositionReader inputs. */
+  positionKey?: string;
+  /** PositionReader account address; required for exact CLOSE settlement binding. */
+  accountAddress?: string;
   marketAddress: string;
+  collateralToken?: string;
   isLong: boolean;
   sizeUsd: number;
+  /** PositionReader exact sizeInUsd uint256 (1e30 integer string). */
+  sizeUsd30?: string;
 }
 
 export interface ExecuteViaGmxApiInput {

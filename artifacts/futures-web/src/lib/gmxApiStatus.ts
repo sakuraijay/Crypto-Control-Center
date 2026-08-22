@@ -51,6 +51,9 @@ export interface GmxApiStatusView {
     available: boolean;
     reasons: string[];
     evaluatedAt: string | null;
+    scope: 'LIVE_STOP_EXECUTION';
+    boundary: 'READ_ONLY_STATUS_NOT_EXECUTION_AUTHORIZATION';
+    paperMode: boolean;
     schemaPin: { sdk: string; stopLossDecrease: number };
   };
   protectionCounts?: Record<string, number> | null;
@@ -92,6 +95,137 @@ export interface GmxApiStatusView {
   };
   uncoveredStopCount?: number | null;
   executionEligibleCostMaxAgeMs?: number;
+  /**
+   * PAPER background diagnostic cache. This evidence is display-only and never
+   * execution authorization; unknown/stale/failed values remain fail-closed.
+   */
+  paperRuntimeReadiness?: {
+    boundary: 'READ_ONLY_NOT_EXECUTION_AUTHORIZATION';
+    paperMode: boolean;
+    readonlyEnabled: boolean;
+    scheduler: {
+      running: boolean;
+      inFlight: boolean;
+      intervalMs: number;
+      lastAttemptAtMs: number | null;
+      lastCompletedAtMs: number | null;
+      lastSuccessAtMs: number | null;
+      nextRefreshAtMs: number | null;
+      lastFailureId: string | null;
+    };
+    decimals: Record<'BTC' | 'ETH', {
+      state: 'not_evaluated' | 'verified' | 'stale' | 'failed';
+      attemptedAtMs: number | null;
+      observedAtMs: number | null;
+      ageMs: number | null;
+      fresh: boolean;
+      failureId: string | null;
+      detail: string | null;
+      decimals: number | null;
+      source: string | null;
+      tokenAddress: string | null;
+    }>;
+    deployment: {
+      state: 'not_evaluated' | 'verified' | 'stale' | 'failed';
+      attemptedAtMs: number | null;
+      observedAtMs: number | null;
+      ageMs: number | null;
+      fresh: boolean;
+      failureId: string | null;
+      detail: string | null;
+      manifestVersion: number | null;
+    };
+    rpc: {
+      state: 'not_evaluated' | 'verified' | 'stale' | 'failed';
+      attemptedAtMs: number | null;
+      observedAtMs: number | null;
+      ageMs: number | null;
+      fresh: boolean;
+      failureId: string | null;
+      detail: string | null;
+      chainId: number | null;
+    };
+    costs: Record<'BTC' | 'ETH', {
+      state: 'not_evaluated' | 'verified' | 'stale' | 'failed';
+      attemptedAtMs: number | null;
+      observedAtMs: number | null;
+      ageMs: number | null;
+      fresh: boolean;
+      failureId: string | null;
+      detail: string | null;
+      symbol: 'BTC' | 'ETH';
+      direction: 'LONG';
+      notionalUsd: number;
+      holdingHours: number;
+      capUsd: number | null;
+      positionFeeUsd: number | null;
+      executionFeeUsd: number | null;
+      estimatedPriceImpactUsd: number | null;
+      fundingFeeUsd: number | null;
+      borrowingFeeUsd: number | null;
+      estimatedExitFeeUsd: number | null;
+      estimatedExitPriceImpactUsd: number | null;
+      tradingFeesUsd: number | null;
+      priceImpactTotalUsd: number | null;
+      carryCostUsd: number | null;
+      otherCostUsd: number | null;
+      effectiveRoundTripCostUsd: number | null;
+      totalCostRatePct: number | null;
+      capDeltaUsd: number | null;
+      capExcessUsd: number | null;
+      requiredCostReductionUsd: number | null;
+      requiredCostReductionPct: number | null;
+      breakEvenGrossMoveUsd: number | null;
+      breakEvenGrossMovePct: number | null;
+      withinCap: boolean | null;
+      blockReason: string | null;
+      source: string | null;
+      apiTimestamp: string | null;
+      fetchedAt: string | null;
+      diagnostics?: {
+        firstFailure?: {
+          component: string;
+          sourceId: string;
+          failureClass: string;
+          httpStatus: number | null;
+          peerHost: string | null;
+          peerPath: string[];
+        } | null;
+        failures: Array<{
+          component: string;
+          sourceId: string;
+          failureClass: string;
+          httpStatus: number | null;
+          peerHost: string | null;
+          peerPath: string[];
+        }>;
+        sourceTraces?: Array<{
+          sourceId: string;
+          attempts: Array<{
+            peerHost: string;
+            failureClass: string | null;
+            httpStatus: number | null;
+          }>;
+          attemptCount: number;
+          retryCount: number;
+          failoverCount: number;
+        }>;
+        attemptCount: number;
+        retryCount?: number;
+        failoverCount: number;
+        lastAttemptAtMs: number | null;
+        lastSuccessAtMs: number | null;
+        lastFailureAtMs: number | null;
+      };
+    }>;
+    blockerIds: string[];
+    manualActionHolds: Array<{
+      id: string;
+      requestedAt: string;
+      requiredAction: string;
+      resumeCondition: string;
+    }>;
+  };
   // 6G-3 §7 — prepare 단계 관측 (조회 전용; null = 조회 실패, "미설정" 위장 금지)
   prepareStageCounts: Record<string, number> | null;
   oldestBlockingTaskAt: string | null;
@@ -101,6 +235,16 @@ export interface GmxApiStatusView {
   };
   blockedReasons: string[];
   notices: string[];
+  // ── CLOSE 정산 관측 (읽기 전용; null = Worker 미실행 또는 조회 실패) ──
+  settlementReconcile: {
+    ok: boolean;
+    unsettledCount: number;
+    settledNow: number;
+    incomplete: boolean;
+    reasons: string[];
+  } | null;
+  legacyZeroFeeCount: number | null;
+  unsettledLiveTradeCount: number | null;
 }
 
 export type GmxApiFetchFailureKind =

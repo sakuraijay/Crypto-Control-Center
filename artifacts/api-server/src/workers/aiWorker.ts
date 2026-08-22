@@ -28,6 +28,7 @@ import { enforceOrderSizing } from "../lib/orderSizingEnforcement";
 import { fetchPaperCostSnapshot, fetchLiveCostSnapshot, COST_DATA_UNAVAILABLE, type LiveCostFetchers } from "../lib/costSnapshot";
 import { storePaperCostSnapshot } from "../lib/paperCostCache";
 import { reconcileLiveSettlements, type ReconcileResult, type SettlementEvidenceFetcher } from "../lib/tradeSettlement";
+import { createProductionCloseSettlementFetcher } from "../lib/productionCloseSettlementFetcher";
 import { DEFAULT_STOP_DISTANCE_FRACTION, computeStopTrigger } from "../lib/stopLossPlan";
 import {
   manilaDayKey, computeReduction, GMX_MIN_POSITION_NOTIONAL_USD,
@@ -58,6 +59,10 @@ import {
   reconcileStartupCloseIntent,
   type ServerPaperExecStatus, type PriceQuote,
 } from "./serverPaperExecutor";
+import {
+  applyRiskProfileToLimits,
+  promoteRiskProfileAtSafeBoundary,
+} from "../lib/riskProfiles";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -208,8 +213,8 @@ function getPaperCostFetchers(): LiveCostFetchers {
   return paperCostFetchers ?? { readonlyEnabled: process.env.GMX_API_READONLY_ENABLED === 'true' };
 }
 
-/** LIVE 정산 증거 fetcher — 기본 미구성 → LIVE_SETTLEMENT_INCOMPLETE (§5 fail-closed) */
-let settlementEvidenceFetcher: SettlementEvidenceFetcher = {};
+/** LIVE 정산 증거 fetcher — production은 read-only RPC/status/PositionReader만 사용 */
+let settlementEvidenceFetcher: SettlementEvidenceFetcher = createProductionCloseSettlementFetcher();
 export function __setSettlementEvidenceFetcherForTests(f: SettlementEvidenceFetcher): void {
   settlementEvidenceFetcher = f;
 }
@@ -461,6 +466,8 @@ class WorkerManager {
       tpPriceUsd:        decision.tpPrice ?? null,
       // paperState.positions는 trades 전체(서버 행 포함)에서 파생 — 서버 행 수와 큰 쪽 사용
       openPositionCount: Math.max(paperState.positions.length, serverOpenRows.length),
+      maxConcurrentPositions: decision.riskProfile.derivedLimits.maxConcurrentPositions,
+      riskProfileSnapshot: decision.riskProfile,
       entriesManilaDay:  paperState.entriesManilaDay,
     });
     if (result.ok) {
@@ -686,12 +693,14 @@ class WorkerManager {
     const prices = getCachedPrices();
     if (!prices || prices.length === 0) return;
 
-    let anyAdvanced = false;
+    let latestAdvancedObservedAt = 0;
+    const receivedAt = Date.now();
 
     for (const tick of prices) {
       const sym = tick.tokenSymbol;
       if (!WORKER_SYMBOLS.includes(sym)) continue;
       if (tick.priceUsd <= 0) continue;
+      if (!Number.isFinite(tick.updatedAt) || tick.updatedAt <= 0 || tick.updatedAt > receivedAt + 5_000) continue;
 
       // #120 P0 — stale 캐시 재인증 금지: upstream tick(updatedAt)이 실제로
       // 전진했을 때만 버퍼·신선도를 갱신한다. 전량 폐기로 캐시가 동결되면
@@ -700,16 +709,18 @@ class WorkerManager {
       const lastSeen = this.lastTickUpdatedAtBySymbol.get(sym) ?? 0;
       if (!(tick.updatedAt > lastSeen)) continue;
       this.lastTickUpdatedAtBySymbol.set(sym, tick.updatedAt);
-      anyAdvanced = true;
+      latestAdvancedObservedAt = Math.max(latestAdvancedObservedAt, tick.updatedAt);
 
       const buf = this.priceBuffer.get(sym) ?? [];
       buf.push(tick.priceUsd);
       if (buf.length > MAX_PRICE_HISTORY) buf.shift();
-      this.priceAtBySymbol.set(sym, Date.now()); // Task #111 — per-symbol 신선도 (새 관측시각)
+      this.priceAtBySymbol.set(sym, tick.updatedAt);
       this.priceBuffer.set(sym, buf);
     }
 
-    if (anyAdvanced) this.lastPriceAt = Date.now();
+    if (latestAdvancedObservedAt > 0) {
+      this.lastPriceAt = Math.max(this.lastPriceAt, latestAdvancedObservedAt);
+    }
   }
 
   /** 현재 가격 버퍼에서 SymbolAnalysis 배열을 빌드한다. */
@@ -1093,6 +1104,17 @@ class WorkerManager {
       // 사이클마다 PENDING 세트를 DB에서 재구성 — 승인/거절/만료된 항목 자동 제거
       await this.loadPendingApprovals();
 
+      // 프로필 변경은 사이클 시작의 안전 경계에서만 승격한다. API는 desired만 기록하며
+      // Worker 외 다른 경로는 applied를 변경할 수 없다.
+      const [baseLimits, paperState] = await Promise.all([
+        this.loadStrategyLimits(),
+        this.loadPaperState(),
+      ]);
+      const riskProfileStatus = await promoteRiskProfileAtSafeBoundary(baseLimits);
+      const riskProfile = riskProfileStatus.applied;
+      const limits = applyRiskProfileToLimits(baseLimits, riskProfile);
+      this.lastLimitsUsed = limits;
+
       const analyses = this.buildAnalyses();
 
       // 데이터 신선도 — 가격이 60초 이상 오래됐으면 CASH로 처리
@@ -1113,16 +1135,6 @@ class WorkerManager {
         };
         return;
       }
-
-      // ── 사용자 설정 + PAPER 운용 상태를 DB에서 로드 ────────────────────────────
-      // ⚠️ LIVE 실제 계정 데이터와 절대 혼합하지 않음 (지갑 미연결 = PAPER 데이터 전용)
-      const [limits, paperState] = await Promise.all([
-        this.loadStrategyLimits(),
-        this.loadPaperState(),
-      ]);
-
-      // 이번 사이클에 사용된 설정 저장 (상태 엔드포인트 노출용)
-      this.lastLimitsUsed = limits;
 
       // ── 기간 PnL 갱신 (equity 기준점 기반, UTC) ─────────────────────────────
       // ⚠️ 반드시 cooldown/거래한도 게이트보다 먼저 수행 — 게이트 조기 반환 시에도
@@ -1238,6 +1250,7 @@ class WorkerManager {
           dailyEntryCount:      paperState.entriesManilaDay,
           consecutiveLossCount: paperState.consecutiveLosses,
           openPositionCount:    paperState.positions.length,
+          maxConcurrentPositions: riskProfile.derivedLimits.maxConcurrentPositions,
           dbOk:                 this.riskDbOk && paperState.liveTestDbOk,
           feeDataOk:            true,  // PAPER: 수수료 0 정의. LIVE 실행 경로는 별도 fee 게이트.
           marketDataFresh:      dataFreshMs < 120_000,
@@ -1309,6 +1322,7 @@ class WorkerManager {
         // Server-authoritative on-chain position count (RPC → 999 fail-closed).
         // Never uses browser-posted data; see fetchServerLiveTestData() in gmx.ts.
         livePositionCount: liveTestData.positionCount,
+        immediateEntryThreshold: riskProfile.derivedLimits.immediateEntryThreshold,
       });
 
       // ── RiskEngine 강제 (6H-1) — LONG/SHORT 결정 veto + 레버리지 클램프 ────
@@ -1428,6 +1442,7 @@ class WorkerManager {
                 orderType: 'MarketIncrease',
               },
               now: nowSizing,
+              riskBudgetPct: riskProfile.derivedLimits.maxRiskPerTradePct,
             });
             if (paperEnf.ok) {
               engineResult.sizeUsd = paperEnf.finalNotionalUsd;
@@ -1504,6 +1519,7 @@ class WorkerManager {
         paperOrderId:  null,
         source:        "server_worker",
         testMode:      testModeActive,
+        riskProfile,
         ...engineResult,
       };
 
@@ -1619,6 +1635,12 @@ class WorkerManager {
     try {
       const { operatingState, primarySymbol } = decision;
       const mainAddress = process.env.GMX_WALLET_ADDRESS ?? '';
+      // 자동 Worker의 모든 fund-moving LIVE action(OPEN/CLOSE/REDUCE)은 동일한
+      // 명시적 opt-in 없이는 금지. Manual Canary는 이 메서드를 거치지 않는다.
+      if (process.env.AUTO_WORKER_LIVE_ENABLED !== 'true') {
+        console.info('[AIWorker] LIVE 자동 실행 차단 — AUTO_WORKER_LIVE_ENABLED ≠ true (OPEN/CLOSE/REDUCE 공통)');
+        return;
+      }
 
       // ── 6H-2A §8 — CLOSE_ALL 실배선: authoritative 포지션 전수 청산 ─────────
       // primarySymbol과 무관하게 실행 — 위험 액션은 특정 심볼 결정에 종속되지 않는다.
@@ -1652,14 +1674,6 @@ class WorkerManager {
       if (currentPrice <= 0) return;
 
       if (operatingState === 'LONG' || operatingState === 'SHORT') {
-        // ── #135 구조적 분리 — 자동 Worker의 신규 LIVE 진입(OPEN)은
-        // AUTO_WORKER_LIVE_ENABLED가 정확히 'true'일 때만 허용 (미설정=차단, fail-closed).
-        // 청산/축소(위 위험 액션 경로)는 보호 목적이므로 게이트 대상이 아니다.
-        // Manual Canary(decisionId `manual-canary:*`)는 이 메서드를 거치지 않는 별도 경로.
-        if (process.env.AUTO_WORKER_LIVE_ENABLED !== 'true') {
-          console.info('[AIWorker] LIVE 자동 신규 진입 차단 — AUTO_WORKER_LIVE_ENABLED ≠ true (수동 Canary 분리 게이트, #135)');
-          return;
-        }
         // ── 6H-2A §5 — 정산 미완료 동안 신규 LIVE 진입 차단 (청산은 허용) ──
         const rec = this.lastSettlementReconcile;
         if (!rec || rec.incomplete) {
@@ -1701,10 +1715,12 @@ class WorkerManager {
           tierNotionalCapUsd: LIVE_TEST_CAPS.maxCapitalUsd,
           defensiveMode: this.lastRiskEvaluation?.sizeFactor != null && this.lastRiskEvaluation.sizeFactor < 1,
           canaryActive: true, // LIVE TEST = Canary 하드캡 우선순위 적용 (§11)
+            riskBudgetPct: decision.riskProfile.derivedLimits.maxRiskPerTradePct,
         };
 
         const result = await executeLiveTestOrder({
           decisionId:        decision.id,
+          riskProfileSnapshot: decision.riskProfile,
           cycleNumber:       cycleNum,
           symbol:            primarySymbol,
           marketAddress:     market.marketToken,
@@ -1869,6 +1885,7 @@ class WorkerManager {
       }
       const result = await closeLiveTestPosition({
         decisionId: `${decision.id}:closeall:${intent.positionKey}`,
+        riskProfileSnapshot: decision.riskProfile,
         cycleNumber: cycleNum, symbol,
         marketAddress: intent.marketAddress, isLong: intent.isLong,
         sizeUsd: intent.closeSizeUsd, currentPriceUsd: price, mainAddress,
@@ -1881,13 +1898,8 @@ class WorkerManager {
         intentId: intent.intentId, positionKey: intent.positionKey,
         status: result.simulated ? 'PENDING' : result.ok ? 'SUBMITTED' : 'FAILED',
       });
-      if (!result.simulated && result.ok) {
-        // 제출 수락 → durable UNSETTLED CLOSE 기록 (reconciliation 대상)
-        await this.recordLiveTradeUnsettled({
-          symbol, action: 'CLOSE', isLong: intent.isLong,
-          sizeUsd: intent.closeSizeUsd, priceUsd: price, marketAddress: intent.marketAddress,
-        });
-      }
+      // CLOSE durable UNSETTLED 행은 closeLiveTestPosition이 제출 전에 intent와
+      // 원자적으로 생성한다. 여기서 legacy 행을 추가하면 미결속 중복이 생긴다.
     }
     this.lastCloseAllSummary = summarizeCloseAll(progress);
     console.warn(
@@ -1959,6 +1971,7 @@ class WorkerManager {
       }
       const result = await closeLiveTestPosition({
         decisionId: idempotencyKey,
+        riskProfileSnapshot: decision.riskProfile,
         cycleNumber: cycleNum, symbol,
         marketAddress: p.marketAddress, isLong: p.isLong,
         sizeUsd: reduction.reduceSizeUsd, currentPriceUsd: price, mainAddress,
@@ -1976,12 +1989,6 @@ class WorkerManager {
           orderKey: result.orderKey ?? null,
           updatedAt: new Date().toISOString(),
         };
-        if (result.ok) {
-          await this.recordLiveTradeUnsettled({
-            symbol, action: 'CLOSE', isLong: p.isLong,
-            sizeUsd: reduction.reduceSizeUsd, priceUsd: price, marketAddress: p.marketAddress,
-          });
-        }
       }
       await this.saveProfitProtectRecords(records); // 상태 갱신 실패 = 예약(UNRESOLVED) 유지 → 재제출 계속 차단
       console.warn(

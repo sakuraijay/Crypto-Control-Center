@@ -28,6 +28,7 @@ import { accrueHoldingCostsFromEntryRates, computePaperNetPnl } from "../lib/hol
 import { computeStopTrigger } from "../lib/stopLossPlan";
 import { computeReduction, GMX_MIN_POSITION_NOTIONAL_USD, canExecuteReduction, buildProfitProtectKey, manilaDayKey, type ProfitProtectRecord } from "../lib/profitProtection";
 import { RISK_POLICY } from "../lib/riskPolicy";
+import { isAppliedRiskProfileSnapshot } from "../lib/riskProfiles";
 
 const fin = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 
@@ -58,8 +59,12 @@ export interface ServerPaperOpenArgs {
   quote: PriceQuote | null;
   /** 엔진 제안 TP — 유효(양수·이익 방향)할 때만 채택, 아니면 null(TP 없음) */
   tpPriceUsd: number | null;
-  /** 현재 미청산 포지션 수 (모든 출처) — 동시 포지션 1개 최종 게이트 */
+  /** 현재 미청산 포지션 수 (모든 출처) */
   openPositionCount: number;
+  /** 적용 프로필 동시 포지션 상한. 서버 절대 상한 2와 교차한다. */
+  maxConcurrentPositions?: number;
+  /** 결정/주문 감사용 불변 프로필 스냅샷 */
+  riskProfileSnapshot: import("./serverTypes").AppliedRiskProfileSnapshot;
   /** Manila 거래일 신규 진입 횟수 — 일일 3회 최종 게이트 */
   entriesManilaDay: number;
   nowMs?: number;
@@ -96,6 +101,7 @@ export interface ServerPaperOpenPositionView {
 
 export interface ServerPaperExecStatus {
   openPosition: ServerPaperOpenPositionView | null;
+  openPositions: ServerPaperOpenPositionView[];
   pendingClose: { reason: string; requestedAt: string } | null;
   lastTickAt: string | null;
   /** 마지막 틱에서 가격 stale로 관리가 스킵됐는지 (관측용) */
@@ -110,6 +116,7 @@ export interface ServerPaperExecStatus {
 
 const state: ServerPaperExecStatus = {
   openPosition: null,
+  openPositions: [],
   pendingClose: null,
   lastTickAt: null,
   lastTickStale: false,
@@ -122,11 +129,12 @@ const state: ServerPaperExecStatus = {
 let tickInFlight = false;
 
 export function getServerPaperStatus(): ServerPaperExecStatus {
-  return { ...state };
+  return { ...state, openPositions: [...state.openPositions] };
 }
 
 export function __resetServerPaperStateForTests(): void {
   state.openPosition = null;
+  state.openPositions = [];
   state.pendingClose = null;
   state.lastTickAt = null;
   state.lastTickStale = false;
@@ -215,10 +223,22 @@ export async function openServerPaperPosition(args: ServerPaperOpenArgs): Promis
 
   if (state.unresolved) return record({ ok: false, reason: `UNRESOLVED 상태 — 신규 진입 차단: ${state.unresolved}` });
   if (!args.decisionId) return record({ ok: false, reason: "decisionId 없음 — idempotency 불가, 진입 거부" });
+  if (!isAppliedRiskProfileSnapshot(args.riskProfileSnapshot)) {
+    return record({ ok: false, reason: "위험 프로필 감사 스냅샷 없음/손상 — 진입 거부" });
+  }
 
   // ── 최종 서버 게이트 (RiskEngine 상류 통과와 별개로 재검증) ────────────────
-  if (args.openPositionCount >= RISK_POLICY.maxConcurrentPositions) {
-    return record({ ok: false, reason: `동시 포지션 한도 (${args.openPositionCount}/${RISK_POLICY.maxConcurrentPositions}) — 진입 거부 (물타기/추가 진입 금지)` });
+  const maxConcurrentPositions = Math.max(
+    1,
+    Math.min(
+      Number.isFinite(args.maxConcurrentPositions)
+        ? Math.floor(args.maxConcurrentPositions as number)
+        : RISK_POLICY.maxConcurrentPositions,
+      RISK_POLICY.maxProfileConcurrentPositions,
+    ),
+  );
+  if (args.openPositionCount >= maxConcurrentPositions) {
+    return record({ ok: false, reason: `동시 포지션 한도 (${args.openPositionCount}/${maxConcurrentPositions}) — 진입 거부` });
   }
   if (args.entriesManilaDay >= RISK_POLICY.maxDailyEntries) {
     return record({ ok: false, reason: `Manila 일일 진입 한도 (${args.entriesManilaDay}/${RISK_POLICY.maxDailyEntries}) — 진입 거부` });
@@ -264,6 +284,16 @@ export async function openServerPaperPosition(args: ServerPaperOpenArgs): Promis
     // 이익 방향이 아니면 TP 미설정 (0/엉뚱한 값 저장 금지)
   }
 
+  const existingRows = await loadServerOpenRows();
+  if (existingRows.some(row => row.symbol.toUpperCase() === args.symbol.toUpperCase())) {
+    return record({ ok: false, reason: `${args.symbol} 기존 포지션 중복 — 동일 심볼 추가 진입/물타기 금지` });
+  }
+  const usedSlots = new Set(existingRows.map(row => row.paperPositionSlot).filter((slot): slot is number => slot != null));
+  const paperPositionSlot = [1, 2].find(slot => !usedSlots.has(slot));
+  if (!paperPositionSlot || existingRows.length >= maxConcurrentPositions) {
+    return record({ ok: false, reason: `서버 PAPER 슬롯 한도 (${existingRows.length}/${maxConcurrentPositions}) — 진입 거부` });
+  }
+
   const tradeId = crypto.randomUUID();
   try {
     const inserted = await db.insert(tradesTable).values({
@@ -293,6 +323,8 @@ export async function openServerPaperPosition(args: ServerPaperOpenArgs): Promis
       openDecisionId: args.decisionId,
       stopPriceUsd: String(stop.plan.triggerPriceUsd),
       takeProfitPriceUsd: tp != null ? String(tp) : null,
+      riskProfileSnapshot: args.riskProfileSnapshot,
+      paperPositionSlot,
     }).onConflictDoNothing({ target: tradesTable.id }).returning({ id: tradesTable.id });
 
     if (!inserted || inserted.length === 0) {
@@ -421,6 +453,7 @@ export async function closeServerPaperPosition(args: ServerPaperCloseArgs): Prom
       closesTradeId: openRow.id,
       closeKind: effectiveKind,
       closeReason: args.reason,
+      riskProfileSnapshot: openRow.riskProfileSnapshot,
     }).onConflictDoNothing({ target: tradesTable.id }).returning({ id: tradesTable.id });
     void inserted;
   } catch (err) {
@@ -600,6 +633,7 @@ export async function manageServerPaperTick(getQuote: PriceLookup, nowMs = Date.
     const openRows = await loadServerOpenRows();
     if (openRows.length === 0) {
       state.openPosition = null;
+      state.openPositions = [];
       if (state.pendingClose) {
         state.pendingClose = null;
         await deleteWorkerState(PENDING_CLOSE_KEY).catch(() => {});
@@ -607,9 +641,10 @@ export async function manageServerPaperTick(getQuote: PriceLookup, nowMs = Date.
       return;
     }
 
+    state.openPositions = openRows.map(row => toView(row, getQuote(row.symbol)));
+    state.openPosition = state.openPositions[0] ?? null;
     for (const row of openRows) {
       const quote = getQuote(row.symbol);
-      state.openPosition = toView(row, quote);
 
       if (!quote || !fin(quote.priceUsd) || quote.priceUsd <= 0 || quote.ageMs > MAX_MANAGE_PRICE_AGE_MS) {
         state.lastTickStale = true; // stale — 이번 틱 관리 스킵 (합성 가격 금지)
@@ -641,11 +676,13 @@ export async function manageServerPaperTick(getQuote: PriceLookup, nowMs = Date.
       if (remaining.length === 0) {
         state.pendingClose = null;
         state.openPosition = null;
+        state.openPositions = [];
         await deleteWorkerState(PENDING_CLOSE_KEY).catch(() => {});
       }
     } else {
       const remaining = await loadServerOpenRows();
-      state.openPosition = remaining.length > 0 ? toView(remaining[0], getQuote(remaining[0].symbol)) : null;
+      state.openPositions = remaining.map(row => toView(row, getQuote(row.symbol)));
+      state.openPosition = state.openPositions[0] ?? null;
     }
   } catch (err) {
     console.error("[ServerPaper] 관리 틱 오류:", (err as Error).message);

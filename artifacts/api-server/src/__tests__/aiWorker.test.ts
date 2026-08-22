@@ -70,6 +70,37 @@ vi.mock('../workers/stateEngine', () => ({
   runAiEngine: vi.fn(),
 }));
 
+vi.mock('../lib/riskProfiles', () => ({
+  applyRiskProfileToLimits: (base: Record<string, unknown>) => base,
+  promoteRiskProfileAtSafeBoundary: async (base: Record<string, unknown>) => ({
+    desired: {
+      name: 'conservative',
+      version: 'risk-profile/v1',
+      requestedAt: '2026-08-21T00:00:00.000Z',
+    },
+    applied: {
+      name: 'conservative',
+      version: 'risk-profile/v1',
+      appliedAt: '2026-08-21T00:00:00.000Z',
+      derivedLimits: {
+        immediateEntryThreshold: 80,
+        maxRiskPerTradePct: 0.75,
+        reserveCashPct: Number(base.reserveCashPct ?? 20),
+        maxMarginPerTradeUsd: Number(base.maxMarginPerTrade ?? 334),
+        maxConcurrentPositions: 1,
+        cooldownMinutes: Number(base.cooldownMinutes ?? 30),
+        maxLeverage: Math.min(Number(base.maxLeverage ?? 3), 3),
+        maxTotalExposureUsd: Number(base.maxTotalExposureUSDT ?? 3_000),
+        allocatedTradingCapitalUsd: Number(base.tradingCapital ?? 1_000),
+        maxRiskPerTradeUsd: Number(base.tradingCapital ?? 1_000) * 0.0075,
+      },
+    },
+    pending: false,
+    safeBoundary: true,
+    reason: null,
+  }),
+}));
+
 vi.mock('../workers/indicators', () => ({
   computeIndicators: vi.fn(() => ({
     rsi14: 50, ema9: 50000, ema21: 50000, emaCross: 'neutral',
@@ -97,6 +128,7 @@ vi.mock('../routes/gmx', () => ({
 // 모킹 이후 실제 모듈 import
 import { workerManager } from '../workers/aiWorker';
 import { runAiEngine }   from '../workers/stateEngine';
+import { getCachedPrices } from '../routes/gmx';
 import { db }            from '@workspace/db';
 
 // ── 최소 유효 AI 결정 (CASH — 가장 안전한 기본값) ──────────────────────────────
@@ -139,6 +171,8 @@ function resetWorker() {
   wm.lastLiveTestMode        = false;
   wm.lastLiveTestDbOk        = true;
   wm.lastPriceAt             = 0;
+  (wm.priceAtBySymbol as Map<string, number>).clear();
+  (wm.lastTickUpdatedAtBySymbol as Map<string, number>).clear();
 
   const pb = wm.priceBuffer as Map<string, number[]>;
   pb.clear();
@@ -159,6 +193,39 @@ function resetWorker() {
   if (cTimer) clearTimeout(cTimer);
   wm.cycleTimer = null;
 }
+
+describe('upstream price timestamp binding', () => {
+  it('does not re-stamp a stale-but-newly-received tick with local now', () => {
+    resetWorker();
+    const observedAt = Date.now() - 120_000;
+    vi.mocked(getCachedPrices).mockReturnValue([{
+      tokenSymbol: 'ETH',
+      priceUsd: 3_000,
+      updatedAt: observedAt,
+    }] as never);
+    const wm = workerManager as unknown as {
+      updatePriceBuffers(): void;
+      priceAtBySymbol: Map<string, number>;
+    };
+    wm.updatePriceBuffers();
+    expect(wm.priceAtBySymbol.get('ETH')).toBe(observedAt);
+    expect(workerManager.getPriceQuote('ETH')!.ageMs).toBeGreaterThanOrEqual(119_000);
+  });
+
+  it('rejects ticks without a valid upstream timestamp', () => {
+    resetWorker();
+    vi.mocked(getCachedPrices).mockReturnValue([{
+      tokenSymbol: 'ETH',
+      priceUsd: 3_000,
+    }] as never);
+    const wm = workerManager as unknown as {
+      updatePriceBuffers(): void;
+      priceAtBySymbol: Map<string, number>;
+    };
+    wm.updatePriceBuffers();
+    expect(wm.priceAtBySymbol.has('ETH')).toBe(false);
+  });
+});
 
 // ── DB 행 헬퍼 ────────────────────────────────────────────────────────────────
 
@@ -644,6 +711,29 @@ describe('#135 AUTO_WORKER_LIVE_ENABLED 게이트 (F22)', () => {
       );
       expect(infoSpy.mock.calls.some(c => String(c[0]).includes('AUTO_WORKER_LIVE_ENABLED'))).toBe(true);
     } finally {
+      infoSpy.mockRestore();
+    }
+  });
+
+  it('플래그 미설정이면 자동 CLOSE_ALL/REDUCE도 OPEN과 동일하게 차단된다', async () => {
+    delete process.env.AUTO_WORKER_LIVE_ENABLED;
+    const { workerManager } = await import('../workers/aiWorker');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const closeSpy = vi.spyOn(workerManager as any, 'executeCloseAllPositions');
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (workerManager as any).tryLiveTestExecution(
+        { operatingState: 'CASH', confidence: 90, executionType: 'close_all', primarySymbol: null },
+        [], { positionCount: 1 },
+        { liveTestAccumLossUsd: 0, liveTestDbOk: true },
+        { liveTestMode: true, tradingCapital: 100 }, 1,
+        { closeAllRequested: true, reduce70Requested: false },
+      );
+      expect(closeSpy).not.toHaveBeenCalled();
+      expect(infoSpy.mock.calls.some(c => String(c[0]).includes('AUTO_WORKER_LIVE_ENABLED'))).toBe(true);
+    } finally {
+      closeSpy.mockRestore();
       infoSpy.mockRestore();
     }
   });
