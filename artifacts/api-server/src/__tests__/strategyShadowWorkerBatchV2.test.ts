@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { CostSnapshot } from '../lib/costSnapshot';
-import type { StrategyShadowRecord } from './strategyShadowAdapterV2';
-import type { StrategyShadowRunnerResult } from './strategyShadowRunnerV2';
+import type { StrategyShadowRecord } from '../intel/strategyShadowAdapterV2';
+import type { StrategyShadowRunnerResult } from '../intel/strategyShadowRunnerV2';
 import {
   buildStrategyShadowWorkerBatch,
   deriveConservativeShadowCostBps,
   type StrategyShadowWorkerBatchInput,
-} from './strategyShadowWorkerBatchV2';
+} from '../intel/strategyShadowWorkerBatchV2';
 
 const NOW = Date.parse('2026-08-23T00:00:00.000Z');
 const MARKET = '0x1111111111111111111111111111111111111111';
