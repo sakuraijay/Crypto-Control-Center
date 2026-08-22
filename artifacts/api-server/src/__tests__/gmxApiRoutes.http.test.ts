@@ -59,6 +59,7 @@ import {
   __getGmxApiReadinessCoordinatorStateForTests,
   __resetGmxApiReadinessCoordinatorForTests,
   __setGmxApiReadinessCoordinatorDepsForTests,
+  runGmxApiReadinessRefresh,
   type CoordinatorDeps,
 } from '../lib/gmxApiReadinessCoordinator';
 import {
@@ -367,6 +368,108 @@ describe('POST /api/executor/gmx-api/readiness/refresh', () => {
     ]);
     expect(calls).toEqual([{ method: 'GET', path: '/markets/tickers' }]);
     expect(dbWriteCalls).toEqual([]);
+  });
+
+  it('coordinator refresh 실패 뒤 shared in-flight를 해제하고 다음 refresh를 새 generation으로 재실행한다', async () => {
+    const { t, calls } = makeSpyTransport(true);
+    coordinatorTransport = t;
+    refreshCanarySpy
+      .mockRejectedValueOnce(new Error('injected readonly failure'))
+      .mockResolvedValueOnce(emptyCanaryEvidence());
+    installCoordinatorDeps();
+
+    await expect(runGmxApiReadinessRefresh({
+      singlePeerOnly: true,
+    })).rejects.toThrow('injected readonly failure');
+
+    expect(__getGmxApiReadinessCoordinatorStateForTests()).toEqual({
+      active: false,
+      joinCount: 0,
+    });
+    expect(getPaperRuntimeReadinessSnapshot(
+      Date.now(),
+      coordinatorEnv,
+    ).scheduler.inFlight).toBe(false);
+
+    const retried = await runGmxApiReadinessRefresh({
+      singlePeerOnly: true,
+    });
+
+    expect(retried.generation).toBe(2);
+    expect(refreshCanarySpy).toHaveBeenCalledTimes(2);
+    expect(runPaperCycleSpy).toHaveBeenCalledTimes(1);
+    expect(refreshStopSpy).toHaveBeenCalledTimes(1);
+    expect(__getGmxApiReadinessCoordinatorStateForTests()).toEqual({
+      active: false,
+      joinCount: 0,
+    });
+    expect(calls).toEqual([
+      { method: 'GET', path: '/markets/tickers' },
+      { method: 'GET', path: '/markets/tickers' },
+    ]);
+    expect(calls.some((call) =>
+      call.method === 'POST'
+      || /rpc|prepare|sign|submit/i.test(call.path))).toBe(false);
+    expect(dbWriteCalls).toEqual([]);
+  });
+
+  it('scheduler stop 뒤 예약된 stale timer가 PAPER cycle을 다시 시작하지 않는다', async () => {
+    vi.useFakeTimers();
+    try {
+      const { t, calls } = makeSpyTransport(true);
+      coordinatorTransport = t;
+      let resolveFirstCycle: (() => void) | null = null;
+      const firstCycle = new Promise<void>((resolve) => {
+        resolveFirstCycle = resolve;
+      });
+      refreshStopSpy.mockImplementation(async () => {
+        resolveFirstCycle!();
+        return getStopExecutionCapability();
+      });
+      installCoordinatorDeps();
+
+      startPaperRuntimeReadinessScheduler();
+      await firstCycle;
+      for (let i = 0; i < 10; i += 1) await Promise.resolve();
+
+      const beforeStop = getPaperRuntimeReadinessSnapshot(
+        Date.now(),
+        coordinatorEnv,
+      ).scheduler;
+      expect(beforeStop.running).toBe(true);
+      expect(beforeStop.inFlight).toBe(false);
+      expect(beforeStop.nextRefreshAtMs).not.toBeNull();
+      expect(refreshCanarySpy).toHaveBeenCalledTimes(1);
+      expect(runPaperCycleSpy).toHaveBeenCalledTimes(1);
+      expect(refreshStopSpy).toHaveBeenCalledTimes(1);
+
+      stopPaperRuntimeReadinessScheduler();
+      expect(getPaperRuntimeReadinessSnapshot(
+        Date.now(),
+        coordinatorEnv,
+      ).scheduler).toMatchObject({
+        running: false,
+        inFlight: false,
+        nextRefreshAtMs: null,
+      });
+
+      await vi.advanceTimersByTimeAsync(beforeStop.intervalMs * 3);
+
+      expect(refreshCanarySpy).toHaveBeenCalledTimes(1);
+      expect(runPaperCycleSpy).toHaveBeenCalledTimes(1);
+      expect(refreshStopSpy).toHaveBeenCalledTimes(1);
+      expect(calls).toEqual([
+        { method: 'GET', path: '/markets/tickers' },
+        { method: 'GET', path: '/markets/tickers' },
+      ]);
+      expect(calls.some((call) =>
+        call.method === 'POST'
+        || /rpc|prepare|sign|submit/i.test(call.path))).toBe(false);
+      expect(dbWriteCalls).toEqual([]);
+    } finally {
+      stopPaperRuntimeReadinessScheduler();
+      vi.useRealTimers();
+    }
   });
 
   it('scheduler refresh 중 HTTP refresh가 합류해 canary external read를 중복하지 않는다', async () => {
