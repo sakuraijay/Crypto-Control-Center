@@ -182,6 +182,19 @@ export interface GmxApiStatusView {
       source: string | null;
       apiTimestamp: string | null;
       fetchedAt: string | null;
+      diagnostics?: {
+        failures: Array<{
+          component: string;
+          sourceId: string;
+          failureClass: string;
+          peerHost: string | null;
+        }>;
+        attemptCount: number;
+        failoverCount: number;
+        lastAttemptAtMs: number | null;
+        lastSuccessAtMs: number | null;
+        lastFailureAtMs: number | null;
+      };
     }>;
     blockerIds: string[];
     manualActionHolds: Array<{

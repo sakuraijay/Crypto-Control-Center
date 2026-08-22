@@ -536,6 +536,19 @@ describe('GmxApiStatusCard — PAPER runtime fixture', () => {
       source: null,
       apiTimestamp: null,
       fetchedAt: null,
+      diagnostics: {
+        failures: [{
+          component: 'funding',
+          sourceId: 'GMX_API_MARKETS_TICKERS',
+          failureClass: 'timeout',
+          peerHost: 'arbitrum.gmxapi.ai',
+        }],
+        attemptCount: 2,
+        failoverCount: 1,
+        lastAttemptAtMs: 1_777_000_000_000,
+        lastSuccessAtMs: null,
+        lastFailureAtMs: 1_777_000_000_000,
+      },
     };
 
     const html = renderToStaticMarkup(<PaperCostDetails symbol="BTC" cost={stale} />);
@@ -544,5 +557,9 @@ describe('GmxApiStatusCard — PAPER runtime fixture', () => {
     expect(html).not.toContain('notional 대비');
     expect(html).not.toContain('source');
     expect(html).not.toContain('gross move');
+    expect(html).toContain('funding');
+    expect(html).toContain('GMX_API_MARKETS_TICKERS');
+    expect(html).toContain('timeout');
+    expect(html).toContain('failover 1');
   });
 });

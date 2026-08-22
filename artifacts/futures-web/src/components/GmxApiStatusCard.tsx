@@ -93,6 +93,28 @@ function fmtPct(value: number | null, digits = 3): string {
 type PaperReadinessView = NonNullable<GmxApiStatusView['paperRuntimeReadiness']>;
 type PaperCostView = PaperReadinessView['costs']['BTC'];
 
+function PaperCostDiagnostics({ symbol, cost }: { symbol: 'BTC' | 'ETH'; cost: PaperCostView }) {
+  const diagnostics = cost.diagnostics;
+  if (!diagnostics) return null;
+  const failures = diagnostics.failures.length > 0
+    ? diagnostics.failures.map((failure) =>
+      `${failure.component}←${failure.sourceId}/${failure.failureClass}${failure.peerHost ? `@${failure.peerHost}` : ''}`,
+    ).join(' · ')
+    : '성분 실패 없음';
+  return (
+    <div className="font-mono text-[10px] text-muted-foreground leading-relaxed"
+      data-testid={`paper-cost-${symbol.toLowerCase()}-diagnostics`}>
+      <p>{failures}</p>
+      <p>
+        시도 {diagnostics.attemptCount} · failover {diagnostics.failoverCount}
+        {' · '}마지막 시도 {fmtEpochMs(diagnostics.lastAttemptAtMs)}
+        {' · '}성공 {fmtEpochMs(diagnostics.lastSuccessAtMs)}
+        {' · '}실패 {fmtEpochMs(diagnostics.lastFailureAtMs)}
+      </p>
+    </div>
+  );
+}
+
 export function PaperCostDetails({
   symbol,
   cost,
@@ -107,9 +129,12 @@ export function PaperCostDetails({
 
   if (!usable) {
     return (
-      <p className="text-[10px] text-amber-300" data-testid={`paper-cost-${symbol.toLowerCase()}-blocked`}>
-        {cost.blockReason ?? cost.failureId ?? `${symbol} 비용 snapshot 사용 불가`}
-      </p>
+      <>
+        <p className="text-[10px] text-amber-300" data-testid={`paper-cost-${symbol.toLowerCase()}-blocked`}>
+          {cost.blockReason ?? cost.failureId ?? `${symbol} 비용 snapshot 사용 불가`}
+        </p>
+        <PaperCostDiagnostics symbol={symbol} cost={cost} />
+      </>
     );
   }
 
@@ -139,6 +164,7 @@ export function PaperCostDetails({
       <p className="text-[10px] text-muted-foreground">
         source {cost.source ?? '—'} · fetched {cost.fetchedAt ?? '—'} · observed {fmtEpochMs(cost.observedAtMs)} · age {fmtAge(cost.ageMs)}
       </p>
+      <PaperCostDiagnostics symbol={symbol} cost={cost} />
       {cost.blockReason && <p className="text-[10px] text-red-300">{cost.blockReason}</p>}
     </>
   );
