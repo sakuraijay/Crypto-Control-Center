@@ -96,17 +96,32 @@ type PaperCostView = PaperReadinessView['costs']['BTC'];
 function PaperCostDiagnostics({ symbol, cost }: { symbol: 'BTC' | 'ETH'; cost: PaperCostView }) {
   const diagnostics = cost.diagnostics;
   if (!diagnostics) return null;
-  const failures = diagnostics.failures.length > 0
-    ? diagnostics.failures.map((failure) =>
-      `${failure.component}←${failure.sourceId}/${failure.failureClass}${failure.peerHost ? `@${failure.peerHost}` : ''}`,
-    ).join(' · ')
+  const firstFailure = diagnostics.firstFailure ?? diagnostics.failures[0] ?? null;
+  const firstFailureText = firstFailure
+    ? [
+      `첫 실패 ${firstFailure.component}←${firstFailure.sourceId}/${firstFailure.failureClass}`,
+      firstFailure.httpStatus === null ? null : `HTTP ${firstFailure.httpStatus}`,
+      firstFailure.peerPath.length > 0
+        ? firstFailure.peerPath.join('→')
+        : firstFailure.peerHost,
+    ].filter(Boolean).join(' · ')
     : '성분 실패 없음';
+  const sourceTraceText = (diagnostics.sourceTraces ?? [])
+    .map((trace) => {
+      const path = trace.attempts
+        .map((attempt) =>
+          `${attempt.peerHost}:${attempt.failureClass ?? 'ok'}${attempt.httpStatus === null ? '' : `/HTTP${attempt.httpStatus}`}`)
+        .join('→');
+      return `${trace.sourceId}[${path || '호출 없음'}]`;
+    })
+    .join(' · ');
   return (
     <div className="font-mono text-[10px] text-muted-foreground leading-relaxed"
       data-testid={`paper-cost-${symbol.toLowerCase()}-diagnostics`}>
-      <p>{failures}</p>
+      <p>{firstFailureText}</p>
+      {sourceTraceText && <p>{sourceTraceText}</p>}
       <p>
-        시도 {diagnostics.attemptCount} · failover {diagnostics.failoverCount}
+        시도 {diagnostics.attemptCount} · retry {diagnostics.retryCount ?? 0} · failover {diagnostics.failoverCount}
         {' · '}마지막 시도 {fmtEpochMs(diagnostics.lastAttemptAtMs)}
         {' · '}성공 {fmtEpochMs(diagnostics.lastSuccessAtMs)}
         {' · '}실패 {fmtEpochMs(diagnostics.lastFailureAtMs)}

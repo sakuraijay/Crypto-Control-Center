@@ -41,6 +41,53 @@ const ACCEPTED_DECIMALS_SOURCES = new Set([
   'sdk+onchain',
   'sdk-synthetic+onchain-no-code',
 ]);
+const SAFE_COST_COMPONENTS = new Set([
+  'feeParams',
+  'fundingBorrowingRates',
+  'ethPrice',
+  'impactInputs',
+  'indexTokenRegistry',
+  'indexPrice',
+  'entryFee',
+  'exitFee',
+  'funding',
+  'borrowing',
+  'priceImpact',
+  'gasExecution',
+  'costSnapshotFetchedAt',
+  'snapshotValidation',
+  'unknown',
+]);
+const SAFE_COST_SOURCE_IDS = new Set([
+  'RPC_DATASTORE',
+  'GMX_API_MARKETS_TICKERS',
+  'GMX_API_MARKETS_INFO',
+  'GMX_API_READONLY',
+  'ETH_PRICE_CACHE',
+  'INDEX_PRICE_CACHE',
+  'SDK_MARKET_REGISTRY',
+  'COST_COMPONENT_TIMESTAMPS',
+  'COST_ENGINE',
+  'EXECUTION_COST_SNAPSHOT',
+  'EXECUTION_COST_READINESS',
+]);
+const SAFE_COST_FAILURE_CLASSES = new Set([
+  'config',
+  'timeout',
+  'network',
+  '4xx',
+  '429',
+  '5xx',
+  'decode',
+  'rpc',
+  'cache',
+  'validation',
+  'unavailable',
+]);
+const SAFE_GMX_PEER_HOSTS = new Set([
+  'arbitrum.gmxapi.io',
+  'arbitrum.gmxapi.ai',
+]);
 type CanarySymbol = (typeof SYMBOLS)[number];
 export type PaperEvidenceDisplayState = 'not_evaluated' | 'verified' | 'stale' | 'failed';
 
@@ -106,17 +153,36 @@ export interface PaperRpcEvidenceView extends PaperEvidenceMeta {
 }
 
 export interface PaperCostReadinessDiagnosticsView {
-  failures: Array<{
-    component: string;
-    sourceId: string;
-    failureClass: string;
-    peerHost: string | null;
-  }>;
+  firstFailure: PaperCostReadinessFailureView | null;
+  failures: PaperCostReadinessFailureView[];
+  sourceTraces: PaperCostReadinessSourceTraceView[];
   attemptCount: number;
+  retryCount: number;
   failoverCount: number;
   lastAttemptAtMs: number | null;
   lastSuccessAtMs: number | null;
   lastFailureAtMs: number | null;
+}
+
+export interface PaperCostReadinessFailureView {
+  component: string;
+  sourceId: string;
+  failureClass: string;
+  httpStatus: number | null;
+  peerHost: string | null;
+  peerPath: string[];
+}
+
+export interface PaperCostReadinessSourceTraceView {
+  sourceId: string;
+  attempts: Array<{
+    peerHost: string;
+    failureClass: string | null;
+    httpStatus: number | null;
+  }>;
+  attemptCount: number;
+  retryCount: number;
+  failoverCount: number;
 }
 
 export interface PaperCostEvidenceView extends PaperEvidenceMeta {
@@ -124,7 +190,7 @@ export interface PaperCostEvidenceView extends PaperEvidenceMeta {
   direction: 'LONG';
   notionalUsd: number;
   holdingHours: number;
-  capUsd: number;
+  capUsd: number | null;
   positionFeeUsd: number | null;
   executionFeeUsd: number | null;
   estimatedPriceImpactUsd: number | null;
@@ -218,8 +284,11 @@ let costState: Record<CanarySymbol, EvidenceAttempt<CostObservation>> = {
   ETH: emptyAttempt(),
 };
 const emptyCostDiagnostics = (): PaperCostReadinessDiagnosticsView => ({
+  firstFailure: null,
   failures: [],
+  sourceTraces: [],
   attemptCount: 0,
+  retryCount: 0,
   failoverCount: 0,
   lastAttemptAtMs: null,
   lastSuccessAtMs: null,
@@ -243,6 +312,135 @@ let lastCompletedAtMs: number | null = null;
 let lastSuccessAtMs: number | null = null;
 let nextRefreshAtMs: number | null = null;
 let lastFailureId: string | null = null;
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object'
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function safeCount(value: unknown, max = 16): number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0
+    ? Math.min(value, max)
+    : 0;
+}
+
+function safeHttpStatus(value: unknown): number | null {
+  return typeof value === 'number'
+    && Number.isInteger(value)
+    && value >= 100
+    && value <= 599
+    ? value
+    : null;
+}
+
+function safePeerHost(value: unknown): string | null {
+  return typeof value === 'string' && SAFE_GMX_PEER_HOSTS.has(value)
+    ? value
+    : null;
+}
+
+function safePeerPath(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map(safePeerHost)
+    .filter((host): host is string => host !== null)
+    .slice(0, 2);
+}
+
+function safeTimestamp(value: unknown, fallbackAtMs: number): number {
+  return typeof value === 'number'
+    && Number.isFinite(value)
+    && value > 0
+    && value <= fallbackAtMs + 5_000
+    ? value
+    : fallbackAtMs;
+}
+
+function normalizeCostFailure(value: unknown): PaperCostReadinessFailureView | null {
+  const record = asRecord(value);
+  if (!record) return null;
+  const component = typeof record.component === 'string'
+    && SAFE_COST_COMPONENTS.has(record.component)
+    ? record.component
+    : 'unknown';
+  const sourceId = typeof record.sourceId === 'string'
+    && SAFE_COST_SOURCE_IDS.has(record.sourceId)
+    ? record.sourceId
+    : 'EXECUTION_COST_READINESS';
+  const failureClass = typeof record.failureClass === 'string'
+    && SAFE_COST_FAILURE_CLASSES.has(record.failureClass)
+    ? record.failureClass
+    : 'unavailable';
+  return {
+    component,
+    sourceId,
+    failureClass,
+    httpStatus: safeHttpStatus(record.httpStatus),
+    peerHost: safePeerHost(record.peerHost),
+    peerPath: safePeerPath(record.peerPath),
+  };
+}
+
+function normalizeCostDiagnostics(
+  value: unknown,
+  fallbackAtMs: number,
+): Omit<
+  PaperCostReadinessDiagnosticsView,
+  'lastSuccessAtMs' | 'lastFailureAtMs'
+> {
+  const record = asRecord(value);
+  const failures = (Array.isArray(record?.failures) ? record.failures : [])
+    .map(normalizeCostFailure)
+    .filter((failure): failure is PaperCostReadinessFailureView => failure !== null)
+    .slice(0, 8);
+  const sourceTraces = (Array.isArray(record?.sourceTraces) ? record.sourceTraces : [])
+    .map((value): PaperCostReadinessSourceTraceView | null => {
+      const trace = asRecord(value);
+      if (!trace || typeof trace.sourceId !== 'string'
+        || !SAFE_COST_SOURCE_IDS.has(trace.sourceId)) return null;
+      const attempts = (Array.isArray(trace.attempts) ? trace.attempts : [])
+        .map((value) => {
+          const attempt = asRecord(value);
+          const peerHost = safePeerHost(attempt?.peerHost);
+          if (!attempt || peerHost === null) return null;
+          const failureClass = attempt.failureClass === null
+            ? null
+            : typeof attempt.failureClass === 'string'
+              && SAFE_COST_FAILURE_CLASSES.has(attempt.failureClass)
+              ? attempt.failureClass
+              : 'unavailable';
+          return {
+            peerHost,
+            failureClass,
+            httpStatus: safeHttpStatus(attempt.httpStatus),
+          };
+        })
+        .filter((attempt): attempt is PaperCostReadinessSourceTraceView['attempts'][number] =>
+          attempt !== null)
+        .slice(0, 2);
+      return {
+        sourceId: trace.sourceId,
+        attempts,
+        attemptCount: safeCount(trace.attemptCount, 2),
+        retryCount: safeCount(trace.retryCount, 2),
+        failoverCount: safeCount(trace.failoverCount, 1),
+      };
+    })
+    .filter((trace): trace is PaperCostReadinessSourceTraceView => trace !== null)
+    .slice(0, 4);
+  return {
+    firstFailure: failures[0]
+      ? { ...failures[0], peerPath: [...failures[0].peerPath] }
+      : null,
+    failures,
+    sourceTraces,
+    attemptCount: safeCount(record?.attemptCount),
+    retryCount: safeCount(record?.retryCount),
+    failoverCount: safeCount(record?.failoverCount),
+    lastAttemptAtMs: safeTimestamp(record?.attemptedAtMs, fallbackAtMs),
+  };
+}
 
 const DEFAULT_DEPS: PaperReadinessCycleDeps = {
   env: process.env,
@@ -397,11 +595,10 @@ function updateCanaryEvidence(
     const costResult = result.costs[symbol];
     const reportedDiagnostics = costResult?.diagnostics;
     const previousDiagnostics = costDiagnosticsState[symbol];
-    const attemptAtMs = reportedDiagnostics?.attemptedAtMs ?? atMs;
+    const normalizedDiagnostics = normalizeCostDiagnostics(reportedDiagnostics, atMs);
+    const attemptAtMs = normalizedDiagnostics.lastAttemptAtMs;
     costDiagnosticsState[symbol] = {
-      failures: reportedDiagnostics?.failures.map((failure) => ({ ...failure })) ?? [],
-      attemptCount: reportedDiagnostics?.attemptCount ?? 0,
-      failoverCount: reportedDiagnostics?.failoverCount ?? 0,
+      ...normalizedDiagnostics,
       lastAttemptAtMs: attemptAtMs,
       lastSuccessAtMs: previousDiagnostics.lastSuccessAtMs,
       lastFailureAtMs: previousDiagnostics.lastFailureAtMs,
@@ -419,6 +616,7 @@ function updateCanaryEvidence(
       const observedAtMs = Date.parse(costResult.snapshot.apiTimestamp ?? '');
       if (validated.ok && Number.isFinite(observedAtMs) && observedAtMs > 0) {
         costDiagnosticsState[symbol].lastSuccessAtMs = attemptAtMs;
+        costDiagnosticsState[symbol].firstFailure = null;
         costDiagnosticsState[symbol].failures = [];
         setSuccess(costState[symbol], atMs, {
           snapshot: { ...costResult.snapshot },
@@ -433,8 +631,14 @@ function updateCanaryEvidence(
             component: 'snapshotValidation',
             sourceId: 'EXECUTION_COST_SNAPSHOT',
             failureClass: 'validation',
+            httpStatus: null,
             peerHost: null,
+            peerPath: [],
           }];
+          costDiagnosticsState[symbol].firstFailure = {
+            ...costDiagnosticsState[symbol].failures[0],
+            peerPath: [],
+          };
         }
         setFailure(
           costState[symbol],
@@ -453,14 +657,20 @@ function updateCanaryEvidence(
           component: 'unknown',
           sourceId: 'EXECUTION_COST_READINESS',
           failureClass: 'unavailable',
+            httpStatus: null,
           peerHost: null,
+            peerPath: [],
         }];
+          costDiagnosticsState[symbol].firstFailure = {
+            ...costDiagnosticsState[symbol].failures[0],
+            peerPath: [],
+          };
       }
       setFailure(
         costState[symbol],
         atMs,
         `COST_${symbol}_UNAVAILABLE`,
-        sanitizeCostError(costResult?.reason ?? '비용 관측 실패'),
+          '공식 GMX read-only 비용 관측 실패 (구조화 진단 참조)',
       );
     }
   }
@@ -667,7 +877,7 @@ function costView(symbol: CanarySymbol, nowMs: number): PaperCostEvidenceView {
     direction: 'LONG',
     notionalUsd: PAPER_COST_NOTIONAL_USD,
     holdingHours: PAPER_COST_HOLDING_HOURS,
-    capUsd: cap,
+    capUsd: usable ? cap : null,
     positionFeeUsd: snapshot?.positionFeeUsd ?? null,
     executionFeeUsd: snapshot?.executionFeeUsd ?? null,
     estimatedPriceImpactUsd: snapshot?.estimatedPriceImpactUsd ?? null,

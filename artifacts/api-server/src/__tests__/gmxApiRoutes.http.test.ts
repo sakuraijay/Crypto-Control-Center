@@ -204,7 +204,7 @@ describe('GET /api/executor/gmx-api/status', () => {
     });
     expect(typeof s.paperRuntimeReadiness.paperMode).toBe('boolean');
     expect(s.paperRuntimeReadiness).toHaveProperty('decimals.BTC.state');
-    expect(s.paperRuntimeReadiness).toHaveProperty('costs.BTC.capUsd', 0.4);
+    expect(s.paperRuntimeReadiness).toHaveProperty('costs.BTC.capUsd', null);
     expect(s.paperRuntimeReadiness.costs.BTC).toMatchObject({
       effectiveRoundTripCostUsd: null,
       totalCostRatePct: null,

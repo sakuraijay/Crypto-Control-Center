@@ -174,7 +174,20 @@ describe('6G-1 §3 — gmxApiTransport peer·플래그·failover·단일 제출'
     const r = await t.getJson('/markets');
     expect(r.ok).toBe(true);
     expect(r.attemptCount).toBe(2);
+    expect(r.retryCount).toBe(0);
     expect(r.failoverCount).toBe(1);
+    expect(r.attemptTrace).toEqual([
+      {
+        peerHost: 'arbitrum.gmxapi.io',
+        kind: 'network',
+        httpStatus: null,
+      },
+      {
+        peerHost: 'arbitrum.gmxapi.ai',
+        kind: null,
+        httpStatus: 200,
+      },
+    ]);
     expect(fetchSpy).toHaveBeenCalledTimes(2);
     const hosts = fetchSpy.mock.calls.map((c: unknown[]) => new URL(String(c[0])).host);
     expect(new Set(hosts).size).toBe(2); // 서로 다른 peer
@@ -197,6 +210,27 @@ describe('6G-1 §3 — gmxApiTransport peer·플래그·failover·단일 제출'
     expect(fetchSpy).toHaveBeenCalledTimes(GMX_API_PEERS.length);
   });
 
+  it('readonly 5xx failover 실패는 정수 status·정규화 kind·allowlist peer 경로만 남긴다', async () => {
+    fetchSpy.mockImplementation(async () => jsonResponse({ error: 'upstream unavailable' }, 503));
+    const r = await createGmxApiTransport(BOTH_FLAGS).getJson('/markets/info');
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error('failure expected');
+    expect(r).toMatchObject({
+      kind: 'http_5xx',
+      httpStatus: 503,
+      attemptCount: 2,
+      retryCount: 0,
+      failoverCount: 1,
+      attemptTrace: [
+        { peerHost: 'arbitrum.gmxapi.io', kind: 'http_5xx', httpStatus: 503 },
+        { peerHost: 'arbitrum.gmxapi.ai', kind: 'http_5xx', httpStatus: 503 },
+      ],
+    });
+    expect(JSON.stringify(r)).not.toContain('https://');
+    expect(JSON.stringify(r)).not.toContain('/markets/info');
+    expect(fetchSpy).toHaveBeenCalledTimes(GMX_API_PEERS.length);
+  });
+
   it('submit 응답 상한은 기존 256KiB로 유지한다', async () => {
     fetchSpy.mockImplementation(async () =>
       jsonResponse({ result: 'x'.repeat(GMX_API_MAX_SUBMIT_RESPONSE_BYTES + 1) }));
@@ -213,6 +247,11 @@ describe('6G-1 §3 — gmxApiTransport peer·플래그·failover·단일 제출'
     const r = await t.postJson('/orders/txns/submit', { a: 1 }, 'submit');
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.ambiguous).toBe(true);
+    expect(r).toMatchObject({
+      attemptCount: 1,
+      retryCount: 0,
+      failoverCount: 0,
+    });
     expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 

@@ -57,44 +57,58 @@ function costSnapshot(symbol: 'BTC' | 'ETH'): CostSnapshot {
 function canaryResult(options: {
   btcSource?: string;
   omitEthDecimals?: boolean;
-  costFailure?: boolean;
+  costFailures?: ReadonlyArray<'BTC' | 'ETH'>;
 } = {}) {
+  const costResult = (symbol: 'BTC' | 'ETH') => {
+    if (!options.costFailures?.includes(symbol)) {
+      return {
+        ok: true as const,
+        reason: null,
+        snapshot: costSnapshot(symbol),
+        roundTripCostUsd: 0.453012,
+      };
+    }
+    const failedPrerequisite = {
+      component: 'fundingBorrowingRates',
+      sourceId: 'GMX_API_MARKETS_TICKERS',
+      failureClass: '5xx' as const,
+      httpStatus: 503,
+      peerHost: 'arbitrum.gmxapi.ai',
+      peerPath: ['arbitrum.gmxapi.io', 'arbitrum.gmxapi.ai'],
+    };
+    return {
+      ok: false as const,
+      reason: 'COST_DATA_UNAVAILABLE',
+      snapshot: null,
+      roundTripCostUsd: null,
+      diagnostics: {
+        firstFailure: { ...failedPrerequisite, peerPath: [...failedPrerequisite.peerPath] },
+        failures: [{ ...failedPrerequisite, peerPath: [...failedPrerequisite.peerPath] }],
+        sourceTraces: [{
+          sourceId: 'GMX_API_MARKETS_TICKERS',
+          attempts: [
+            { peerHost: 'arbitrum.gmxapi.io', failureClass: '5xx' as const, httpStatus: 503 },
+            { peerHost: 'arbitrum.gmxapi.ai', failureClass: '5xx' as const, httpStatus: 503 },
+          ],
+          attemptCount: 2,
+          retryCount: 0,
+          failoverCount: 1,
+        }],
+        attemptCount: 2,
+        retryCount: 0,
+        failoverCount: 1,
+        attemptedAtMs: NOW - 500,
+      },
+    };
+  };
   return {
     decimals: {
       BTC: { ok: true, detail: 'BTC verified' },
       ETH: { ok: true, detail: 'ETH verified' },
     },
     costs: {
-      BTC: options.costFailure
-        ? {
-          ok: false as const,
-          reason: 'COST_DATA_UNAVAILABLE',
-          snapshot: null,
-          roundTripCostUsd: null,
-          diagnostics: {
-            failures: [{
-              component: 'funding',
-              sourceId: 'GMX_API_MARKETS_TICKERS',
-              failureClass: 'timeout' as const,
-              peerHost: 'arbitrum.gmxapi.ai',
-            }],
-            attemptCount: 2,
-            failoverCount: 1,
-            attemptedAtMs: NOW - 500,
-          },
-        }
-        : {
-          ok: true as const,
-          reason: null,
-          snapshot: costSnapshot('BTC'),
-          roundTripCostUsd: 0.453012,
-        },
-      ETH: {
-        ok: true as const,
-        reason: null,
-        snapshot: costSnapshot('ETH'),
-        roundTripCostUsd: 0.453012,
-      },
+      BTC: costResult('BTC'),
+      ETH: costResult('ETH'),
     },
     decimalsSnapshot: [
       {
@@ -271,6 +285,7 @@ describe('PAPER runtime readiness cycle', () => {
     expect(stale.rpc.state).toBe('stale');
     expect(stale.costs.BTC.state).toBe('stale');
     expect(stale.costs.BTC).toMatchObject({
+      capUsd: null,
       effectiveRoundTripCostUsd: null,
       totalCostRatePct: null,
       capExcessUsd: null,
@@ -337,6 +352,7 @@ describe('PAPER runtime readiness cycle', () => {
     expect(status.costs.BTC.state).toBe('failed');
     expect(status.costs.BTC.failureId).toBe('COST_BTC_INVALID');
     expect(status.costs.BTC).toMatchObject({
+      capUsd: null,
       positionFeeUsd: null,
       executionFeeUsd: null,
       effectiveRoundTripCostUsd: null,
@@ -356,29 +372,151 @@ describe('PAPER runtime readiness cycle', () => {
 
   it('비용 실패 성분·안전한 source·응답 분류·failover와 시각을 보존한다', async () => {
     const status = await runPaperRuntimeReadinessCycle({
-      deps: depsFrom(canaryResult({ costFailure: true })),
+      deps: depsFrom(canaryResult({ costFailures: ['BTC'] })),
       forceDeployment: true,
     });
 
     expect(status.costs.BTC).toMatchObject({
       state: 'failed',
+      capUsd: null,
       effectiveRoundTripCostUsd: null,
       capDeltaUsd: null,
       withinCap: null,
       diagnostics: {
-        failures: [{
-          component: 'funding',
+        firstFailure: {
+          component: 'fundingBorrowingRates',
           sourceId: 'GMX_API_MARKETS_TICKERS',
-          failureClass: 'timeout',
+          failureClass: '5xx',
+          httpStatus: 503,
           peerHost: 'arbitrum.gmxapi.ai',
+          peerPath: ['arbitrum.gmxapi.io', 'arbitrum.gmxapi.ai'],
+        },
+        failures: [{
+          component: 'fundingBorrowingRates',
+          sourceId: 'GMX_API_MARKETS_TICKERS',
+          failureClass: '5xx',
+          httpStatus: 503,
+          peerHost: 'arbitrum.gmxapi.ai',
+          peerPath: ['arbitrum.gmxapi.io', 'arbitrum.gmxapi.ai'],
+        }],
+        sourceTraces: [{
+          sourceId: 'GMX_API_MARKETS_TICKERS',
+          attempts: [
+            { peerHost: 'arbitrum.gmxapi.io', failureClass: '5xx', httpStatus: 503 },
+            { peerHost: 'arbitrum.gmxapi.ai', failureClass: '5xx', httpStatus: 503 },
+          ],
+          attemptCount: 2,
+          retryCount: 0,
+          failoverCount: 1,
         }],
         attemptCount: 2,
+        retryCount: 0,
         failoverCount: 1,
         lastAttemptAtMs: NOW - 500,
         lastSuccessAtMs: null,
         lastFailureAtMs: NOW - 500,
       },
     });
+    expect(status.costs.ETH).toMatchObject({
+      state: 'verified',
+      capUsd: 0.4,
+      effectiveRoundTripCostUsd: 0.453012,
+      diagnostics: {
+        firstFailure: null,
+        failures: [],
+      },
+    });
+  });
+
+  it('BTC-only, ETH-only, 동시 실패를 symbol별로 독립 보존한다', async () => {
+    for (const failedSymbols of [
+      ['BTC'] as const,
+      ['ETH'] as const,
+      ['BTC', 'ETH'] as const,
+    ]) {
+      __resetPaperRuntimeReadinessForTests();
+      const status = await runPaperRuntimeReadinessCycle({
+        deps: depsFrom(canaryResult({ costFailures: failedSymbols })),
+        forceDeployment: true,
+      });
+      for (const symbol of ['BTC', 'ETH'] as const) {
+        if (failedSymbols.includes(symbol as never)) {
+          expect(status.costs[symbol]).toMatchObject({
+            state: 'failed',
+            capUsd: null,
+            effectiveRoundTripCostUsd: null,
+            withinCap: null,
+          });
+        } else {
+          expect(status.costs[symbol]).toMatchObject({
+            state: 'verified',
+            capUsd: 0.4,
+            effectiveRoundTripCostUsd: 0.453012,
+          });
+        }
+      }
+    }
+  });
+
+  it('corrupt 진단 입력은 allowlist 밖 값을 폐기하고 금액/cap을 fail-closed로 유지한다', async () => {
+    const result = canaryResult({ costFailures: ['BTC'] });
+    const btc = result.costs.BTC;
+    if (btc.ok) throw new Error('BTC failure fixture required');
+    (btc as unknown as { reason: string; diagnostics: unknown }).reason =
+      'token=SHOULD_NOT_LEAK https://evil.example/path?secret=value';
+    (btc as unknown as { reason: string; diagnostics: unknown }).diagnostics = {
+      failures: [{
+        component: 'token=SHOULD_NOT_LEAK',
+        sourceId: 'https://evil.example/path?secret=value',
+        failureClass: 'credential_error',
+        httpStatus: 999,
+        peerHost: 'evil.example',
+        peerPath: ['evil.example'],
+      }],
+      sourceTraces: [{
+        sourceId: 'https://evil.example',
+        attempts: [{ peerHost: 'evil.example', failureClass: 'secret', httpStatus: 999 }],
+        attemptCount: 999,
+        retryCount: 999,
+        failoverCount: 999,
+      }],
+      attemptCount: 999,
+      retryCount: 999,
+      failoverCount: 999,
+      attemptedAtMs: Number.POSITIVE_INFINITY,
+    };
+
+    const status = await runPaperRuntimeReadinessCycle({
+      deps: depsFrom(result),
+      forceDeployment: true,
+    });
+
+    expect(status.costs.BTC).toMatchObject({
+      state: 'failed',
+      capUsd: null,
+      effectiveRoundTripCostUsd: null,
+      capDeltaUsd: null,
+      withinCap: null,
+      diagnostics: {
+        firstFailure: {
+          component: 'unknown',
+          sourceId: 'EXECUTION_COST_READINESS',
+          failureClass: 'unavailable',
+          httpStatus: null,
+          peerHost: null,
+          peerPath: [],
+        },
+        sourceTraces: [],
+        attemptCount: 16,
+        retryCount: 16,
+        failoverCount: 16,
+        lastAttemptAtMs: NOW,
+      },
+    });
+    const serialized = JSON.stringify(status.costs.BTC);
+    expect(serialized).not.toContain('SHOULD_NOT_LEAK');
+    expect(serialized).not.toContain('evil.example');
+    expect(serialized).not.toContain('secret=value');
   });
 
   it('stop→restart 중 진행 중 cycle을 보존하고 외부 read를 겹치지 않는다', async () => {
@@ -471,6 +609,22 @@ describe('PAPER runtime readiness cycle', () => {
     expect(cold.deployment.state).toBe('not_evaluated');
     expect(cold.rpc.state).toBe('not_evaluated');
     expect(cold.scheduler.running).toBe(false);
+    expect(cold.costs.BTC).toMatchObject({
+      state: 'not_evaluated',
+      capUsd: null,
+      effectiveRoundTripCostUsd: null,
+      diagnostics: {
+        firstFailure: null,
+        failures: [],
+        sourceTraces: [],
+        attemptCount: 0,
+        retryCount: 0,
+        failoverCount: 0,
+        lastAttemptAtMs: null,
+        lastSuccessAtMs: null,
+        lastFailureAtMs: null,
+      },
+    });
 
     startPaperRuntimeReadinessScheduler({ deps, forceDeployment: true });
     startPaperRuntimeReadinessScheduler({ deps, forceDeployment: true });

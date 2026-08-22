@@ -157,7 +157,7 @@ export interface GmxApiStatusView {
       direction: 'LONG';
       notionalUsd: number;
       holdingHours: number;
-      capUsd: number;
+      capUsd: number | null;
       positionFeeUsd: number | null;
       executionFeeUsd: number | null;
       estimatedPriceImpactUsd: number | null;
@@ -183,13 +183,35 @@ export interface GmxApiStatusView {
       apiTimestamp: string | null;
       fetchedAt: string | null;
       diagnostics?: {
+        firstFailure?: {
+          component: string;
+          sourceId: string;
+          failureClass: string;
+          httpStatus: number | null;
+          peerHost: string | null;
+          peerPath: string[];
+        } | null;
         failures: Array<{
           component: string;
           sourceId: string;
           failureClass: string;
+          httpStatus: number | null;
           peerHost: string | null;
+          peerPath: string[];
+        }>;
+        sourceTraces?: Array<{
+          sourceId: string;
+          attempts: Array<{
+            peerHost: string;
+            failureClass: string | null;
+            httpStatus: number | null;
+          }>;
+          attemptCount: number;
+          retryCount: number;
+          failoverCount: number;
         }>;
         attemptCount: number;
+        retryCount?: number;
         failoverCount: number;
         lastAttemptAtMs: number | null;
         lastSuccessAtMs: number | null;

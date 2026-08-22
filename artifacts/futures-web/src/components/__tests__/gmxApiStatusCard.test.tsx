@@ -526,6 +526,7 @@ describe('GmxApiStatusCard — PAPER runtime fixture', () => {
       otherCostUsd: null,
       effectiveRoundTripCostUsd: null,
       totalCostRatePct: null,
+      capUsd: null,
       capDeltaUsd: null,
       capExcessUsd: null,
       requiredCostReductionUsd: null,
@@ -537,13 +538,34 @@ describe('GmxApiStatusCard — PAPER runtime fixture', () => {
       apiTimestamp: null,
       fetchedAt: null,
       diagnostics: {
-        failures: [{
-          component: 'funding',
+        firstFailure: {
+          component: 'fundingBorrowingRates',
           sourceId: 'GMX_API_MARKETS_TICKERS',
-          failureClass: 'timeout',
+          failureClass: '5xx',
+          httpStatus: 503,
           peerHost: 'arbitrum.gmxapi.ai',
+          peerPath: ['arbitrum.gmxapi.io', 'arbitrum.gmxapi.ai'],
+        },
+        failures: [{
+          component: 'fundingBorrowingRates',
+          sourceId: 'GMX_API_MARKETS_TICKERS',
+          failureClass: '5xx',
+          httpStatus: 503,
+          peerHost: 'arbitrum.gmxapi.ai',
+          peerPath: ['arbitrum.gmxapi.io', 'arbitrum.gmxapi.ai'],
+        }],
+        sourceTraces: [{
+          sourceId: 'GMX_API_MARKETS_TICKERS',
+          attempts: [
+            { peerHost: 'arbitrum.gmxapi.io', failureClass: '5xx', httpStatus: 503 },
+            { peerHost: 'arbitrum.gmxapi.ai', failureClass: '5xx', httpStatus: 503 },
+          ],
+          attemptCount: 2,
+          retryCount: 0,
+          failoverCount: 1,
         }],
         attemptCount: 2,
+        retryCount: 0,
         failoverCount: 1,
         lastAttemptAtMs: 1_777_000_000_000,
         lastSuccessAtMs: null,
@@ -557,9 +579,11 @@ describe('GmxApiStatusCard — PAPER runtime fixture', () => {
     expect(html).not.toContain('notional 대비');
     expect(html).not.toContain('source');
     expect(html).not.toContain('gross move');
-    expect(html).toContain('funding');
+    expect(html).toContain('fundingBorrowingRates');
     expect(html).toContain('GMX_API_MARKETS_TICKERS');
-    expect(html).toContain('timeout');
+    expect(html).toContain('5xx');
+    expect(html).toContain('HTTP 503');
+    expect(html).toContain('retry 0');
     expect(html).toContain('failover 1');
   });
 });
