@@ -51,7 +51,7 @@ import {
   type PersistedRiskEngineState,
 } from "../lib/riskEngineState";
 import { manilaDayStartIso, manilaWeekStartIso, msUntilNextManilaDay } from "../lib/manilaTime";
-import { runIntelServiceCycle, stopIntelService, resumeIntelService } from "../intel/intelService";
+import { runIntelServiceCycle, runStrategyShadowWorkerReadOnly, stopIntelService, resumeIntelService } from "../intel/intelService";
 import { buildStrategyShadowWorkerEnvelope } from "../intel/strategyShadowWorkerEnvelopeV2";
 import {
   openServerPaperPosition, closeServerPaperPosition, reduceServerPaper70,
@@ -1515,22 +1515,34 @@ class WorkerManager {
       // 전체 결정 객체 조립
       const decisionId = crypto.randomUUID();
       const decisionCreatedAt = new Date().toISOString();
-      const strategyEnsembleShadow = buildStrategyShadowWorkerEnvelope({
+      const strategyShadowExistingAi = {
+        decisionId,
+        action: engineResult.operatingState === 'LONG' ? 'LONG' as const
+          : engineResult.operatingState === 'SHORT' ? 'SHORT' as const : 'NO_TRADE' as const,
+        confidence: engineResult.confidence,
+        primarySymbol: typeof engineResult.primarySymbol === 'string'
+          && engineResult.primarySymbol.trim() ? engineResult.primarySymbol : null,
+        createdAt: decisionCreatedAt,
+      };
+      let strategyEnsembleShadow = buildStrategyShadowWorkerEnvelope({
         cycleNumber: cycleNum,
         generatedAt: Date.parse(decisionCreatedAt),
         expectedSymbols: analyses.map(analysis => analysis.symbol),
         records: [],
-        existingAi: {
-          decisionId,
-          action: engineResult.operatingState === 'LONG' ? 'LONG'
-            : engineResult.operatingState === 'SHORT' ? 'SHORT' : 'NO_TRADE',
-          confidence: engineResult.confidence,
-          primarySymbol: typeof engineResult.primarySymbol === 'string'
-            && engineResult.primarySymbol.trim() ? engineResult.primarySymbol : null,
-          createdAt: decisionCreatedAt,
-        },
-        notEvaluatedReason: 'MTF Strategy Ensemble runner evidence 미연결 — SHADOW 결과 미생성',
+        existingAi: strategyShadowExistingAi,
+        notEvaluatedReason: 'MTF Strategy Ensemble read 시작 전 — SHADOW 결과 없음',
       });
+      try {
+        strategyEnsembleShadow = await runStrategyShadowWorkerReadOnly({
+          cycleNumber: cycleNum,
+          evaluatedAt: Date.parse(decisionCreatedAt),
+          expectedSymbols: analyses.map(analysis => analysis.symbol),
+          existingAi: strategyShadowExistingAi,
+        });
+      } catch (error) {
+        // service 자체도 fail-closed지만 Worker 생존을 위한 방어적 이중 안전망.
+        console.warn(`[AIWorker] 사이클 #${cycleNum} MTF SHADOW read 실패 — NOT_EVALUATED 유지: ${error instanceof Error ? error.name : 'unknown'}`);
+      }
       const decision: ServerAiDecision = {
         id:          decisionId,
         createdAt:   decisionCreatedAt,
