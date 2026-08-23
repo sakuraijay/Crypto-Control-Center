@@ -180,4 +180,6 @@ export interface ServerAiDecision {
   strategyEnsembleShadow: import('../intel/strategyShadowWorkerEnvelopeV2').StrategyShadowWorkerEnvelope;
   /** 기존 Risk Engine 결과의 read-only advisory projection. 실행 입력으로 사용 금지. */
   strategyRiskAdvisory?: import('../intel/strategyRiskWorkerBridgeV2').StrategyRiskWorkerAdvisory;
+  /** SHADOW→Risk terminal 상태의 read-only 직렬화. 실행 입력으로 사용 금지. */
+  strategyDecisionExplainability?: import('../intel/strategyDecisionExplainabilityWorkerBridgeV2').StrategyDecisionExplainabilityWorkerAdvisory;
 }

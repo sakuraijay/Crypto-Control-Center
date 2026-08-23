@@ -54,6 +54,7 @@ import { manilaDayStartIso, manilaWeekStartIso, msUntilNextManilaDay } from "../
 import { runIntelServiceCycle, runStrategyShadowWorkerReadOnly, stopIntelService, resumeIntelService } from "../intel/intelService";
 import { buildStrategyShadowWorkerEnvelope } from "../intel/strategyShadowWorkerEnvelopeV2";
 import { buildStrategyRiskWorkerAdvisory } from "../intel/strategyRiskWorkerBridgeV2";
+import { buildStrategyDecisionExplainabilityWorkerAdvisory } from "../intel/strategyDecisionExplainabilityWorkerBridgeV2";
 import type { SignalLifecycleSnapshotV2 } from "../intel/signalLifecycleSnapshotV2";
 import {
   advanceStrategyShadowLifecycleSnapshot,
@@ -1610,6 +1611,10 @@ class WorkerManager {
           });
         }
       }
+      const strategyRiskAdvisory = buildStrategyRiskWorkerAdvisory({
+        shadowEnvelope: strategyEnsembleShadow,
+        riskEvaluation: riskEval,
+      });
       const decision: ServerAiDecision = {
         id:          decisionId,
         createdAt:   decisionCreatedAt,
@@ -1619,9 +1624,10 @@ class WorkerManager {
         testMode:      testModeActive,
         riskProfile,
         strategyEnsembleShadow,
-        strategyRiskAdvisory: buildStrategyRiskWorkerAdvisory({
+        strategyRiskAdvisory,
+        strategyDecisionExplainability: buildStrategyDecisionExplainabilityWorkerAdvisory({
           shadowEnvelope: strategyEnsembleShadow,
-          riskEvaluation: riskEval,
+          riskAdvisory: strategyRiskAdvisory,
         }),
         ...engineResult,
       };
