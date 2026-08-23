@@ -1,5 +1,9 @@
 /** Pure, serializable worker envelope for Strategy Ensemble SHADOW explainability. */
 import type { StrategyShadowRecord } from './strategyShadowAdapterV2';
+import {
+  restoreSignalLifecycleSnapshot,
+  type SignalLifecycleSnapshotV2,
+} from './signalLifecycleSnapshotV2';
 
 export const STRATEGY_SHADOW_WORKER_ENVELOPE_VERSION = 'strategy-shadow-worker-envelope/v1' as const;
 
@@ -26,6 +30,7 @@ export interface StrategyShadowWorkerEnvelope {
   evaluatedSymbols: string[];
   missingSymbols: string[];
   records: StrategyShadowRecord[];
+  lifecycleSnapshot: SignalLifecycleSnapshotV2 | null;
   summary: {
     long: number;
     short: number;
@@ -50,6 +55,7 @@ export interface StrategyShadowWorkerEnvelopeInput {
   expectedSymbols: string[];
   records: StrategyShadowRecord[];
   existingAi: ExistingWorkerAiSummary;
+  lifecycleSnapshot?: SignalLifecycleSnapshotV2 | null;
   notEvaluatedReason?: string;
 }
 
@@ -64,6 +70,7 @@ function safeEnvelope(
   records: StrategyShadowRecord[],
   reasons: string[],
   warnings: string[] = [],
+  lifecycleSnapshot: SignalLifecycleSnapshotV2 | null = null,
 ): StrategyShadowWorkerEnvelope {
   const evaluatedSymbols = [...new Set(records.map(record => normalizeSymbol(record.symbol)))].sort();
   const evaluated = new Set(evaluatedSymbols);
@@ -86,6 +93,7 @@ function safeEnvelope(
     evaluatedSymbols,
     missingSymbols: expectedSymbols.filter(symbol => !evaluated.has(symbol)),
     records,
+    lifecycleSnapshot,
     summary,
     existingAi: input.existingAi,
     reasons,
@@ -110,6 +118,7 @@ export function buildStrategyShadowWorkerEnvelope(
     .filter((symbol): symbol is string => typeof symbol === 'string')
     .map(normalizeSymbol))].sort();
   const issues: string[] = [];
+  let lifecycleSnapshot: SignalLifecycleSnapshotV2 | null = null;
   if (!Number.isInteger(input.cycleNumber) || input.cycleNumber <= 0) issues.push('cycle number INVALID');
   if (!finite(input.generatedAt) || input.generatedAt <= 0) issues.push('generatedAt INVALID');
   if (!Array.isArray(input.expectedSymbols)
@@ -130,9 +139,14 @@ export function buildStrategyShadowWorkerEnvelope(
     issues.push('existing AI primary symbol INVALID');
   }
   if (!Array.isArray(input.records)) issues.push('shadow records 배열 필요');
+  if (input.lifecycleSnapshot !== undefined && input.lifecycleSnapshot !== null) {
+    const restored = restoreSignalLifecycleSnapshot(input.lifecycleSnapshot, input.generatedAt);
+    if (restored.ok) lifecycleSnapshot = restored.snapshot;
+    else issues.push(`lifecycle snapshot INVALID: ${restored.reason}`);
+  }
   if (issues.length > 0) {
     return safeEnvelope(input, 'BLOCKED', 'INVALID', expectedSymbols, [],
-      ['worker Shadow 입력 INVALID — fail-closed'], issues);
+      ['worker Shadow 입력 INVALID — fail-closed'], issues, lifecycleSnapshot);
   }
 
   const recordIds = new Set<string>();
@@ -152,17 +166,17 @@ export function buildStrategyShadowWorkerEnvelope(
   }
   if (issues.length > 0) {
     return safeEnvelope(input, 'BLOCKED', STRATEGY_SHADOW_WORKER_ENVELOPE_VERSION,
-      expectedSymbols, [], ['Shadow record 검증 실패 — 기록 채택 차단'], issues);
+      expectedSymbols, [], ['Shadow record 검증 실패 — 기록 채택 차단'], issues, lifecycleSnapshot);
   }
 
   if (input.records.length === 0) {
     const reason = input.notEvaluatedReason?.trim();
     if (!reason) {
       return safeEnvelope(input, 'BLOCKED', STRATEGY_SHADOW_WORKER_ENVELOPE_VERSION,
-        expectedSymbols, [], ['0건 Shadow record의 NOT_EVALUATED 사유 누락 — fail-closed']);
+        expectedSymbols, [], ['0건 Shadow record의 NOT_EVALUATED 사유 누락 — fail-closed'], [], lifecycleSnapshot);
     }
     return safeEnvelope(input, 'NOT_EVALUATED', STRATEGY_SHADOW_WORKER_ENVELOPE_VERSION,
-      expectedSymbols, [], [reason, '가짜 Ensemble 신호를 생성하지 않음']);
+      expectedSymbols, [], [reason, '가짜 Ensemble 신호를 생성하지 않음'], [], lifecycleSnapshot);
   }
 
   const covered = new Set(input.records.map(record => normalizeSymbol(record.symbol)));
@@ -171,5 +185,5 @@ export function buildStrategyShadowWorkerEnvelope(
   return safeEnvelope(input, status, STRATEGY_SHADOW_WORKER_ENVELOPE_VERSION,
     expectedSymbols, input.records, [status === 'EVALUATED'
       ? '모든 기대 종목의 Shadow explainability 확보'
-      : '일부 종목만 Shadow explainability 확보 — 누락 종목 실행 근거로 사용 금지']);
+      : '일부 종목만 Shadow explainability 확보 — 누락 종목 실행 근거로 사용 금지'], [], lifecycleSnapshot);
 }

@@ -7,6 +7,7 @@ import type { CostSnapshot } from '../lib/costSnapshot';
 import { validateCostSnapshot } from '../lib/costSnapshot';
 import type { RegimeState } from './regimeEngineV2';
 import type { SignalHistoryEvent, SignalLifecycleRecord } from './signalLifecycleV2';
+import { buildSignalLifecycleSnapshot } from './signalLifecycleSnapshotV2';
 import type { ExistingAiDecisionSnapshot, StrategyShadowRecord } from './strategyShadowAdapterV2';
 import {
   runStrategyShadowSymbol,
@@ -143,8 +144,10 @@ export function buildStrategyShadowWorkerBatch(
     || symbols.length !== rawSymbols.length
     || !Array.isArray(input.lifecycleRecords)
     || !Array.isArray(input.historyEvents);
+  const lifecycleSnapshot = invalid ? null : buildSignalLifecycleSnapshot(
+    input.lifecycleRecords, input.historyEvents, input.evaluatedAt);
 
-  if (invalid) {
+  if (invalid || lifecycleSnapshot === null) {
     return {
       schemaVersion: 'INVALID',
       envelope: buildStrategyShadowWorkerEnvelope({
@@ -153,11 +156,15 @@ export function buildStrategyShadowWorkerBatch(
         expectedSymbols: symbols,
         records: [],
         existingAi: input.existingAi,
-        notEvaluatedReason: 'SHADOW batch 입력 INVALID — fail-closed',
+        notEvaluatedReason: lifecycleSnapshot === null && !invalid
+          ? 'SHADOW lifecycle 상태 INVALID — fail-closed'
+          : 'SHADOW batch 입력 INVALID — fail-closed',
       }),
       notEvaluatedSymbols: symbols.map(symbol => ({
         symbol,
-        reasons: ['SHADOW batch 입력 INVALID — fail-closed'],
+        reasons: [lifecycleSnapshot === null && !invalid
+          ? 'SHADOW lifecycle 상태 INVALID — fail-closed'
+          : 'SHADOW batch 입력 INVALID — fail-closed'],
         warnings: [],
       })),
       executionAuthorized: false,
@@ -200,6 +207,7 @@ export function buildStrategyShadowWorkerBatch(
     generatedAt: input.evaluatedAt,
     expectedSymbols: symbols,
     records,
+    lifecycleSnapshot,
     existingAi: input.existingAi,
     notEvaluatedReason: records.length === 0
       ? '모든 종목의 fresh MTF/cost SHADOW 근거 미충족 — 가짜 record 생성 금지'

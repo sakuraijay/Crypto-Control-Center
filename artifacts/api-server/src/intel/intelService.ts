@@ -25,6 +25,10 @@ import {
   type ExistingWorkerAiSummary,
   type StrategyShadowWorkerEnvelope,
 } from './strategyShadowWorkerEnvelopeV2';
+import {
+  buildSignalLifecycleSnapshot,
+  restoreSignalLifecycleSnapshot,
+} from './signalLifecycleSnapshotV2';
 
 export type CycleLifecycleStatus = 'SUCCESS' | 'FAILED' | 'TIMEOUT' | 'BLOCKED' | 'SKIPPED_IN_FLIGHT' | 'SKIPPED_INTERVAL' | 'SKIPPED_SHUTDOWN' | 'SKIPPED_BACKOFF';
 
@@ -157,6 +161,7 @@ export interface StrategyShadowWorkerReadOnlyInput {
   evaluatedAt: number;
   expectedSymbols: string[];
   existingAi: ExistingWorkerAiSummary;
+  lifecycleSnapshot?: import('./signalLifecycleSnapshotV2').SignalLifecycleSnapshotV2 | null;
 }
 
 function buildNotEvaluatedStrategyShadowEnvelope(
@@ -169,6 +174,7 @@ function buildNotEvaluatedStrategyShadowEnvelope(
     expectedSymbols: input.expectedSymbols,
     records: [],
     existingAi: input.existingAi,
+    lifecycleSnapshot: input.lifecycleSnapshot,
     notEvaluatedReason: reason,
   });
 }
@@ -183,6 +189,15 @@ export async function runStrategyShadowWorkerReadOnly(
 ): Promise<StrategyShadowWorkerEnvelope> {
   let ownsRead = false;
   try {
+    const restoredLifecycle = input.lifecycleSnapshot === undefined || input.lifecycleSnapshot === null
+      ? null : restoreSignalLifecycleSnapshot(input.lifecycleSnapshot, input.evaluatedAt);
+    const lifecycle = restoredLifecycle === null
+      ? buildSignalLifecycleSnapshot([], [], input.evaluatedAt)
+      : restoredLifecycle.ok ? restoredLifecycle.snapshot : null;
+    if (!lifecycle) {
+      return buildNotEvaluatedStrategyShadowEnvelope(input,
+        'SHADOW lifecycle snapshot 복원 실패 — fail-closed');
+    }
     if (state.shutdownRequested) {
       return buildNotEvaluatedStrategyShadowEnvelope(input,
         'Intel shutdown 중 — MTF SHADOW external read 미제출');
@@ -224,8 +239,8 @@ export async function runStrategyShadowWorkerReadOnly(
       framesBySymbol: read.framesBySymbol,
       costsBySymbol: {},
       previousRegimes: {},
-      lifecycleRecords: [],
-      historyEvents: [],
+      lifecycleRecords: lifecycle.records,
+      historyEvents: lifecycle.historyEvents,
       existingAi: input.existingAi,
     }).envelope;
   } catch (error) {

@@ -190,4 +190,25 @@ describe('Intel service Strategy SHADOW Worker read-only bridge', () => {
     expect(envelope.executionAuthorized).toBe(false);
     expect(injected.beginCycle).toHaveBeenCalledTimes(1);
   });
+
+  it('손상 lifecycle snapshot은 external read 전 BLOCKED하고 예산을 사용하지 않는다', async () => {
+    const fetchCandles = vi.fn(async (_symbol: string, timeframe: Timeframe, count: number) =>
+      candles(timeframe, count));
+    const injected = handle(fetchCandles);
+    __setIntelHandleForTests(injected);
+
+    const envelope = await runStrategyShadowWorkerReadOnly({
+      cycleNumber: 4,
+      evaluatedAt: NOW,
+      expectedSymbols: ['BTC'],
+      existingAi: existingAi(),
+      lifecycleSnapshot: { schemaVersion: 'future' } as never,
+    });
+
+    expect(envelope.status).toBe('BLOCKED');
+    expect(envelope.records).toEqual([]);
+    expect(envelope.warnings.join(' ')).toContain('lifecycle snapshot INVALID');
+    expect(fetchCandles).not.toHaveBeenCalled();
+    expect(injected.beginCycle).not.toHaveBeenCalled();
+  });
 });
