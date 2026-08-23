@@ -11,7 +11,7 @@ import {
 
 const BOUNDARY = 1_800_000_000_000;
 const NOW = BOUNDARY + 10_000;
-const STEPS: Record<Timeframe, number> = {
+const STEPS: Partial<Record<Timeframe, number>> = {
   '15m': 15 * 60_000,
   '1h': 60 * 60_000,
   '4h': 4 * 60 * 60_000,
@@ -19,6 +19,7 @@ const STEPS: Record<Timeframe, number> = {
 
 function candles(timeframe: Timeframe, count: number) {
   const step = STEPS[timeframe];
+  if (!step) throw new Error(`unsupported test timeframe: ${timeframe}`);
   const lastOpen = BOUNDARY - step;
   const firstOpen = lastOpen - (count - 1) * step;
   return Array.from({ length: count }, (_, index) => {
