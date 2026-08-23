@@ -306,4 +306,18 @@ describe('Strategy decision explainability DB-free runtime selector', () => {
       envelopes: [{ finalAdvisoryNotionalUsd: 17.5 }],
     });
   });
+
+  it('runtime 경계에서도 mixed generation을 INVALID/BLOCKED로 보존한다', () => {
+    const s = shadow();
+    expect(buildStrategyDecisionExplainabilityRuntimeAdvisory({
+      shadowEnvelope: s,
+      riskAdvisory: risk(s),
+      downstreamEvidence: {
+        sizingAdvisory: workerSizing(s),
+        readinessBinding: readiness(s.expectedSymbols, 7),
+        confidenceAdvisories: [confidence(s.records[0])],
+        gmxNetEdgeAdvisories: [gmx(s.records[0], 8)],
+      },
+    })).toMatchObject({ schemaVersion: 'INVALID', status: 'BLOCKED', envelopes: [] });
+  });
 });
