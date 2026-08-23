@@ -4,6 +4,10 @@ import {
   buildStrategyDecisionExplainabilityWorkerAdvisoryWithDownstream,
   STRATEGY_DECISION_EXPLAINABILITY_WORKER_VERSION,
 } from '../intel/strategyDecisionExplainabilityWorkerBridgeV2';
+import {
+  buildStrategyDecisionExplainabilityRuntimeAdvisory,
+  STRATEGY_DECISION_EXPLAINABILITY_RUNTIME_VERSION,
+} from '../intel/strategyDecisionExplainabilityRuntimeV2';
 import type { StrategyConfidenceRiskReductionAdvisory } from '../intel/strategyConfidenceRiskReductionV2';
 import type { StrategyGmxContextNetEdgeAdvisory } from '../intel/strategyGmxContextNetEdgeV2';
 import type { StrategyRiskWorkerAdvisory } from '../intel/strategyRiskWorkerBridgeV2';
@@ -259,5 +263,47 @@ describe('Strategy decision explainability same-generation downstream bridge', (
     expect(buildStrategyDecisionExplainabilityWorkerAdvisoryWithDownstream(input))
       .toMatchObject({ schemaVersion: 'INVALID', status: 'BLOCKED' });
     expect(JSON.stringify(input)).toBe(before);
+  });
+});
+
+describe('Strategy decision explainability DB-free runtime selector', () => {
+  it('runtime 계약 버전과 downstream 결측의 기존 NOT_EVALUATED 투영을 고정한다', () => {
+    expect(STRATEGY_DECISION_EXPLAINABILITY_RUNTIME_VERSION)
+      .toBe('strategy-decision-explainability-runtime/v1');
+    const s = shadow();
+    const result = buildStrategyDecisionExplainabilityRuntimeAdvisory({
+      shadowEnvelope: s,
+      riskAdvisory: risk(s),
+      downstreamEvidence: null,
+    });
+    expect(result).toMatchObject({
+      status: 'NOT_EVALUATED',
+      externalReadStarted: false,
+      independentPersistenceAllowed: false,
+      executionAuthorized: false,
+      envelopes: [{ stages: { sizing: null, confidence: null, gmxNetEdge: null } }],
+    });
+  });
+
+  it('이미 계산된 동일-generation bundle만 downstream bridge에 전달한다', () => {
+    const s = shadow();
+    const result = buildStrategyDecisionExplainabilityRuntimeAdvisory({
+      shadowEnvelope: s,
+      riskAdvisory: risk(s),
+      downstreamEvidence: {
+        sizingAdvisory: workerSizing(s),
+        readinessBinding: readiness(s.expectedSymbols),
+        confidenceAdvisories: [confidence(s.records[0])],
+        gmxNetEdgeAdvisories: [gmx(s.records[0])],
+      },
+    });
+    expect(result).toMatchObject({
+      status: 'EVALUATED',
+      summary: { evaluated: 1 },
+      externalReadStarted: false,
+      independentPersistenceAllowed: false,
+      executionAuthorized: false,
+      envelopes: [{ finalAdvisoryNotionalUsd: 17.5 }],
+    });
   });
 });

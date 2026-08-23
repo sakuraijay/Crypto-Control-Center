@@ -54,7 +54,7 @@ import { manilaDayStartIso, manilaWeekStartIso, msUntilNextManilaDay } from "../
 import { runIntelServiceCycle, runStrategyShadowWorkerReadOnly, stopIntelService, resumeIntelService } from "../intel/intelService";
 import { buildStrategyShadowWorkerEnvelope } from "../intel/strategyShadowWorkerEnvelopeV2";
 import { buildStrategyRiskWorkerAdvisory } from "../intel/strategyRiskWorkerBridgeV2";
-import { buildStrategyDecisionExplainabilityWorkerAdvisory } from "../intel/strategyDecisionExplainabilityWorkerBridgeV2";
+import { buildStrategyDecisionExplainabilityRuntimeAdvisory } from "../intel/strategyDecisionExplainabilityRuntimeV2";
 import type { SignalLifecycleSnapshotV2 } from "../intel/signalLifecycleSnapshotV2";
 import {
   advanceStrategyShadowLifecycleSnapshot,
@@ -1625,9 +1625,12 @@ class WorkerManager {
         riskProfile,
         strategyEnsembleShadow,
         strategyRiskAdvisory,
-        strategyDecisionExplainability: buildStrategyDecisionExplainabilityWorkerAdvisory({
+        strategyDecisionExplainability: buildStrategyDecisionExplainabilityRuntimeAdvisory({
           shadowEnvelope: strategyEnsembleShadow,
           riskAdvisory: strategyRiskAdvisory,
+          // The runtime cannot independently fetch or infer downstream evidence.
+          // A later shared-readiness handoff may replace this explicit null.
+          downstreamEvidence: null,
         }),
         ...engineResult,
       };
