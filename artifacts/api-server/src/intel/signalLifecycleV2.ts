@@ -202,9 +202,16 @@ export function evaluateSignalEligibility(
     decision.reasons.push('Signal 또는 lifecycle 입력 INVALID — fail-closed');
     return decision;
   }
-  if (records.some(record => record.signalId === signal.signalId)) {
+  const duplicateById = records.some(record => record.signalId === signal.signalId);
+  const duplicateByCandleIdentity = records.some(record => normalizeSymbol(record.symbol) === symbol
+    && record.strategyId === signal.strategyId
+    && record.direction === signal.direction
+    && record.sourceCandleCloseTime === signal.sourceCandleCloseTime);
+  if (duplicateById || duplicateByCandleIdentity) {
     decision.codes.push('DUPLICATE_SIGNAL');
-    decision.reasons.push('동일 Signal ID가 이미 처리됨 — 재처리 금지');
+    decision.reasons.push(duplicateById
+      ? '동일 Signal ID가 이미 처리됨 — 재처리 금지'
+      : '동일 종목·전략·방향·완료봉 Signal이 이미 처리됨 — ID 변경 우회 금지');
   }
 
   const eventMap = new Map<string, SignalHistoryEvent>();
