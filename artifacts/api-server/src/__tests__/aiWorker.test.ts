@@ -130,6 +130,16 @@ import { workerManager } from '../workers/aiWorker';
 import { runAiEngine }   from '../workers/stateEngine';
 import { getCachedPrices } from '../routes/gmx';
 import { db }            from '@workspace/db';
+import { buildSignalLifecycleSnapshot } from '../intel/signalLifecycleSnapshotV2';
+import {
+  evaluateSignalEligibility,
+  type SignalHistoryEvent,
+  type SignalLifecycleRecord,
+} from '../intel/signalLifecycleV2';
+import {
+  STRATEGY_SIGNAL_SCHEMA_VERSION,
+  type StrategySignal,
+} from '../intel/strategySignalV2';
 
 // ── 최소 유효 AI 결정 (CASH — 가장 안전한 기본값) ──────────────────────────────
 const CASH_DECISION = {
@@ -171,6 +181,8 @@ function resetWorker() {
   wm.lastLiveTestMode        = false;
   wm.lastLiveTestDbOk        = true;
   wm.lastPriceAt             = 0;
+  wm.strategyLifecycleSnapshot = null;
+  wm.strategyLifecycleRestoreBlocked = true;
   (wm.priceAtBySymbol as Map<string, number>).clear();
   (wm.lastTickUpdatedAtBySymbol as Map<string, number>).clear();
 
@@ -279,12 +291,14 @@ function makeOpenTrade(ageMs: number): unknown[] {
 function setupDbSequence(opts: {
   pendingApprovals?: unknown[];
   hwmValue?:         string | null;
+  lifecycleDecision?: unknown[];
   strategyRow?:      unknown[];
   trades?:           unknown[];
   insertResult?:     unknown;
 } = {}) {
   const pending  = opts.pendingApprovals ?? [];
   const hwm      = opts.hwmValue != null ? hwmRow(opts.hwmValue) : [];
+  const lifecycle = opts.lifecycleDecision ?? [];
   const strategy = opts.strategyRow ?? defaultStrategyRow;
   const trades   = opts.trades    ?? noTradesResult;
   const inserted = opts.insertResult ?? [{ id: 'test-decision-1' }];
@@ -295,7 +309,7 @@ function setupDbSequence(opts: {
     if (selectCallN === 1) return pending;   // start(): loadPendingApprovals
     if (selectCallN === 2) return hwm;       // start(): loadHwmFromDb
     if (selectCallN === 3) return [];        // start(): loadBaselinesFromDb (기준점 없음)
-    if (selectCallN === 4) return [];        // start(): lifecycle decision 없음 — empty legacy baseline
+    if (selectCallN === 4) return lifecycle; // start(): latest lifecycle decision (없으면 legacy baseline)
     if (selectCallN === 5) return [];        // start(): loadRiskEngineState (6H-1 — 미수립)
     if (selectCallN === 6) return pending;   // runCycle(): loadPendingApprovals again
     if (selectCallN === 7) return strategy;  // runCycle(): strategyConfigTable
@@ -363,6 +377,107 @@ describe('crash-restart — HWM DB 복원', () => {
     const s = workerManager.getStatus();
     // 0은 유효하지 않은 HWM → null 유지
     expect(s.equityHwm).toBeNull();
+  });
+});
+
+// ── Strategy SHADOW lifecycle 실제 Worker 재시작 복원 ───────────────────────
+describe('crash-restart — Strategy SHADOW lifecycle DB 복원', () => {
+  beforeEach(() => { resetWorker(); });
+  afterEach(() => { workerManager.stop(); vi.useRealTimers(); });
+
+  const makeRestartEvidence = () => {
+    const now = Date.now();
+    const candle = 15 * 60_000;
+    const close = now - candle;
+    const record: SignalLifecycleRecord = {
+      configVersion: 'signal-lifecycle/v1',
+      signalId: `BTC:TREND_PULLBACK:LONG:15m:${close}`,
+      symbol: 'BTC', strategyId: 'TREND_PULLBACK', direction: 'LONG',
+      sourceCandleCloseTime: close, status: 'GENERATED',
+      generatedAt: close + 1, updatedAt: close + 1,
+      reason: 'restart regression evidence',
+    };
+    const historyEvents: SignalHistoryEvent[] = [
+      { eventId: `STOP_LOSS:${close - candle}`, kind: 'STOP_LOSS', symbol: 'BTC',
+        strategyId: 'TREND_PULLBACK', direction: 'LONG', sourceCandleCloseTime: close - candle },
+      { eventId: `FAILED_BREAKOUT:${close - 2 * candle}`, kind: 'FAILED_BREAKOUT', symbol: 'BTC',
+        strategyId: 'TREND_PULLBACK', direction: 'LONG', sourceCandleCloseTime: close - 2 * candle },
+    ];
+    const snapshot = buildSignalLifecycleSnapshot([record], historyEvents, now - 1)!;
+    const signal: StrategySignal = {
+      schemaVersion: STRATEGY_SIGNAL_SCHEMA_VERSION,
+      signalId: 'attempted-restart-bypass', strategyId: 'TREND_PULLBACK', symbol: 'BTC',
+      regime: 'TREND_UP', direction: 'LONG', confidence: 80,
+      entryZoneLow: 99, entryZoneHigh: 101, proposedEntryPrice: 100,
+      structuralStop: 98, stopDistancePct: 2, invalidationPrice: 98,
+      targets: [{ price: 104, expectedR: 2, allocationPct: 100 }],
+      grossExpectedEdgeBps: 400, expectedCostsBps: 20, netExpectedEdgeBps: 380,
+      expectedNetRR: 1.9, higherTimeframeTrend: 'TREND_UP', marketStructure: 'BULLISH',
+      confirmationPattern: 'REJECTION', sourceTimeframes: ['4h', '1h', '15m'],
+      sourceCandleCloseTime: close, dataQuality: 'GOOD', volumeConfirmation: null,
+      reasons: [], warnings: [],
+    };
+    return { now, close, candle, snapshot, signal };
+  };
+
+  it('마지막 durable decision을 새 Worker 메모리로 복원해 동일 완료봉과 cooldown을 유지한다', async () => {
+    const evidence = makeRestartEvidence();
+    setupDbSequence({ lifecycleDecision: [{ fullJson: JSON.stringify({
+      source: 'server_worker',
+      strategyEnsembleShadow: { lifecycleSnapshot: evidence.snapshot },
+    }) }] });
+    vi.mocked(db.insert).mockClear();
+    vi.mocked(db.update).mockClear();
+    vi.mocked(db.delete).mockClear();
+    vi.mocked(runAiEngine).mockClear();
+    vi.useFakeTimers({ now: evidence.now });
+
+    await workerManager.start();
+    const wm = workerManager as unknown as {
+      strategyLifecycleSnapshot: typeof evidence.snapshot | null;
+      strategyLifecycleRestoreBlocked: boolean;
+    };
+    expect(wm.strategyLifecycleRestoreBlocked).toBe(false);
+    expect(wm.strategyLifecycleSnapshot).toEqual(evidence.snapshot);
+
+    const decision = evaluateSignalEligibility(
+      evidence.signal,
+      wm.strategyLifecycleSnapshot!.records,
+      wm.strategyLifecycleSnapshot!.historyEvents,
+    );
+    expect(decision.eligible).toBe(false);
+    expect(decision.codes).toContain('DUPLICATE_SIGNAL');
+    expect(decision.codes).toContain('STOP_LOSS_COOLDOWN');
+    expect(decision.codes).toContain('FAILED_BREAKOUT_COOLDOWN');
+    expect(decision.blockedUntilCandleCloseTime).toBe(evidence.close + 2 * evidence.candle);
+    expect(db.insert).not.toHaveBeenCalled();
+    expect(db.update).not.toHaveBeenCalled();
+    expect(db.delete).not.toHaveBeenCalled();
+    expect(runAiEngine).not.toHaveBeenCalled();
+  });
+
+  it('손상된 persisted snapshot은 부분 복원 없이 Worker SHADOW를 차단한다', async () => {
+    setupDbSequence({ lifecycleDecision: [{ fullJson: JSON.stringify({
+      source: 'server_worker',
+      strategyEnsembleShadow: { lifecycleSnapshot: { schemaVersion: 'future' } },
+    }) }] });
+    vi.mocked(db.insert).mockClear();
+    vi.mocked(db.update).mockClear();
+    vi.mocked(db.delete).mockClear();
+    vi.mocked(runAiEngine).mockClear();
+    vi.useFakeTimers();
+
+    await workerManager.start();
+    const wm = workerManager as unknown as {
+      strategyLifecycleSnapshot: unknown;
+      strategyLifecycleRestoreBlocked: boolean;
+    };
+    expect(wm.strategyLifecycleSnapshot).toBeNull();
+    expect(wm.strategyLifecycleRestoreBlocked).toBe(true);
+    expect(db.insert).not.toHaveBeenCalled();
+    expect(db.update).not.toHaveBeenCalled();
+    expect(db.delete).not.toHaveBeenCalled();
+    expect(runAiEngine).not.toHaveBeenCalled();
   });
 });
 
