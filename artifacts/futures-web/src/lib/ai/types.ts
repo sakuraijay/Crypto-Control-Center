@@ -150,6 +150,8 @@ export interface AiEngineDecision {
   // ── Strategy Ensemble SHADOW explainability ───────────────────────────────
   /** Persisted display-only evidence. It never grants Risk or execution authority. */
   strategyEnsembleShadow?: unknown;
+  /** Persisted read-only Risk projection. It never grants execution authority. */
+  strategyRiskAdvisory?: unknown;
 }
 
 export interface AiEngineStats {
