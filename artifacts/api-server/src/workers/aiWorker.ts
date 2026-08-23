@@ -53,6 +53,7 @@ import {
 import { manilaDayStartIso, manilaWeekStartIso, msUntilNextManilaDay } from "../lib/manilaTime";
 import { runIntelServiceCycle, runStrategyShadowWorkerReadOnly, stopIntelService, resumeIntelService } from "../intel/intelService";
 import { buildStrategyShadowWorkerEnvelope } from "../intel/strategyShadowWorkerEnvelopeV2";
+import { buildStrategyRiskWorkerAdvisory } from "../intel/strategyRiskWorkerBridgeV2";
 import type { SignalLifecycleSnapshotV2 } from "../intel/signalLifecycleSnapshotV2";
 import {
   advanceStrategyShadowLifecycleSnapshot,
@@ -1618,6 +1619,10 @@ class WorkerManager {
         testMode:      testModeActive,
         riskProfile,
         strategyEnsembleShadow,
+        strategyRiskAdvisory: buildStrategyRiskWorkerAdvisory({
+          shadowEnvelope: strategyEnsembleShadow,
+          riskEvaluation: riskEval,
+        }),
         ...engineResult,
       };
 

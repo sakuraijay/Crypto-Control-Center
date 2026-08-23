@@ -178,4 +178,6 @@ export interface ServerAiDecision {
   riskProfile: AppliedRiskProfileSnapshot;
   /** Regime-Aware Strategy Ensemble v2의 주문 불가 SHADOW explainability 봉투 */
   strategyEnsembleShadow: import('../intel/strategyShadowWorkerEnvelopeV2').StrategyShadowWorkerEnvelope;
+  /** 기존 Risk Engine 결과의 read-only advisory projection. 실행 입력으로 사용 금지. */
+  strategyRiskAdvisory?: import('../intel/strategyRiskWorkerBridgeV2').StrategyRiskWorkerAdvisory;
 }
