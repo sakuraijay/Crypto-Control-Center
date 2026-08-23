@@ -1,4 +1,45 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+// intelService imports read-only persistence wiring at module load; keep this test DB/network-free.
+vi.mock('@workspace/db', () => {
+  function chain(getResult: () => unknown) {
+    const value: Record<string, unknown> = {};
+    for (const method of ['from', 'where', 'limit', 'offset', 'orderBy', 'set', 'values',
+      'onConflictDoNothing', 'onConflictDoUpdate', 'returning', 'innerJoin', 'leftJoin']) {
+      value[method] = () => value;
+    }
+    (value as { then(resolve: (result: unknown) => unknown): Promise<unknown> }).then =
+      resolve => Promise.resolve(getResult()).then(resolve);
+    return value;
+  }
+  return {
+    db: {
+      select: () => chain(() => []),
+      insert: () => chain(() => []),
+      update: () => chain(() => []),
+      delete: () => chain(() => []),
+    },
+    marketIntelligenceSnapshotsTable: { createdAt: 'created_at' },
+    opportunityCandidatesTable: { id: 'id', decidedAtMs: 'decided_at_ms' },
+    shadowOutcomesTable: {
+      candidateId: 'candidate_id', complete: 'complete',
+      outcomeStatus4h: 'outcome_status_4h', attempts: 'attempts', createdAt: 'created_at',
+    },
+    runMigrations: vi.fn(async () => {}),
+  };
+});
+
+vi.mock('../routes/gmx', () => ({
+  getCachedPrices: () => null,
+  getCachedChange24h: () => null,
+  fetchGmxCandles: vi.fn(async () => null),
+  getCandleFetchStats: () => ({
+    requests: 0, ok: 0, http429: 0, http5xx: 0, httpOther: 0,
+    timeouts: 0, invalidPayload: 0, totalLatencyMs: 0, maxLatencyMs: 0,
+    lastErrorKind: null, last429AtMs: null,
+  }),
+}));
+
 import type { ProductionFetchersHandle } from '../intel/dataSource';
 import type { Timeframe } from '../intel/types';
 import {
