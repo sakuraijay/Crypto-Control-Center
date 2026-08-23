@@ -269,9 +269,11 @@ function makeOpenTrade(ageMs: number): unknown[] {
 //   start()    → (1) loadPendingApprovals (liveApprovalsTable)
 //              → (2) loadHwmFromDb        (workerStateTable)
 //              → (3) loadBaselinesFromDb  (workerStateTable — 기간 PnL 기준점)
-//   runCycle() → (4) loadPendingApprovals again (liveApprovalsTable)
-//              → (5) strategyConfigTable
-//              → (6) tradesTable (consecutiveLosses + cooldown 계산)
+//              → (4) loadStrategyLifecycleSnapshotFromDb (aiDecisionsTable)
+//              → (5) loadRiskEngineState  (workerStateTable — 미수립)
+//   runCycle() → (6) loadPendingApprovals again (liveApprovalsTable)
+//              → (7) strategyConfigTable
+//              → (8) tradesTable (consecutiveLosses + cooldown 계산)
 // insert/update 호출은 별도 mock (_dbInsertImpl, _dbUpdateImpl)
 
 function setupDbSequence(opts: {
@@ -293,10 +295,11 @@ function setupDbSequence(opts: {
     if (selectCallN === 1) return pending;   // start(): loadPendingApprovals
     if (selectCallN === 2) return hwm;       // start(): loadHwmFromDb
     if (selectCallN === 3) return [];        // start(): loadBaselinesFromDb (기준점 없음)
-    if (selectCallN === 4) return [];        // start(): loadRiskEngineState (6H-1 — 미수립)
-    if (selectCallN === 5) return pending;   // runCycle(): loadPendingApprovals again
-    if (selectCallN === 6) return strategy;  // runCycle(): strategyConfigTable
-    if (selectCallN === 7) return trades;    // runCycle(): tradesTable (consecutiveLosses)
+    if (selectCallN === 4) return [];        // start(): lifecycle decision 없음 — empty legacy baseline
+    if (selectCallN === 5) return [];        // start(): loadRiskEngineState (6H-1 — 미수립)
+    if (selectCallN === 6) return pending;   // runCycle(): loadPendingApprovals again
+    if (selectCallN === 7) return strategy;  // runCycle(): strategyConfigTable
+    if (selectCallN === 8) return trades;    // runCycle(): tradesTable (consecutiveLosses)
     return [];
   };
 
