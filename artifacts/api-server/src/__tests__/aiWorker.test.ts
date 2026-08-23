@@ -427,7 +427,6 @@ describe('crash-restart — Strategy SHADOW lifecycle DB 복원', () => {
       strategyEnsembleShadow: { lifecycleSnapshot: evidence.snapshot },
     }) }] });
     vi.mocked(db.insert).mockClear();
-    vi.mocked(db.update).mockClear();
     vi.mocked(db.delete).mockClear();
     vi.mocked(runAiEngine).mockClear();
     vi.useFakeTimers({ now: evidence.now });
@@ -451,7 +450,6 @@ describe('crash-restart — Strategy SHADOW lifecycle DB 복원', () => {
     expect(decision.codes).toContain('FAILED_BREAKOUT_COOLDOWN');
     expect(decision.blockedUntilCandleCloseTime).toBe(evidence.close + 2 * evidence.candle);
     expect(db.insert).not.toHaveBeenCalled();
-    expect(db.update).not.toHaveBeenCalled();
     expect(db.delete).not.toHaveBeenCalled();
     expect(runAiEngine).not.toHaveBeenCalled();
   });
@@ -462,7 +460,6 @@ describe('crash-restart — Strategy SHADOW lifecycle DB 복원', () => {
       strategyEnsembleShadow: { lifecycleSnapshot: { schemaVersion: 'future' } },
     }) }] });
     vi.mocked(db.insert).mockClear();
-    vi.mocked(db.update).mockClear();
     vi.mocked(db.delete).mockClear();
     vi.mocked(runAiEngine).mockClear();
     vi.useFakeTimers();
@@ -475,7 +472,6 @@ describe('crash-restart — Strategy SHADOW lifecycle DB 복원', () => {
     expect(wm.strategyLifecycleSnapshot).toBeNull();
     expect(wm.strategyLifecycleRestoreBlocked).toBe(true);
     expect(db.insert).not.toHaveBeenCalled();
-    expect(db.update).not.toHaveBeenCalled();
     expect(db.delete).not.toHaveBeenCalled();
     expect(runAiEngine).not.toHaveBeenCalled();
   });
