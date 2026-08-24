@@ -19,6 +19,8 @@ import Backtest from '@/pages/backtest';
 import AiLog from '@/pages/ai-log';
 import { AlertCircle } from 'lucide-react';
 
+export const APP_ROUTER_BASE = '/futures-web';
+
 function EmergencyBanner() {
   const { engineState, resetFromEmergency } = useAppContext();
   if (engineState !== 'EMERGENCY_STOP') return null;
@@ -41,7 +43,7 @@ function EmergencyBanner() {
   );
 }
 
-function Router() {
+export function AppRouter() {
   return (
     <RoutedErrorBoundary>
       <Shell>
@@ -54,7 +56,7 @@ function Router() {
           <Route path="/settings" component={Settings} />
           <Route path="/backtest" component={Backtest} />
           <Route path="/ai-log" component={AiLog} />
-          <Route component={NotFound} />
+          <Route path="*" component={NotFound} />
         </Switch>
       </Shell>
     </RoutedErrorBoundary>
@@ -66,13 +68,13 @@ function RoutedErrorBoundary({ children }: { children: ReactNode }) {
   return <ErrorBoundary resetKey={location}>{children}</ErrorBoundary>;
 }
 
-function AppContent() {
+export function AppContent() {
   return (
     <>
       <AuthOverlay />
       <EmergencyBanner />
       <RiskAlertMonitor />
-      <Router />
+      <AppRouter />
     </>
   );
 }
@@ -81,7 +83,7 @@ function App() {
   return (
     <GlobalProviders>
       <TooltipProvider>
-        <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, '')}>
+        <WouterRouter base={APP_ROUTER_BASE}>
           <AppContent />
         </WouterRouter>
         <Toaster />
