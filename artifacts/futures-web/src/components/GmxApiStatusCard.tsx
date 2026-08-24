@@ -62,6 +62,129 @@ function fmtExpires(expiresAt: string | number | null): string {
   try { return new Date(n * 1000).toLocaleString(); } catch { return '—'; }
 }
 
+function evidenceTone(state: 'not_evaluated' | 'verified' | 'stale' | 'failed'): Tone {
+  if (state === 'verified') return 'ok';
+  if (state === 'failed') return 'error';
+  if (state === 'stale') return 'warn';
+  return 'muted';
+}
+
+function evidenceLabel(state: 'not_evaluated' | 'verified' | 'stale' | 'failed'): string {
+  if (state === 'verified') return 'VERIFIED';
+  if (state === 'failed') return 'FAILED';
+  if (state === 'stale') return 'STALE';
+  return 'NOT EVALUATED';
+}
+
+function fmtAge(ageMs: number | null): string {
+  if (ageMs === null) return '—';
+  if (ageMs < 60_000) return `${Math.round(ageMs / 1000)}초`;
+  return `${Math.round(ageMs / 60_000)}분`;
+}
+
+function fmtUsd(value: number | null, digits = 6): string {
+  return value === null || !Number.isFinite(value) ? '—' : `$${value.toFixed(digits)}`;
+}
+
+function fmtPct(value: number | null, digits = 3): string {
+  return value === null || !Number.isFinite(value) ? '—' : `${value.toFixed(digits)}%`;
+}
+
+type PaperReadinessView = NonNullable<GmxApiStatusView['paperRuntimeReadiness']>;
+type PaperCostView = PaperReadinessView['costs']['BTC'];
+
+function PaperCostDiagnostics({ symbol, cost }: { symbol: 'BTC' | 'ETH'; cost: PaperCostView }) {
+  const diagnostics = cost.diagnostics;
+  if (!diagnostics) return null;
+  const firstFailure = diagnostics.firstFailure ?? diagnostics.failures[0] ?? null;
+  const firstFailureText = firstFailure
+    ? [
+      `첫 실패 ${firstFailure.component}←${firstFailure.sourceId}/${firstFailure.failureClass}`,
+      firstFailure.httpStatus === null ? null : `HTTP ${firstFailure.httpStatus}`,
+      firstFailure.peerPath.length > 0
+        ? firstFailure.peerPath.join('→')
+        : firstFailure.peerHost,
+    ].filter(Boolean).join(' · ')
+    : '성분 실패 없음';
+  const sourceTraceText = (diagnostics.sourceTraces ?? [])
+    .map((trace) => {
+      const path = trace.attempts
+        .map((attempt) =>
+          `${attempt.peerHost}:${attempt.failureClass ?? 'ok'}${attempt.httpStatus === null ? '' : `/HTTP${attempt.httpStatus}`}`)
+        .join('→');
+      return `${trace.sourceId}[${path || '호출 없음'}]`;
+    })
+    .join(' · ');
+  return (
+    <div className="font-mono text-[10px] text-muted-foreground leading-relaxed"
+      data-testid={`paper-cost-${symbol.toLowerCase()}-diagnostics`}>
+      <p>{firstFailureText}</p>
+      {sourceTraceText && <p>{sourceTraceText}</p>}
+      <p>
+        시도 {diagnostics.attemptCount} · retry {diagnostics.retryCount ?? 0} · failover {diagnostics.failoverCount}
+        {' · '}마지막 시도 {fmtEpochMs(diagnostics.lastAttemptAtMs)}
+        {' · '}성공 {fmtEpochMs(diagnostics.lastSuccessAtMs)}
+        {' · '}실패 {fmtEpochMs(diagnostics.lastFailureAtMs)}
+      </p>
+    </div>
+  );
+}
+
+export function PaperCostDetails({
+  symbol,
+  cost,
+}: {
+  symbol: 'BTC' | 'ETH';
+  cost: PaperCostView;
+}) {
+  const overCap = cost.withinCap === false;
+  const usable = cost.state === 'verified'
+    && cost.fresh
+    && cost.effectiveRoundTripCostUsd !== null;
+
+  if (!usable) {
+    return (
+      <>
+        <p className="text-[10px] text-amber-300" data-testid={`paper-cost-${symbol.toLowerCase()}-blocked`}>
+          {cost.blockReason ?? cost.failureId ?? `${symbol} 비용 snapshot 사용 불가`}
+        </p>
+        <PaperCostDiagnostics symbol={symbol} cost={cost} />
+      </>
+    );
+  }
+
+  return (
+    <>
+      <p className={cn('font-mono text-[12px]', overCap ? 'text-red-300' : 'text-foreground')}>
+        총 {fmtUsd(cost.effectiveRoundTripCostUsd)} · notional 대비 {fmtPct(cost.totalCostRatePct)}
+        {' · '}cap {fmtUsd(cost.capUsd)} · 초과 {fmtUsd(cost.capExcessUsd)}
+      </p>
+      <p className="font-mono text-[10px] text-muted-foreground leading-relaxed">
+        거래수수료 {fmtUsd(cost.tradingFeesUsd)} · 가스 {fmtUsd(cost.executionFeeUsd)}
+        {' · '}price impact {fmtUsd(cost.priceImpactTotalUsd)}
+        {' · '}funding/borrowing {fmtUsd(cost.carryCostUsd)}
+        {' · '}기타/보수 조정 {fmtUsd(cost.otherCostUsd)}
+      </p>
+      <p className="font-mono text-[10px] text-muted-foreground leading-relaxed">
+        raw: entry {fmtUsd(cost.positionFeeUsd)} · exit {fmtUsd(cost.estimatedExitFeeUsd)}
+        {' · '}entry impact {fmtUsd(cost.estimatedPriceImpactUsd)}
+        {' · '}exit impact {fmtUsd(cost.estimatedExitPriceImpactUsd)}
+        {' · '}funding {fmtUsd(cost.fundingFeeUsd)}
+        {' · '}borrowing {fmtUsd(cost.borrowingFeeUsd)}
+      </p>
+      <p className="text-[10px] text-muted-foreground">
+        cap 충족 필요 절감 {fmtUsd(cost.requiredCostReductionUsd)} ({fmtPct(cost.requiredCostReductionPct)})
+        {' · '}비용 회수 최소 gross move/edge {fmtUsd(cost.breakEvenGrossMoveUsd)} ({fmtPct(cost.breakEvenGrossMovePct)})
+      </p>
+      <p className="text-[10px] text-muted-foreground">
+        source {cost.source ?? '—'} · fetched {cost.fetchedAt ?? '—'} · observed {fmtEpochMs(cost.observedAtMs)} · age {fmtAge(cost.ageMs)}
+      </p>
+      <PaperCostDiagnostics symbol={symbol} cost={cost} />
+      {cost.blockReason && <p className="text-[10px] text-red-300">{cost.blockReason}</p>}
+    </>
+  );
+}
+
 export function GmxApiStatusCard() {
   const [pin, setPin] = useState('');
   const [status, setStatus] = useState<GmxApiStatusView | null>(null);
@@ -208,14 +331,32 @@ export function GmxApiStatusCard() {
                 : '실패 — LIVE 차단')
               : '미시도 — LIVE 차단'} />
           {/* ── 6H-2B §12 — stop 실행 능력·보호 주문·action 예산 (조회 전용) ── */}
-          <Row label="Stop 실행 능력"
+          <Row label="LIVE Stop 실행 능력"
             tone={s.stopCapability?.available ? 'ok' : 'muted'}
             value={s.stopCapability
-              ? `${s.stopCapability.available ? '가능' : '불가'}${s.stopCapability.available ? '' : ` — ${s.stopCapability.reasons[0] ?? ''}`}`
+              ? `${s.stopCapability.available ? '가능' : '불가'} · ${s.stopCapability.paperMode ? '현재 PAPER' : '현재 LIVE'} · status는 권한 아님`
               : String(s.stopExecutionAvailable ?? false)} />
           {s.stopCapability && (
-            <Row label="Stop 스키마 pin" tone="muted"
-              value={`${s.stopCapability.schemaPin.sdk} · StopLossDecrease=${s.stopCapability.schemaPin.stopLossDecrease}`} />
+            <>
+              <Row label="Stop 평가 시각 / 경계" tone="muted"
+                value={`${fmtEpochMs(s.stopCapability.evaluatedAt ? Date.parse(s.stopCapability.evaluatedAt) : null)} · ${s.stopCapability.boundary}`} />
+              <Row label="Stop 스키마 pin" tone="muted"
+                value={`${s.stopCapability.schemaPin.sdk} · StopLossDecrease=${s.stopCapability.schemaPin.stopLossDecrease}`} />
+              <div className="sm:col-span-2 space-y-1 py-1" data-testid="stop-capability-reasons">
+                <p className="text-[10px] font-semibold text-muted-foreground">
+                  Stop capability 판정 근거 ({s.stopCapability.scope})
+                </p>
+                {s.stopCapability.reasons.length === 0 ? (
+                  <p className="text-[10px] text-emerald-300">
+                    모든 Stop 실행 전제조건 충족 · 단, 이 읽기 전용 status 자체는 실행 승인이 아닙니다.
+                  </p>
+                ) : (
+                  s.stopCapability.reasons.map((reason) => (
+                    <p key={reason} className="text-[10px] text-amber-300">• {reason}</p>
+                  ))
+                )}
+              </div>
+            </>
           )}
           <Row label="보호 주문 (차단/전체)"
             tone={s.blockingProtectionCount === null || s.blockingProtectionCount === undefined ? 'warn'
@@ -273,6 +414,175 @@ export function GmxApiStatusCard() {
           {s.executionEligibleCostMaxAgeMs !== undefined && (
             <Row label="실행 적격 비용 창" tone="muted" value={`${Math.round(s.executionEligibleCostMaxAgeMs / 1000)}초 (표시 cache와 별도)`} />
           )}
+        </div>
+      )}
+
+      {/* PAPER runtime diagnostics — execution authorization cache와 구조적으로 분리 */}
+      {s?.paperRuntimeReadiness && (
+        <div
+          className="space-y-3 rounded-md border border-sky-500/30 bg-sky-500/5 p-3"
+          data-testid="paper-runtime-readiness"
+        >
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div>
+              <p className="text-[11px] font-semibold text-sky-300">PAPER Runtime Readiness Evidence</p>
+              <p className="text-[10px] text-muted-foreground">
+                서버 background cache · 외부 호출은 scheduler만 수행 · GET status는 저장값만 표시
+              </p>
+              <p className="text-[10px] text-sky-200">
+                PAPER evidence는 LIVE Stop capability를 설명만 하며, LIVE 권한·signer·submission을 활성화하지 않습니다.
+              </p>
+            </div>
+            <Badge tone="warn">READ-ONLY / NOT EXECUTION AUTHORIZATION</Badge>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6">
+            <Row
+              label="PAPER / Read-only"
+              tone={s.paperRuntimeReadiness.paperMode && s.paperRuntimeReadiness.readonlyEnabled ? 'ok' : 'error'}
+              value={`${s.paperRuntimeReadiness.paperMode ? 'PAPER' : 'NOT PAPER'} · ${s.paperRuntimeReadiness.readonlyEnabled ? 'READ-ONLY ON' : 'READ-ONLY OFF'}`}
+            />
+            <Row
+              label="Background scheduler"
+              tone={s.paperRuntimeReadiness.scheduler.running ? 'ok' : 'muted'}
+              value={`${s.paperRuntimeReadiness.scheduler.running ? 'RUNNING' : 'STOPPED'} · ${s.paperRuntimeReadiness.scheduler.inFlight ? 'IN-FLIGHT' : 'IDLE'} · 마지막 ${fmtEpochMs(s.paperRuntimeReadiness.scheduler.lastCompletedAtMs)}`}
+            />
+            <Row
+              label="Scheduler next / failure"
+              tone={s.paperRuntimeReadiness.scheduler.lastFailureId ? 'warn' : 'muted'}
+              value={`다음 ${fmtEpochMs(s.paperRuntimeReadiness.scheduler.nextRefreshAtMs)} · ${s.paperRuntimeReadiness.scheduler.lastFailureId ?? 'failure 없음'}`}
+            />
+            <Row
+              label="Deployment evidence"
+              tone={evidenceTone(s.paperRuntimeReadiness.deployment.state)}
+              value={`${evidenceLabel(s.paperRuntimeReadiness.deployment.state)} · age ${fmtAge(s.paperRuntimeReadiness.deployment.ageMs)}${s.paperRuntimeReadiness.deployment.failureId ? ` · ${s.paperRuntimeReadiness.deployment.failureId}` : ''}`}
+            />
+            <Row
+              label="Arbitrum RPC evidence"
+              tone={evidenceTone(s.paperRuntimeReadiness.rpc.state)}
+              value={`${evidenceLabel(s.paperRuntimeReadiness.rpc.state)} · chain ${s.paperRuntimeReadiness.rpc.chainId ?? '—'} · age ${fmtAge(s.paperRuntimeReadiness.rpc.ageMs)}${s.paperRuntimeReadiness.rpc.failureId ? ` · ${s.paperRuntimeReadiness.rpc.failureId}` : ''}`}
+            />
+            {(['BTC', 'ETH'] as const).map((symbol) => {
+              const decimals = s.paperRuntimeReadiness!.decimals[symbol];
+              return (
+                <Row
+                  key={`paper-decimals-${symbol}`}
+                  label={`${symbol} index decimals`}
+                  tone={evidenceTone(decimals.state)}
+                  value={`${decimals.decimals ?? '—'} · ${decimals.source ?? evidenceLabel(decimals.state)} · age ${fmtAge(decimals.ageMs)}${decimals.failureId ? ` · ${decimals.failureId}` : ''}`}
+                />
+              );
+            })}
+          </div>
+
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-2">
+            {(['BTC', 'ETH'] as const).map((symbol) => {
+              const cost = s.paperRuntimeReadiness!.costs[symbol];
+              const overCap = cost.withinCap === false;
+              return (
+                <div
+                  key={`paper-cost-${symbol}`}
+                  className="rounded border border-border/60 bg-background/50 p-2 space-y-1"
+                  data-testid={`paper-cost-${symbol.toLowerCase()}`}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-[11px] font-semibold">
+                      {symbol} LONG · ${cost.notionalUsd} · {cost.holdingHours}h
+                    </span>
+                    <Badge tone={cost.state !== 'verified' ? evidenceTone(cost.state) : overCap ? 'error' : 'ok'}>
+                      {cost.state !== 'verified'
+                        ? evidenceLabel(cost.state)
+                        : cost.withinCap
+                          ? 'WITHIN CAP'
+                          : 'BLOCKED · CAP EXCEEDED'}
+                    </Badge>
+                  </div>
+                  <PaperCostDetails symbol={symbol} cost={cost} />
+                </div>
+              );
+            })}
+          </div>
+
+          <p className="text-[10px] text-muted-foreground">
+            경제성 진단 입력은 LONG · $20 · 1h 관측 시나리오입니다. 비용 상한은 서버 고정 $0.40이며,
+            이 화면은 통과 가능한 주문 크기를 제안하거나 상한을 완화하지 않습니다.
+          </p>
+
+          <div className="space-y-1">
+            <p className="text-[10px] font-semibold text-muted-foreground">Blocker IDs</p>
+            <div className="flex flex-wrap gap-1" data-testid="paper-runtime-blocker-ids">
+              {s.paperRuntimeReadiness.blockerIds.map((id) => (
+                <Badge key={id} tone="warn">{id}</Badge>
+              ))}
+            </div>
+          </div>
+
+          <div className="space-y-1" data-testid="paper-runtime-holds">
+            <p className="text-[10px] font-semibold text-muted-foreground">Manual-action HOLD · requested 2026-08-20T13:59:15Z</p>
+            {s.paperRuntimeReadiness.manualActionHolds.map((hold) => (
+              <div key={hold.id} className="rounded border border-amber-500/20 bg-amber-500/5 px-2 py-1 text-[10px]">
+                <span className="font-mono text-amber-300">{hold.id}</span>
+                <span className="text-muted-foreground"> · 필요: {hold.requiredAction} · 재개: {hold.resumeCondition}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── CLOSE 정산 증거 (Settlement Evidence) — 읽기 전용 관측 ── */}
+      {s && (
+        <div className="space-y-1" data-testid="gmx-api-settlement-evidence">
+          <p className="text-[11px] font-semibold text-muted-foreground">Settlement Evidence</p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6">
+            <Row
+              label="CLOSE 정산 reconciliation"
+              tone={
+                s.settlementReconcile === null
+                  ? 'warn'
+                  : s.settlementReconcile.incomplete
+                    ? 'error'
+                    : 'ok'
+              }
+              value={
+                s.settlementReconcile === null
+                  ? '미실행/조회 불가'
+                  : s.settlementReconcile.incomplete
+                    ? `미완료 — ${s.settlementReconcile.unsettledCount}건 중 ${s.settlementReconcile.settledNow}건 정산`
+                    : `완료 (${s.settlementReconcile.unsettledCount}건)`
+              }
+            />
+            {s.settlementReconcile !== null && s.settlementReconcile.incomplete && s.settlementReconcile.reasons.length > 0 && (
+              <Row
+                label="정산 차단 사유 (첫 번째)"
+                tone="error"
+                value={s.settlementReconcile.reasons[0]
+                  .replace(/^LIVE_SETTLEMENT_INCOMPLETE:\s*/i, '')
+                  .slice(0, 80)}
+              />
+            )}
+            <Row
+              label="미정산 LIVE 거래"
+              tone={
+                s.unsettledLiveTradeCount === null
+                  ? 'warn'
+                  : s.unsettledLiveTradeCount > 0
+                    ? 'error'
+                    : 'ok'
+              }
+              value={s.unsettledLiveTradeCount === null ? '조회 실패' : String(s.unsettledLiveTradeCount)}
+            />
+            <Row
+              label="Legacy zero-fee 거래"
+              tone={
+                s.legacyZeroFeeCount === null
+                  ? 'warn'
+                  : s.legacyZeroFeeCount > 0
+                    ? 'error'
+                    : 'ok'
+              }
+              value={s.legacyZeroFeeCount === null ? '조회 실패' : String(s.legacyZeroFeeCount)}
+            />
+          </div>
         </div>
       )}
 

@@ -88,6 +88,46 @@ describe('LONG 상태', () => {
     const result = runAiEngine(makeInput({ analyses: [analysis] }));
     expect(result.operatingState).not.toBe('LONG');
   });
+
+  it('프로필은 분석/선택/신뢰도를 바꾸지 않고 entryStyle 경계만 80→70으로 바꾼다', () => {
+    const analysis = makeAnalysis({
+      symbol: 'ETH',
+      bullishScore: 75,
+      bearishScore: 20,
+      opportunityScore: 82,
+      indicators: { ...LONG_ANALYSIS.indicators, atrPct: 2 },
+    });
+    const conservative = runAiEngine(makeInput({
+      analyses: [analysis],
+      immediateEntryThreshold: 80,
+    }));
+    const aggressive = runAiEngine(makeInput({
+      analyses: [analysis],
+      immediateEntryThreshold: 70,
+    }));
+    expect(conservative.entryStyle).toBe('scaled');
+    expect(aggressive.entryStyle).toBe('immediate');
+    expect(aggressive.primarySymbol).toBe(conservative.primarySymbol);
+    expect(aggressive.confidence).toBe(conservative.confidence);
+    expect(aggressive.marketRankings).toEqual(conservative.marketRankings);
+    expect(aggressive.stateRationale).toBe(conservative.stateRationale);
+    expect(aggressive.reasoning).toEqual(conservative.reasoning);
+  });
+
+  it('서로 다른 심볼의 두 번째 포지션은 신규 OPEN, 같은 심볼은 scale_in으로 차단 표기한다', () => {
+    const different = runAiEngine(makeInput({
+      analyses: [LONG_ANALYSIS],
+      positions: [makePosition({ symbol: 'ETH' })],
+      limits: { ...BASE_LIMITS, maxSimultaneousPositions: 2 },
+    }));
+    const same = runAiEngine(makeInput({
+      analyses: [LONG_ANALYSIS],
+      positions: [makePosition({ symbol: LONG_ANALYSIS.symbol })],
+      limits: { ...BASE_LIMITS, maxSimultaneousPositions: 2 },
+    }));
+    expect(different.executionType).toBe('perp_long_open');
+    expect(same.executionType).toBe('scale_in');
+  });
 });
 
 // ── SHORT 상태 ─────────────────────────────────────────────────────────────────

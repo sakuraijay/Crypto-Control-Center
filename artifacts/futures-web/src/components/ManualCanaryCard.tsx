@@ -14,10 +14,13 @@ import { Bird, Loader2, RefreshCw, ShieldAlert, CheckCircle2, XCircle, CircleDas
 import { cn } from '@/lib/utils';
 import { Card } from '@/components/ui/card';
 import {
-  fetchCanaryPreflight, fetchCanaryStatus, postCanaryExecute, postCanaryClose, stageTone,
+  fetchCanaryPreflight, fetchCanaryStatus, normalizeCanaryBlockers,
+  postCanaryExecute, postCanaryClose, stageTone,
   CANARY_CONFIRM_OPEN, CANARY_CONFIRM_CLOSE,
   type CanaryPreflightResponse, type CanaryStatusResponse, type CanaryExecuteResponse,
+  type CanaryBlocker,
 } from '@/lib/manualCanary';
+import { BlockerGroupSection } from '@/components/BlockerGroupSection';
 
 const SYMBOLS = ['BTC', 'ETH'] as const;
 const DIRECTIONS = ['LONG', 'SHORT'] as const;
@@ -48,12 +51,16 @@ export function ManualCanaryCard() {
   const [closeConfirmText, setCloseConfirmText] = useState('');
   const [message, setMessage] = useState<{ tone: 'ok' | 'warn' | 'error'; text: string } | null>(null);
   const [lastResult, setLastResult] = useState<CanaryExecuteResponse | null>(null);
+  const [blockers, setBlockers] = useState<CanaryBlocker[] | null>(null);
 
   const pinReady = pin.length >= 4;
 
   const refreshStatus = useCallback(async (p: string) => {
     const r = await fetchCanaryStatus(p);
-    if (r.kind === 'ok') setStatus(r.data);
+    if (r.kind === 'ok') {
+      setStatus(r.data);
+      setBlockers(normalizeCanaryBlockers(r.data.blockers));
+    }
   }, []);
 
   const onPreflight = async () => {
@@ -222,6 +229,14 @@ export function ManualCanaryCard() {
           ))}
         </div>
       )}
+
+      {/* 차단 그룹 섹션 */}
+      <div className="flex flex-col gap-2">
+        <span className="text-[11px] text-muted-foreground font-medium">
+          차단 항목 그룹 · 상태 새로고침에 포함
+        </span>
+        <BlockerGroupSection blockers={blockers} />
+      </div>
 
       {/* 2단계 — confirm 문구 + 실행 */}
       {preflight?.ok && preflight.preflightId && (

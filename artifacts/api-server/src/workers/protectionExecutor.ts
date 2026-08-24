@@ -23,6 +23,11 @@ import { manilaDayKey } from '../lib/profitProtection';
 // ── 주입식 제출 함수 ──────────────────────────────────────────────────────────
 
 export interface ProtectionSubmitRequest {
+  parentOpenIntentId: string;
+  /** OPEN confirmation에서 읽은 exact GMX position key. */
+  positionKey: string;
+  /** 서버가 확인한 Manual Canary OPEN lineage에서만 true. */
+  manualCanary: boolean;
   purpose: ProtectionPurpose;
   symbol: string;
   marketAddress: string;
@@ -56,6 +61,8 @@ export interface ConfirmedOpenEvidence {
   isLong: boolean;
   /** authoritative readback으로 확인된 실제 포지션 크기 (USD) */
   confirmedSizeUsd: number;
+  /** parentOpenIntentId가 Manual Canary 결정적 ID인 경우에만 설정한다. */
+  manualCanary?: true;
 }
 
 export interface InitialStopPlanInput {
@@ -67,7 +74,42 @@ export interface InitialStopPlanInput {
 
 export type StopCreationResult =
   | { ok: true; protectionId: string; finalStatus: ProtectionStatus }
-  | { ok: false; protectionId: string | null; reason: string; emergencyCloseRequired: boolean };
+  | {
+      ok: false;
+      protectionId: string | null;
+      reason: string;
+      emergencyCloseRequired: boolean;
+      currentStatus?: ProtectionStatus;
+    };
+
+function existingStopNeedsEmergency(status: string): boolean {
+  // PREPARED/SUBMITTING은 다른 동시 pass가 CAS claim을 획득한 in-flight 상태다.
+  // startup reconciliation이 crash 잔존 상태를 UNRESOLVED로 바꾸기 전에는
+  // loser pass가 emergency close를 발동하면 안 된다.
+  return !['PREPARED', 'SUBMITTING', 'SUBMITTED', 'ACTIVE'].includes(status);
+}
+
+async function lostStopTransitionResult(
+  protectionId: string,
+  fallbackReason: string,
+): Promise<StopCreationResult> {
+  const current = await getProtection(protectionId);
+  if (!current) {
+    return {
+      ok: false,
+      protectionId,
+      reason: `${fallbackReason}; 현재 상태 재조회 실패`,
+      emergencyCloseRequired: true,
+    };
+  }
+  return {
+    ok: false,
+    protectionId,
+    reason: `${fallbackReason}; 현재 상태 ${current.status}/attempts=${current.submitAttempts}`,
+    emergencyCloseRequired: existingStopNeedsEmergency(current.status),
+    currentStatus: current.status as ProtectionStatus,
+  };
+}
 
 /**
  * INITIAL_STOP 전체 수명주기 1회 실행. 실패 지점별 처리:
@@ -107,7 +149,13 @@ export async function createInitialStopAfterOpenConfirmed(
   const row = await getProtection(id);
   if (!row) return { ok: false, protectionId: id, reason: '보호 주문 재조회 실패 — 제출 0회 (fail-closed)', emergencyCloseRequired: true };
   if (row.status !== 'PLANNED' || row.submitAttempts > 0) {
-    return { ok: false, protectionId: id, reason: `기존 보호 주문 상태 ${row.status}/attempts=${row.submitAttempts} — 자동 재제출 금지`, emergencyCloseRequired: row.status !== 'ACTIVE' && row.status !== 'SUBMITTED' };
+    return {
+      ok: false,
+      protectionId: id,
+      reason: `기존 보호 주문 상태 ${row.status}/attempts=${row.submitAttempts} — 자동 재제출 금지`,
+      emergencyCloseRequired: existingStopNeedsEmergency(row.status),
+      currentStatus: row.status as ProtectionStatus,
+    };
   }
   if (!_submitFn) {
     return { ok: false, protectionId: id, reason: 'stop 제출 함수 미구성 — 제출 0회', emergencyCloseRequired: true };
@@ -115,13 +163,16 @@ export async function createInitialStopAfterOpenConfirmed(
 
   // PREPARED → SUBMITTING 커밋 후에만 제출 (재시작 시 UNRESOLVED 취급 지점)
   const t1 = await transitionProtection(id, 'PLANNED', 'PREPARED');
-  if (!t1.ok) return { ok: false, protectionId: id, reason: t1.reason, emergencyCloseRequired: true };
+  if (!t1.ok) return lostStopTransitionResult(id, t1.reason);
   const t2 = await transitionProtection(id, 'PREPARED', 'SUBMITTING', { incrementSubmitAttempts: true });
-  if (!t2.ok) return { ok: false, protectionId: id, reason: t2.reason, emergencyCloseRequired: true };
+  if (!t2.ok) return lostStopTransitionResult(id, t2.reason);
 
   let outcome: ProtectionSubmitOutcome;
   try {
     outcome = await _submitFn({
+      parentOpenIntentId: o.parentOpenIntentId,
+      positionKey: o.positionKey,
+      manualCanary: o.manualCanary === true,
       purpose: 'INITIAL_STOP', symbol: o.symbol, marketAddress: o.marketAddress,
       isLong: o.isLong, sizeDeltaUsd: o.confirmedSizeUsd,
       triggerPriceUsd: input.triggerPriceUsd, acceptablePriceUsd: input.acceptablePriceUsd,
@@ -154,6 +205,63 @@ export async function createInitialStopAfterOpenConfirmed(
   return { ok: false, protectionId: id, reason: outcome.reason, emergencyCloseRequired: true };
 }
 
+/**
+ * OPEN은 확정됐지만 stop 제출 선행조건이 하나라도 사라진 경우의 durable 차단 기록.
+ * 네트워크 제출은 호출하지 않고 INITIAL_STOP을 UNRESOLVED로 고정해 자동 재시도를
+ * 금지한다. 호출자는 이어서 deterministic EMERGENCY_CLOSE를 최대 1회 시도한다.
+ */
+export async function recordInitialStopHandoffFailure(
+  input: InitialStopPlanInput,
+  reason: string,
+): Promise<StopCreationResult> {
+  const o = input.open;
+  if (!Number.isFinite(o.confirmedSizeUsd) || o.confirmedSizeUsd <= 0
+      || !Number.isFinite(input.triggerPriceUsd) || input.triggerPriceUsd <= 0
+      || !Number.isFinite(input.acceptablePriceUsd) || input.acceptablePriceUsd <= 0) {
+    return { ok: false, protectionId: null, reason: 'INITIAL_STOP 실패 기록 입력 비정상', emergencyCloseRequired: true };
+  }
+  const planned = await planProtection({
+    parentOpenIntentId: o.parentOpenIntentId,
+    positionKey: o.positionKey,
+    purpose: 'INITIAL_STOP',
+    symbol: o.symbol,
+    marketAddress: o.marketAddress,
+    isLong: o.isLong,
+    sizeDeltaUsd: o.confirmedSizeUsd,
+    triggerPriceUsd: input.triggerPriceUsd,
+    acceptablePriceUsd: input.acceptablePriceUsd,
+    dayKey: manilaDayKey(input.now ?? new Date()),
+  });
+  if (!planned.ok) {
+    return { ok: false, protectionId: null, reason: planned.reason, emergencyCloseRequired: true };
+  }
+  const row = await getProtection(planned.protectionId);
+  if (!row) {
+    return { ok: false, protectionId: planned.protectionId, reason: 'INITIAL_STOP 실패 기록 재조회 실패', emergencyCloseRequired: true };
+  }
+  if (row.status === 'UNRESOLVED') {
+    return { ok: false, protectionId: planned.protectionId, reason, emergencyCloseRequired: true };
+  }
+  if (row.status !== 'PLANNED' || row.submitAttempts > 0) {
+    return {
+      ok: false,
+      protectionId: planned.protectionId,
+      reason: `기존 보호 주문 상태 ${row.status}/attempts=${row.submitAttempts} — 실패 기록 중복 전이 금지`,
+      emergencyCloseRequired: existingStopNeedsEmergency(row.status),
+      currentStatus: row.status as ProtectionStatus,
+    };
+  }
+  const transitioned = await transitionProtection(
+    planned.protectionId,
+    'PLANNED',
+    'UNRESOLVED',
+    { error: reason, evidence: o.evidence },
+  );
+  return transitioned.ok
+    ? { ok: false, protectionId: planned.protectionId, reason, emergencyCloseRequired: true }
+    : lostStopTransitionResult(planned.protectionId, transitioned.reason);
+}
+
 // ── §6 — emergency close (전량 MarketDecrease, 최대 1회) ─────────────────────
 
 export interface EmergencyCloseInput {
@@ -165,6 +273,7 @@ export interface EmergencyCloseInput {
   /** authoritative 전체 포지션 크기 (초과 금지·전량) */
   fullSizeUsd: number;
   reason: string;
+  manualCanary?: true;
   now?: Date;
 }
 
@@ -206,6 +315,9 @@ export async function runEmergencyClose(input: EmergencyCloseInput): Promise<Sto
   let outcome: ProtectionSubmitOutcome;
   try {
     outcome = await _submitFn({
+      parentOpenIntentId: input.parentOpenIntentId,
+      positionKey: input.positionKey,
+      manualCanary: input.manualCanary === true,
       purpose: 'EMERGENCY_CLOSE', symbol: input.symbol, marketAddress: input.marketAddress,
       isLong: input.isLong, sizeDeltaUsd: input.fullSizeUsd,
       triggerPriceUsd: null, acceptablePriceUsd: null, protectionId: id,

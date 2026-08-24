@@ -39,6 +39,8 @@ export const RISK_POLICY = {
   conditional5xEnabled: false,
   /** 동시 포지션 최대 */
   maxConcurrentPositions: 1,
+  /** 버전 프로필이 요청할 수 있는 절대 동시 포지션 상한 */
+  maxProfileConcurrentPositions: 2,
   /** Manila 거래일 기준 신규 진입 최대 횟수 */
   maxDailyEntries: 3,
   /** 연속 순손실 즉시 중단 기준 */

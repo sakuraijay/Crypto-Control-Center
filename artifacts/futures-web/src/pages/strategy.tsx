@@ -6,7 +6,7 @@ import { Switch } from '@/components/ui/switch';
 import { Button } from '@/components/ui/button';
 import { Activity, ShieldAlert, RotateCcw, Target, TrendingUp, Cpu, Info, Lock, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { useCallback, useEffect } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 function Stepper({ value, onChange, min = 0, max = 1000, step = 1 }: {
   value: number; onChange: (v: number) => void; min?: number; max?: number; step?: number;
@@ -29,8 +29,44 @@ function Stepper({ value, onChange, min = 0, max = 1000, step = 1 }: {
 }
 
 export default function Strategy() {
-  const { indicators, limits, updateIndicator, updateLimit, resetToDefaults, syncStatus, syncError } = useStrategyContext();
+  const { indicators, limits, updateIndicator, updateLimit, resetToDefaults, syncStatus, syncError, riskProfile, requestRiskProfile } = useStrategyContext();
   const { address, usdcBalance } = useWallet();
+
+  const [profileDialogOpen, setProfileDialogOpen] = useState(false);
+  const [selectedTargetProfile, setSelectedTargetProfile] = useState<'conservative' | 'aggressive' | null>(null);
+  const [pin, setPin] = useState('');
+  const [pinError, setPinError] = useState('');
+  const [profileLoading, setProfileLoading] = useState(false);
+
+  const handleRequestProfile = async () => {
+    if (!selectedTargetProfile || !pin) return;
+    setProfileLoading(true);
+    setPinError('');
+    try {
+      await requestRiskProfile(selectedTargetProfile, pin);
+      setProfileDialogOpen(false);
+      setPin('');
+    } catch (e: any) {
+      setPinError(e.message || 'Failed to update profile');
+    } finally {
+      setPin('');
+      setProfileLoading(false);
+    }
+  };
+
+  const closeProfileDialog = () => {
+    setProfileDialogOpen(false);
+    setSelectedTargetProfile(null);
+    setPin('');
+    setPinError('');
+  };
+
+  const openProfileDialog = (profile: 'conservative' | 'aggressive') => {
+    setSelectedTargetProfile(profile);
+    setPin('');
+    setPinError('');
+    setProfileDialogOpen(true);
+  };
 
   const combined = indicators.find(i => i.id === 'combined');
   const minScore = (combined?.params.minScore as number) ?? 60;
@@ -75,6 +111,58 @@ export default function Strategy() {
 
   return (
     <div className="animate-in fade-in duration-500 flex flex-col gap-6">
+      {profileDialogOpen && (
+        <div className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm flex items-center justify-center p-4" role="presentation">
+          <form
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="risk-profile-dialog-title"
+            onSubmit={event => {
+              event.preventDefault();
+              void handleRequestProfile();
+            }}
+            className="bg-popover text-popover-foreground border border-border rounded-xl shadow-lg w-full max-w-md p-6 flex flex-col gap-4 animate-in zoom-in-95 duration-200"
+          >
+            <div className="flex flex-col gap-1.5">
+              <h3 id="risk-profile-dialog-title" className="font-semibold text-lg leading-none tracking-tight">Confirm Profile Change</h3>
+              <p className="text-sm text-muted-foreground">
+                You are about to switch the operational risk profile to <strong className="uppercase text-foreground">{selectedTargetProfile}</strong>.
+                {selectedTargetProfile === 'aggressive' && (
+                  <span className="block mt-2 text-destructive font-medium">
+                    Warning: Aggressive mode significantly increases market exposure and reduces safety margins.
+                  </span>
+                )}
+              </p>
+            </div>
+            <div className="flex flex-col gap-2">
+              <label htmlFor="risk-profile-pin" className="text-xs font-semibold text-foreground">Operator PIN</label>
+              <input
+                id="risk-profile-pin"
+                type="password"
+                autoComplete="one-time-code"
+                inputMode="numeric"
+                value={pin}
+                onChange={e => setPin(e.target.value)}
+                placeholder="Enter operator PIN (6+ digits)"
+                className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring font-mono"
+              />
+              {pinError && <p className="text-[10px] text-destructive">{pinError}</p>}
+            </div>
+            <div className="flex justify-end gap-2 mt-2">
+              <Button type="button" variant="outline" onClick={closeProfileDialog} disabled={profileLoading}>Cancel</Button>
+              <Button
+                type="submit"
+                variant={selectedTargetProfile === 'aggressive' ? 'destructive' : 'default'}
+                disabled={!pin || profileLoading}
+              >
+                {profileLoading ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
+                Confirm
+              </Button>
+            </div>
+          </form>
+        </div>
+      )}
+
       <div className="flex items-center justify-between gap-3">
         <p className="text-muted-foreground text-sm">Configure signal thresholds, indicator logic, and risk guards.</p>
         <div className="flex items-center gap-2 shrink-0">
@@ -97,6 +185,103 @@ export default function Strategy() {
           <Button variant="outline" size="sm" onClick={resetToDefaults} className="h-8 text-xs">
             <RotateCcw className="w-3 h-3 mr-2" /> Reset Defaults
           </Button>
+        </div>
+      </div>
+
+      {/* ── Risk Profile Mode ── */}
+      <div className="flex flex-col gap-4">
+        <div className="flex items-center justify-between border-b border-border pb-2">
+          <h2 className="font-semibold flex items-center gap-2 text-sm">
+            <ShieldAlert className="w-4 h-4 text-primary" /> Operational Risk Profile
+          </h2>
+          {riskProfile?.pending && (
+            <span className="text-[10px] flex items-center gap-1 text-amber-400 bg-amber-500/10 px-2 py-1 rounded">
+              <Loader2 className="w-3 h-3 animate-spin" /> Pending Verification
+            </span>
+          )}
+        </div>
+
+        {riskProfile && (
+          <div className="grid gap-2 rounded-lg border border-border bg-muted/20 p-3 text-xs sm:grid-cols-3">
+            <div>
+              <span className="text-muted-foreground">Applied</span>
+              <div className="font-semibold capitalize">{riskProfile.applied.name} · {riskProfile.applied.version}</div>
+            </div>
+            <div>
+              <span className="text-muted-foreground">Requested</span>
+              <div className="font-semibold capitalize">{riskProfile.desired.name} · {riskProfile.desired.version}</div>
+            </div>
+            <div>
+              <span className="text-muted-foreground">Cycle boundary</span>
+              <div className={cn("font-semibold", riskProfile.safeBoundary ? "text-emerald-500" : "text-amber-400")}>
+                {riskProfile.safeBoundary ? "Ready" : riskProfile.reason ?? "Waiting for a safe boundary"}
+              </div>
+            </div>
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          <Card className={cn("p-4 flex flex-col gap-3 relative overflow-hidden transition-colors", riskProfile?.applied.name === 'conservative' || !riskProfile ? 'border-primary/50 bg-primary/5' : 'bg-card/50')}>
+            {(riskProfile?.applied.name === 'conservative' || !riskProfile) && <div className="absolute top-0 right-0 px-2 py-1 bg-primary text-primary-foreground text-[9px] font-bold uppercase rounded-bl">Active</div>}
+            {riskProfile?.desired.name === 'conservative' && riskProfile?.pending && <div className="absolute top-0 right-0 px-2 py-1 bg-amber-500 text-amber-950 text-[9px] font-bold uppercase rounded-bl">Pending</div>}
+            <div className="font-semibold flex items-center gap-2">
+              Conservative <span className="text-[10px] font-normal text-muted-foreground">(Default)</span>
+            </div>
+            <div className="text-[10px] text-muted-foreground flex-1 flex flex-col gap-1">
+              <div>Current strategy values stay unchanged; the existing server safety policy remains authoritative.</div>
+              <ul className="mt-1 space-y-0.5 opacity-80 list-disc list-inside ml-1">
+                <li>Signal Threshold: 80</li>
+                <li>Max Risk: 0.75% per trade</li>
+                <li>Reserve Cash: {limits.reserveCashPct}%</li>
+                <li>Max Margin: ${limits.maxMarginPerTrade.toLocaleString()}</li>
+                <li>Max Positions: 1</li>
+                <li>Cooldown: {limits.cooldownMinutes}m</li>
+                <li>Max Leverage: ≤{Math.min(limits.maxLeverage, 3)}x</li>
+                <li>Exposure: ${Math.min(limits.maxTotalExposureUSDT, 3000).toLocaleString()}</li>
+              </ul>
+              <div className="mt-2 p-2 bg-background border border-border rounded text-[10px] leading-relaxed">
+                <span className="font-semibold text-foreground">Allocated capital:</span> ${limits.tradingCapital.toLocaleString()} allows at most <strong className="text-foreground">${(limits.tradingCapital * 0.0075).toLocaleString()}</strong> risk per trade.
+              </div>
+            </div>
+            <Button
+              variant={(riskProfile?.applied.name === 'conservative' || !riskProfile) ? 'secondary' : 'outline'}
+              size="sm"
+              disabled={(riskProfile?.applied.name === 'conservative' || !riskProfile) || riskProfile?.pending}
+              onClick={() => openProfileDialog('conservative')}
+            >
+              {(riskProfile?.applied.name === 'conservative' || !riskProfile) ? 'Current Profile' : 'Switch to Conservative'}
+            </Button>
+          </Card>
+
+          <Card className={cn("p-4 flex flex-col gap-3 relative overflow-hidden transition-colors", riskProfile?.applied.name === 'aggressive' ? 'border-destructive/50 bg-destructive/5' : 'bg-card/50')}>
+            {riskProfile?.applied.name === 'aggressive' && <div className="absolute top-0 right-0 px-2 py-1 bg-destructive text-destructive-foreground text-[9px] font-bold uppercase rounded-bl">Active</div>}
+            {riskProfile?.desired.name === 'aggressive' && riskProfile?.pending && <div className="absolute top-0 right-0 px-2 py-1 bg-amber-500 text-amber-950 text-[9px] font-bold uppercase rounded-bl">Pending</div>}
+            <div className="font-semibold text-destructive">Aggressive</div>
+            <div className="text-[10px] text-muted-foreground flex-1 flex flex-col gap-1">
+              <div>Higher entry rates and scaled exposure. Use only in strong trending markets.</div>
+              <ul className="mt-1 space-y-0.5 opacity-80 list-disc list-inside ml-1">
+                <li>Signal Threshold: 70</li>
+                <li>Max Risk: 1% per trade</li>
+                <li>Reserve Cash: 10%</li>
+                <li>Max Margin: $500</li>
+                <li>Max Positions: 2</li>
+                <li>Cooldown: 10m</li>
+                <li>Max Leverage: ≤3x</li>
+                <li>Exposure: Min(Capital × 3, $3,000) = ${Math.min(limits.tradingCapital * 3, 3000).toLocaleString()}</li>
+              </ul>
+              <div className="mt-2 p-2 bg-background border border-border rounded text-[10px] leading-relaxed">
+                <span className="font-semibold text-foreground">Capital Impact:</span> At ${limits.tradingCapital.toLocaleString()} trading capital, max risk (1%) allows <strong className="text-foreground">${((limits.tradingCapital * 1) / 100).toLocaleString()}</strong> risk per trade.
+              </div>
+            </div>
+            <Button
+              variant={riskProfile?.applied.name === 'aggressive' ? 'secondary' : 'destructive'}
+              size="sm"
+              disabled={riskProfile?.applied.name === 'aggressive' || riskProfile?.pending}
+              onClick={() => openProfileDialog('aggressive')}
+            >
+              {riskProfile?.applied.name === 'aggressive' ? 'Current Profile' : 'Switch to Aggressive'}
+            </Button>
+          </Card>
         </div>
       </div>
 

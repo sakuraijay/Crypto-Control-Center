@@ -67,6 +67,8 @@ export interface RiskEvaluationInput {
   dailyEntryCount: number;
   consecutiveLossCount: number;
   openPositionCount: number;
+  /** 적용 프로필 상한. 절대 프로필 상한(2)을 넘길 수 없다. */
+  maxConcurrentPositions?: number;
   /** DB 영속화 정상 여부 — false면 무조건 진입 차단 */
   dbOk: boolean;
   /** 수수료/시장 데이터 사용 가능 여부 — false면 진입 차단 */
@@ -112,6 +114,15 @@ export function resetWeeklyLocks(locks: PersistedLocks): PersistedLocks {
 
 export function evaluateRiskState(input: RiskEvaluationInput): RiskEvaluationResult {
   const p = RISK_POLICY;
+  const maxConcurrentPositions = Math.max(
+    1,
+    Math.min(
+      Number.isFinite(input.maxConcurrentPositions)
+        ? Math.floor(input.maxConcurrentPositions as number)
+        : p.maxConcurrentPositions,
+      p.maxProfileConcurrentPositions,
+    ),
+  );
   const locks: PersistedLocks = { ...input.locks };
   const blockReasons: string[] = [];
   const actions: RiskAction[] = [];
@@ -273,8 +284,8 @@ export function evaluateRiskState(input: RiskEvaluationInput): RiskEvaluationRes
       blockReasons.push(`일일 신규 진입 한도 (${input.dailyEntryCount}/${p.maxDailyEntries})`);
       return blocked('DEFENSIVE', 0.5);
     }
-    if (input.openPositionCount >= p.maxConcurrentPositions) {
-      blockReasons.push(`동시 포지션 한도 (${input.openPositionCount}/${p.maxConcurrentPositions})`);
+    if (input.openPositionCount >= maxConcurrentPositions) {
+      blockReasons.push(`동시 포지션 한도 (${input.openPositionCount}/${maxConcurrentPositions})`);
       return blocked('DEFENSIVE', 0.5);
     }
     return {
@@ -288,8 +299,8 @@ export function evaluateRiskState(input: RiskEvaluationInput): RiskEvaluationRes
     blockReasons.push(`일일 신규 진입 한도 도달 (${input.dailyEntryCount}/${p.maxDailyEntries})`);
     return blocked('NORMAL', 1);
   }
-  if (input.openPositionCount >= p.maxConcurrentPositions) {
-    blockReasons.push(`동시 포지션 한도 (${input.openPositionCount}/${p.maxConcurrentPositions})`);
+  if (input.openPositionCount >= maxConcurrentPositions) {
+    blockReasons.push(`동시 포지션 한도 (${input.openPositionCount}/${maxConcurrentPositions})`);
     return blocked('NORMAL', 1);
   }
 

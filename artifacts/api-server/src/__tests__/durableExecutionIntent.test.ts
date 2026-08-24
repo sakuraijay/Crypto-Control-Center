@@ -132,6 +132,7 @@ gmxFlowMocks.executeViaGmxApi.mockImplementation(async () => flowState.result);
 vi.mock('../lib/gmxApiExecution', () => ({
   executeViaGmxApi: gmxFlowMocks.executeViaGmxApi,
   buildActivationInput: vi.fn((x: unknown) => x),
+  sizeDeltaUsdString: vi.fn((value: number) => `${BigInt(Math.round(value * 1e6))}${'0'.repeat(24)}`),
   usdPriceToGmxString: vi.fn(() => '0'),
 }));
 // transport는 config-only stub (외부 호출 없음)
@@ -205,7 +206,7 @@ beforeEach(async () => {
     isSubaccountListed: true, expiresAt: String(Math.floor(Date.now() / 1000) + 3600), remaining: '8',
   });
   savedValues.length = 0;
-});
+}, 30_000);
 afterAll(() => {
   for (const k of ENV_KEYS) {
     if (savedEnv[k] === undefined) delete process.env[k];
@@ -225,7 +226,7 @@ function testSizingContext() {
       fundingFeeUsd: 0.005, borrowingFeeUsd: 0,
       fundingRatePerHourFraction: 0.00001, borrowingRatePerHourFraction: 0.000005,
       estimatedExitFeeUsd: 0.206, totalEstimatedRoundTripCostUsd: 0.427,
-      source: 'GMX_API' as const, blockNumber: null, apiTimestamp: null,
+      source: 'GMX_API' as const, blockNumber: null, apiTimestamp: new Date(now).toISOString(),
       fetchedAt: new Date(now).toISOString(), expiresAt: new Date(now + 60_000).toISOString(),
     },
     liquidityCapUsd: 50_000, tierNotionalCapUsd: 30,
@@ -356,7 +357,15 @@ describe('CLOSE — 동일 durable intent 경로', () => {
   it('정상 경로: intent:close 키로 PREPARED 커밋 + GMX API 제출 수락', async () => {
     unlockEnv();
     const { closeLiveTestPosition, __setOpenPositionsFetchForTests } = await import('../workers/liveTestExecutor');
-    __setOpenPositionsFetchForTests(async () => [{ marketAddress: '0xM', isLong: true, sizeUsd: 10 }]);
+    __setOpenPositionsFetchForTests(async () => [{
+      positionKey: `0x${'1'.repeat(64)}`,
+      accountAddress: '0xMain',
+      marketAddress: '0xM',
+      collateralToken: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831',
+      isLong: true,
+      sizeUsd: 10,
+      sizeUsd30: '10000000000000000000000000000000',
+    }]);
     try {
       const r = await closeLiveTestPosition(closeParams());
       expect(r.ok).toBe(true);
@@ -385,7 +394,15 @@ describe('CLOSE — 동일 durable intent 경로', () => {
       blockReasons: ['submit 응답 유실(ECONNRESET) — 수락 여부 불명'], preBlocked: false,
     };
     const { closeLiveTestPosition, __setOpenPositionsFetchForTests } = await import('../workers/liveTestExecutor');
-    __setOpenPositionsFetchForTests(async () => [{ marketAddress: '0xM', isLong: true, sizeUsd: 10 }]);
+    __setOpenPositionsFetchForTests(async () => [{
+      positionKey: `0x${'1'.repeat(64)}`,
+      accountAddress: '0xMain',
+      marketAddress: '0xM',
+      collateralToken: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831',
+      isLong: true,
+      sizeUsd: 10,
+      sizeUsd30: '10000000000000000000000000000000',
+    }]);
     try {
       const r = await closeLiveTestPosition(closeParams());
       expect(r.ok).toBe(false);

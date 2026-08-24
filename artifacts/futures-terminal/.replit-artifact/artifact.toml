@@ -15,10 +15,6 @@ localPort = 26245
 [services.development]
 run = "pnpm --filter @workspace/futures-terminal run dev"
 
-[services.production]
-build = [ "pnpm", "--filter", "@workspace/futures-terminal", "run", "build" ]
-run = [ "pnpm", "--filter", "@workspace/futures-terminal", "run", "serve" ]
-
 [services.env]
 PORT = "26245"
 BASE_PATH = "/futures-terminal/"

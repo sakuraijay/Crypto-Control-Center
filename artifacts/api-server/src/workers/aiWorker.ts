@@ -28,6 +28,7 @@ import { enforceOrderSizing } from "../lib/orderSizingEnforcement";
 import { fetchPaperCostSnapshot, fetchLiveCostSnapshot, COST_DATA_UNAVAILABLE, type LiveCostFetchers } from "../lib/costSnapshot";
 import { storePaperCostSnapshot } from "../lib/paperCostCache";
 import { reconcileLiveSettlements, type ReconcileResult, type SettlementEvidenceFetcher } from "../lib/tradeSettlement";
+import { createProductionCloseSettlementFetcher } from "../lib/productionCloseSettlementFetcher";
 import { DEFAULT_STOP_DISTANCE_FRACTION, computeStopTrigger } from "../lib/stopLossPlan";
 import {
   manilaDayKey, computeReduction, GMX_MIN_POSITION_NOTIONAL_USD,
@@ -50,7 +51,15 @@ import {
   type PersistedRiskEngineState,
 } from "../lib/riskEngineState";
 import { manilaDayStartIso, manilaWeekStartIso, msUntilNextManilaDay } from "../lib/manilaTime";
-import { runIntelServiceCycle, stopIntelService, resumeIntelService } from "../intel/intelService";
+import { runIntelServiceCycle, runStrategyShadowWorkerReadOnly, stopIntelService, resumeIntelService } from "../intel/intelService";
+import { buildStrategyShadowWorkerEnvelope } from "../intel/strategyShadowWorkerEnvelopeV2";
+import { buildStrategyRiskWorkerAdvisory } from "../intel/strategyRiskWorkerBridgeV2";
+import { buildStrategyDecisionExplainabilityRuntimeAdvisory } from "../intel/strategyDecisionExplainabilityRuntimeV2";
+import type { SignalLifecycleSnapshotV2 } from "../intel/signalLifecycleSnapshotV2";
+import {
+  advanceStrategyShadowLifecycleSnapshot,
+  restoreStrategyShadowLifecycleFromDecisionFullJson,
+} from "../intel/strategyShadowLifecycleRuntimeV2";
 import {
   openServerPaperPosition, closeServerPaperPosition, reduceServerPaper70,
   requestServerPaperCloseAll, loadPendingCloseFromDb, manageServerPaperTick,
@@ -58,6 +67,10 @@ import {
   reconcileStartupCloseIntent,
   type ServerPaperExecStatus, type PriceQuote,
 } from "./serverPaperExecutor";
+import {
+  applyRiskProfileToLimits,
+  promoteRiskProfileAtSafeBoundary,
+} from "../lib/riskProfiles";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -208,8 +221,8 @@ function getPaperCostFetchers(): LiveCostFetchers {
   return paperCostFetchers ?? { readonlyEnabled: process.env.GMX_API_READONLY_ENABLED === 'true' };
 }
 
-/** LIVE 정산 증거 fetcher — 기본 미구성 → LIVE_SETTLEMENT_INCOMPLETE (§5 fail-closed) */
-let settlementEvidenceFetcher: SettlementEvidenceFetcher = {};
+/** LIVE 정산 증거 fetcher — production은 read-only RPC/status/PositionReader만 사용 */
+let settlementEvidenceFetcher: SettlementEvidenceFetcher = createProductionCloseSettlementFetcher();
 export function __setSettlementEvidenceFetcherForTests(f: SettlementEvidenceFetcher): void {
   settlementEvidenceFetcher = f;
 }
@@ -306,6 +319,11 @@ class WorkerManager {
   /** 마지막 사이클 RiskEngine 평가 결과 (상태 노출용) */
   private lastRiskEvaluation: RiskEvaluationResult | null = null;
 
+  /** SHADOW 전용 lifecycle 연속성. Risk·PAPER/LIVE 실행 권한과 무관하다. */
+  private strategyLifecycleSnapshot: SignalLifecycleSnapshotV2 | null = null;
+  /** 마지막 fullJson 복원이 손상되면 SHADOW 평가만 fail-closed로 차단한다. */
+  private strategyLifecycleRestoreBlocked = true;
+
   // ── Public API ──────────────────────────────────────────────────────────────
 
   async start(): Promise<void> {
@@ -323,6 +341,10 @@ class WorkerManager {
 
     // DB에서 Daily/Weekly equity 기준점 복구 (재시작 후 기간 PnL 연속성 유지)
     await this.loadBaselinesFromDb();
+
+    // 기존 ai_decisions.fullJson만 read하여 SHADOW lifecycle 연속성을 복원한다.
+    // 별도 schema/migration/write를 만들지 않으며 실패는 SHADOW 평가만 차단한다.
+    await this.loadStrategyLifecycleSnapshotFromDb();
 
     // RiskEngine 영속 상태 복구 (6H-1 §11 — 잠금·카운터·Manila 기준점)
     const riskLoad = await loadRiskEngineState();
@@ -461,6 +483,8 @@ class WorkerManager {
       tpPriceUsd:        decision.tpPrice ?? null,
       // paperState.positions는 trades 전체(서버 행 포함)에서 파생 — 서버 행 수와 큰 쪽 사용
       openPositionCount: Math.max(paperState.positions.length, serverOpenRows.length),
+      maxConcurrentPositions: decision.riskProfile.derivedLimits.maxConcurrentPositions,
+      riskProfileSnapshot: decision.riskProfile,
       entriesManilaDay:  paperState.entriesManilaDay,
     });
     if (result.ok) {
@@ -686,12 +710,14 @@ class WorkerManager {
     const prices = getCachedPrices();
     if (!prices || prices.length === 0) return;
 
-    let anyAdvanced = false;
+    let latestAdvancedObservedAt = 0;
+    const receivedAt = Date.now();
 
     for (const tick of prices) {
       const sym = tick.tokenSymbol;
       if (!WORKER_SYMBOLS.includes(sym)) continue;
       if (tick.priceUsd <= 0) continue;
+      if (!Number.isFinite(tick.updatedAt) || tick.updatedAt <= 0 || tick.updatedAt > receivedAt + 5_000) continue;
 
       // #120 P0 — stale 캐시 재인증 금지: upstream tick(updatedAt)이 실제로
       // 전진했을 때만 버퍼·신선도를 갱신한다. 전량 폐기로 캐시가 동결되면
@@ -700,16 +726,18 @@ class WorkerManager {
       const lastSeen = this.lastTickUpdatedAtBySymbol.get(sym) ?? 0;
       if (!(tick.updatedAt > lastSeen)) continue;
       this.lastTickUpdatedAtBySymbol.set(sym, tick.updatedAt);
-      anyAdvanced = true;
+      latestAdvancedObservedAt = Math.max(latestAdvancedObservedAt, tick.updatedAt);
 
       const buf = this.priceBuffer.get(sym) ?? [];
       buf.push(tick.priceUsd);
       if (buf.length > MAX_PRICE_HISTORY) buf.shift();
-      this.priceAtBySymbol.set(sym, Date.now()); // Task #111 — per-symbol 신선도 (새 관측시각)
+      this.priceAtBySymbol.set(sym, tick.updatedAt);
       this.priceBuffer.set(sym, buf);
     }
 
-    if (anyAdvanced) this.lastPriceAt = Date.now();
+    if (latestAdvancedObservedAt > 0) {
+      this.lastPriceAt = Math.max(this.lastPriceAt, latestAdvancedObservedAt);
+    }
   }
 
   /** 현재 가격 버퍼에서 SymbolAnalysis 배열을 빌드한다. */
@@ -741,6 +769,30 @@ class WorkerManager {
     }
 
     return analyses.sort((a, b) => b.opportunityScore - a.opportunityScore);
+  }
+
+  /** 마지막 AI decision fullJson에서 SHADOW lifecycle snapshot을 읽기 전용 복원한다. */
+  private async loadStrategyLifecycleSnapshotFromDb(): Promise<void> {
+    try {
+      const rows = await db.select().from(aiDecisionsTable)
+        .where(like(aiDecisionsTable.fullJson, '%"source":"server_worker"%'))
+        .orderBy(desc(aiDecisionsTable.ts)).limit(1);
+      const restored = restoreStrategyShadowLifecycleFromDecisionFullJson(
+        rows[0]?.fullJson ?? null,
+        Date.now(),
+      );
+      this.strategyLifecycleSnapshot = restored.snapshot;
+      this.strategyLifecycleRestoreBlocked = restored.status === 'BLOCKED';
+      if (restored.status === 'BLOCKED') {
+        console.error(`[AIWorker] ${restored.reason} — Strategy SHADOW 평가 차단`);
+      } else {
+        console.info(`[AIWorker] ${restored.reason} — records=${restored.snapshot.records.length}, history=${restored.snapshot.historyEvents.length}`);
+      }
+    } catch (error) {
+      this.strategyLifecycleSnapshot = null;
+      this.strategyLifecycleRestoreBlocked = true;
+      console.error(`[AIWorker] SHADOW lifecycle DB read 실패(${error instanceof Error ? error.name : 'unknown'}) — SHADOW 평가 차단`);
+    }
   }
 
   /** 결정을 ai_decisions 테이블에 저장한다. 성공 여부를 반환한다 (Task #111 —
@@ -1093,6 +1145,17 @@ class WorkerManager {
       // 사이클마다 PENDING 세트를 DB에서 재구성 — 승인/거절/만료된 항목 자동 제거
       await this.loadPendingApprovals();
 
+      // 프로필 변경은 사이클 시작의 안전 경계에서만 승격한다. API는 desired만 기록하며
+      // Worker 외 다른 경로는 applied를 변경할 수 없다.
+      const [baseLimits, paperState] = await Promise.all([
+        this.loadStrategyLimits(),
+        this.loadPaperState(),
+      ]);
+      const riskProfileStatus = await promoteRiskProfileAtSafeBoundary(baseLimits);
+      const riskProfile = riskProfileStatus.applied;
+      const limits = applyRiskProfileToLimits(baseLimits, riskProfile);
+      this.lastLimitsUsed = limits;
+
       const analyses = this.buildAnalyses();
 
       // 데이터 신선도 — 가격이 60초 이상 오래됐으면 CASH로 처리
@@ -1113,16 +1176,6 @@ class WorkerManager {
         };
         return;
       }
-
-      // ── 사용자 설정 + PAPER 운용 상태를 DB에서 로드 ────────────────────────────
-      // ⚠️ LIVE 실제 계정 데이터와 절대 혼합하지 않음 (지갑 미연결 = PAPER 데이터 전용)
-      const [limits, paperState] = await Promise.all([
-        this.loadStrategyLimits(),
-        this.loadPaperState(),
-      ]);
-
-      // 이번 사이클에 사용된 설정 저장 (상태 엔드포인트 노출용)
-      this.lastLimitsUsed = limits;
 
       // ── 기간 PnL 갱신 (equity 기준점 기반, UTC) ─────────────────────────────
       // ⚠️ 반드시 cooldown/거래한도 게이트보다 먼저 수행 — 게이트 조기 반환 시에도
@@ -1238,6 +1291,7 @@ class WorkerManager {
           dailyEntryCount:      paperState.entriesManilaDay,
           consecutiveLossCount: paperState.consecutiveLosses,
           openPositionCount:    paperState.positions.length,
+          maxConcurrentPositions: riskProfile.derivedLimits.maxConcurrentPositions,
           dbOk:                 this.riskDbOk && paperState.liveTestDbOk,
           feeDataOk:            true,  // PAPER: 수수료 0 정의. LIVE 실행 경로는 별도 fee 게이트.
           marketDataFresh:      dataFreshMs < 120_000,
@@ -1309,6 +1363,7 @@ class WorkerManager {
         // Server-authoritative on-chain position count (RPC → 999 fail-closed).
         // Never uses browser-posted data; see fetchServerLiveTestData() in gmx.ts.
         livePositionCount: liveTestData.positionCount,
+        immediateEntryThreshold: riskProfile.derivedLimits.immediateEntryThreshold,
       });
 
       // ── RiskEngine 강제 (6H-1) — LONG/SHORT 결정 veto + 레버리지 클램프 ────
@@ -1428,6 +1483,7 @@ class WorkerManager {
                 orderType: 'MarketIncrease',
               },
               now: nowSizing,
+              riskBudgetPct: riskProfile.derivedLimits.maxRiskPerTradePct,
             });
             if (paperEnf.ok) {
               engineResult.sizeUsd = paperEnf.finalNotionalUsd;
@@ -1497,13 +1553,85 @@ class WorkerManager {
       this.prevState = engineResult.operatingState;
 
       // 전체 결정 객체 조립
+      const decisionId = crypto.randomUUID();
+      const decisionCreatedAt = new Date().toISOString();
+      const strategyShadowExistingAi = {
+        decisionId,
+        action: engineResult.operatingState === 'LONG' ? 'LONG' as const
+          : engineResult.operatingState === 'SHORT' ? 'SHORT' as const : 'NO_TRADE' as const,
+        confidence: engineResult.confidence,
+        primarySymbol: typeof engineResult.primarySymbol === 'string'
+          && engineResult.primarySymbol.trim() ? engineResult.primarySymbol : null,
+        createdAt: decisionCreatedAt,
+      };
+      let strategyEnsembleShadow = buildStrategyShadowWorkerEnvelope({
+        cycleNumber: cycleNum,
+        generatedAt: Date.parse(decisionCreatedAt),
+        expectedSymbols: analyses.map(analysis => analysis.symbol),
+        records: [],
+        existingAi: strategyShadowExistingAi,
+        lifecycleSnapshot: this.strategyLifecycleSnapshot,
+        notEvaluatedReason: this.strategyLifecycleRestoreBlocked
+          ? 'SHADOW lifecycle 이전 상태 복원 실패 — 외부 read 미제출·fail-closed'
+          : 'MTF Strategy Ensemble read 시작 전 — SHADOW 결과 없음',
+      });
+      if (!this.strategyLifecycleRestoreBlocked && this.strategyLifecycleSnapshot !== null) {
+        try {
+          strategyEnsembleShadow = await runStrategyShadowWorkerReadOnly({
+            cycleNumber: cycleNum,
+            evaluatedAt: Date.parse(decisionCreatedAt),
+            expectedSymbols: analyses.map(analysis => analysis.symbol),
+            existingAi: strategyShadowExistingAi,
+            lifecycleSnapshot: this.strategyLifecycleSnapshot,
+          });
+        } catch (error) {
+          // service 자체도 fail-closed지만 Worker 생존을 위한 방어적 이중 안전망.
+          console.warn(`[AIWorker] 사이클 #${cycleNum} MTF SHADOW read 실패 — NOT_EVALUATED 유지: ${error instanceof Error ? error.name : 'unknown'}`);
+        }
+      }
+      let nextStrategyLifecycleSnapshot = this.strategyLifecycleSnapshot;
+      if (!this.strategyLifecycleRestoreBlocked && this.strategyLifecycleSnapshot !== null) {
+        const advanced = advanceStrategyShadowLifecycleSnapshot(
+          this.strategyLifecycleSnapshot,
+          strategyEnsembleShadow,
+          Date.parse(decisionCreatedAt),
+        );
+        if (advanced) {
+          nextStrategyLifecycleSnapshot = advanced;
+          strategyEnsembleShadow = { ...strategyEnsembleShadow, lifecycleSnapshot: advanced };
+        } else {
+          strategyEnsembleShadow = buildStrategyShadowWorkerEnvelope({
+            cycleNumber: cycleNum,
+            generatedAt: Date.parse(decisionCreatedAt),
+            expectedSymbols: analyses.map(analysis => analysis.symbol),
+            records: [],
+            existingAi: strategyShadowExistingAi,
+            lifecycleSnapshot: this.strategyLifecycleSnapshot,
+            notEvaluatedReason: 'SHADOW lifecycle snapshot 갱신 실패 — 평가 결과 미채택·fail-closed',
+          });
+        }
+      }
+      const strategyRiskAdvisory = buildStrategyRiskWorkerAdvisory({
+        shadowEnvelope: strategyEnsembleShadow,
+        riskEvaluation: riskEval,
+      });
       const decision: ServerAiDecision = {
-        id:          crypto.randomUUID(),
-        createdAt:   new Date().toISOString(),
+        id:          decisionId,
+        createdAt:   decisionCreatedAt,
         paperExecuted: false,
         paperOrderId:  null,
         source:        "server_worker",
         testMode:      testModeActive,
+        riskProfile,
+        strategyEnsembleShadow,
+        strategyRiskAdvisory,
+        strategyDecisionExplainability: buildStrategyDecisionExplainabilityRuntimeAdvisory({
+          shadowEnvelope: strategyEnsembleShadow,
+          riskAdvisory: strategyRiskAdvisory,
+          // The runtime cannot independently fetch or infer downstream evidence.
+          // A later shared-readiness handoff may replace this explicit null.
+          downstreamEvidence: null,
+        }),
         ...engineResult,
       };
 
@@ -1512,6 +1640,10 @@ class WorkerManager {
       // 크래시해도 재시작 reconciliation이 마지막 영속 결정(CASH/NO_TRADE)에서 의도를
       // 복원할 수 있다. 기록 실패 = 실행 불가 (fail-closed).
       const decisionPersisted = await this.persistDecision(decision);
+      if (decisionPersisted && nextStrategyLifecycleSnapshot !== null) {
+        // durable decision에 snapshot이 포함된 뒤에만 메모리 상태를 전진시킨다.
+        this.strategyLifecycleSnapshot = nextStrategyLifecycleSnapshot;
+      }
 
       // ── Task #111 — 서버 권위 PAPER 실행 (PAPER 모드 전용, LIVE/승인 경로와 분리) ──
       if (!isLiveMode && !testModeActive) {
@@ -1619,6 +1751,12 @@ class WorkerManager {
     try {
       const { operatingState, primarySymbol } = decision;
       const mainAddress = process.env.GMX_WALLET_ADDRESS ?? '';
+      // 자동 Worker의 모든 fund-moving LIVE action(OPEN/CLOSE/REDUCE)은 동일한
+      // 명시적 opt-in 없이는 금지. Manual Canary는 이 메서드를 거치지 않는다.
+      if (process.env.AUTO_WORKER_LIVE_ENABLED !== 'true') {
+        console.info('[AIWorker] LIVE 자동 실행 차단 — AUTO_WORKER_LIVE_ENABLED ≠ true (OPEN/CLOSE/REDUCE 공통)');
+        return;
+      }
 
       // ── 6H-2A §8 — CLOSE_ALL 실배선: authoritative 포지션 전수 청산 ─────────
       // primarySymbol과 무관하게 실행 — 위험 액션은 특정 심볼 결정에 종속되지 않는다.
@@ -1652,14 +1790,6 @@ class WorkerManager {
       if (currentPrice <= 0) return;
 
       if (operatingState === 'LONG' || operatingState === 'SHORT') {
-        // ── #135 구조적 분리 — 자동 Worker의 신규 LIVE 진입(OPEN)은
-        // AUTO_WORKER_LIVE_ENABLED가 정확히 'true'일 때만 허용 (미설정=차단, fail-closed).
-        // 청산/축소(위 위험 액션 경로)는 보호 목적이므로 게이트 대상이 아니다.
-        // Manual Canary(decisionId `manual-canary:*`)는 이 메서드를 거치지 않는 별도 경로.
-        if (process.env.AUTO_WORKER_LIVE_ENABLED !== 'true') {
-          console.info('[AIWorker] LIVE 자동 신규 진입 차단 — AUTO_WORKER_LIVE_ENABLED ≠ true (수동 Canary 분리 게이트, #135)');
-          return;
-        }
         // ── 6H-2A §5 — 정산 미완료 동안 신규 LIVE 진입 차단 (청산은 허용) ──
         const rec = this.lastSettlementReconcile;
         if (!rec || rec.incomplete) {
@@ -1701,10 +1831,12 @@ class WorkerManager {
           tierNotionalCapUsd: LIVE_TEST_CAPS.maxCapitalUsd,
           defensiveMode: this.lastRiskEvaluation?.sizeFactor != null && this.lastRiskEvaluation.sizeFactor < 1,
           canaryActive: true, // LIVE TEST = Canary 하드캡 우선순위 적용 (§11)
+            riskBudgetPct: decision.riskProfile.derivedLimits.maxRiskPerTradePct,
         };
 
         const result = await executeLiveTestOrder({
           decisionId:        decision.id,
+          riskProfileSnapshot: decision.riskProfile,
           cycleNumber:       cycleNum,
           symbol:            primarySymbol,
           marketAddress:     market.marketToken,
@@ -1869,6 +2001,7 @@ class WorkerManager {
       }
       const result = await closeLiveTestPosition({
         decisionId: `${decision.id}:closeall:${intent.positionKey}`,
+        riskProfileSnapshot: decision.riskProfile,
         cycleNumber: cycleNum, symbol,
         marketAddress: intent.marketAddress, isLong: intent.isLong,
         sizeUsd: intent.closeSizeUsd, currentPriceUsd: price, mainAddress,
@@ -1881,13 +2014,8 @@ class WorkerManager {
         intentId: intent.intentId, positionKey: intent.positionKey,
         status: result.simulated ? 'PENDING' : result.ok ? 'SUBMITTED' : 'FAILED',
       });
-      if (!result.simulated && result.ok) {
-        // 제출 수락 → durable UNSETTLED CLOSE 기록 (reconciliation 대상)
-        await this.recordLiveTradeUnsettled({
-          symbol, action: 'CLOSE', isLong: intent.isLong,
-          sizeUsd: intent.closeSizeUsd, priceUsd: price, marketAddress: intent.marketAddress,
-        });
-      }
+      // CLOSE durable UNSETTLED 행은 closeLiveTestPosition이 제출 전에 intent와
+      // 원자적으로 생성한다. 여기서 legacy 행을 추가하면 미결속 중복이 생긴다.
     }
     this.lastCloseAllSummary = summarizeCloseAll(progress);
     console.warn(
@@ -1959,6 +2087,7 @@ class WorkerManager {
       }
       const result = await closeLiveTestPosition({
         decisionId: idempotencyKey,
+        riskProfileSnapshot: decision.riskProfile,
         cycleNumber: cycleNum, symbol,
         marketAddress: p.marketAddress, isLong: p.isLong,
         sizeUsd: reduction.reduceSizeUsd, currentPriceUsd: price, mainAddress,
@@ -1976,12 +2105,6 @@ class WorkerManager {
           orderKey: result.orderKey ?? null,
           updatedAt: new Date().toISOString(),
         };
-        if (result.ok) {
-          await this.recordLiveTradeUnsettled({
-            symbol, action: 'CLOSE', isLong: p.isLong,
-            sizeUsd: reduction.reduceSizeUsd, priceUsd: price, marketAddress: p.marketAddress,
-          });
-        }
       }
       await this.saveProfitProtectRecords(records); // 상태 갱신 실패 = 예약(UNRESOLVED) 유지 → 재제출 계속 차단
       console.warn(

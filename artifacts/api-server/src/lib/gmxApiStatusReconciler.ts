@@ -32,6 +32,7 @@ import {
 } from './gmxOrderEvents';
 import { createViemOnchainClient, type OnchainClient } from './intentReconciler';
 import { resolveIntentTerminal } from './executionIntents';
+import { EVIDENCE_CONFIRMATION_DEPTH } from './protectionEvidence';
 
 const OPEN_GMX_STATUSES: RelayTaskStatus[] = [
   RELAY_TASK_STATUS.SUBMITTING,
@@ -96,6 +97,36 @@ export interface GmxReconcileSummary {
   errors: number;
 }
 
+export interface ConfirmedOpenHandoffInput {
+  taskId: string;
+  intentId: string;
+  orderKey: string;
+  executionTxHash: string;
+  emitterAddress: string;
+  resolutionBlock: string;
+  latestBlock: string;
+  confirmations: number;
+}
+
+export type ConfirmedOpenHandoffResult =
+  | { handled: true; basis: string }
+  | { handled: false; reason: string };
+
+export type ConfirmedOpenHandoffFn = (
+  input: ConfirmedOpenHandoffInput,
+) => Promise<ConfirmedOpenHandoffResult>;
+
+let _confirmedOpenHandoff: ConfirmedOpenHandoffFn | null = null;
+
+/** liveTestExecutor가 production callback을 결선한다. null은 fail-closed 미결선. */
+export function setConfirmedOpenHandoff(fn: ConfirmedOpenHandoffFn | null): void {
+  _confirmedOpenHandoff = fn;
+}
+
+export function isConfirmedOpenHandoffWired(): boolean {
+  return _confirmedOpenHandoff !== null;
+}
+
 function allowedEmitters(): string[] {
   const r = resolveGmxEventEmitterAddress();
   return r.ok ? [r.address] : [];
@@ -115,13 +146,23 @@ async function patchTask(
 async function resolveLinkedIntent(
   row: RelayTaskRow,
   status: 'CONFIRMED' | 'FAILED' | 'CANCELLED',
-  evidence: { txHash: string | null; orderKey: string | null; basis: string },
+  evidence: {
+    txHash: string | null;
+    orderKey: string | null;
+    basis: string;
+    receiptStatus?: 'success' | 'reverted';
+    resolutionBlock?: string | null;
+    emitterAddress?: string;
+  },
 ): Promise<void> {
   if (!row.intentId) return;
   try {
     await resolveIntentTerminal(row.intentId, status, {
       resolutionTxHash: evidence.txHash,
       orderKey: evidence.orderKey ?? undefined,
+      receiptStatus: evidence.receiptStatus,
+      resolutionBlock: evidence.resolutionBlock,
+      orderEmitterAddress: evidence.emitterAddress,
       resolutionReason: evidence.basis,
     });
   } catch { /* intent 해소 실패 → blocking 유지 (fail-closed) */ }
@@ -225,7 +266,10 @@ async function reconcileOneTask(row: RelayTaskRow, deps: GmxReconcileDeps, summa
       });
       if (t.ok) {
         summary.transitioned += 1;
-        await resolveLinkedIntent(row, 'FAILED', { txHash, orderKey: null, basis: '온체인 receipt revert' });
+        await resolveLinkedIntent(row, 'FAILED', {
+          txHash, orderKey: null, basis: '온체인 receipt revert',
+          receiptStatus: 'reverted', resolutionBlock: receipt.blockNumber == null ? null : String(receipt.blockNumber),
+        });
       }
     } else {
       // 보고와 온체인 모순 — 조사 필요
@@ -267,6 +311,44 @@ async function reconcileOneTask(row: RelayTaskRow, deps: GmxReconcileDeps, summa
 
   if (verdict.action === 'confirm_pending_onchain') {
     if (resolution?.kind === 'executed') {
+      // API/task status나 단일 receipt만으로는 handoff/CONFIRMED 금지.
+      // 정확한 허용-emitter OrderExecuted log + receipt block + 최신 block depth가 필수.
+      if (!resolution.blockNumber || !receipt.blockNumber
+          || BigInt(resolution.blockNumber) !== BigInt(receipt.blockNumber)
+          || !resolution.txHash || resolution.txHash.toLowerCase() !== txHash.toLowerCase()
+          || !deps.onchain.getLatestBlockNumber) {
+        return;
+      }
+      let latest: bigint | null;
+      try { latest = await deps.onchain.getLatestBlockNumber(); }
+      catch { latest = null; }
+      const resolutionBlock = BigInt(resolution.blockNumber);
+      if (latest === null || latest < resolutionBlock) return;
+      const confirmations = Number(latest - resolutionBlock);
+      if (confirmations < EVIDENCE_CONFIRMATION_DEPTH) return;
+
+      // OPEN만: terminal 전환 전에 durable INITIAL_STOP handoff가 처리되어야 한다.
+      // 미결선/선행조건 미충족/저장 실패는 task+intent를 차단 상태로 남겨 다음 pass에서 재시도한다.
+      if (row.kind === 'OPEN') {
+        if (!row.intentId || !_confirmedOpenHandoff) return;
+        let handoff: ConfirmedOpenHandoffResult;
+        try {
+          handoff = await _confirmedOpenHandoff({
+            taskId: row.id,
+            intentId: row.intentId,
+            orderKey,
+            executionTxHash: txHash,
+            emitterAddress: resolution.emitterAddress,
+            resolutionBlock: resolution.blockNumber,
+            latestBlock: latest.toString(),
+            confirmations,
+          });
+        } catch {
+          summary.errors += 1;
+          return;
+        }
+        if (!handoff.handled) return;
+      }
       const t = await transitionRelayTask({
         taskId: row.id, from: row.status as RelayTaskStatus, to: RELAY_TASK_STATUS.CONFIRMED,
         patch: { txHash, orderKey, resolutionBasis: `GMX executed + 온체인 OrderExecuted (tx=${txHash} orderKey=${orderKey})` },
@@ -274,7 +356,14 @@ async function reconcileOneTask(row: RelayTaskRow, deps: GmxReconcileDeps, summa
       if (t.ok) {
         summary.transitioned += 1;
         await patchTask(row.id, { gmxExecutionTxHash: txHash, gmxOrderKeys: JSON.stringify([orderKey]) });
-        await resolveLinkedIntent(row, 'CONFIRMED', { txHash, orderKey, basis: '온체인 OrderExecuted' });
+        await resolveLinkedIntent(row, 'CONFIRMED', {
+          txHash,
+          orderKey,
+          basis: '온체인 OrderExecuted',
+          receiptStatus: 'success',
+          resolutionBlock: resolution.blockNumber,
+          emitterAddress: resolution.emitterAddress,
+        });
       }
     } else {
       // executed 보고인데 온체인 OrderExecuted 이벤트 없음 — 보고만으로 CONFIRMED 금지
@@ -296,7 +385,14 @@ async function reconcileOneTask(row: RelayTaskRow, deps: GmxReconcileDeps, summa
       });
       if (t.ok) {
         summary.transitioned += 1;
-        await resolveLinkedIntent(row, 'CANCELLED', { txHash, orderKey, basis: '온체인 OrderCancelled' });
+        await resolveLinkedIntent(row, 'CANCELLED', {
+          txHash,
+          orderKey,
+          basis: '온체인 OrderCancelled',
+          receiptStatus: 'success',
+          resolutionBlock: resolution.blockNumber,
+          emitterAddress: resolution.emitterAddress,
+        });
       }
     } else {
       const t = await transitionRelayTask({

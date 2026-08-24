@@ -18,6 +18,17 @@ import { buildCandidateCostBreakdown } from './costEngine';
 import { lookupSdkIndexToken, ARBITRUM_CHAIN_ID } from '../lib/indexTokenDecimals';
 import { createGmxCostReader, createProductionCostReaderClient, GmxCostReader } from './gmxCostReader';
 import type { CostBreakdownUsd } from './candidate';
+import { StrategyShadowMtfFrameCoordinator } from './strategyShadowMtfFrameCoordinatorV2';
+import { buildStrategyShadowWorkerBatch } from './strategyShadowWorkerBatchV2';
+import {
+  buildStrategyShadowWorkerEnvelope,
+  type ExistingWorkerAiSummary,
+  type StrategyShadowWorkerEnvelope,
+} from './strategyShadowWorkerEnvelopeV2';
+import {
+  buildSignalLifecycleSnapshot,
+  restoreSignalLifecycleSnapshot,
+} from './signalLifecycleSnapshotV2';
 
 export type CycleLifecycleStatus = 'SUCCESS' | 'FAILED' | 'TIMEOUT' | 'BLOCKED' | 'SKIPPED_IN_FLIGHT' | 'SKIPPED_INTERVAL' | 'SKIPPED_SHUTDOWN' | 'SKIPPED_BACKOFF';
 
@@ -41,6 +52,8 @@ interface IntelServiceState {
   lastEnrichment: (EnrichmentSummary & { atMs: number }) | null;
   // 6I-2 §3·§11 — 수명주기 관측치
   inFlight: boolean;
+  /** MTF SHADOW external read ownership; Intel refreshes join by skipping, never reset the shared budget. */
+  shadowReadInFlight: boolean;
   currentCycleId: string | null;
   skippedInFlight: number;
   timeoutCount: number;
@@ -54,7 +67,7 @@ interface IntelServiceState {
 const state: IntelServiceState = {
   lastRecord: null, lastRecordStale: false, lastError: null, lastRunAtMs: null,
   cycleCount: 0, noTradeCycles: 0, lastEnrichment: null,
-  inFlight: false, currentCycleId: null, skippedInFlight: 0,
+  inFlight: false, shadowReadInFlight: false, currentCycleId: null, skippedInFlight: 0,
   timeoutCount: 0, failedCount: 0, shutdownRequested: false,
   lastAttempt: null, lastWindowKey: null, enrichInFlight: false,
 };
@@ -68,6 +81,8 @@ function getHandle(): ProductionFetchersHandle {
   });
   return handle;
 }
+
+let strategyShadowMtfCoordinator: StrategyShadowMtfFrameCoordinator | null = null;
 
 let costReader: GmxCostReader | null = null;
 function getCostReader(): GmxCostReader {
@@ -141,6 +156,101 @@ export function cycleIdForWindow(windowKey: number): string {
   return `w${windowKey}`;
 }
 
+export interface StrategyShadowWorkerReadOnlyInput {
+  cycleNumber: number;
+  evaluatedAt: number;
+  expectedSymbols: string[];
+  existingAi: ExistingWorkerAiSummary;
+  lifecycleSnapshot?: import('./signalLifecycleSnapshotV2').SignalLifecycleSnapshotV2 | null;
+}
+
+function buildNotEvaluatedStrategyShadowEnvelope(
+  input: StrategyShadowWorkerReadOnlyInput,
+  reason: string,
+): StrategyShadowWorkerEnvelope {
+  return buildStrategyShadowWorkerEnvelope({
+    cycleNumber: input.cycleNumber,
+    generatedAt: input.evaluatedAt,
+    expectedSymbols: input.expectedSymbols,
+    records: [],
+    existingAi: input.existingAi,
+    lifecycleSnapshot: input.lifecycleSnapshot,
+    notEvaluatedReason: reason,
+  });
+}
+
+/**
+ * Existing Intel cache/budget/backoff를 재사용하는 주문 없는 Worker SHADOW read.
+ * 동일 cycle은 coordinator single-flight에 합류하고, 다른 cycle은 큐 없이 차단한다.
+ * 어떤 결과도 Risk/approval/PAPER/LIVE 권한을 부여하지 않는다.
+ */
+export async function runStrategyShadowWorkerReadOnly(
+  input: StrategyShadowWorkerReadOnlyInput,
+): Promise<StrategyShadowWorkerEnvelope> {
+  let ownsRead = false;
+  try {
+    const restoredLifecycle = input.lifecycleSnapshot === undefined || input.lifecycleSnapshot === null
+      ? null : restoreSignalLifecycleSnapshot(input.lifecycleSnapshot, input.evaluatedAt);
+    const lifecycle = restoredLifecycle === null
+      ? buildSignalLifecycleSnapshot([], [], input.evaluatedAt)
+      : restoredLifecycle.ok ? restoredLifecycle.snapshot : null;
+    if (!lifecycle) {
+      return buildNotEvaluatedStrategyShadowEnvelope(input,
+        'SHADOW lifecycle snapshot 복원 실패 — fail-closed');
+    }
+    if (state.shutdownRequested) {
+      return buildNotEvaluatedStrategyShadowEnvelope(input,
+        'Intel shutdown 중 — MTF SHADOW external read 미제출');
+    }
+    if (state.inFlight) {
+      return buildNotEvaluatedStrategyShadowEnvelope(input,
+        'Intel refresh external read 진행 중 — 합류 불가·큐 생성 없음');
+    }
+
+    const h = getHandle();
+    strategyShadowMtfCoordinator ??= new StrategyShadowMtfFrameCoordinator({
+      fetchCandles: h.fetchers.fetchCandles,
+      concurrency: 8,
+    });
+
+    if (!state.shadowReadInFlight) {
+      state.shadowReadInFlight = true;
+      ownsRead = true;
+      // external read 소유권을 확보한 뒤에만 shared request budget을 reset한다.
+      h.beginCycle();
+    }
+
+    const read = await strategyShadowMtfCoordinator.read({
+      cycleKey: `worker-${input.cycleNumber}`,
+      symbols: input.expectedSymbols,
+      requestedAtMs: input.evaluatedAt,
+    });
+    if (read.schemaVersion === 'INVALID' || read.status === 'BUSY_DIFFERENT_CYCLE') {
+      return buildNotEvaluatedStrategyShadowEnvelope(input,
+        read.status === 'BUSY_DIFFERENT_CYCLE'
+          ? '다른 MTF SHADOW cycle 진행 중 — 미제출/큐 생성 없음'
+          : 'MTF SHADOW coordinator 입력 INVALID — fail-closed');
+    }
+
+    return buildStrategyShadowWorkerBatch({
+      cycleNumber: input.cycleNumber,
+      evaluatedAt: input.evaluatedAt,
+      expectedSymbols: input.expectedSymbols,
+      framesBySymbol: read.framesBySymbol,
+      costsBySymbol: {},
+      previousRegimes: {},
+      lifecycleRecords: lifecycle.records,
+      historyEvents: lifecycle.historyEvents,
+      existingAi: input.existingAi,
+    }).envelope;
+  } catch (error) {
+    return buildNotEvaluatedStrategyShadowEnvelope(input,
+      `MTF SHADOW read 실패(${error instanceof Error ? error.name : 'unknown'}) — fail-closed`);
+  } finally {
+    if (ownsRead) state.shadowReadInFlight = false;
+  }
+}
+
 /**
  * worker 사이클에서 호출 — 간격 미달/재진입/shutdown이면 skip.
  * 어떤 예외도 밖으로 던지지 않는다 (기존 매매 루프 보호).
@@ -155,8 +265,8 @@ export async function runIntelServiceCycle(input: { cycleNum: number; gates: Ran
     state.lastAttempt = { cycleId, windowKey, status: 'SKIPPED_SHUTDOWN', startedAtMs: nowMs, finishedAtMs: nowMs, error: null };
     return;
   }
-  // single-flight — 실행 중 재진입 즉시 skip (동시 실행 구조적 차단)
-  if (state.inFlight) {
+  // single-flight — Intel/Worker SHADOW external read 중 재진입 즉시 skip
+  if (state.inFlight || state.shadowReadInFlight) {
     state.skippedInFlight++;
     state.lastAttempt = { cycleId, windowKey, status: 'SKIPPED_IN_FLIGHT', startedAtMs: nowMs, finishedAtMs: nowMs, error: null };
     return;
@@ -303,11 +413,12 @@ export function __resetIntelServiceForTests(): void {
   if (!(process.env.VITEST || process.env.NODE_ENV === 'test')) return;
   state.lastRecord = null; state.lastRecordStale = false; state.lastError = null; state.lastRunAtMs = null;
   state.cycleCount = 0; state.noTradeCycles = 0; state.lastEnrichment = null;
-  state.inFlight = false; state.currentCycleId = null; state.skippedInFlight = 0;
+  state.inFlight = false; state.shadowReadInFlight = false; state.currentCycleId = null; state.skippedInFlight = 0;
   state.timeoutCount = 0; state.failedCount = 0; state.shutdownRequested = false;
   state.lastAttempt = null; state.lastWindowKey = null; state.enrichInFlight = false;
   lastEnrichAtMs = 0;
   handle = null;
+  strategyShadowMtfCoordinator = null;
   costReader = null;
 }
 

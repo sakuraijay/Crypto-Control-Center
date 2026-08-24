@@ -176,6 +176,41 @@ describe('§5 INITIAL_STOP 수명주기', () => {
     expect(submit).toHaveBeenCalledTimes(1);
     if (!r2.ok) expect(r2.reason).toContain('자동 재제출 금지');
   });
+  it.each(['PREPARED', 'SUBMITTING'] as const)(
+    '동시 pass가 %s claim을 보면 emergency close 요구 없이 대기',
+    async (status) => {
+      const submit = vi.fn();
+      setProtectionSubmitFn(submit as never);
+      await planProtection({
+        parentOpenIntentId: OPEN.parentOpenIntentId,
+        positionKey: OPEN.positionKey,
+        purpose: 'INITIAL_STOP',
+        symbol: OPEN.symbol,
+        marketAddress: OPEN.marketAddress,
+        isLong: OPEN.isLong,
+        sizeDeltaUsd: OPEN.confirmedSizeUsd,
+        triggerPriceUsd: STOP_INPUT.triggerPriceUsd,
+        acceptablePriceUsd: STOP_INPUT.acceptablePriceUsd,
+        dayKey: '2026-08-19',
+      });
+      await transitionProtection('prot:intent-1:INITIAL_STOP', 'PLANNED', 'PREPARED');
+      if (status === 'SUBMITTING') {
+        await transitionProtection(
+          'prot:intent-1:INITIAL_STOP',
+          'PREPARED',
+          'SUBMITTING',
+          { incrementSubmitAttempts: true },
+        );
+      }
+      const result = await createInitialStopAfterOpenConfirmed(STOP_INPUT);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.emergencyCloseRequired).toBe(false);
+        expect(result.currentStatus).toBe(status);
+      }
+      expect(submit).not.toHaveBeenCalled();
+    },
+  );
   it('제출 결과 불명(예외) → UNRESOLVED + emergency close 요구, 재호출도 제출 0회', async () => {
     const submit = vi.fn(async () => { throw new Error('timeout'); });
     setProtectionSubmitFn(submit as never);
