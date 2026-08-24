@@ -25,8 +25,8 @@ import {
 } from './paperRuntimeReadiness';
 import {
   getStopExecutionCapability,
-  refreshStopExecutionCapability,
-} from '../workers/liveTestExecutor';
+  type StopExecutionCapabilitySnapshot,
+} from './stopExecutionCapabilityState';
 
 export interface GmxApiPeerHealth {
   peerHost: string;
@@ -34,7 +34,7 @@ export interface GmxApiPeerHealth {
   kind?: string;
 }
 
-type StopCapability = Awaited<ReturnType<typeof refreshStopExecutionCapability>>;
+type StopCapability = StopExecutionCapabilitySnapshot;
 
 export interface GmxApiReadinessRefreshResult {
   generation: number;
@@ -77,7 +77,12 @@ const DEFAULT_DEPS: CoordinatorDeps = {
   runPaperCycle: ({ forceDeployment, preloadedCanary }) =>
     runPaperRuntimeReadinessCycle({ forceDeployment, preloadedCanary }),
   getPaperSnapshot: getPaperRuntimeReadinessSnapshot,
-  refreshStopCapability: refreshStopExecutionCapability,
+  refreshStopCapability: async () => {
+    const { refreshStopExecutionCapability } =
+      await import('../workers/liveTestExecutor');
+    await refreshStopExecutionCapability();
+    return getStopExecutionCapability();
+  },
   getStopCapability: getStopExecutionCapability,
   setCoordinatorInFlight: setPaperRuntimeReadinessCoordinatorInFlight,
 };
@@ -85,6 +90,7 @@ const DEFAULT_DEPS: CoordinatorDeps = {
 let injectedDeps: Partial<CoordinatorDeps> | null = null;
 let activeRefreshPromise: Promise<GmxApiReadinessRefreshResult> | null = null;
 let generation = 0;
+let activeGeneration: number | null = null;
 let activeJoinCount = 0;
 
 export function __setGmxApiReadinessCoordinatorDepsForTests(
@@ -97,6 +103,7 @@ export function __resetGmxApiReadinessCoordinatorForTests(): void {
   injectedDeps = null;
   activeRefreshPromise = null;
   generation = 0;
+  activeGeneration = null;
   activeJoinCount = 0;
   setPaperRuntimeReadinessCoordinatorInFlight(false);
 }
@@ -111,11 +118,15 @@ export function __getGmxApiReadinessCoordinatorStateForTests(): {
   };
 }
 
+export function __getGmxApiReadinessCoordinatorGenerationForTests(): number | null {
+  return activeGeneration;
+}
+
 async function performRefresh(
   options: GmxApiReadinessRefreshOptions,
   deps: CoordinatorDeps,
+  currentGeneration: number,
 ): Promise<GmxApiReadinessRefreshResult> {
-  const currentGeneration = ++generation;
   const transport = options.transport ?? deps.createTransport(deps.env);
   const readonlyEnabled = transport.readonlyEnabled;
   const shouldContinue = options.shouldContinue ?? (() => true);
@@ -169,7 +180,7 @@ async function performRefresh(
     if (!shouldContinue()) return snapshot();
   }
 
-  if (readonlyEnabled) {
+  if (readonlyEnabled && deps.env.WORKER_ENGINE_MODE !== 'PAPER') {
     if (!shouldContinue()) return snapshot();
     stopCapability = await deps.refreshStopCapability();
   }
@@ -187,14 +198,20 @@ export async function runGmxApiReadinessRefresh(
 
   const deps: CoordinatorDeps = { ...DEFAULT_DEPS, ...injectedDeps };
   activeJoinCount = 0;
+  const currentGeneration = ++generation;
+  activeGeneration = currentGeneration;
   deps.setCoordinatorInFlight(true);
-  const refreshPromise = performRefresh(options, deps);
+  // Defer the production work by one microtask so the shared-flight identity is
+  // published before even the first peer transport operation can begin.
+  const refreshPromise = Promise.resolve().then(() =>
+    performRefresh(options, deps, currentGeneration));
   activeRefreshPromise = refreshPromise;
   try {
     return await refreshPromise;
   } finally {
     if (activeRefreshPromise === refreshPromise) {
       activeRefreshPromise = null;
+      activeGeneration = null;
       activeJoinCount = 0;
       deps.setCoordinatorInFlight(false);
     }

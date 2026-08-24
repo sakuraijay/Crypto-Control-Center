@@ -89,6 +89,18 @@ import { countBlockingIntentsOrNull } from '../lib/executionIntents';
 import { fetchServerOpenPositions } from '../routes/gmx';
 // ── 6H-2B §11 — stop 실행 능력 파생 게이트 ──────────────────────────────────
 import { deriveStopExecutionCapability, type StopCapabilityResult } from '../lib/stopExecutionCapability';
+import {
+  __setStopExecutionAvailabilityForTests,
+  getStopExecutionAvailabilityTestOverride,
+  getStopExecutionCapability,
+  isStopExecutionAvailable,
+  setStopExecutionCapability,
+} from '../lib/stopExecutionCapabilityState';
+export {
+  __setStopExecutionAvailabilityForTests,
+  getStopExecutionCapability,
+  isStopExecutionAvailable,
+} from '../lib/stopExecutionCapabilityState';
 import { evaluateActionBudget } from '../lib/actionBudget';
 import {
   listBlockingProtections, listActiveProtections, recordProtectionEvidenceFields,
@@ -519,31 +531,6 @@ export async function fetchAuthoritativeOpenPositions(): Promise<OpenPositionEvi
 export const STOP_EXECUTION_UNAVAILABLE = 'STOP_EXECUTION_UNAVAILABLE';
 
 /**
- * 6H-2B §11 — stop 실행 능력은 상수가 아니라 실제 조건에서 파생한다.
- * deriveStopExecutionCapability(순수 함수)에 서버 상태를 공급해 캐시하며,
- * 어떤 조건도 낙관 기본값을 갖지 않는다 (초기값 = 미평가 → false).
- * 현 Production(서명·제출 잠금)에서는 available=false가 정상.
- */
-let _stopCapability: StopCapabilityResult & { evaluatedAt: string | null } = {
-  available: false,
-  reasons: ['stop 실행 능력 미평가 — refreshStopExecutionCapability 필요 (fail-closed)'],
-  evaluatedAt: null,
-};
-/** 테스트 전용 강제 override (null = 파생값 사용) */
-let _stopCapabilityTestOverride: boolean | null = null;
-
-export function isStopExecutionAvailable(): boolean {
-  if (_stopCapabilityTestOverride !== null) return _stopCapabilityTestOverride;
-  return _stopCapability.available;
-}
-export function getStopExecutionCapability(): StopCapabilityResult & { evaluatedAt: string | null } {
-  return _stopCapability;
-}
-export function __setStopExecutionAvailabilityForTests(v: boolean | null): void {
-  _stopCapabilityTestOverride = v;
-}
-
-/**
  * §2 — stop 스키마 런타임 검증: 로컬 ORDER_TYPE 상수를 설치된 공식 SDK enum과
  * 실시간 대조한다 (상수 true 금지 — SDK 로드/대조 실패 = false, 캐시).
  */
@@ -641,15 +628,16 @@ export async function evaluateManualCanaryStopCapability(
 }
 
 export async function refreshStopExecutionCapability(): Promise<StopCapabilityResult> {
-  const derived = _stopCapabilityTestOverride === null
+  const testOverride = getStopExecutionAvailabilityTestOverride();
+  const derived = testOverride === null
     ? await collectStopExecutionCapability(
       getExecutionEligibleCostEvidence(Date.now()).fresh,
     )
     : {
-      available: _stopCapabilityTestOverride,
-      reasons: _stopCapabilityTestOverride ? [] : ['테스트 override: stop 실행 능력 비활성'],
+      available: testOverride,
+      reasons: testOverride ? [] : ['테스트 override: stop 실행 능력 비활성'],
     };
-  _stopCapability = { ...derived, evaluatedAt: new Date().toISOString() };
+  setStopExecutionCapability(derived);
   return derived;
 }
 
