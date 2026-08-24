@@ -101,6 +101,34 @@ function handle(fetchCandles: ProductionFetchersHandle['fetchers']['fetchCandles
   } as unknown as ProductionFetchersHandle;
 }
 
+const lifecycleRecord = {
+  configVersion: 'signal-lifecycle/v1' as const,
+  signalId: `BTC:TREND_PULLBACK:LONG:15m:${BOUNDARY - 15 * 60_000}`,
+  symbol: 'BTC',
+  strategyId: 'TREND_PULLBACK' as const,
+  direction: 'LONG' as const,
+  sourceCandleCloseTime: BOUNDARY - 15 * 60_000,
+  status: 'GENERATED' as const,
+  generatedAt: BOUNDARY - 15 * 60_000 + 1,
+  updatedAt: BOUNDARY - 15 * 60_000 + 1,
+  reason: 'restart read boundary',
+};
+const lifecycleEvent = {
+  eventId: `STOP_LOSS:${BOUNDARY - 30 * 60_000}`,
+  kind: 'STOP_LOSS' as const,
+  symbol: 'BTC',
+  strategyId: 'TREND_PULLBACK' as const,
+  direction: 'LONG' as const,
+  sourceCandleCloseTime: BOUNDARY - 30 * 60_000,
+};
+const validLifecycleSnapshot = {
+  schemaVersion: 'signal-lifecycle-snapshot/v1' as const,
+  configVersion: 'signal-lifecycle/v1' as const,
+  capturedAt: NOW - 1,
+  records: [lifecycleRecord],
+  historyEvents: [lifecycleEvent],
+};
+
 describe('Intel service Strategy SHADOW Worker read-only bridge', () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -191,7 +219,27 @@ describe('Intel service Strategy SHADOW Worker read-only bridge', () => {
     expect(injected.beginCycle).toHaveBeenCalledTimes(1);
   });
 
-  it('손상 lifecycle snapshot은 external read 전 BLOCKED하고 예산을 사용하지 않는다', async () => {
+  it.each([
+    ['unknown schema', { ...validLifecycleSnapshot, schemaVersion: 'future' }],
+    ['unknown config', { ...validLifecycleSnapshot, configVersion: 'future' }],
+    ['future capturedAt', { ...validLifecycleSnapshot, capturedAt: NOW + 1 }],
+    ['duplicate Signal ID', {
+      ...validLifecycleSnapshot,
+      records: [
+        lifecycleRecord,
+        { ...lifecycleRecord, sourceCandleCloseTime: lifecycleRecord.sourceCandleCloseTime - 15 * 60_000 },
+      ],
+    }],
+    ['same candle with another Signal ID', {
+      ...validLifecycleSnapshot,
+      records: [lifecycleRecord, { ...lifecycleRecord, signalId: 'attempted-candle-bypass' }],
+    }],
+    ['duplicate History event ID', {
+      ...validLifecycleSnapshot,
+      historyEvents: [lifecycleEvent, { ...lifecycleEvent }],
+    }],
+  ])('%s lifecycle snapshot은 external candle read 전 BLOCKED하고 예산을 사용하지 않는다',
+    async (_name, lifecycleSnapshot) => {
     const fetchCandles = vi.fn(async (_symbol: string, timeframe: Timeframe, count: number) =>
       candles(timeframe, count));
     const injected = handle(fetchCandles);
@@ -202,12 +250,19 @@ describe('Intel service Strategy SHADOW Worker read-only bridge', () => {
       evaluatedAt: NOW,
       expectedSymbols: ['BTC'],
       existingAi: existingAi(),
-      lifecycleSnapshot: { schemaVersion: 'future' } as never,
+      lifecycleSnapshot: lifecycleSnapshot as never,
     });
 
     expect(envelope.status).toBe('BLOCKED');
     expect(envelope.records).toEqual([]);
     expect(envelope.warnings.join(' ')).toContain('lifecycle snapshot INVALID');
+    expect(envelope).toMatchObject({
+      executionAuthorized: false,
+      approvalCreationAllowed: false,
+      paperPositionMutationAllowed: false,
+      livePositionMutationAllowed: false,
+      riskAuthority: 'NOT_EVALUATED',
+    });
     expect(fetchCandles).not.toHaveBeenCalled();
     expect(injected.beginCycle).not.toHaveBeenCalled();
   });
