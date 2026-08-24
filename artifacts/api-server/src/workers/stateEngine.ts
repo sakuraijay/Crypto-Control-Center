@@ -272,11 +272,13 @@ export interface EngineInput {
    * Set to a fail-closed sentinel (999) when the snapshot is stale or unavailable.
    */
   livePositionCount?: number;
+  /** 적용 프로필의 즉시진입 신뢰도 경계. 분석/점수/신뢰도 산식에는 영향 없음. */
+  immediateEntryThreshold?: number;
 }
 
 export function runAiEngine(
   input: EngineInput,
-): Omit<import('./serverTypes').ServerAiDecision, 'id' | 'createdAt' | 'paperExecuted' | 'paperOrderId' | 'source'> {
+): Omit<import('./serverTypes').ServerAiDecision, 'id' | 'createdAt' | 'paperExecuted' | 'paperOrderId' | 'source' | 'riskProfile' | 'strategyEnsembleShadow'> {
   const {
     cycleNumber, prevState, analyses, positions, account,
     limits, engineState, consecutiveLosses, dataFreshMs,
@@ -288,6 +290,7 @@ export function runAiEngine(
     walletSubgraphOk = true,
     livePositionCount,
     liveTestDbOk = true,
+    immediateEntryThreshold = 80,
   } = input;
 
   const profitLockStage = computeProfitLockStage(
@@ -376,7 +379,9 @@ export function runAiEngine(
   let trailingStopPct: number | undefined;
   let hedgeParams: HedgeParams | undefined;
 
-  const hasOpenPositions = positions.length > 0;
+  const hasSameSymbolPosition = best
+    ? positions.some(position => position.symbol === best.symbol)
+    : false;
 
   const reservedCash = (limits.tradingCapital ?? 10_000) * ((limits.reserveCashPct ?? 0) / 100);
   const deployableBalance = Math.max(0, account.availableBalance - reservedCash);
@@ -416,8 +421,8 @@ export function runAiEngine(
     confidence = Math.min(95, bullishScore + (directionalBias > 40 ? 10 : 0));
     leverage = Math.min(LEVERAGE_BY_CONFIDENCE(confidence, avgAtr), limits.maxLeverage ?? 10);
     sizeUsd = calcSizeUsd('LONG', confidence, limits, deployableBalance) * leverage;
-    executionType = hasOpenPositions ? 'scale_in' : 'perp_long_open';
-    entryStyle = confidence >= 80 ? 'immediate' : 'scaled';
+    executionType = hasSameSymbolPosition ? 'scale_in' : 'perp_long_open';
+    entryStyle = confidence >= immediateEntryThreshold ? 'immediate' : 'scaled';
     const tpsl = calcTpSl(best.price, true, avgAtr, confidence);
     tpPrice = tpsl.tpPrice; slPrice = tpsl.slPrice; trailingStopPct = tpsl.trailingStopPct;
   }
@@ -427,8 +432,8 @@ export function runAiEngine(
     confidence = Math.min(95, bearishScore + (directionalBias < -40 ? 10 : 0));
     leverage = Math.min(LEVERAGE_BY_CONFIDENCE(confidence, avgAtr), limits.maxLeverage ?? 10);
     sizeUsd = calcSizeUsd('SHORT', confidence, limits, deployableBalance) * leverage;
-    executionType = hasOpenPositions ? 'scale_in' : 'perp_short_open';
-    entryStyle = confidence >= 80 ? 'immediate' : 'scaled';
+    executionType = hasSameSymbolPosition ? 'scale_in' : 'perp_short_open';
+    entryStyle = confidence >= immediateEntryThreshold ? 'immediate' : 'scaled';
     const tpsl = calcTpSl(best.price, false, avgAtr, confidence);
     tpPrice = tpsl.tpPrice; slPrice = tpsl.slPrice; trailingStopPct = tpsl.trailingStopPct;
   }

@@ -14,6 +14,13 @@ import { and, desc, eq } from "drizzle-orm";
 import { getPaperCostBinding } from "../lib/paperCostCache";
 import { clampDailyTargetUSDT } from "../lib/riskPolicy";
 import { accrueHoldingCostsFromEntryRates, computePaperNetPnl } from "../lib/holdingCosts";
+import { requireOperatorAuth } from "../lib/operatorAuthGuard";
+import {
+  getRiskProfileStatus,
+  parseRiskProfileName,
+  profileBaseLimits,
+  requestRiskProfile,
+} from "../lib/riskProfiles";
 
 const router = Router();
 
@@ -375,6 +382,36 @@ router.put("/data/strategy", async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: "Failed to save strategy config" });
+  }
+});
+
+/** GET /api/data/risk-profile — 권위 프로필의 desired/applied/pending 상태 */
+router.get("/data/risk-profile", async (_req, res) => {
+  try {
+    const rows = await db.select({ limits: strategyConfigTable.limits })
+      .from(strategyConfigTable).limit(1);
+    res.json(await getRiskProfileStatus(profileBaseLimits(rows[0]?.limits)));
+  } catch {
+    res.status(503).json({ error: "Risk profile status unavailable (fail-closed)" });
+  }
+});
+
+/**
+ * PUT /api/data/risk-profile — 프로필 변경 요청만 기록한다.
+ * 실제 적용은 Worker가 열린 포지션/승인/intent/close가 없는 안전 사이클 경계에서 수행한다.
+ */
+router.put("/data/risk-profile", requireOperatorAuth, async (req, res) => {
+  const name = parseRiskProfileName(req.body?.profile);
+  if (!name) {
+    return res.status(400).json({ error: "profile must be conservative or aggressive" });
+  }
+  try {
+    await requestRiskProfile(name);
+    const rows = await db.select({ limits: strategyConfigTable.limits })
+      .from(strategyConfigTable).limit(1);
+    return res.json(await getRiskProfileStatus(profileBaseLimits(rows[0]?.limits)));
+  } catch {
+    return res.status(503).json({ error: "Risk profile request could not be persisted" });
   }
 });
 

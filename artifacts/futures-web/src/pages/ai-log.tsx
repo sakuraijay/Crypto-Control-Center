@@ -21,6 +21,11 @@ import {
 } from 'lucide-react';
 import { format, formatDistanceToNowStrict } from 'date-fns';
 import type { AiEngineDecision, AiOperatingState, RiskLevel, PendingLiveApproval } from '@/lib/ai/types';
+import { parseStrategyShadowView, type StrategyShadowView } from '@/lib/ai/strategyShadowView';
+import {
+  parseStrategyRiskAdvisoryView,
+  type StrategyRiskAdvisoryView,
+} from '@/lib/ai/strategyRiskAdvisoryView';
 
 // ── CSV export helpers ────────────────────────────────────────────────────────
 
@@ -164,8 +169,142 @@ function ConfBar({ value }: { value: number }) {
   );
 }
 
+function ShadowStatusPill({ shadow }: { shadow: StrategyShadowView }) {
+  const statusColor = shadow.status === 'EVALUATED'
+    ? 'text-cyan-300 border-cyan-500/30 bg-cyan-500/10'
+    : shadow.status === 'PARTIAL'
+      ? 'text-amber-300 border-amber-500/30 bg-amber-500/10'
+      : 'text-muted-foreground border-border bg-secondary';
+  return (
+    <span className={cn('inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold border', statusColor)}>
+      SHADOW {shadow.status} {shadow.evaluatedSymbols.length}/{shadow.expectedSymbols.length}
+    </span>
+  );
+}
+
+function StrategyShadowDetail({ shadow }: { shadow: StrategyShadowView }) {
+  return (
+    <div className="mt-4 pt-4 border-t border-border" data-testid="strategy-shadow-detail">
+      <div className="flex flex-wrap items-center gap-2 mb-3">
+        <div className="text-[9px] font-bold text-muted-foreground uppercase tracking-wider">Strategy Ensemble Explainability</div>
+        <ShadowStatusPill shadow={shadow} />
+        <span className="text-[9px] text-muted-foreground font-mono">cycle #{shadow.cycleNumber} · SHADOW_ONLY</span>
+        <span className="ml-auto text-[9px] text-cyan-300">읽기 전용 · 실행 권한 없음</span>
+      </div>
+
+      {shadow.records.length > 0 ? (
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">
+          {shadow.records.map(record => (
+            <div key={`${record.symbol}:${record.signalId ?? record.action}`} className="rounded border border-border bg-background/60 p-2.5 text-[10px]">
+              <div className="flex flex-wrap items-center gap-1.5 mb-1.5">
+                <span className="font-bold font-mono text-foreground">{record.symbol}</span>
+                <span className="text-muted-foreground">{record.regime}</span>
+                <span className={cn(
+                  'ml-auto font-bold',
+                  record.action === 'LONG' ? 'text-[var(--color-long)]'
+                    : record.action === 'SHORT' ? 'text-[var(--color-short)]' : 'text-muted-foreground',
+                )}>{record.action}</span>
+              </div>
+              <div className="grid grid-cols-2 gap-x-2 gap-y-0.5 font-mono text-muted-foreground">
+                <span>Strategy</span><span className="text-right text-foreground">{record.strategyId ?? '—'}</span>
+                <span>Comparison</span><span className="text-right text-foreground">{record.comparison}</span>
+                <span>Confidence</span><span className="text-right text-foreground">{record.confidence ?? '—'}</span>
+                <span>Lifecycle</span><span className="text-right text-foreground">{record.lifecycleEligible === null ? '—' : record.lifecycleEligible ? 'ELIGIBLE' : 'BLOCKED'}</span>
+                <span>Net edge / R:R</span><span className="text-right text-foreground">{record.expectedNetEdgeBps ?? '—'} / {record.expectedNetRR ?? '—'}</span>
+              </div>
+              {record.reasons.slice(0, 2).map((reason, index) => (
+                <div key={index} className="mt-1 text-muted-foreground break-words">• {reason}</div>
+              ))}
+              {record.warnings.length > 0 && (
+                <div className="mt-1 text-amber-300 break-words">⚠ {record.warnings.slice(0, 2).join(' · ')}</div>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="rounded border border-border bg-background/60 p-2.5 text-[10px] text-muted-foreground">
+          {shadow.reasons.join(' · ') || '평가 record 없음 — 실행 근거로 사용하지 않음'}
+          {shadow.missingSymbols.length > 0 && ` · 누락: ${shadow.missingSymbols.join(', ')}`}
+        </div>
+      )}
+
+      <div className="mt-2 text-[9px] text-muted-foreground font-mono">
+        execution=false · approval=false · PAPER mutation=false · LIVE mutation=false · riskAuthority=NOT_EVALUATED
+      </div>
+    </div>
+  );
+}
+
+function StrategyRiskStatusPill({ advisory }: { advisory: StrategyRiskAdvisoryView }) {
+  const { allow, reduce, reject } = advisory.summary;
+  const statusColor = reject > 0 || advisory.status === 'BLOCKED'
+    ? 'text-red-300 border-red-500/30 bg-red-500/10'
+    : reduce > 0 || advisory.status === 'PARTIAL'
+      ? 'text-amber-300 border-amber-500/30 bg-amber-500/10'
+      : 'text-emerald-300 border-emerald-500/30 bg-emerald-500/10';
+  return (
+    <span className={cn('inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold border', statusColor)}>
+      RISK {advisory.status} · A{allow}/D{reduce}/R{reject}
+    </span>
+  );
+}
+
+function StrategyRiskAdvisoryDetail({ advisory }: { advisory: StrategyRiskAdvisoryView }) {
+  return (
+    <div className="mt-3 pt-3 border-t border-border" data-testid="strategy-risk-advisory-detail">
+      <div className="flex flex-wrap items-center gap-2 mb-2">
+        <div className="text-[9px] font-bold text-muted-foreground uppercase tracking-wider">Risk Advisory Explainability</div>
+        <StrategyRiskStatusPill advisory={advisory} />
+        <span className="text-[9px] text-muted-foreground font-mono">
+          cycle #{advisory.cycleNumber} · {advisory.riskState ?? 'NOT_EVALUATED'}
+        </span>
+        <span className="ml-auto text-[9px] text-cyan-300">ADVISORY_ONLY · 실행 권한 없음</span>
+      </div>
+
+      {advisory.decisions.length > 0 ? (
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">
+          {advisory.decisions.map(decision => (
+            <div key={decision.decisionId} className="rounded border border-border bg-background/60 p-2.5 text-[10px]">
+              <div className="flex flex-wrap items-center gap-1.5 mb-1.5">
+                <span className="font-bold font-mono text-foreground">{decision.symbol}</span>
+                <span className="text-muted-foreground">{decision.direction}</span>
+                <span className={cn(
+                  'ml-auto font-bold',
+                  decision.action === 'ALLOW' ? 'text-emerald-300'
+                    : decision.action === 'REDUCE' ? 'text-amber-300' : 'text-red-300',
+                )}>{decision.action}</span>
+              </div>
+              <div className="grid grid-cols-2 gap-x-2 gap-y-0.5 font-mono text-muted-foreground">
+                <span>Risk state</span><span className="text-right text-foreground">{decision.riskState ?? '—'}</span>
+                <span>Size factor</span><span className="text-right text-foreground">{decision.sizeFactor.toFixed(2)}</span>
+                <span>Max leverage</span><span className="text-right text-foreground">{decision.maxLeverage.toFixed(2)}×</span>
+              </div>
+              {decision.reasons.slice(0, 2).map((reason, index) => (
+                <div key={index} className="mt-1 text-muted-foreground break-words">• {reason}</div>
+              ))}
+              {decision.warnings.length > 0 && (
+                <div className="mt-1 text-amber-300 break-words">⚠ {decision.warnings.slice(0, 2).join(' · ')}</div>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="rounded border border-border bg-background/60 p-2.5 text-[10px] text-muted-foreground">
+          {advisory.reasons.join(' · ') || 'Risk advisory 없음 — 실행 근거로 사용하지 않음'}
+        </div>
+      )}
+
+      <div className="mt-2 text-[9px] text-muted-foreground font-mono">
+        authority=ADVISORY_ONLY · execution=false · approval=false · PAPER mutation=false · LIVE mutation=false
+      </div>
+    </div>
+  );
+}
+
 function DecisionRow({ d }: { d: AiEngineDecision }) {
   const [open, setOpen] = useState(false);
+  const shadow = parseStrategyShadowView(d.strategyEnsembleShadow);
+  const riskAdvisory = parseStrategyRiskAdvisoryView(d.strategyRiskAdvisory);
   return (
     <>
       <tr
@@ -189,6 +328,8 @@ function DecisionRow({ d }: { d: AiEngineDecision }) {
                 🧪 TEST
               </span>
             )}
+            {shadow && <ShadowStatusPill shadow={shadow} />}
+            {riskAdvisory && <StrategyRiskStatusPill advisory={riskAdvisory} />}
           </div>
         </td>
         {/* Symbol */}
@@ -300,6 +441,8 @@ function DecisionRow({ d }: { d: AiEngineDecision }) {
                 </div>
               </div>
             </div>
+            {shadow && <StrategyShadowDetail shadow={shadow} />}
+            {riskAdvisory && <StrategyRiskAdvisoryDetail advisory={riskAdvisory} />}
           </td>
         </tr>
       )}

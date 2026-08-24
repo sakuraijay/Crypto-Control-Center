@@ -5,7 +5,7 @@
  *  - signer 접근·서명·prepare/submit POST·자동 재시도 절대 없음.
  *  - GET status는 외부 호출 0회 — 저장 스냅샷·DB 파생값만 조립한다.
  *  - POST readiness/refresh는 readonly 조회만 — peer health GET(/markets/tickers)
- *    + 기존 미종결 task의 status readback(§9 reconciler 1회 실행).
+ *    + decimals/cost/stop capability의 read-only evidence 갱신.
  *    readonly 플래그 꺼짐 = 외부 호출 0회.
  *  - API base URL 전문·응답 원문·서명은 노출하지 않는다 (host명·상태 문자열만).
  */
@@ -52,12 +52,12 @@ import { loadStopCoverage } from '../workers/liveTestExecutor';
 import { getWorkerStatus } from '../workers/aiWorker';
 import { GMX_DEPLOYMENT_MANIFEST } from '../lib/gmxDeploymentManifest';
 import { APPROVAL_PURPOSE, SESSION_STATUS } from '../lib/ownerApprovalSession';
-import { reconcileGmxApiTasks, makeProductionDeps } from '../lib/gmxApiStatusReconciler';
 import { getGmxPrepareStartupState } from '../lib/gmxApiPrepareStartup';
 import { sanitizeRpcError } from '../lib/rpcErrorSanitize';
 import { getLastPreflight, isPreflightPassedFresh, runGmxLivePreflight, PREFLIGHT_TTL_MS } from '../lib/gmxLivePreflight';
-import { refreshManualCanaryReadonlyEvidence } from '../lib/manualCanaryDeps';
-import { MARKET_BY_SYMBOL_SERVER } from '../lib/gmxMarkets';
+import { deriveCanaryDecimalsReadiness } from '../lib/canaryDecimalsReadiness';
+import { getPaperRuntimeReadinessSnapshot } from '../lib/paperRuntimeReadiness';
+import { runGmxApiReadinessRefresh } from '../lib/gmxApiReadinessCoordinator';
 
 const router = Router();
 
@@ -68,22 +68,6 @@ export function __setGmxApiRouteTransportForTests(t: GmxApiTransport | null): vo
 }
 function transport(): GmxApiTransport {
   return injectedTransport ?? createGmxApiTransport(process.env);
-}
-
-export function deriveCanaryDecimalsReadiness(entries: Array<{
-  tokenAddress: string;
-  stale: boolean;
-  source: string;
-}>): Record<'BTC' | 'ETH', boolean> {
-  const freshValidated = new Set(
-    entries
-      .filter((entry) => !entry.stale && entry.source === 'sdk+onchain')
-      .map((entry) => entry.tokenAddress.toLowerCase()),
-  );
-  return {
-    BTC: freshValidated.has(MARKET_BY_SYMBOL_SERVER.get('BTC')!.indexToken.toLowerCase()),
-    ETH: freshValidated.has(MARKET_BY_SYMBOL_SERVER.get('ETH')!.indexToken.toLowerCase()),
-  };
 }
 
 /** GMX API v2 상태 스냅샷 조립 — 외부 호출 0회 (DB read + 메모리 getter만) */
@@ -181,6 +165,7 @@ async function buildGmxApiStatusSnapshot() {
   const gmxConfigOk = resolveGmxLiveRelayConfig().ok;
   const manualCanaryPosture = isManualCanarySignerRestoreAllowed(env);
   const executionCostEvidence = getExecutionEligibleCostEvidence(Date.now());
+  const paperRuntimeReadiness = getPaperRuntimeReadinessSnapshot(Date.now(), env);
   const feeEstimateFresh =
     fe.attempted && fe.ok && fe.atMs !== null && Date.now() - fe.atMs < 10 * 60_000;
 
@@ -343,6 +328,7 @@ async function buildGmxApiStatusSnapshot() {
     feeEstimate: { attempted: fe.attempted, ok: fe.ok, atMs: fe.atMs, fresh: feeEstimateFresh },
     manualCanaryPosture,
     executionEligibleCostEvidence: executionCostEvidence,
+    paperRuntimeReadiness,
     lastReadinessRefresh: {
       attempted: lastRefresh.attempted, atMs: lastRefresh.atMs,
       ok: lastRefresh.ok, basis: lastRefresh.basis,
@@ -356,6 +342,9 @@ async function buildGmxApiStatusSnapshot() {
       available: stopCapability.available,
       reasons: stopCapability.reasons,
       evaluatedAt: stopCapability.evaluatedAt,
+      scope: 'LIVE_STOP_EXECUTION',
+      boundary: 'READ_ONLY_STATUS_NOT_EXECUTION_AUTHORIZATION',
+      paperMode: process.env.WORKER_ENGINE_MODE === 'PAPER',
       schemaPin: { sdk: '@gmx-io/sdk@1.7.0', stopLossDecrease: 6 },
     },
     protectionCounts,
@@ -431,44 +420,35 @@ router.get('/executor/gmx-api/status', requireOperatorAuth, async (_req, res) =>
 });
 
 // POST /executor/gmx-api/readiness/refresh — readonly 조회만.
-// 허용: peer health GET + 기존 미종결 task status readback(§9, 자동 재제출 0회).
-// 금지: signer 접근·서명·prepare/submit·task/intent 생성·자동 재시도.
+// 허용: peer health GET + decimals/cost/RPC capability readback.
+// 금지: reconciliation·DB 상태 전이·signer 접근·서명·prepare/submit·task/intent 생성·자동 재시도.
 router.post('/executor/gmx-api/readiness/refresh', requireOperatorAuth, async (_req, res) => {
   try {
     const t = transport();
-    let peerHealth: Array<{ peerHost: string; ok: boolean; kind?: string }> | null = null;
-    if (t.readonlyEnabled) {
-      peerHealth = [];
-      for (const base of t.peers) {
-        const single = injectedTransport ?? createGmxApiTransport(process.env, { peers: [base] });
-        const r = await single.getJson('/markets/tickers');
-        peerHealth.push(r.ok
-          ? { peerHost: r.peerHost, ok: true }
-          : { peerHost: new URL(base).host, ok: false, kind: r.kind });
-        if (injectedTransport) break; // 테스트 주입 시 단일 transport로만
-      }
-    }
-
-    // §9 reconciliation 1회 — readonly 게이트 내장 (플래그 꺼짐 = scanned 0)
-    const recon = await reconcileGmxApiTasks(
-      injectedTransport
-        ? { transport: injectedTransport, onchain: null, nowMs: () => Date.now() }
-        : makeProductionDeps(),
-    );
-    const canaryEvidence = t.readonlyEnabled
-      ? await refreshManualCanaryReadonlyEvidence()
-      : { decimals: {}, costs: {} };
-    const stopCapability = await refreshStopExecutionCapability();
+    const refreshResult = await runGmxApiReadinessRefresh({
+      transport: t,
+      peerTransportFactory: injectedTransport
+        ? () => injectedTransport as GmxApiTransport
+        : undefined,
+      singlePeerOnly: injectedTransport !== null,
+      forceDeployment: true,
+    });
 
     const snapshot = await buildGmxApiStatusSnapshot();
     return res.json({
       ok: true,
       refresh: {
-        readonlyEnabled: t.readonlyEnabled,
-        peerHealth,
-        reconciliation: recon,
-        canaryEvidence,
-        stopCapability,
+        generation: refreshResult.generation,
+        readonlyEnabled: refreshResult.readonlyEnabled,
+        peerHealth: refreshResult.peerHealth,
+        reconciliation: {
+          ran: false,
+          readOnly: true,
+          reason: 'readiness refresh에서는 durable reconciliation을 실행하지 않음',
+        },
+        canaryEvidence: refreshResult.canaryEvidence,
+        paperRuntimeReadiness: refreshResult.paperRuntimeReadiness,
+        stopCapability: refreshResult.stopCapability,
       },
       status: snapshot,
     });

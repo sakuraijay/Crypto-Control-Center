@@ -6,8 +6,10 @@
  *    임의 URL·redirect·다른 host·다른 chain은 전부 fail-closed(config).
  *  - GMX API는 공개 API(OpenAPI security: []) — 어떤 인증 헤더도 보내지 않는다.
  *    GELATO_API_KEY는 이 모듈에서 절대 읽지도, 전송하지도 않는다.
- *  - 응답 크기 상한 262144B, timeout, Content-Type=application/json, JSON decode
- *    검증. 오류는 sanitize된 고정 문구 + kind + httpStatus 정수만 노출한다.
+ *  - 응답 크기 상한은 readonly 1MiB / submit 256KiB로 분리한다. 공식
+ *    markets/info 전체 응답은 256KiB를 넘으므로 조회만 제한적으로 확대하고,
+ *    제출 응답의 기존 상한은 유지한다. timeout, Content-Type=application/json,
+ *    JSON decode 검증. 오류는 sanitize된 고정 문구 + kind + httpStatus 정수만 노출한다.
  *    (URL query·서명·typed data 전문·개인키는 로그/오류에 절대 포함 금지)
  *  - peer 정책: readonly(시장 데이터·prepare·status)는 network/timeout/5xx에서
  *    다음 peer로 1회 failover 허용. submit은 자동 peer 재시도 절대 금지 —
@@ -26,7 +28,8 @@ export const GMX_API_PEERS = [
 /** peer host allowlist (호스트만 — 오류 문구에 host까지만 노출 허용) */
 export const GMX_API_HOST_ALLOWLIST = ['arbitrum.gmxapi.io', 'arbitrum.gmxapi.ai'] as const;
 
-export const GMX_API_MAX_RESPONSE_BYTES = 262144;
+export const GMX_API_MAX_READONLY_RESPONSE_BYTES = 1024 * 1024;
+export const GMX_API_MAX_SUBMIT_RESPONSE_BYTES = 256 * 1024;
 export const GMX_API_TIMEOUT_MS = 10_000;
 export const GMX_API_CHAIN_ID = 42161;
 
@@ -42,8 +45,26 @@ export type GmxApiErrorKind =
   | 'http_5xx'      // 5xx — 외부 장애 (submit이면 ambiguous)
   | 'decode';       // Content-Type/JSON/구조 오류 (submit이면 ambiguous)
 
+export interface GmxApiAttemptTrace {
+  /** allowlist 검증된 host만 포함 — URL/path/query는 절대 보존하지 않는다. */
+  peerHost: string;
+  /** null은 해당 peer 호출 성공을 뜻한다. */
+  kind: GmxApiErrorKind | null;
+  /** 안전한 정수 HTTP status. 응답 자체를 받지 못했으면 null. */
+  httpStatus: number | null;
+}
+
 export type GmxApiResult<T> =
-  | { ok: true; data: T; peerHost: string }
+  | {
+      ok: true;
+      data: T;
+      peerHost: string;
+      httpStatus?: number;
+      attemptCount?: number;
+      retryCount?: number;
+      failoverCount?: number;
+      attemptTrace?: GmxApiAttemptTrace[];
+    }
   | {
       ok: false;
       kind: GmxApiErrorKind;
@@ -53,6 +74,10 @@ export type GmxApiResult<T> =
       /** sanitize된 고정 문구만 — URL query/서명/payload 전문 금지 */
       message: string;
       peerHost: string | null;
+      attemptCount?: number;
+      retryCount?: number;
+      failoverCount?: number;
+      attemptTrace?: GmxApiAttemptTrace[];
     };
 
 export type GmxApiIntent = 'readonly' | 'submit';
@@ -101,11 +126,11 @@ function bigIntReplacer(_k: string, v: unknown): unknown {
   return typeof v === 'bigint' ? v.toString() : v;
 }
 
-async function readBounded(res: Response): Promise<string> {
+async function readBounded(res: Response, maxBytes: number): Promise<string> {
   const reader = res.body?.getReader();
   if (!reader) {
     const text = await res.text();
-    if (text.length > GMX_API_MAX_RESPONSE_BYTES) throw new Error('response too large');
+    if (text.length > maxBytes) throw new Error('response too large');
     return text;
   }
   const chunks: Uint8Array[] = [];
@@ -114,7 +139,7 @@ async function readBounded(res: Response): Promise<string> {
     const { done, value } = await reader.read();
     if (done) break;
     total += value.byteLength;
-    if (total > GMX_API_MAX_RESPONSE_BYTES) {
+    if (total > maxBytes) {
       try { await reader.cancel(); } catch { /* noop */ }
       throw new Error('response too large');
     }
@@ -133,6 +158,7 @@ async function callOnce<T>(params: {
   method: 'GET' | 'POST';
   body: unknown;
   fetchImpl: typeof fetch;
+  maxResponseBytes: number;
 }): Promise<GmxApiResult<T>> {
   const peerHost = hostOf(params.base);
   const controller = new AbortController();
@@ -178,13 +204,13 @@ async function callOnce<T>(params: {
       message: `GMX API Content-Type 불일치 (peer=${peerHost})`, peerHost };
   }
   let text: string;
-  try { text = await readBounded(res); }
+  try { text = await readBounded(res, params.maxResponseBytes); }
   catch {
     return { ok: false, kind: 'network', httpStatus: res.status, ambiguous: true,
       message: `GMX API 응답 크기/수신 오류 (peer=${peerHost})`, peerHost };
   }
   try {
-    return { ok: true, data: JSON.parse(text) as T, peerHost };
+    return { ok: true, data: JSON.parse(text) as T, peerHost, httpStatus: res.status };
   } catch {
     return { ok: false, kind: 'decode', httpStatus: res.status, ambiguous: true,
       message: `GMX API JSON decode 실패 (peer=${peerHost})`, peerHost };
@@ -194,6 +220,15 @@ async function callOnce<T>(params: {
 /** failover 대상 판정 — readonly 전용 (network/timeout/5xx만) */
 function isFailoverEligible(kind: GmxApiErrorKind): boolean {
   return kind === 'network' || kind === 'timeout' || kind === 'http_5xx';
+}
+
+function toAttemptTrace<T>(result: GmxApiResult<T>): GmxApiAttemptTrace | null {
+  if (result.peerHost === null) return null;
+  return {
+    peerHost: result.peerHost,
+    kind: result.ok ? null : result.kind,
+    httpStatus: result.httpStatus ?? null,
+  };
 }
 
 export function createGmxApiTransport(
@@ -211,33 +246,70 @@ export function createGmxApiTransport(
   async function call<T>(path: string, method: 'GET' | 'POST', body: unknown, intent: GmxApiIntent): Promise<GmxApiResult<T>> {
     if (!peersValid) {
       return { ok: false, kind: 'config', httpStatus: null, ambiguous: false,
-        message: 'GMX API peer allowlist 위반 — 호출 차단 (fail-closed)', peerHost: null };
+        message: 'GMX API peer allowlist 위반 — 호출 차단 (fail-closed)', peerHost: null,
+        attemptCount: 0, retryCount: 0, failoverCount: 0, attemptTrace: [] };
     }
     if (!isSafePath(path)) {
       return { ok: false, kind: 'config', httpStatus: null, ambiguous: false,
-        message: 'GMX API path 형식 위반 — 호출 차단 (fail-closed)', peerHost: null };
+        message: 'GMX API path 형식 위반 — 호출 차단 (fail-closed)', peerHost: null,
+        attemptCount: 0, retryCount: 0, failoverCount: 0, attemptTrace: [] };
     }
     if (intent === 'submit') {
       if (!submissionEnabled) {
         return { ok: false, kind: 'config', httpStatus: null, ambiguous: false,
-          message: `${GMX_API_SUBMISSION_FLAG}!=true — 제출 차단 (fail-closed)`, peerHost: null };
+          message: `${GMX_API_SUBMISSION_FLAG}!=true — 제출 차단 (fail-closed)`, peerHost: null,
+          attemptCount: 0, retryCount: 0, failoverCount: 0, attemptTrace: [] };
       }
       // submit: 단일 peer(첫 번째), 정확히 1회 — 자동 peer 재시도 금지
-      return callOnce<T>({ base: peers[0], path, method, body, fetchImpl });
+      const result = await callOnce<T>({
+        base: peers[0], path, method, body, fetchImpl,
+        maxResponseBytes: GMX_API_MAX_SUBMIT_RESPONSE_BYTES,
+      });
+      const trace = toAttemptTrace(result);
+      return {
+        ...result,
+        attemptCount: 1,
+        retryCount: 0,
+        failoverCount: 0,
+        attemptTrace: trace ? [trace] : [],
+      };
     }
     if (!readonlyEnabled) {
       return { ok: false, kind: 'config', httpStatus: null, ambiguous: false,
-        message: `${GMX_API_READONLY_FLAG}!=true — 조회 차단 (fail-closed)`, peerHost: null };
+        message: `${GMX_API_READONLY_FLAG}!=true — 조회 차단 (fail-closed)`, peerHost: null,
+        attemptCount: 0, retryCount: 0, failoverCount: 0, attemptTrace: [] };
     }
     // readonly: peer 순차 시도 — network/timeout/5xx에서만 failover
     let last: GmxApiResult<T> | null = null;
+    let attemptCount = 0;
+    const attemptTrace: GmxApiAttemptTrace[] = [];
     for (const base of peers) {
-      const r = await callOnce<T>({ base, path, method, body, fetchImpl });
-      if (r.ok) return r;
+      attemptCount += 1;
+      const r = await callOnce<T>({
+        base, path, method, body, fetchImpl,
+        maxResponseBytes: GMX_API_MAX_READONLY_RESPONSE_BYTES,
+      });
+      const trace = toAttemptTrace(r);
+      if (trace) attemptTrace.push(trace);
+      const metadata = {
+        attemptCount,
+        retryCount: 0,
+        failoverCount: Math.max(0, attemptCount - 1),
+        attemptTrace: attemptTrace.map((entry) => ({ ...entry })),
+      };
+      if (r.ok) return { ...r, ...metadata };
       last = r;
-      if (!isFailoverEligible(r.kind)) return r; // 4xx/429/decode/config는 즉시 반환
+      if (!isFailoverEligible(r.kind)) {
+        return { ...r, ...metadata };
+      } // 4xx/429/decode/config는 즉시 반환
     }
-    return last as GmxApiResult<T>;
+    return {
+      ...(last as GmxApiResult<T>),
+      attemptCount,
+      retryCount: 0,
+      failoverCount: Math.max(0, attemptCount - 1),
+      attemptTrace: attemptTrace.map((entry) => ({ ...entry })),
+    };
   }
 
   return {

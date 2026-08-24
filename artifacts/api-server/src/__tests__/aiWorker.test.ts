@@ -25,13 +25,20 @@ import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 let _dbSelectImpl: () => unknown = () => [];
 let _dbInsertImpl: () => unknown = () => undefined;
 let _dbUpdateImpl: () => unknown = () => 0;
+const _dbInsertTables: unknown[] = [];
+const _dbUpdateTables: unknown[] = [];
+const _dbValuesInputs: unknown[] = [];
 
 function chain(getResult: () => unknown) {
   const c: Record<string, unknown> = {};
-  for (const m of ['from','where','limit','offset','orderBy','set','values',
+  for (const m of ['from','where','limit','offset','orderBy','set',
                    'onConflictDoNothing','onConflictDoUpdate','returning']) {
     c[m] = () => c;
   }
+  c.values = (value: unknown) => {
+    _dbValuesInputs.push(value);
+    return c;
+  };
   (c as { then(r: (v: unknown) => unknown): Promise<unknown> }).then =
     (resolve) => Promise.resolve(getResult()).then(resolve);
   return c;
@@ -46,8 +53,14 @@ vi.mock('@workspace/db', () => ({
       if (stack.includes('serverPaperExecutor')) return chain(() => []);
       return chain(_dbSelectImpl);
     }),
-    insert: vi.fn().mockImplementation(() => chain(_dbInsertImpl)),
-    update: vi.fn().mockImplementation(() => chain(_dbUpdateImpl)),
+    insert: vi.fn().mockImplementation((table: unknown) => {
+      _dbInsertTables.push(table);
+      return chain(_dbInsertImpl);
+    }),
+    update: vi.fn().mockImplementation((table: unknown) => {
+      _dbUpdateTables.push(table);
+      return chain(_dbUpdateImpl);
+    }),
     delete: vi.fn().mockImplementation(() => chain(() => 0)),
   },
   aiDecisionsTable:    new Proxy({}, { get: (_, k) => ({ col: String(k) }) }),
@@ -68,6 +81,37 @@ vi.mock('drizzle-orm', () => ({
 
 vi.mock('../workers/stateEngine', () => ({
   runAiEngine: vi.fn(),
+}));
+
+vi.mock('../lib/riskProfiles', () => ({
+  applyRiskProfileToLimits: (base: Record<string, unknown>) => base,
+  promoteRiskProfileAtSafeBoundary: async (base: Record<string, unknown>) => ({
+    desired: {
+      name: 'conservative',
+      version: 'risk-profile/v1',
+      requestedAt: '2026-08-21T00:00:00.000Z',
+    },
+    applied: {
+      name: 'conservative',
+      version: 'risk-profile/v1',
+      appliedAt: '2026-08-21T00:00:00.000Z',
+      derivedLimits: {
+        immediateEntryThreshold: 80,
+        maxRiskPerTradePct: 0.75,
+        reserveCashPct: Number(base.reserveCashPct ?? 20),
+        maxMarginPerTradeUsd: Number(base.maxMarginPerTrade ?? 334),
+        maxConcurrentPositions: 1,
+        cooldownMinutes: Number(base.cooldownMinutes ?? 30),
+        maxLeverage: Math.min(Number(base.maxLeverage ?? 3), 3),
+        maxTotalExposureUsd: Number(base.maxTotalExposureUSDT ?? 3_000),
+        allocatedTradingCapitalUsd: Number(base.tradingCapital ?? 1_000),
+        maxRiskPerTradeUsd: Number(base.tradingCapital ?? 1_000) * 0.0075,
+      },
+    },
+    pending: false,
+    safeBoundary: true,
+    reason: null,
+  }),
 }));
 
 vi.mock('../workers/indicators', () => ({
@@ -94,10 +138,127 @@ vi.mock('../routes/gmx', () => ({
   default: {},
 }));
 
+vi.mock('../intel/intelService', () => ({
+  runIntelServiceCycle: vi.fn(async () => undefined),
+  runStrategyShadowWorkerReadOnly: vi.fn(async (input: {
+    cycleNumber: number;
+    evaluatedAt: number;
+    expectedSymbols: string[];
+    existingAi: {
+      decisionId: string;
+      action: 'LONG' | 'SHORT' | 'NO_TRADE';
+      confidence: number;
+      primarySymbol: string | null;
+      createdAt: string;
+    };
+    lifecycleSnapshot?: unknown;
+  }) => {
+    const expectedSymbols = [...new Set(input.expectedSymbols.map(symbol => symbol.trim().toUpperCase()))].sort();
+    return {
+      schemaVersion: 'strategy-shadow-worker-envelope/v1' as const,
+      envelopeId: `${input.existingAi.decisionId}:STRATEGY_SHADOW`,
+      mode: 'SHADOW_ONLY' as const,
+      status: 'NOT_EVALUATED' as const,
+      cycleNumber: input.cycleNumber,
+      generatedAt: input.evaluatedAt,
+      expectedSymbols,
+      evaluatedSymbols: [],
+      missingSymbols: expectedSymbols,
+      records: [],
+      lifecycleSnapshot: input.lifecycleSnapshot ?? null,
+      summary: {
+        long: 0, short: 0, noTrade: 0, rejected: 0, disabled: 0, directionConflicts: 0,
+      },
+      existingAi: input.existingAi,
+      reasons: ['테스트 SHADOW read 결과 없음'],
+      warnings: [],
+      executionAuthorized: false as const,
+      approvalCreationAllowed: false as const,
+      paperPositionMutationAllowed: false as const,
+      livePositionMutationAllowed: false as const,
+      riskAuthority: 'NOT_EVALUATED' as const,
+    };
+  }),
+  stopIntelService: vi.fn(),
+  resumeIntelService: vi.fn(),
+}));
+
+vi.mock('../workers/liveTestExecutor', () => ({
+  executeLiveTestOrder: vi.fn(async () => ({
+    ok: false, txHash: null, orderKey: null, simulated: true,
+    executedAt: new Date().toISOString(),
+  })),
+  closeLiveTestPosition: vi.fn(async () => ({
+    ok: false, txHash: null, orderKey: null, simulated: true,
+    executedAt: new Date().toISOString(),
+  })),
+  getLastSizingEnforcement: vi.fn(() => null),
+  fetchAuthoritativeOpenPositions: vi.fn(async () => []),
+}));
+
+vi.mock('../workers/serverPaperExecutor', () => ({
+  MAX_MANAGE_PRICE_AGE_MS: 30_000,
+  openServerPaperPosition: vi.fn(async () => ({ ok: false, reason: 'TEST_BLOCKED' })),
+  closeServerPaperPosition: vi.fn(async () => ({ ok: false, reason: 'TEST_BLOCKED' })),
+  reduceServerPaper70: vi.fn(async () => ({ ok: false, reason: 'TEST_BLOCKED' })),
+  requestServerPaperCloseAll: vi.fn(async () => ({ persisted: false })),
+  loadPendingCloseFromDb: vi.fn(async () => undefined),
+  manageServerPaperTick: vi.fn(async () => undefined),
+  loadServerOpenRows: vi.fn(async () => []),
+  reconcileStartupCloseIntent: vi.fn(async () => undefined),
+  getServerPaperStatus: vi.fn(() => ({
+    openPosition: null,
+    openPositions: [],
+    pendingClose: null,
+    lastTickAt: null,
+    lastTickStale: false,
+    lastOpenAttempt: null,
+    lastCloseAction: null,
+    unresolved: null,
+  })),
+}));
+
 // 모킹 이후 실제 모듈 import
-import { workerManager } from '../workers/aiWorker';
+import { buildWorkerDecisionIdentity, workerManager } from '../workers/aiWorker';
 import { runAiEngine }   from '../workers/stateEngine';
-import { db }            from '@workspace/db';
+import { getCachedPrices } from '../routes/gmx';
+import {
+  aiDecisionsTable,
+  db,
+  liveApprovalsTable,
+  tradesTable,
+} from '@workspace/db';
+import { buildSignalLifecycleSnapshot } from '../intel/signalLifecycleSnapshotV2';
+import {
+  evaluateSignalEligibility,
+  type SignalHistoryEvent,
+  type SignalLifecycleRecord,
+} from '../intel/signalLifecycleV2';
+import {
+  STRATEGY_SIGNAL_SCHEMA_VERSION,
+  type StrategySignal,
+} from '../intel/strategySignalV2';
+import {
+  advanceStrategyShadowLifecycleSnapshot,
+} from '../intel/strategyShadowLifecycleRuntimeV2';
+import { buildStrategyShadowWorkerEnvelope } from '../intel/strategyShadowWorkerEnvelopeV2';
+import type { StrategyShadowRecord } from '../intel/strategyShadowAdapterV2';
+import {
+  runIntelServiceCycle,
+  runStrategyShadowWorkerReadOnly,
+  resumeIntelService,
+} from '../intel/intelService';
+import {
+  closeLiveTestPosition,
+  executeLiveTestOrder,
+} from '../workers/liveTestExecutor';
+import {
+  closeServerPaperPosition,
+  openServerPaperPosition,
+  reduceServerPaper70,
+  requestServerPaperCloseAll,
+  manageServerPaperTick,
+} from '../workers/serverPaperExecutor';
 
 // ── 최소 유효 AI 결정 (CASH — 가장 안전한 기본값) ──────────────────────────────
 const CASH_DECISION = {
@@ -139,6 +300,10 @@ function resetWorker() {
   wm.lastLiveTestMode        = false;
   wm.lastLiveTestDbOk        = true;
   wm.lastPriceAt             = 0;
+  wm.strategyLifecycleSnapshot = null;
+  wm.strategyLifecycleRestoreBlocked = true;
+  (wm.priceAtBySymbol as Map<string, number>).clear();
+  (wm.lastTickUpdatedAtBySymbol as Map<string, number>).clear();
 
   const pb = wm.priceBuffer as Map<string, number[]>;
   pb.clear();
@@ -148,6 +313,10 @@ function resetWorker() {
   const ethPrices = Array.from({ length: 30 }, (_, i) =>  3_000 + (i - 15) * 3);
   pb.set('BTC', btcPrices);
   pb.set('ETH', ethPrices);
+  // 수동 priceBuffer fixture도 production과 같은 upstream timestamp 계약을
+  // 충족해야 한다. 모든 restart fixture에서 동일한 완료 경계를 사용한다.
+  (wm.lastTickUpdatedAtBySymbol as Map<string, number>).set('BTC', 1_700_000_000_001);
+  (wm.lastTickUpdatedAtBySymbol as Map<string, number>).set('ETH', 1_700_000_000_001);
 
   (wm.pendingApprovalKeys as Set<string>).clear();
 
@@ -158,7 +327,61 @@ function resetWorker() {
   const cTimer = wm.cycleTimer as ReturnType<typeof setTimeout> | null;
   if (cTimer) clearTimeout(cTimer);
   wm.cycleTimer = null;
+
+  const sTimer = wm.serverPaperTimer as ReturnType<typeof setInterval> | null;
+  if (sTimer) clearInterval(sTimer);
+  wm.serverPaperTimer = null;
+
+  _dbInsertTables.length = 0;
+  _dbUpdateTables.length = 0;
+  _dbValuesInputs.length = 0;
+  vi.mocked(db.insert).mockClear();
+  vi.mocked(db.update).mockClear();
+  vi.mocked(db.delete).mockClear();
+  vi.mocked(runAiEngine).mockClear();
+  vi.mocked(runStrategyShadowWorkerReadOnly).mockClear();
+  vi.mocked(runIntelServiceCycle).mockClear();
+  vi.mocked(resumeIntelService).mockClear();
+  vi.mocked(executeLiveTestOrder).mockClear();
+  vi.mocked(closeLiveTestPosition).mockClear();
+  vi.mocked(openServerPaperPosition).mockClear();
+  vi.mocked(closeServerPaperPosition).mockClear();
+  vi.mocked(reduceServerPaper70).mockClear();
+  vi.mocked(requestServerPaperCloseAll).mockClear();
 }
+
+describe('upstream price timestamp binding', () => {
+  it('does not re-stamp a stale-but-newly-received tick with local now', () => {
+    resetWorker();
+    const observedAt = Date.now() - 120_000;
+    vi.mocked(getCachedPrices).mockReturnValue([{
+      tokenSymbol: 'ETH',
+      priceUsd: 3_000,
+      updatedAt: observedAt,
+    }] as never);
+    const wm = workerManager as unknown as {
+      updatePriceBuffers(): void;
+      priceAtBySymbol: Map<string, number>;
+    };
+    wm.updatePriceBuffers();
+    expect(wm.priceAtBySymbol.get('ETH')).toBe(observedAt);
+    expect(workerManager.getPriceQuote('ETH')!.ageMs).toBeGreaterThanOrEqual(119_000);
+  });
+
+  it('rejects ticks without a valid upstream timestamp', () => {
+    resetWorker();
+    vi.mocked(getCachedPrices).mockReturnValue([{
+      tokenSymbol: 'ETH',
+      priceUsd: 3_000,
+    }] as never);
+    const wm = workerManager as unknown as {
+      updatePriceBuffers(): void;
+      priceAtBySymbol: Map<string, number>;
+    };
+    wm.updatePriceBuffers();
+    expect(wm.priceAtBySymbol.has('ETH')).toBe(false);
+  });
+});
 
 // ── DB 행 헬퍼 ────────────────────────────────────────────────────────────────
 
@@ -202,20 +425,24 @@ function makeOpenTrade(ageMs: number): unknown[] {
 //   start()    → (1) loadPendingApprovals (liveApprovalsTable)
 //              → (2) loadHwmFromDb        (workerStateTable)
 //              → (3) loadBaselinesFromDb  (workerStateTable — 기간 PnL 기준점)
-//   runCycle() → (4) loadPendingApprovals again (liveApprovalsTable)
-//              → (5) strategyConfigTable
-//              → (6) tradesTable (consecutiveLosses + cooldown 계산)
+//              → (4) loadStrategyLifecycleSnapshotFromDb (aiDecisionsTable)
+//              → (5) loadRiskEngineState  (workerStateTable — 미수립)
+//   runCycle() → (6) loadPendingApprovals again (liveApprovalsTable)
+//              → (7) strategyConfigTable
+//              → (8) tradesTable (consecutiveLosses + cooldown 계산)
 // insert/update 호출은 별도 mock (_dbInsertImpl, _dbUpdateImpl)
 
 function setupDbSequence(opts: {
   pendingApprovals?: unknown[];
   hwmValue?:         string | null;
+  lifecycleDecision?: unknown[];
   strategyRow?:      unknown[];
   trades?:           unknown[];
   insertResult?:     unknown;
 } = {}) {
   const pending  = opts.pendingApprovals ?? [];
   const hwm      = opts.hwmValue != null ? hwmRow(opts.hwmValue) : [];
+  const lifecycle = opts.lifecycleDecision ?? [];
   const strategy = opts.strategyRow ?? defaultStrategyRow;
   const trades   = opts.trades    ?? noTradesResult;
   const inserted = opts.insertResult ?? [{ id: 'test-decision-1' }];
@@ -226,10 +453,11 @@ function setupDbSequence(opts: {
     if (selectCallN === 1) return pending;   // start(): loadPendingApprovals
     if (selectCallN === 2) return hwm;       // start(): loadHwmFromDb
     if (selectCallN === 3) return [];        // start(): loadBaselinesFromDb (기준점 없음)
-    if (selectCallN === 4) return [];        // start(): loadRiskEngineState (6H-1 — 미수립)
-    if (selectCallN === 5) return pending;   // runCycle(): loadPendingApprovals again
-    if (selectCallN === 6) return strategy;  // runCycle(): strategyConfigTable
-    if (selectCallN === 7) return trades;    // runCycle(): tradesTable (consecutiveLosses)
+    if (selectCallN === 4) return lifecycle; // start(): latest lifecycle decision (없으면 legacy baseline)
+    if (selectCallN === 5) return [];        // start(): loadRiskEngineState (6H-1 — 미수립)
+    if (selectCallN === 6) return pending;   // runCycle(): loadPendingApprovals again
+    if (selectCallN === 7) return strategy;  // runCycle(): strategyConfigTable
+    if (selectCallN === 8) return trades;    // runCycle(): tradesTable (consecutiveLosses)
     return [];
   };
 
@@ -264,6 +492,204 @@ describe('Worker 초기 상태', () => {
   });
 });
 
+describe('worker lifecycle generation safety', () => {
+  beforeEach(() => { resetWorker(); });
+  afterEach(() => { workerManager.stop(); vi.useRealTimers(); vi.restoreAllMocks(); });
+
+  it('stop during awaited startup prevents every later recovery phase and timer/Intel install', async () => {
+    vi.useFakeTimers();
+    let release!: (rows: unknown[]) => void;
+    let selects = 0;
+    _dbSelectImpl = () => {
+      selects += 1;
+      return new Promise<unknown[]>(resolve => { release = resolve; });
+    };
+
+    const startup = workerManager.start();
+    for (let i = 0; i < 5 && selects === 0; i++) await Promise.resolve();
+    workerManager.stop();
+    release([]);
+    await startup;
+
+    const wm = workerManager as unknown as Record<string, unknown>;
+    expect(selects).toBe(1);
+    expect(wm.pricePollTimer).toBeNull();
+    expect(wm.serverPaperTimer).toBeNull();
+    expect(wm.cycleTimer).toBeNull();
+    expect(resumeIntelService).not.toHaveBeenCalled();
+  });
+
+  it('stop while a cycle read is in flight prevents later reads, engine, Intel and reschedule', async () => {
+    vi.useFakeTimers();
+    let release!: (rows: unknown[]) => void;
+    let selects = 0;
+    _dbSelectImpl = () => {
+      selects += 1;
+      return new Promise<unknown[]>(resolve => { release = resolve; });
+    };
+    const wm = workerManager as unknown as {
+      active: boolean;
+      lifecycleGeneration: number;
+      cycleTimer: ReturnType<typeof setTimeout> | null;
+      runCycle(generation: number): Promise<void>;
+    };
+    wm.active = true;
+    const generation = ++wm.lifecycleGeneration;
+    const cycle = wm.runCycle(generation);
+    for (let i = 0; i < 5 && selects === 0; i++) await Promise.resolve();
+    workerManager.stop();
+    release([]);
+    await cycle;
+
+    expect(selects).toBe(1);
+    expect(runAiEngine).not.toHaveBeenCalled();
+    expect(runIntelServiceCycle).not.toHaveBeenCalled();
+    expect(wm.cycleTimer).toBeNull();
+  });
+
+  it('a queued PAPER management callback invoked after stop is a no-op', async () => {
+    vi.useFakeTimers();
+    setupDbSequence();
+    const callbacks: Array<() => void> = [];
+    const realSetInterval = globalThis.setInterval;
+    vi.spyOn(globalThis, 'setInterval').mockImplementation(((callback: () => void, delay?: number) => {
+      callbacks.push(callback as () => void);
+      return realSetInterval(callback, delay);
+    }) as typeof setInterval);
+
+    await workerManager.start();
+    expect(callbacks.length).toBeGreaterThanOrEqual(2);
+    const queuedPaperTick = callbacks[1];
+    workerManager.stop();
+    queuedPaperTick();
+    await Promise.resolve();
+    expect(manageServerPaperTick).not.toHaveBeenCalled();
+  });
+});
+
+describe('completed-candle decision replay idempotency', () => {
+  beforeEach(() => { resetWorker(); });
+
+  it('same signal/candle persists once and dispatches no duplicate PAPER execution', async () => {
+    const evidence = {
+      symbol: 'BTC',
+      operatingState: 'LONG' as const,
+      sourceCandleCloseTime: 1_800_000_000_000,
+      evaluatedAtMs: 1_800_000_000_001,
+    };
+    const firstIdentity = buildWorkerDecisionIdentity(evidence);
+    const replayIdentity = buildWorkerDecisionIdentity(evidence);
+    expect(replayIdentity).toEqual(firstIdentity);
+    expect(firstIdentity.dbId).toBeLessThan(0);
+    expect(() => buildWorkerDecisionIdentity({
+      ...evidence,
+      evaluatedAtMs: evidence.sourceCandleCloseTime,
+    })).toThrow('authoritative completed-candle');
+
+    let insertAttempt = 0;
+    _dbInsertImpl = () => (++insertAttempt === 1 ? [{ id: firstIdentity.dbId }] : []);
+    const wm = workerManager as unknown as {
+      persistDecision(decision: unknown): Promise<boolean>;
+    };
+    const decision = {
+      ...CASH_DECISION,
+      id: firstIdentity.decisionId,
+      createdAt: '2027-01-15T08:00:01.000Z',
+      primarySymbol: 'BTC',
+      source: 'server_worker',
+      testMode: false,
+      paperExecuted: false,
+      paperOrderId: null,
+    };
+
+    for (let replay = 0; replay < 2; replay++) {
+      const durableClaim = await wm.persistDecision(decision);
+      if (durableClaim) {
+        await openServerPaperPosition({} as never);
+      }
+    }
+
+    expect(db.insert).toHaveBeenCalledTimes(2);
+    expect(openServerPaperPosition).toHaveBeenCalledTimes(1);
+  });
+
+  it('restart replay claim blocks duplicate approval, LIVE intent/order dispatch, and Intel cycle', async () => {
+    const previousMode = process.env.WORKER_ENGINE_MODE;
+    process.env.WORKER_ENGINE_MODE = 'LIVE';
+    vi.useFakeTimers({ now: 1_800_000_000_000 });
+    const wm = workerManager as unknown as {
+      runCycle(): Promise<void>;
+      maybeCreateApproval(...args: unknown[]): Promise<boolean>;
+      tryLiveTestExecution(...args: unknown[]): Promise<void>;
+      runServerPaperExecution(...args: unknown[]): Promise<void>;
+    };
+    const approvalDispatch = vi.spyOn(wm, 'maybeCreateApproval').mockResolvedValue(false);
+    const liveIntentOrderDispatch = vi.spyOn(wm, 'tryLiveTestExecution').mockResolvedValue();
+    const paperOrderDispatch = vi.spyOn(wm, 'runServerPaperExecution').mockResolvedValue();
+    let decisionClaimAttempts = 0;
+
+    const installRestartDb = (lifecycleDecision: unknown[] = []) => {
+      setupDbSequence({
+        lifecycleDecision,
+        strategyRow: [{ limits: JSON.stringify({ liveTestMode: true }) }],
+      });
+      _dbInsertImpl = () => {
+        if (_dbInsertTables.at(-1) === aiDecisionsTable) {
+          decisionClaimAttempts += 1;
+          return decisionClaimAttempts === 1 ? [{ id: 'first-durable-claim' }] : [];
+        }
+        return [{ id: 'auxiliary-row' }];
+      };
+    };
+
+    vi.mocked(runAiEngine).mockReturnValue({
+      ...CASH_DECISION,
+      operatingState: 'LONG',
+      primarySymbol: 'BTC',
+      riskApproved: true,
+      executionType: 'perp_long_open',
+    } as unknown as ReturnType<typeof runAiEngine>);
+
+    try {
+      installRestartDb();
+      await workerManager.start();
+      await wm.runCycle();
+
+      expect(decisionClaimAttempts).toBe(1);
+      expect(approvalDispatch).toHaveBeenCalledTimes(1);
+      expect(liveIntentOrderDispatch).toHaveBeenCalledTimes(1);
+      expect(paperOrderDispatch).not.toHaveBeenCalled();
+      expect(runIntelServiceCycle).toHaveBeenCalledTimes(1);
+
+      const persistedRow = _dbValuesInputs.find((value): value is { fullJson: string } =>
+        typeof value === 'object' && value !== null
+        && typeof (value as { fullJson?: unknown }).fullJson === 'string');
+      expect(persistedRow).toBeDefined();
+
+      workerManager.stop();
+      resetWorker();
+      installRestartDb(persistedRow ? [{ fullJson: persistedRow.fullJson }] : []);
+      await workerManager.start();
+      await wm.runCycle();
+
+      expect(decisionClaimAttempts).toBe(2);
+      expect(approvalDispatch).toHaveBeenCalledTimes(1);
+      expect(liveIntentOrderDispatch).toHaveBeenCalledTimes(1);
+      expect(paperOrderDispatch).not.toHaveBeenCalled();
+      expect(runIntelServiceCycle).not.toHaveBeenCalled();
+      expect(executeLiveTestOrder).not.toHaveBeenCalled();
+      expect(closeLiveTestPosition).not.toHaveBeenCalled();
+    } finally {
+      workerManager.stop();
+      approvalDispatch.mockRestore();
+      liveIntentOrderDispatch.mockRestore();
+      paperOrderDispatch.mockRestore();
+      if (previousMode === undefined) delete process.env.WORKER_ENGINE_MODE;
+      else process.env.WORKER_ENGINE_MODE = previousMode;
+    }
+  });
+});
+
 // ── HWM 재시작 복구 ───────────────────────────────────────────────────────────
 
 describe('crash-restart — HWM DB 복원', () => {
@@ -293,6 +719,429 @@ describe('crash-restart — HWM DB 복원', () => {
     const s = workerManager.getStatus();
     // 0은 유효하지 않은 HWM → null 유지
     expect(s.equityHwm).toBeNull();
+  });
+});
+
+// ── Strategy SHADOW lifecycle 실제 Worker 재시작 복원 ───────────────────────
+describe('crash-restart — Strategy SHADOW lifecycle DB 복원', () => {
+  beforeEach(() => { resetWorker(); });
+  afterEach(() => { workerManager.stop(); vi.useRealTimers(); });
+
+  const makeRestartEvidence = () => {
+    const now = Date.now();
+    const candle = 15 * 60_000;
+    const close = now - candle;
+    const record: SignalLifecycleRecord = {
+      configVersion: 'signal-lifecycle/v1',
+      signalId: `BTC:TREND_PULLBACK:LONG:15m:${close}`,
+      symbol: 'BTC', strategyId: 'TREND_PULLBACK', direction: 'LONG',
+      sourceCandleCloseTime: close, status: 'GENERATED',
+      generatedAt: close + 1, updatedAt: close + 1,
+      reason: 'restart regression evidence',
+    };
+    const historyEvents: SignalHistoryEvent[] = [
+      { eventId: `STOP_LOSS:${close - candle}`, kind: 'STOP_LOSS', symbol: 'BTC',
+        strategyId: 'TREND_PULLBACK', direction: 'LONG', sourceCandleCloseTime: close - candle },
+      { eventId: `FAILED_BREAKOUT:${close - 2 * candle}`, kind: 'FAILED_BREAKOUT', symbol: 'BTC',
+        strategyId: 'TREND_PULLBACK', direction: 'LONG', sourceCandleCloseTime: close - 2 * candle },
+    ];
+    const snapshot = buildSignalLifecycleSnapshot([record], historyEvents, now - 1)!;
+    const signal: StrategySignal = {
+      schemaVersion: STRATEGY_SIGNAL_SCHEMA_VERSION,
+      signalId: 'attempted-restart-bypass', strategyId: 'TREND_PULLBACK', symbol: 'BTC',
+      regime: 'TREND_UP', direction: 'LONG', confidence: 80,
+      entryZoneLow: 99, entryZoneHigh: 101, proposedEntryPrice: 100,
+      structuralStop: 98, stopDistancePct: 2, invalidationPrice: 98,
+      targets: [{ price: 104, expectedR: 2, allocationPct: 100 }],
+      grossExpectedEdgeBps: 400, expectedCostsBps: 20, netExpectedEdgeBps: 380,
+      expectedNetRR: 1.9, higherTimeframeTrend: 'TREND_UP', marketStructure: 'BULLISH',
+      confirmationPattern: 'REJECTION', sourceTimeframes: ['4h', '1h', '15m'],
+      sourceCandleCloseTime: close, dataQuality: 'GOOD', volumeConfirmation: null,
+      reasons: [], warnings: [],
+    };
+    return { now, close, candle, record, historyEvents, snapshot, signal };
+  };
+
+  const makeShadowRecord = (
+    evidence: ReturnType<typeof makeRestartEvidence>,
+  ): StrategyShadowRecord => ({
+    schemaVersion: 'strategy-shadow-adapter/v1',
+    shadowRecordId: `BTC:STRATEGY_SHADOW:TREND_UP:${evidence.close}`,
+    mode: 'SHADOW_ONLY',
+    symbol: 'BTC',
+    evaluatedAt: evidence.now - 1,
+    sourceCandleCloseTime: evidence.close,
+    regime: 'TREND_UP',
+    action: 'LONG',
+    comparison: 'ENSEMBLE_ONLY',
+    strategyId: 'TREND_PULLBACK',
+    signalId: evidence.record.signalId,
+    direction: 'LONG',
+    confidence: 80,
+    selectedScore: 80,
+    entryPrice: 100,
+    structuralStop: 98,
+    expectedNetEdgeBps: 200,
+    expectedNetRR: 2,
+    lifecycleEligible: true,
+    existingAi: null,
+    reasons: [],
+    warnings: [],
+    executionAuthorized: false,
+    paperPositionMutationAllowed: false,
+    riskAuthority: 'NOT_EVALUATED',
+  });
+
+  it('첫 Worker의 durable decision을 두 번째 Worker가 복원해 Signal ID·동일 완료봉·cooldown을 보존한다', async () => {
+    const fixedNow = 1_800_000_000_000;
+    vi.useFakeTimers({ now: fixedNow });
+    const evidence = makeRestartEvidence();
+    const firstBaseline = buildSignalLifecycleSnapshot([], evidence.historyEvents, evidence.now - 2)!;
+    const firstEnvelope = buildStrategyShadowWorkerEnvelope({
+      cycleNumber: 1,
+      generatedAt: evidence.now - 1,
+      expectedSymbols: ['BTC'],
+      records: [makeShadowRecord(evidence)],
+      lifecycleSnapshot: firstBaseline,
+      existingAi: {
+        decisionId: 'worker-1-decision',
+        action: 'NO_TRADE',
+        confidence: 0,
+        primarySymbol: 'BTC',
+        createdAt: new Date(evidence.now - 2).toISOString(),
+      },
+    });
+    const firstOutputSnapshot = advanceStrategyShadowLifecycleSnapshot(
+      firstBaseline,
+      firstEnvelope,
+      evidence.now,
+    );
+    expect(firstOutputSnapshot).not.toBeNull();
+
+    setupDbSequence({ insertResult: [{ id: 'worker-1-decision' }] });
+    const firstWorker = workerManager as unknown as {
+      strategyLifecycleSnapshot: typeof firstBaseline | null;
+      strategyLifecycleRestoreBlocked: boolean;
+      persistDecision(decision: unknown): Promise<boolean>;
+    };
+    firstWorker.strategyLifecycleSnapshot = firstBaseline;
+    firstWorker.strategyLifecycleRestoreBlocked = false;
+    const durableIdentity = buildWorkerDecisionIdentity({
+      symbol: evidence.record.symbol,
+      operatingState: 'CASH',
+      sourceCandleCloseTime: evidence.close,
+      evaluatedAtMs: evidence.now,
+    });
+    const persisted = await firstWorker.persistDecision({
+      id: durableIdentity.decisionId,
+      createdAt: new Date(evidence.now).toISOString(),
+      source: 'server_worker',
+      primarySymbol: 'BTC',
+      operatingState: 'CASH',
+      confidence: 0,
+      stateRationale: 'Phase 4I restart fixture',
+      riskApproved: false,
+      riskVetoReason: 'SHADOW_ONLY',
+      testMode: false,
+      paperExecuted: false,
+      paperOrderId: null,
+      strategyEnsembleShadow: {
+        ...firstEnvelope,
+        lifecycleSnapshot: firstOutputSnapshot,
+      },
+    });
+    expect(persisted).toBe(true);
+    expect(db.insert).toHaveBeenCalledTimes(1);
+    const persistedRow = _dbValuesInputs.find((value): value is { fullJson: string } =>
+      typeof value === 'object' && value !== null
+      && typeof (value as { fullJson?: unknown }).fullJson === 'string');
+    expect(persistedRow).toBeDefined();
+    const persistedDecision = JSON.parse(persistedRow!.fullJson) as {
+      source: string;
+      strategyEnsembleShadow: {
+        lifecycleSnapshot: typeof firstOutputSnapshot;
+        executionAuthorized: boolean;
+        approvalCreationAllowed: boolean;
+        paperPositionMutationAllowed: boolean;
+        livePositionMutationAllowed: boolean;
+        riskAuthority: string;
+      };
+    };
+    expect(persistedDecision.source).toBe('server_worker');
+    expect(persistedDecision.strategyEnsembleShadow.lifecycleSnapshot).toEqual(firstOutputSnapshot);
+    expect(persistedDecision.strategyEnsembleShadow).toMatchObject({
+      executionAuthorized: false,
+      approvalCreationAllowed: false,
+      paperPositionMutationAllowed: false,
+      livePositionMutationAllowed: false,
+      riskAuthority: 'NOT_EVALUATED',
+    });
+
+    workerManager.stop();
+    resetWorker();
+    setupDbSequence({ lifecycleDecision: [{ fullJson: persistedRow!.fullJson }] });
+    const previousMode = process.env.WORKER_ENGINE_MODE;
+    process.env.WORKER_ENGINE_MODE = 'LIVE';
+    try {
+      await workerManager.start();
+      const wm = workerManager as unknown as {
+        strategyLifecycleSnapshot: typeof firstOutputSnapshot;
+        strategyLifecycleRestoreBlocked: boolean;
+        runCycle(): Promise<void>;
+      };
+      expect(wm.strategyLifecycleRestoreBlocked).toBe(false);
+      expect(wm.strategyLifecycleSnapshot).toEqual(firstOutputSnapshot);
+
+      const directSameIdDecision = evaluateSignalEligibility(
+        { ...evidence.signal, signalId: evidence.record.signalId },
+        wm.strategyLifecycleSnapshot!.records,
+        wm.strategyLifecycleSnapshot!.historyEvents,
+      );
+      const directSameCandleBypassDecision = evaluateSignalEligibility(
+        evidence.signal,
+        wm.strategyLifecycleSnapshot!.records,
+        wm.strategyLifecycleSnapshot!.historyEvents,
+      );
+      for (const decision of [directSameIdDecision, directSameCandleBypassDecision]) {
+        expect(decision.eligible).toBe(false);
+        expect(decision.codes).toContain('DUPLICATE_SIGNAL');
+        expect(decision.codes).toContain('STOP_LOSS_COOLDOWN');
+        expect(decision.codes).toContain('FAILED_BREAKOUT_COOLDOWN');
+        expect(decision.blockedUntilCandleCloseTime).toBe(evidence.close + 2 * evidence.candle);
+      }
+      expect(runStrategyShadowWorkerReadOnly).not.toHaveBeenCalled();
+      expect(db.insert).not.toHaveBeenCalled();
+      expect(db.delete).not.toHaveBeenCalled();
+      expect(runAiEngine).not.toHaveBeenCalled();
+
+      let handedOffSnapshot: unknown = null;
+      const handoffEligibility: ReturnType<typeof evaluateSignalEligibility>[] = [];
+      vi.mocked(runStrategyShadowWorkerReadOnly).mockImplementationOnce(async input => {
+        handedOffSnapshot = input.lifecycleSnapshot;
+        const restored = input.lifecycleSnapshot!;
+        handoffEligibility.push(
+          evaluateSignalEligibility(
+            { ...evidence.signal, signalId: evidence.record.signalId },
+            restored.records,
+            restored.historyEvents,
+          ),
+          evaluateSignalEligibility(
+            evidence.signal,
+            restored.records,
+            restored.historyEvents,
+          ),
+        );
+        return buildStrategyShadowWorkerEnvelope({
+          cycleNumber: input.cycleNumber,
+          generatedAt: input.evaluatedAt,
+          expectedSymbols: input.expectedSymbols,
+          records: [],
+          lifecycleSnapshot: restored,
+          existingAi: input.existingAi,
+        });
+      });
+      vi.mocked(runAiEngine).mockReturnValue(
+        { ...CASH_DECISION, riskApproved: false } as unknown as ReturnType<typeof runAiEngine>);
+
+      await wm.runCycle();
+
+      expect(handedOffSnapshot).toEqual(firstOutputSnapshot);
+      expect(handoffEligibility).toHaveLength(2);
+      for (const decision of handoffEligibility) {
+        expect(decision.eligible).toBe(false);
+        expect(decision.codes).toEqual(expect.arrayContaining([
+          'DUPLICATE_SIGNAL',
+          'STOP_LOSS_COOLDOWN',
+          'FAILED_BREAKOUT_COOLDOWN',
+        ]));
+        expect(decision.blockedUntilCandleCloseTime).toBe(evidence.close + 2 * evidence.candle);
+      }
+      expect(runStrategyShadowWorkerReadOnly).toHaveBeenCalledTimes(1);
+      expect(_dbInsertTables).not.toContain(liveApprovalsTable);
+      expect(_dbInsertTables).not.toContain(tradesTable);
+      expect(_dbUpdateTables).not.toContain(tradesTable);
+      expect(openServerPaperPosition).not.toHaveBeenCalled();
+      expect(closeServerPaperPosition).not.toHaveBeenCalled();
+      expect(reduceServerPaper70).not.toHaveBeenCalled();
+      expect(requestServerPaperCloseAll).not.toHaveBeenCalled();
+      expect(executeLiveTestOrder).not.toHaveBeenCalled();
+      expect(closeLiveTestPosition).not.toHaveBeenCalled();
+    } finally {
+      if (previousMode === undefined) delete process.env.WORKER_ENGINE_MODE;
+      else process.env.WORKER_ENGINE_MODE = previousMode;
+    }
+  });
+
+  const invalidPersistedCases: Array<[
+    string,
+    (evidence: ReturnType<typeof makeRestartEvidence>) => string,
+  ]> = [
+    ['손상 JSON', () => '{broken'],
+    ['미래 capturedAt', evidence => JSON.stringify({
+      source: 'server_worker',
+      strategyEnsembleShadow: {
+        lifecycleSnapshot: { ...evidence.snapshot, capturedAt: evidence.now + 1 },
+      },
+    })],
+    ['알 수 없는 snapshot schema version', evidence => JSON.stringify({
+      source: 'server_worker',
+      strategyEnsembleShadow: {
+        lifecycleSnapshot: { ...evidence.snapshot, schemaVersion: 'signal-lifecycle-snapshot/future' },
+      },
+    })],
+    ['알 수 없는 snapshot config version', evidence => JSON.stringify({
+      source: 'server_worker',
+      strategyEnsembleShadow: {
+        lifecycleSnapshot: { ...evidence.snapshot, configVersion: 'signal-lifecycle/future' },
+      },
+    })],
+    ['알 수 없는 record config version', evidence => JSON.stringify({
+      source: 'server_worker',
+      strategyEnsembleShadow: {
+        lifecycleSnapshot: {
+          ...evidence.snapshot,
+          records: [{ ...evidence.record, configVersion: 'signal-lifecycle/future' }],
+        },
+      },
+    })],
+    ['중복 Signal ID', evidence => JSON.stringify({
+      source: 'server_worker',
+      strategyEnsembleShadow: {
+        lifecycleSnapshot: {
+          ...evidence.snapshot,
+          records: [
+            evidence.record,
+            {
+              ...evidence.record,
+              sourceCandleCloseTime: evidence.close - evidence.candle,
+            },
+          ],
+        },
+      },
+    })],
+    ['ID만 다른 동일 완료봉', evidence => JSON.stringify({
+      source: 'server_worker',
+      strategyEnsembleShadow: {
+        lifecycleSnapshot: {
+          ...evidence.snapshot,
+          records: [
+            evidence.record,
+            { ...evidence.record, signalId: 'attempted-same-candle-bypass' },
+          ],
+        },
+      },
+    })],
+    ['중복 History event ID', evidence => JSON.stringify({
+      source: 'server_worker',
+      strategyEnsembleShadow: {
+        lifecycleSnapshot: {
+          ...evidence.snapshot,
+          historyEvents: [
+            ...evidence.historyEvents,
+            { ...evidence.historyEvents[0] },
+          ],
+        },
+      },
+    })],
+  ];
+
+  it.each(invalidPersistedCases)('%s은 부분 복원·SHADOW read·권한 mutation 없이 차단한다',
+    async (_name, persistedFullJson) => {
+    const fixedNow = 1_800_000_000_000;
+    vi.useFakeTimers({ now: fixedNow });
+    const evidence = makeRestartEvidence();
+    setupDbSequence({ lifecycleDecision: [{ fullJson: persistedFullJson(evidence) }] });
+
+    await workerManager.start();
+    const wm = workerManager as unknown as {
+      strategyLifecycleSnapshot: unknown;
+      strategyLifecycleRestoreBlocked: boolean;
+    };
+    expect(wm.strategyLifecycleSnapshot).toBeNull();
+    expect(wm.strategyLifecycleRestoreBlocked).toBe(true);
+    expect(runStrategyShadowWorkerReadOnly).not.toHaveBeenCalled();
+    expect(runIntelServiceCycle).not.toHaveBeenCalled();
+    expect(db.insert).not.toHaveBeenCalled();
+    expect(db.delete).not.toHaveBeenCalled();
+    expect(runAiEngine).not.toHaveBeenCalled();
+    expect(_dbInsertTables).not.toContain(liveApprovalsTable);
+    expect(_dbInsertTables).not.toContain(tradesTable);
+    expect(_dbUpdateTables).not.toContain(tradesTable);
+  });
+
+  it('차단된 복원은 첫 cycle에서도 SHADOW NOT_EVALUATED·execution 권한 0을 유지한다', async () => {
+    const previousMode = process.env.WORKER_ENGINE_MODE;
+    process.env.WORKER_ENGINE_MODE = 'LIVE';
+    vi.useFakeTimers({ now: 1_800_000_000_000 });
+    const evidence = makeRestartEvidence();
+    setupDbSequence({
+      lifecycleDecision: [{ fullJson: '{broken' }],
+      insertResult: [{ id: 'blocked-cycle-decision' }],
+    });
+    vi.mocked(runAiEngine).mockReturnValue(
+      { ...CASH_DECISION, riskApproved: false } as unknown as ReturnType<typeof runAiEngine>);
+    const wm = workerManager as unknown as {
+      runCycle(): Promise<void>;
+      runServerPaperExecution: (...args: unknown[]) => Promise<void>;
+      tryLiveTestExecution: (...args: unknown[]) => Promise<void>;
+    };
+    const paperExecution = vi.spyOn(wm, 'runServerPaperExecution');
+    const liveExecution = vi.spyOn(wm, 'tryLiveTestExecution');
+    try {
+      await workerManager.start();
+      await wm.runCycle();
+
+      expect(runStrategyShadowWorkerReadOnly).not.toHaveBeenCalled();
+      expect(paperExecution).not.toHaveBeenCalled();
+      expect(liveExecution).not.toHaveBeenCalled();
+      expect(_dbInsertTables).not.toContain(liveApprovalsTable);
+      expect(_dbInsertTables).not.toContain(tradesTable);
+      expect(_dbUpdateTables).not.toContain(tradesTable);
+      expect(openServerPaperPosition).not.toHaveBeenCalled();
+      expect(closeServerPaperPosition).not.toHaveBeenCalled();
+      expect(reduceServerPaper70).not.toHaveBeenCalled();
+      expect(requestServerPaperCloseAll).not.toHaveBeenCalled();
+      expect(executeLiveTestOrder).not.toHaveBeenCalled();
+      expect(closeLiveTestPosition).not.toHaveBeenCalled();
+
+      const decisionRow = _dbValuesInputs.find((value): value is { fullJson: string } =>
+        typeof value === 'object' && value !== null
+        && typeof (value as { fullJson?: unknown }).fullJson === 'string');
+      expect(decisionRow).toBeDefined();
+      const decision = JSON.parse(decisionRow!.fullJson) as {
+        paperExecuted: boolean;
+        paperOrderId: string | null;
+        strategyEnsembleShadow: {
+          status: string;
+          records: unknown[];
+          lifecycleSnapshot: unknown;
+          executionAuthorized: boolean;
+          approvalCreationAllowed: boolean;
+          paperPositionMutationAllowed: boolean;
+          livePositionMutationAllowed: boolean;
+          riskAuthority: string;
+        };
+      };
+      expect(decision.paperExecuted).toBe(false);
+      expect(decision.paperOrderId).toBeNull();
+      expect(decision.strategyEnsembleShadow).toMatchObject({
+        status: 'NOT_EVALUATED',
+        records: [],
+        lifecycleSnapshot: null,
+        executionAuthorized: false,
+        approvalCreationAllowed: false,
+        paperPositionMutationAllowed: false,
+        livePositionMutationAllowed: false,
+        riskAuthority: 'NOT_EVALUATED',
+      });
+      expect(decision.strategyEnsembleShadow.records).toEqual([]);
+      expect(evidence.snapshot.records).toHaveLength(1);
+    } finally {
+      paperExecution.mockRestore();
+      liveExecution.mockRestore();
+      if (previousMode === undefined) delete process.env.WORKER_ENGINE_MODE;
+      else process.env.WORKER_ENGINE_MODE = previousMode;
+    }
   });
 });
 
@@ -644,6 +1493,29 @@ describe('#135 AUTO_WORKER_LIVE_ENABLED 게이트 (F22)', () => {
       );
       expect(infoSpy.mock.calls.some(c => String(c[0]).includes('AUTO_WORKER_LIVE_ENABLED'))).toBe(true);
     } finally {
+      infoSpy.mockRestore();
+    }
+  });
+
+  it('플래그 미설정이면 자동 CLOSE_ALL/REDUCE도 OPEN과 동일하게 차단된다', async () => {
+    delete process.env.AUTO_WORKER_LIVE_ENABLED;
+    const { workerManager } = await import('../workers/aiWorker');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const closeSpy = vi.spyOn(workerManager as any, 'executeCloseAllPositions');
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (workerManager as any).tryLiveTestExecution(
+        { operatingState: 'CASH', confidence: 90, executionType: 'close_all', primarySymbol: null },
+        [], { positionCount: 1 },
+        { liveTestAccumLossUsd: 0, liveTestDbOk: true },
+        { liveTestMode: true, tradingCapital: 100 }, 1,
+        { closeAllRequested: true, reduce70Requested: false },
+      );
+      expect(closeSpy).not.toHaveBeenCalled();
+      expect(infoSpy.mock.calls.some(c => String(c[0]).includes('AUTO_WORKER_LIVE_ENABLED'))).toBe(true);
+    } finally {
+      closeSpy.mockRestore();
       infoSpy.mockRestore();
     }
   });

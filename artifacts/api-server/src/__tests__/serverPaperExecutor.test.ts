@@ -87,6 +87,17 @@ const BASE_OPEN = {
   tpPriceUsd: 52_000,
   openPositionCount: 0,
   entriesManilaDay: 0,
+  riskProfileSnapshot: {
+    name: 'conservative' as const,
+    version: 'risk-profile/v1' as const,
+    appliedAt: '2026-08-21T00:00:00.000Z',
+    derivedLimits: {
+      immediateEntryThreshold: 80, maxRiskPerTradePct: 0.75, reserveCashPct: 20,
+      maxMarginPerTradeUsd: 334, maxConcurrentPositions: 1, cooldownMinutes: 30,
+      maxLeverage: 3, maxTotalExposureUsd: 3_000,
+      allocatedTradingCapitalUsd: 1_000, maxRiskPerTradeUsd: 7.5,
+    },
+  },
 };
 
 /** 서버 OPEN 행 fixture (managed_by='SERVER', close_time=0) */
@@ -487,6 +498,57 @@ describe('manageServerPaperTick', () => {
     const releaseSelect = resolveSelect as unknown as (() => void) | null;
     releaseSelect?.();
     await first;
+  });
+
+  it('DB read 중 lifecycle stop → 후속 close/write를 시작하지 않는다', async () => {
+    let active = true;
+    vi.mocked(db.select).mockImplementation(() =>
+      makeChain(() => [serverOpenRow()]) as never);
+
+    const tick = manageServerPaperTick(
+      () => ({ priceUsd: 49_400, ageMs: 1_000 }),
+      Date.now(),
+      () => active,
+    );
+    active = false;
+    await tick;
+
+    expect(db.select).toHaveBeenCalledTimes(1);
+    expect(db.insert).not.toHaveBeenCalled();
+    expect(db.update).not.toHaveBeenCalled();
+    expect(db.delete).not.toHaveBeenCalled();
+    expect(getServerPaperStatus().lastCloseAction).toBeNull();
+  });
+
+  it('close helper OPEN-row read 중 lifecycle stop → CLOSE claim/update 0회', async () => {
+    let active = true;
+    let selectCall = 0;
+    let releaseCloseRead: (() => void) | null = null;
+    vi.mocked(db.select).mockImplementation(() => makeChain(() => {
+      selectCall += 1;
+      if (selectCall === 1) return [serverOpenRow()];
+      if (selectCall === 2) {
+        return new Promise<unknown[]>((resolve) => {
+          releaseCloseRead = () => resolve([serverOpenRow()]);
+        });
+      }
+      return [];
+    }) as never);
+
+    const tick = manageServerPaperTick(
+      () => ({ priceUsd: 49_400, ageMs: 1_000 }),
+      Date.now(),
+      () => active,
+    );
+    await vi.waitFor(() => expect(selectCall).toBe(2));
+    active = false;
+    const release = releaseCloseRead as unknown as (() => void) | null;
+    release?.();
+    await tick;
+
+    expect(db.insert).not.toHaveBeenCalled();
+    expect(db.update).not.toHaveBeenCalled();
+    expect(getServerPaperStatus().lastCloseAction).toBeNull();
   });
 });
 
