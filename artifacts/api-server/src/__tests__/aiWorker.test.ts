@@ -219,10 +219,11 @@ vi.mock('../workers/serverPaperExecutor', () => ({
 }));
 
 // 모킹 이후 실제 모듈 import
-import { workerManager } from '../workers/aiWorker';
+import { buildWorkerDecisionIdentity, workerManager } from '../workers/aiWorker';
 import { runAiEngine }   from '../workers/stateEngine';
 import { getCachedPrices } from '../routes/gmx';
 import {
+  aiDecisionsTable,
   db,
   liveApprovalsTable,
   tradesTable,
@@ -245,6 +246,7 @@ import type { StrategyShadowRecord } from '../intel/strategyShadowAdapterV2';
 import {
   runIntelServiceCycle,
   runStrategyShadowWorkerReadOnly,
+  resumeIntelService,
 } from '../intel/intelService';
 import {
   closeLiveTestPosition,
@@ -255,6 +257,7 @@ import {
   openServerPaperPosition,
   reduceServerPaper70,
   requestServerPaperCloseAll,
+  manageServerPaperTick,
 } from '../workers/serverPaperExecutor';
 
 // ── 최소 유효 AI 결정 (CASH — 가장 안전한 기본값) ──────────────────────────────
@@ -310,6 +313,10 @@ function resetWorker() {
   const ethPrices = Array.from({ length: 30 }, (_, i) =>  3_000 + (i - 15) * 3);
   pb.set('BTC', btcPrices);
   pb.set('ETH', ethPrices);
+  // 수동 priceBuffer fixture도 production과 같은 upstream timestamp 계약을
+  // 충족해야 한다. 모든 restart fixture에서 동일한 완료 경계를 사용한다.
+  (wm.lastTickUpdatedAtBySymbol as Map<string, number>).set('BTC', 1_700_000_000_001);
+  (wm.lastTickUpdatedAtBySymbol as Map<string, number>).set('ETH', 1_700_000_000_001);
 
   (wm.pendingApprovalKeys as Set<string>).clear();
 
@@ -321,6 +328,10 @@ function resetWorker() {
   if (cTimer) clearTimeout(cTimer);
   wm.cycleTimer = null;
 
+  const sTimer = wm.serverPaperTimer as ReturnType<typeof setInterval> | null;
+  if (sTimer) clearInterval(sTimer);
+  wm.serverPaperTimer = null;
+
   _dbInsertTables.length = 0;
   _dbUpdateTables.length = 0;
   _dbValuesInputs.length = 0;
@@ -330,6 +341,7 @@ function resetWorker() {
   vi.mocked(runAiEngine).mockClear();
   vi.mocked(runStrategyShadowWorkerReadOnly).mockClear();
   vi.mocked(runIntelServiceCycle).mockClear();
+  vi.mocked(resumeIntelService).mockClear();
   vi.mocked(executeLiveTestOrder).mockClear();
   vi.mocked(closeLiveTestPosition).mockClear();
   vi.mocked(openServerPaperPosition).mockClear();
@@ -480,6 +492,204 @@ describe('Worker 초기 상태', () => {
   });
 });
 
+describe('worker lifecycle generation safety', () => {
+  beforeEach(() => { resetWorker(); });
+  afterEach(() => { workerManager.stop(); vi.useRealTimers(); vi.restoreAllMocks(); });
+
+  it('stop during awaited startup prevents every later recovery phase and timer/Intel install', async () => {
+    vi.useFakeTimers();
+    let release!: (rows: unknown[]) => void;
+    let selects = 0;
+    _dbSelectImpl = () => {
+      selects += 1;
+      return new Promise<unknown[]>(resolve => { release = resolve; });
+    };
+
+    const startup = workerManager.start();
+    for (let i = 0; i < 5 && selects === 0; i++) await Promise.resolve();
+    workerManager.stop();
+    release([]);
+    await startup;
+
+    const wm = workerManager as unknown as Record<string, unknown>;
+    expect(selects).toBe(1);
+    expect(wm.pricePollTimer).toBeNull();
+    expect(wm.serverPaperTimer).toBeNull();
+    expect(wm.cycleTimer).toBeNull();
+    expect(resumeIntelService).not.toHaveBeenCalled();
+  });
+
+  it('stop while a cycle read is in flight prevents later reads, engine, Intel and reschedule', async () => {
+    vi.useFakeTimers();
+    let release!: (rows: unknown[]) => void;
+    let selects = 0;
+    _dbSelectImpl = () => {
+      selects += 1;
+      return new Promise<unknown[]>(resolve => { release = resolve; });
+    };
+    const wm = workerManager as unknown as {
+      active: boolean;
+      lifecycleGeneration: number;
+      cycleTimer: ReturnType<typeof setTimeout> | null;
+      runCycle(generation: number): Promise<void>;
+    };
+    wm.active = true;
+    const generation = ++wm.lifecycleGeneration;
+    const cycle = wm.runCycle(generation);
+    for (let i = 0; i < 5 && selects === 0; i++) await Promise.resolve();
+    workerManager.stop();
+    release([]);
+    await cycle;
+
+    expect(selects).toBe(1);
+    expect(runAiEngine).not.toHaveBeenCalled();
+    expect(runIntelServiceCycle).not.toHaveBeenCalled();
+    expect(wm.cycleTimer).toBeNull();
+  });
+
+  it('a queued PAPER management callback invoked after stop is a no-op', async () => {
+    vi.useFakeTimers();
+    setupDbSequence();
+    const callbacks: Array<() => void> = [];
+    const realSetInterval = globalThis.setInterval;
+    vi.spyOn(globalThis, 'setInterval').mockImplementation(((callback: () => void, delay?: number) => {
+      callbacks.push(callback as () => void);
+      return realSetInterval(callback, delay);
+    }) as typeof setInterval);
+
+    await workerManager.start();
+    expect(callbacks.length).toBeGreaterThanOrEqual(2);
+    const queuedPaperTick = callbacks[1];
+    workerManager.stop();
+    queuedPaperTick();
+    await Promise.resolve();
+    expect(manageServerPaperTick).not.toHaveBeenCalled();
+  });
+});
+
+describe('completed-candle decision replay idempotency', () => {
+  beforeEach(() => { resetWorker(); });
+
+  it('same signal/candle persists once and dispatches no duplicate PAPER execution', async () => {
+    const evidence = {
+      symbol: 'BTC',
+      operatingState: 'LONG' as const,
+      sourceCandleCloseTime: 1_800_000_000_000,
+      evaluatedAtMs: 1_800_000_000_001,
+    };
+    const firstIdentity = buildWorkerDecisionIdentity(evidence);
+    const replayIdentity = buildWorkerDecisionIdentity(evidence);
+    expect(replayIdentity).toEqual(firstIdentity);
+    expect(firstIdentity.dbId).toBeLessThan(0);
+    expect(() => buildWorkerDecisionIdentity({
+      ...evidence,
+      evaluatedAtMs: evidence.sourceCandleCloseTime,
+    })).toThrow('authoritative completed-candle');
+
+    let insertAttempt = 0;
+    _dbInsertImpl = () => (++insertAttempt === 1 ? [{ id: firstIdentity.dbId }] : []);
+    const wm = workerManager as unknown as {
+      persistDecision(decision: unknown): Promise<boolean>;
+    };
+    const decision = {
+      ...CASH_DECISION,
+      id: firstIdentity.decisionId,
+      createdAt: '2027-01-15T08:00:01.000Z',
+      primarySymbol: 'BTC',
+      source: 'server_worker',
+      testMode: false,
+      paperExecuted: false,
+      paperOrderId: null,
+    };
+
+    for (let replay = 0; replay < 2; replay++) {
+      const durableClaim = await wm.persistDecision(decision);
+      if (durableClaim) {
+        await openServerPaperPosition({} as never);
+      }
+    }
+
+    expect(db.insert).toHaveBeenCalledTimes(2);
+    expect(openServerPaperPosition).toHaveBeenCalledTimes(1);
+  });
+
+  it('restart replay claim blocks duplicate approval, LIVE intent/order dispatch, and Intel cycle', async () => {
+    const previousMode = process.env.WORKER_ENGINE_MODE;
+    process.env.WORKER_ENGINE_MODE = 'LIVE';
+    vi.useFakeTimers({ now: 1_800_000_000_000 });
+    const wm = workerManager as unknown as {
+      runCycle(): Promise<void>;
+      maybeCreateApproval(...args: unknown[]): Promise<boolean>;
+      tryLiveTestExecution(...args: unknown[]): Promise<void>;
+      runServerPaperExecution(...args: unknown[]): Promise<void>;
+    };
+    const approvalDispatch = vi.spyOn(wm, 'maybeCreateApproval').mockResolvedValue(false);
+    const liveIntentOrderDispatch = vi.spyOn(wm, 'tryLiveTestExecution').mockResolvedValue();
+    const paperOrderDispatch = vi.spyOn(wm, 'runServerPaperExecution').mockResolvedValue();
+    let decisionClaimAttempts = 0;
+
+    const installRestartDb = (lifecycleDecision: unknown[] = []) => {
+      setupDbSequence({
+        lifecycleDecision,
+        strategyRow: [{ limits: JSON.stringify({ liveTestMode: true }) }],
+      });
+      _dbInsertImpl = () => {
+        if (_dbInsertTables.at(-1) === aiDecisionsTable) {
+          decisionClaimAttempts += 1;
+          return decisionClaimAttempts === 1 ? [{ id: 'first-durable-claim' }] : [];
+        }
+        return [{ id: 'auxiliary-row' }];
+      };
+    };
+
+    vi.mocked(runAiEngine).mockReturnValue({
+      ...CASH_DECISION,
+      operatingState: 'LONG',
+      primarySymbol: 'BTC',
+      riskApproved: true,
+      executionType: 'perp_long_open',
+    } as unknown as ReturnType<typeof runAiEngine>);
+
+    try {
+      installRestartDb();
+      await workerManager.start();
+      await wm.runCycle();
+
+      expect(decisionClaimAttempts).toBe(1);
+      expect(approvalDispatch).toHaveBeenCalledTimes(1);
+      expect(liveIntentOrderDispatch).toHaveBeenCalledTimes(1);
+      expect(paperOrderDispatch).not.toHaveBeenCalled();
+      expect(runIntelServiceCycle).toHaveBeenCalledTimes(1);
+
+      const persistedRow = _dbValuesInputs.find((value): value is { fullJson: string } =>
+        typeof value === 'object' && value !== null
+        && typeof (value as { fullJson?: unknown }).fullJson === 'string');
+      expect(persistedRow).toBeDefined();
+
+      workerManager.stop();
+      resetWorker();
+      installRestartDb(persistedRow ? [{ fullJson: persistedRow.fullJson }] : []);
+      await workerManager.start();
+      await wm.runCycle();
+
+      expect(decisionClaimAttempts).toBe(2);
+      expect(approvalDispatch).toHaveBeenCalledTimes(1);
+      expect(liveIntentOrderDispatch).toHaveBeenCalledTimes(1);
+      expect(paperOrderDispatch).not.toHaveBeenCalled();
+      expect(runIntelServiceCycle).not.toHaveBeenCalled();
+      expect(executeLiveTestOrder).not.toHaveBeenCalled();
+      expect(closeLiveTestPosition).not.toHaveBeenCalled();
+    } finally {
+      workerManager.stop();
+      approvalDispatch.mockRestore();
+      liveIntentOrderDispatch.mockRestore();
+      paperOrderDispatch.mockRestore();
+      if (previousMode === undefined) delete process.env.WORKER_ENGINE_MODE;
+      else process.env.WORKER_ENGINE_MODE = previousMode;
+    }
+  });
+});
+
 // ── HWM 재시작 복구 ───────────────────────────────────────────────────────────
 
 describe('crash-restart — HWM DB 복원', () => {
@@ -616,8 +826,14 @@ describe('crash-restart — Strategy SHADOW lifecycle DB 복원', () => {
     };
     firstWorker.strategyLifecycleSnapshot = firstBaseline;
     firstWorker.strategyLifecycleRestoreBlocked = false;
+    const durableIdentity = buildWorkerDecisionIdentity({
+      symbol: evidence.record.symbol,
+      operatingState: 'CASH',
+      sourceCandleCloseTime: evidence.close,
+      evaluatedAtMs: evidence.now,
+    });
     const persisted = await firstWorker.persistDecision({
-      id: 'worker-1-decision',
+      id: durableIdentity.decisionId,
       createdAt: new Date(evidence.now).toISOString(),
       source: 'server_worker',
       primarySymbol: 'BTC',

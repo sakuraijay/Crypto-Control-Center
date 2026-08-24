@@ -1002,6 +1002,7 @@ function launchScheduledCycle(
       .then(({ runGmxApiReadinessRefresh }) =>
         runGmxApiReadinessRefresh({
           forceDeployment: options.forceDeployment,
+          shouldContinue: () => running && generation === schedulerGeneration,
         }))
       .then((result) => result.paperRuntimeReadiness);
   void scheduledRun
@@ -1016,7 +1017,10 @@ export function startPaperRuntimeReadinessScheduler(
   running = true;
   const generation = ++schedulerGeneration;
   if (activeCyclePromise) {
-    void activeCyclePromise.finally(() => launchScheduledCycle(generation, options));
+    void activeCyclePromise.then(
+      () => launchScheduledCycle(generation, options),
+      () => launchScheduledCycle(generation, options),
+    );
     return;
   }
   launchScheduledCycle(generation, options);

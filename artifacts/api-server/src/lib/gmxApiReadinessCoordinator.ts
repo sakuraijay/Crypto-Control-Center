@@ -65,6 +65,7 @@ export interface GmxApiReadinessRefreshOptions {
   peerTransportFactory?: (peer: string) => GmxApiTransport;
   singlePeerOnly?: boolean;
   forceDeployment?: boolean;
+  shouldContinue?: () => boolean;
 }
 
 const DEFAULT_DEPS: CoordinatorDeps = {
@@ -117,15 +118,31 @@ async function performRefresh(
   const currentGeneration = ++generation;
   const transport = options.transport ?? deps.createTransport(deps.env);
   const readonlyEnabled = transport.readonlyEnabled;
+  const shouldContinue = options.shouldContinue ?? (() => true);
 
   let peerHealth: GmxApiPeerHealth[] | null = null;
+  let canaryEvidence: ManualCanaryReadonlyEvidence = { decimals: {}, costs: {} };
+  let paperRuntimeReadiness = deps.getPaperSnapshot(Date.now(), deps.env);
+  let stopCapability = deps.getStopCapability();
+  const snapshot = (): GmxApiReadinessRefreshResult => ({
+    generation: currentGeneration,
+    readonlyEnabled,
+    peerHealth,
+    canaryEvidence,
+    paperRuntimeReadiness,
+    stopCapability,
+  });
+
+  if (!shouldContinue()) return snapshot();
   if (readonlyEnabled) {
     peerHealth = [];
     for (const base of transport.peers) {
+      if (!shouldContinue()) return snapshot();
       const peerTransport = options.peerTransportFactory
         ? options.peerTransportFactory(base)
         : deps.createPeerTransport(deps.env, base);
       const result = await peerTransport.getJson('/markets/tickers');
+      if (!shouldContinue()) return snapshot();
       peerHealth.push(result.ok
         ? { peerHost: result.peerHost, ok: true }
         : {
@@ -137,30 +154,27 @@ async function performRefresh(
     }
   }
 
-  const canaryEvidence: ManualCanaryReadonlyEvidence = readonlyEnabled
-    ? await deps.refreshCanary()
-    : { decimals: {}, costs: {} };
+  if (readonlyEnabled) {
+    if (!shouldContinue()) return snapshot();
+    canaryEvidence = await deps.refreshCanary();
+    if (!shouldContinue()) return snapshot();
+  }
 
-  const paperRuntimeReadiness =
-    readonlyEnabled && deps.env.WORKER_ENGINE_MODE === 'PAPER'
-      ? await deps.runPaperCycle({
-        forceDeployment: options.forceDeployment !== false,
-        preloadedCanary: canaryEvidence,
-      })
-      : deps.getPaperSnapshot(Date.now(), deps.env);
+  if (readonlyEnabled && deps.env.WORKER_ENGINE_MODE === 'PAPER') {
+    if (!shouldContinue()) return snapshot();
+    paperRuntimeReadiness = await deps.runPaperCycle({
+      forceDeployment: options.forceDeployment !== false,
+      preloadedCanary: canaryEvidence,
+    });
+    if (!shouldContinue()) return snapshot();
+  }
 
-  const stopCapability = readonlyEnabled
-    ? await deps.refreshStopCapability()
-    : deps.getStopCapability();
+  if (readonlyEnabled) {
+    if (!shouldContinue()) return snapshot();
+    stopCapability = await deps.refreshStopCapability();
+  }
 
-  return {
-    generation: currentGeneration,
-    readonlyEnabled,
-    peerHealth,
-    canaryEvidence,
-    paperRuntimeReadiness,
-    stopCapability,
-  };
+  return snapshot();
 }
 
 export async function runGmxApiReadinessRefresh(
@@ -181,6 +195,7 @@ export async function runGmxApiReadinessRefresh(
   } finally {
     if (activeRefreshPromise === refreshPromise) {
       activeRefreshPromise = null;
+      activeJoinCount = 0;
       deps.setCoordinatorInFlight(false);
     }
   }

@@ -677,6 +677,44 @@ describe('PAPER runtime readiness cycle', () => {
     expect(retried.every((status) => status.deployment.state === 'verified')).toBe(true);
     expect(getExecutionEligibleCostEvidence(NOW).fresh).toBe(false);
   });
+
+  it('거부된 shared cycle 뒤 scheduler generation을 정확히 한 번 시작하고 unhandled rejection을 만들지 않는다', async () => {
+    const result = canaryResult();
+    const deps = depsFrom(result);
+    const nowMs = vi.fn()
+      .mockImplementationOnce(() => {
+        throw new Error('injected pre-cycle failure');
+      })
+      .mockReturnValue(NOW);
+    deps.nowMs = nowMs;
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+
+    try {
+      const failedSharedCycle = runPaperRuntimeReadinessCycle({
+        deps,
+        forceDeployment: true,
+      });
+      expect(getPaperRuntimeReadinessSnapshot(NOW, ENV).scheduler.inFlight).toBe(true);
+
+      startPaperRuntimeReadinessScheduler({ deps, forceDeployment: true });
+      await expect(failedSharedCycle).rejects.toThrow('injected pre-cycle failure');
+      await vi.waitFor(() => {
+        expect(deps.refreshCanary).toHaveBeenCalledTimes(1);
+        expect(getPaperRuntimeReadinessSnapshot(NOW, ENV).scheduler.inFlight).toBe(false);
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(deps.refreshDeployment).toHaveBeenCalledTimes(1);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+      stopPaperRuntimeReadinessScheduler();
+    }
+  });
 });
 
 describe('structural safety contract', () => {

@@ -147,6 +147,7 @@ export const ENRICHMENT_MIN_INTERVAL_MS = 15 * 60_000;
 /** cycle 전체 timeout — 초과 시 TIMEOUT 기록 + 결과 폐기 */
 export const INTEL_CYCLE_TIMEOUT_MS = 90_000;
 let lastEnrichAtMs = 0;
+let lifecycleGeneration = 0;
 
 /** 결정적 cycle window key — 같은 5분 창은 프로세스 재시작 후에도 같은 키 */
 export function computeCycleWindowKey(nowMs: number): number {
@@ -255,13 +256,22 @@ export async function runStrategyShadowWorkerReadOnly(
  * worker 사이클에서 호출 — 간격 미달/재진입/shutdown이면 skip.
  * 어떤 예외도 밖으로 던지지 않는다 (기존 매매 루프 보호).
  */
-export async function runIntelServiceCycle(input: { cycleNum: number; gates: RankingGates }): Promise<void> {
+export async function runIntelServiceCycle(input: {
+  cycleNum: number;
+  gates: RankingGates;
+  shouldContinue?: () => boolean;
+}): Promise<void> {
   const nowMs = input.gates.nowMs;
   const windowKey = computeCycleWindowKey(nowMs);
   const cycleId = cycleIdForWindow(windowKey);
+  const capturedGeneration = lifecycleGeneration;
+  const shouldContinue = () =>
+    capturedGeneration === lifecycleGeneration
+    && !state.shutdownRequested
+    && (input.shouldContinue?.() ?? true);
 
   // shutdown — 신규 진입 차단
-  if (state.shutdownRequested) {
+  if (!shouldContinue()) {
     state.lastAttempt = { cycleId, windowKey, status: 'SKIPPED_SHUTDOWN', startedAtMs: nowMs, finishedAtMs: nowMs, error: null };
     return;
   }
@@ -289,8 +299,9 @@ export async function runIntelServiceCycle(input: { cycleNum: number; gates: Ran
     // persist 게이트 — timeout/shutdown 후 늦게 도착한 결과의 저장 차단
     const gatedPersist = async (record: IntelCycleRecord) => {
       if (timedOut) throw new Error('cycle timeout 이후 persist 차단');
-      if (state.shutdownRequested) throw new Error('shutdown 이후 persist 차단');
+      if (!shouldContinue()) throw new Error('lifecycle 종료 이후 persist 차단');
       await persistIntelCycle(record, { status: record.decision === 'BLOCKED' ? 'BLOCKED' : 'SUCCESS', startedAtMs, finishedAtMs: Date.now() });
+      if (!shouldContinue()) throw new Error('lifecycle 종료 이후 persist 후속 처리 차단');
     };
 
     const cyclePromise = runIntelCycle({
@@ -307,6 +318,7 @@ export async function runIntelServiceCycle(input: { cycleNum: number; gates: Ran
       cyclePromise,
       new Promise<'TIMEOUT'>(resolve => setTimeout(() => resolve('TIMEOUT'), INTEL_CYCLE_TIMEOUT_MS).unref?.()),
     ]);
+    if (!shouldContinue()) return;
 
     if (record === 'TIMEOUT') {
       timedOut = true;
@@ -318,8 +330,10 @@ export async function runIntelServiceCycle(input: { cycleNum: number; gates: Ran
       // flight ownership 유지 — 늦게 실행 중인 작업이 끝날 때까지 새 사이클/예산 리셋과 겹치지 않게 함
       // (persist는 gatedPersist가 차단; settle 후 finally에서 inFlight 해제)
       void cyclePromise.catch(() => {}).finally(() => {
-        state.inFlight = false;
-        state.currentCycleId = null;
+        if (state.currentCycleId === cycleId) {
+          state.inFlight = false;
+          state.currentCycleId = null;
+        }
       });
       return;
     }
@@ -345,6 +359,7 @@ export async function runIntelServiceCycle(input: { cycleNum: number; gates: Ran
       state.lastAttempt = { cycleId, windowKey, status: 'SKIPPED_IN_FLIGHT', startedAtMs, finishedAtMs: Date.now(), error: null };
     }
   } catch (e) {
+    if (!shouldContinue()) return;
     const isBudget = e instanceof RequestBudgetExceededError;
     const isBackoff = e instanceof RateLimitBackoffError;
     state.failedCount++;
@@ -357,7 +372,8 @@ export async function runIntelServiceCycle(input: { cycleNum: number; gates: Ran
     };
     console.warn(`[Intel] 사이클 실패 (매매 루프 영향 없음)${isBudget ? ' [예산 초과 fail-closed]' : ''}: ${state.lastError}`);
   } finally {
-    if (!timedOut) {                 // timeout 시에는 cyclePromise settle 후 해제 (위 finally)
+    if (!timedOut && state.currentCycleId === cycleId) {
+      // timeout 시에는 cyclePromise settle 후 해제 (위 finally)
       state.inFlight = false;
       state.currentCycleId = null;
     }
@@ -365,15 +381,16 @@ export async function runIntelServiceCycle(input: { cycleNum: number; gates: Ran
 
   // outcome enrichment — horizon 경과 후보 별도 처리 (비치명, single-flight)
   try {
-    if (!state.shutdownRequested && !state.enrichInFlight && nowMs - lastEnrichAtMs >= ENRICHMENT_MIN_INTERVAL_MS) {
+    if (shouldContinue() && !state.enrichInFlight && nowMs - lastEnrichAtMs >= ENRICHMENT_MIN_INTERVAL_MS) {
       state.enrichInFlight = true;
       lastEnrichAtMs = nowMs;
       try {
         const summary = await enrichShadowOutcomes({
           fetchCandles: (symbol, timeframe, count) => getHandle().fetchers.fetchCandles(symbol, timeframe, count),
           nowMs,
-          shouldAbort: () => state.shutdownRequested,   // stop 이후 잔여 write 차단
+          shouldAbort: () => !shouldContinue(),
         });
+        if (!shouldContinue()) return;
         state.lastEnrichment = { ...summary, atMs: nowMs };
         if (summary.scanned > 0) {
           console.info(`[Intel] enrichment — scanned=${summary.scanned} enriched=${summary.enriched} 1h=${summary.enriched1h} ambiguous=${summary.ambiguous} incomplete=${summary.incomplete}`);
@@ -389,9 +406,11 @@ export async function runIntelServiceCycle(input: { cycleNum: number; gates: Ran
 
 /** shutdown — 이후 신규 사이클/enrichment 진입 차단 (worker stop 시 호출) */
 export function stopIntelService(): void {
+  lifecycleGeneration += 1;
   state.shutdownRequested = true;
 }
 export function resumeIntelService(): void {
+  lifecycleGeneration += 1;
   state.shutdownRequested = false;
 }
 
@@ -411,6 +430,7 @@ export function getIntelRuntimeStats() {
 /** 테스트 전용 초기화 */
 export function __resetIntelServiceForTests(): void {
   if (!(process.env.VITEST || process.env.NODE_ENV === 'test')) return;
+  lifecycleGeneration += 1;
   state.lastRecord = null; state.lastRecordStale = false; state.lastError = null; state.lastRunAtMs = null;
   state.cycleCount = 0; state.noTradeCycles = 0; state.lastEnrichment = null;
   state.inFlight = false; state.shadowReadInFlight = false; state.currentCycleId = null; state.skippedInFlight = 0;

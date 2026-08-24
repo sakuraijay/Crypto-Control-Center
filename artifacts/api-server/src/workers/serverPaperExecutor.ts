@@ -150,22 +150,38 @@ export function __resetServerPaperStateForTests(): void {
 
 // ── worker_state helpers ──────────────────────────────────────────────────────
 
-async function readWorkerState(key: string): Promise<string | null> {
+async function readWorkerState(
+  key: string,
+  shouldContinue: () => boolean = () => true,
+): Promise<string | null> {
+  if (!shouldContinue()) throw new Error("lifecycle stopped");
   const rows = await db.select().from(workerStateTable).where(eq(workerStateTable.key, key));
+  if (!shouldContinue()) throw new Error("lifecycle stopped");
   return rows[0]?.value ?? null;
 }
 
-async function writeWorkerState(key: string, value: string): Promise<void> {
+async function writeWorkerState(
+  key: string,
+  value: string,
+  shouldContinue: () => boolean = () => true,
+): Promise<void> {
+  if (!shouldContinue()) throw new Error("lifecycle stopped");
   const now = new Date();
   const rows = await db.select().from(workerStateTable).where(eq(workerStateTable.key, key));
+  if (!shouldContinue()) throw new Error("lifecycle stopped");
   if (rows.length > 0) {
     await db.update(workerStateTable).set({ value, updatedAt: now }).where(eq(workerStateTable.key, key));
   } else {
     await db.insert(workerStateTable).values({ key, value, updatedAt: now });
   }
+  if (!shouldContinue()) throw new Error("lifecycle stopped");
 }
 
-async function deleteWorkerState(key: string): Promise<void> {
+async function deleteWorkerState(
+  key: string,
+  shouldContinue: () => boolean = () => true,
+): Promise<void> {
+  if (!shouldContinue()) return;
   await db.delete(workerStateTable).where(eq(workerStateTable.key, key));
 }
 
@@ -209,18 +225,26 @@ function toView(row: TradeRow, quote: PriceQuote | null): ServerPaperOpenPositio
  * 서버 권위 PAPER OPEN — 모든 게이트 통과 시에만 durable 기록.
  * 어떤 실패든 {ok:false} + 사유 반환 = NO_TRADE (부분 기록 없음).
  */
-export async function openServerPaperPosition(args: ServerPaperOpenArgs): Promise<ServerPaperOpenResult> {
+export async function openServerPaperPosition(
+  args: ServerPaperOpenArgs,
+  shouldContinue: () => boolean = () => true,
+): Promise<ServerPaperOpenResult> {
   const nowMs = args.nowMs ?? Date.now();
   const record = (r: ServerPaperOpenResult): ServerPaperOpenResult => {
-    state.lastOpenAttempt = {
-      at: new Date(nowMs).toISOString(),
-      ok: r.ok,
-      reason: r.ok ? null : r.reason,
-      tradeId: r.ok ? r.tradeId : null,
-    };
+    if (shouldContinue()) {
+      state.lastOpenAttempt = {
+        at: new Date(nowMs).toISOString(),
+        ok: r.ok,
+        reason: r.ok ? null : r.reason,
+        tradeId: r.ok ? r.tradeId : null,
+      };
+    }
     return r;
   };
+  const stopped = (): ServerPaperOpenResult =>
+    ({ ok: false, reason: "lifecycle stopped — OPEN no-op" });
 
+  if (!shouldContinue()) return stopped();
   if (state.unresolved) return record({ ok: false, reason: `UNRESOLVED 상태 — 신규 진입 차단: ${state.unresolved}` });
   if (!args.decisionId) return record({ ok: false, reason: "decisionId 없음 — idempotency 불가, 진입 거부" });
   if (!isAppliedRiskProfileSnapshot(args.riskProfileSnapshot)) {
@@ -285,6 +309,7 @@ export async function openServerPaperPosition(args: ServerPaperOpenArgs): Promis
   }
 
   const existingRows = await loadServerOpenRows();
+  if (!shouldContinue()) return stopped();
   if (existingRows.some(row => row.symbol.toUpperCase() === args.symbol.toUpperCase())) {
     return record({ ok: false, reason: `${args.symbol} 기존 포지션 중복 — 동일 심볼 추가 진입/물타기 금지` });
   }
@@ -296,6 +321,7 @@ export async function openServerPaperPosition(args: ServerPaperOpenArgs): Promis
 
   const tradeId = crypto.randomUUID();
   try {
+    if (!shouldContinue()) return stopped();
     const inserted = await db.insert(tradesTable).values({
       id: tradeId,
       symbol: args.symbol,
@@ -326,11 +352,13 @@ export async function openServerPaperPosition(args: ServerPaperOpenArgs): Promis
       riskProfileSnapshot: args.riskProfileSnapshot,
       paperPositionSlot,
     }).onConflictDoNothing({ target: tradesTable.id }).returning({ id: tradesTable.id });
+    if (!shouldContinue()) return stopped();
 
     if (!inserted || inserted.length === 0) {
       return record({ ok: false, reason: "OPEN 중복 (id conflict) — no-op" });
     }
   } catch (err) {
+    if (!shouldContinue()) return stopped();
     // UNIQUE(open_decision_id / SERVER 단일 미청산) 위반 → 중복 진입 시도, no-op
     const msg = (err as Error).message ?? String(err);
     if (/unique|duplicate/i.test(msg)) {
@@ -350,14 +378,23 @@ export async function openServerPaperPosition(args: ServerPaperOpenArgs): Promis
  * FULL: CLOSE 행 선삽입(UNIQUE claim) → OPEN 행 close_time 조건부 UPDATE(repair 겸용).
  * REDUCE70: 호출 측에서 worker_state 예약 확보 후 호출 (reduceServerPaper70 사용 권장).
  */
-export async function closeServerPaperPosition(args: ServerPaperCloseArgs): Promise<ServerPaperCloseResult> {
+export async function closeServerPaperPosition(
+  args: ServerPaperCloseArgs,
+  shouldContinue: () => boolean = () => true,
+): Promise<ServerPaperCloseResult> {
   const nowMs = args.nowMs ?? Date.now();
   const record = (kind: string, reason: string, ok: boolean, detail: string | null) => {
-    state.lastCloseAction = { at: new Date(nowMs).toISOString(), kind, reason, ok, detail };
+    if (shouldContinue()) {
+      state.lastCloseAction = { at: new Date(nowMs).toISOString(), kind, reason, ok, detail };
+    }
   };
+  const stopped = (): ServerPaperCloseResult =>
+    ({ ok: false, reason: "lifecycle stopped — CLOSE no-op" });
 
   // OPEN 행 로드
+  if (!shouldContinue()) return stopped();
   const rows = await db.select().from(tradesTable).where(eq(tradesTable.id, args.openTradeId));
+  if (!shouldContinue()) return stopped();
   const openRow = rows[0];
   if (!openRow) { record(args.kind, args.reason, false, "OPEN 행 없음"); return { ok: false, reason: "OPEN 행 없음" }; }
   if (openRow.managedBy !== "SERVER") { record(args.kind, args.reason, false, "서버 관리 행 아님"); return { ok: false, reason: "서버 관리 행 아님 — 거부" }; }
@@ -425,6 +462,7 @@ export async function closeServerPaperPosition(args: ServerPaperCloseArgs): Prom
   const closeId = crypto.randomUUID();
   try {
     // 1) CLOSE 행 선삽입 — FULL은 closes_trade_id UNIQUE가 중복 청산을 차단
+    if (!shouldContinue()) return stopped();
     const inserted = await db.insert(tradesTable).values({
       id: closeId,
       symbol: openRow.symbol,
@@ -455,8 +493,10 @@ export async function closeServerPaperPosition(args: ServerPaperCloseArgs): Prom
       closeReason: args.reason,
       riskProfileSnapshot: openRow.riskProfileSnapshot,
     }).onConflictDoNothing({ target: tradesTable.id }).returning({ id: tradesTable.id });
+    if (!shouldContinue()) return stopped();
     void inserted;
   } catch (err) {
+    if (!shouldContinue()) return stopped();
     const msg = (err as Error).message ?? String(err);
     if (!/unique|duplicate/i.test(msg)) {
       record(effectiveKind, args.reason, false, `CLOSE 저장 실패: ${msg}`);
@@ -467,6 +507,7 @@ export async function closeServerPaperPosition(args: ServerPaperCloseArgs): Prom
   }
 
   // 2) OPEN 행 확정 (조건부 UPDATE — 여기 실패해도 다음 틱 repair)
+  if (!shouldContinue()) return stopped();
   if (effectiveKind === "FULL") {
     await db.update(tradesTable)
       .set({ closeTime: nowMs })
@@ -483,6 +524,7 @@ export async function closeServerPaperPosition(args: ServerPaperCloseArgs): Prom
       })
       .where(and(eq(tradesTable.id, openRow.id), eq(tradesTable.sizeInUsd, openRow.sizeInUsd ?? ""), eq(tradesTable.closeTime, 0)));
   }
+  if (!shouldContinue()) return stopped();
 
   record(effectiveKind, args.reason, true, `closed $${closedSize.toFixed(2)} gross=${grossPnl.toFixed(2)} net=${netEst != null ? netEst.toFixed(2) : "불명"}`);
   console.info(`[ServerPaper] CLOSE(${effectiveKind}) ${openRow.symbol} $${closedSize.toFixed(2)} @${q.priceUsd} reason=${args.reason} gross=$${grossPnl.toFixed(2)} net=${netEst != null ? `$${netEst.toFixed(2)}` : "불명(비용 계산 실패)"}`);
@@ -491,7 +533,16 @@ export async function closeServerPaperPosition(args: ServerPaperCloseArgs): Prom
 
 // ── REDUCE70 (durable 1회 예약) ───────────────────────────────────────────────
 
-export async function reduceServerPaper70(args: { openRow: TradeRow; quote: PriceQuote | null; nowMs?: number }): Promise<ServerPaperCloseResult> {
+export async function reduceServerPaper70(args: {
+  openRow: TradeRow;
+  quote: PriceQuote | null;
+  nowMs?: number;
+  shouldContinue?: () => boolean;
+}): Promise<ServerPaperCloseResult> {
+  const shouldContinue = args.shouldContinue ?? (() => true);
+  const stopped = (): ServerPaperCloseResult =>
+    ({ ok: false, reason: "lifecycle stopped — REDUCE70 no-op" });
+  if (!shouldContinue()) return stopped();
   const nowMs = args.nowMs ?? Date.now();
   const dayKey = manilaDayKey(new Date(nowMs));
   const positionKey = `${args.openRow.symbol}:${args.openRow.side}:${args.openRow.id}`;
@@ -501,9 +552,11 @@ export async function reduceServerPaper70(args: { openRow: TradeRow; quote: Pric
   // durable 예약 확인 — 기록이 있으면 상태 불문 재실행 금지
   let existing: ProfitProtectRecord | null = null;
   try {
-    const raw = await readWorkerState(stateKey);
+    const raw = await readWorkerState(stateKey, shouldContinue);
+    if (!shouldContinue()) return stopped();
     existing = raw ? JSON.parse(raw) as ProfitProtectRecord : null;
   } catch {
+    if (!shouldContinue()) return stopped();
     return { ok: false, reason: "REDUCE70 예약 조회 실패 — fail-closed, 축소 보류" };
   }
   const gate = canExecuteReduction(existing);
@@ -515,17 +568,27 @@ export async function reduceServerPaper70(args: { openRow: TradeRow; quote: Pric
     reduceSizeUsd: 0, fullClose: false, status: "SUBMITTED", orderKey: null,
     createdAt: new Date(nowMs).toISOString(), updatedAt: new Date(nowMs).toISOString(),
   };
-  try { await writeWorkerState(stateKey, JSON.stringify(rec)); }
-  catch { return { ok: false, reason: "REDUCE70 예약 기록 실패 — fail-closed, 축소 보류" }; }
+  try {
+    await writeWorkerState(stateKey, JSON.stringify(rec), shouldContinue);
+    if (!shouldContinue()) return stopped();
+  } catch {
+    if (!shouldContinue()) return stopped();
+    return { ok: false, reason: "REDUCE70 예약 기록 실패 — fail-closed, 축소 보류" };
+  }
 
   const result = await closeServerPaperPosition({
     openTradeId: args.openRow.id, reason: "PROFIT_PROTECT_REDUCE70", kind: "REDUCE70", quote: args.quote, nowMs,
-  });
+  }, shouldContinue);
+  if (!shouldContinue()) return stopped();
   rec.status = result.ok ? "CONFIRMED" : "FAILED";
   rec.reduceSizeUsd = result.ok ? result.closedSizeUsd : 0;
   rec.updatedAt = new Date().toISOString();
-  try { await writeWorkerState(stateKey, JSON.stringify(rec)); }
-  catch { console.error("[ServerPaper] REDUCE70 예약 상태 갱신 실패 — 기록은 SUBMITTED 유지 (재실행 차단됨)"); }
+  try { await writeWorkerState(stateKey, JSON.stringify(rec), shouldContinue); }
+  catch {
+    if (shouldContinue()) {
+      console.error("[ServerPaper] REDUCE70 예약 상태 갱신 실패 — 기록은 SUBMITTED 유지 (재실행 차단됨)");
+    }
+  }
   return result;
 }
 
@@ -534,14 +597,21 @@ export async function reduceServerPaper70(args: { openRow: TradeRow; quote: Pric
 /** 영속 실패 시 true — 틱마다 재시도해야 하는 플래그 */
 let pendingClosePersistFailed = false;
 
-export async function requestServerPaperCloseAll(reason: string, nowMs = Date.now()): Promise<{ persisted: boolean }> {
+export async function requestServerPaperCloseAll(
+  reason: string,
+  nowMs = Date.now(),
+  shouldContinue: () => boolean = () => true,
+): Promise<{ persisted: boolean }> {
+  if (!shouldContinue()) return { persisted: false };
   const pending = { reason, requestedAt: new Date(nowMs).toISOString() };
   state.pendingClose = pending;
   try {
-    await writeWorkerState(PENDING_CLOSE_KEY, JSON.stringify(pending));
+    await writeWorkerState(PENDING_CLOSE_KEY, JSON.stringify(pending), shouldContinue);
+    if (!shouldContinue()) return { persisted: false };
     pendingClosePersistFailed = false;
     return { persisted: true };
   } catch (err) {
+    if (!shouldContinue()) return { persisted: false };
     // fail-closed: 영속 확인 전에는 성공으로 취급하지 않는다. 메모리 요청은 유지하되
     // unresolved로 신규 진입을 차단하고, 틱마다 영속을 재시도한다.
     pendingClosePersistFailed = true;
@@ -554,13 +624,18 @@ export async function requestServerPaperCloseAll(reason: string, nowMs = Date.no
 /** startup read 실패 시 true — durable 상태 불명 → 신규 진입 차단 + 틱마다 재시도 */
 let pendingCloseLoadFailed = false;
 
-export async function loadPendingCloseFromDb(): Promise<void> {
+export async function loadPendingCloseFromDb(
+  shouldContinue: () => boolean = () => true,
+): Promise<void> {
+  if (!shouldContinue()) return;
   try {
-    const raw = await readWorkerState(PENDING_CLOSE_KEY);
+    const raw = await readWorkerState(PENDING_CLOSE_KEY, shouldContinue);
+    if (!shouldContinue()) return;
     state.pendingClose = raw ? JSON.parse(raw) as { reason: string; requestedAt: string } : null;
     pendingCloseLoadFailed = false;
     if (state.unresolved?.includes("pendingClose 로드 실패")) state.unresolved = null;
   } catch (err) {
+    if (!shouldContinue()) return;
     // durable-state-unknown: DB에 close-all 의도가 있는지 알 수 없다 — fail-closed.
     // 신규 진입은 unresolved로 차단되고, 틱마다 읽기를 재시도한다.
     pendingCloseLoadFailed = true;
@@ -581,21 +656,32 @@ let storedDirFetcher: (() => Promise<string | null>) | null = null;
 
 export async function reconcileStartupCloseIntent(
   fetchLastDecisionDirection: () => Promise<string | null>,
+  shouldContinue: () => boolean = () => true,
 ): Promise<void> {
+  if (!shouldContinue()) return;
   storedDirFetcher = fetchLastDecisionDirection;
   try {
     if (!state.pendingClose) {
       const open = await loadServerOpenRows();
+      if (!shouldContinue()) return;
       if (open.length > 0) {
         const dir = await fetchLastDecisionDirection();
+        if (!shouldContinue()) return;
         if (dir === "CASH" || dir === "NO_TRADE" || dir === "CLOSE") {
-          await requestServerPaperCloseAll("STARTUP_RECONCILE");
+          await requestServerPaperCloseAll(
+            "STARTUP_RECONCILE",
+            Date.now(),
+            shouldContinue,
+          );
+          if (!shouldContinue()) return;
         }
       }
     }
+    if (!shouldContinue()) return;
     startupReconcileFailed = false;
     if (state.unresolved?.includes("reconciliation 실패")) state.unresolved = null;
   } catch (err) {
+    if (!shouldContinue()) return;
     startupReconcileFailed = true;
     state.unresolved = "startup close-intent reconciliation 실패 — durable 상태 불명, 신규 진입 차단 (재시도 중)";
     console.error("[ServerPaper] startup reconciliation 실패 (fail-closed):", (err as Error).message);
@@ -604,39 +690,56 @@ export async function reconcileStartupCloseIntent(
 
 // ── 관리 틱 (SL/TP/pendingClose — 재시작 복구는 DB 재조회로 자동) ─────────────
 
-export async function manageServerPaperTick(getQuote: PriceLookup, nowMs = Date.now()): Promise<void> {
-  if (tickInFlight) return;
+export async function manageServerPaperTick(
+  getQuote: PriceLookup,
+  nowMs = Date.now(),
+  shouldContinue: () => boolean = () => true,
+): Promise<void> {
+  if (tickInFlight || !shouldContinue()) return;
   tickInFlight = true;
   try {
+    if (!shouldContinue()) return;
     state.lastTickAt = new Date(nowMs).toISOString();
     state.lastTickStale = false;
 
     // startup read 실패분 재시도 — durable 상태 불명 동안 unresolved 유지
     if (pendingCloseLoadFailed) {
-      await loadPendingCloseFromDb();
+      await loadPendingCloseFromDb(shouldContinue);
+      if (!shouldContinue()) return;
     }
 
     // startup reconciliation 실패분 재시도 (durable 상태 불명 → 신규 진입 차단 유지)
     if (startupReconcileFailed && storedDirFetcher) {
-      await reconcileStartupCloseIntent(storedDirFetcher);
+      await reconcileStartupCloseIntent(storedDirFetcher, shouldContinue);
+      if (!shouldContinue()) return;
     }
 
     // pendingClose 영속 재시도 (요청 시점 실패분 — 성공 전에는 unresolved 유지)
     if (pendingClosePersistFailed && state.pendingClose) {
       try {
-        await writeWorkerState(PENDING_CLOSE_KEY, JSON.stringify(state.pendingClose));
+        if (!shouldContinue()) return;
+        await writeWorkerState(
+          PENDING_CLOSE_KEY,
+          JSON.stringify(state.pendingClose),
+          shouldContinue,
+        );
+        if (!shouldContinue()) return;
         pendingClosePersistFailed = false;
         state.unresolved = null;
       } catch { /* 다음 틱 재시도 — unresolved 유지 */ }
     }
 
+    if (!shouldContinue()) return;
     const openRows = await loadServerOpenRows();
+    if (!shouldContinue()) return;
     if (openRows.length === 0) {
       state.openPosition = null;
       state.openPositions = [];
       if (state.pendingClose) {
+        if (!shouldContinue()) return;
         state.pendingClose = null;
-        await deleteWorkerState(PENDING_CLOSE_KEY).catch(() => {});
+        await deleteWorkerState(PENDING_CLOSE_KEY, shouldContinue).catch(() => {});
+        if (!shouldContinue()) return;
       }
       return;
     }
@@ -644,6 +747,7 @@ export async function manageServerPaperTick(getQuote: PriceLookup, nowMs = Date.
     state.openPositions = openRows.map(row => toView(row, getQuote(row.symbol)));
     state.openPosition = state.openPositions[0] ?? null;
     for (const row of openRows) {
+      if (!shouldContinue()) return;
       const quote = getQuote(row.symbol);
 
       if (!quote || !fin(quote.priceUsd) || quote.priceUsd <= 0 || quote.ageMs > MAX_MANAGE_PRICE_AGE_MS) {
@@ -653,7 +757,12 @@ export async function manageServerPaperTick(getQuote: PriceLookup, nowMs = Date.
 
       // 1) pendingClose (CASH 전환·RiskEngine CLOSE_ALL) — 최우선 전량 청산
       if (state.pendingClose) {
-        await closeServerPaperPosition({ openTradeId: row.id, reason: state.pendingClose.reason, kind: "FULL", quote, nowMs });
+        if (!shouldContinue()) return;
+        await closeServerPaperPosition(
+          { openTradeId: row.id, reason: state.pendingClose.reason, kind: "FULL", quote, nowMs },
+          shouldContinue,
+        );
+        if (!shouldContinue()) return;
         continue;
       }
 
@@ -664,28 +773,45 @@ export async function manageServerPaperTick(getQuote: PriceLookup, nowMs = Date.
       const stopHit = fin(stop) && (isLong ? quote.priceUsd <= stop : quote.priceUsd >= stop);
       const tpHit = fin(tp) && (isLong ? quote.priceUsd >= tp : quote.priceUsd <= tp);
       if (stopHit) {
-        await closeServerPaperPosition({ openTradeId: row.id, reason: "STOP_LOSS", kind: "FULL", quote, nowMs });
+        if (!shouldContinue()) return;
+        await closeServerPaperPosition(
+          { openTradeId: row.id, reason: "STOP_LOSS", kind: "FULL", quote, nowMs },
+          shouldContinue,
+        );
+        if (!shouldContinue()) return;
       } else if (tpHit) {
-        await closeServerPaperPosition({ openTradeId: row.id, reason: "TAKE_PROFIT", kind: "FULL", quote, nowMs });
+        if (!shouldContinue()) return;
+        await closeServerPaperPosition(
+          { openTradeId: row.id, reason: "TAKE_PROFIT", kind: "FULL", quote, nowMs },
+          shouldContinue,
+        );
+        if (!shouldContinue()) return;
       }
     }
 
     // 청산 후 재조회 — 전량 청산 완료 시 pendingClose 해제
     if (state.pendingClose) {
+      if (!shouldContinue()) return;
       const remaining = await loadServerOpenRows();
+      if (!shouldContinue()) return;
       if (remaining.length === 0) {
         state.pendingClose = null;
         state.openPosition = null;
         state.openPositions = [];
-        await deleteWorkerState(PENDING_CLOSE_KEY).catch(() => {});
+        await deleteWorkerState(PENDING_CLOSE_KEY, shouldContinue).catch(() => {});
+        if (!shouldContinue()) return;
       }
     } else {
+      if (!shouldContinue()) return;
       const remaining = await loadServerOpenRows();
+      if (!shouldContinue()) return;
       state.openPositions = remaining.map(row => toView(row, getQuote(row.symbol)));
       state.openPosition = state.openPositions[0] ?? null;
     }
   } catch (err) {
-    console.error("[ServerPaper] 관리 틱 오류:", (err as Error).message);
+    if (shouldContinue()) {
+      console.error("[ServerPaper] 관리 틱 오류:", (err as Error).message);
+    }
   } finally {
     tickInFlight = false;
   }

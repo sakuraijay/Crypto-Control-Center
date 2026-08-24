@@ -65,6 +65,7 @@ import {
 import {
   __resetPaperRuntimeReadinessForTests,
   getPaperRuntimeReadinessSnapshot,
+  runPaperRuntimeReadinessCycle,
   startPaperRuntimeReadinessScheduler,
   stopPaperRuntimeReadinessScheduler,
 } from '../lib/paperRuntimeReadiness';
@@ -413,6 +414,111 @@ describe('POST /api/executor/gmx-api/readiness/refresh', () => {
     expect(dbWriteCalls).toEqual([]);
   });
 
+  it('거부된 PAPER shared flight 뒤 scheduler generation이 canary/PAPER/stop을 각각 한 번 실행한다', async () => {
+    const { t, calls } = makeSpyTransport(true);
+    coordinatorTransport = t;
+    installCoordinatorDeps();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+
+    try {
+      const failedSharedFlight = runPaperRuntimeReadinessCycle({
+        deps: {
+          env: coordinatorEnv,
+          nowMs: () => {
+            throw new Error('injected shared PAPER failure');
+          },
+        },
+      });
+      startPaperRuntimeReadinessScheduler();
+
+      await expect(failedSharedFlight).rejects.toThrow(
+        'injected shared PAPER failure',
+      );
+      await vi.waitFor(() => {
+        expect(refreshCanarySpy).toHaveBeenCalledTimes(1);
+        expect(runPaperCycleSpy).toHaveBeenCalledTimes(1);
+        expect(refreshStopSpy).toHaveBeenCalledTimes(1);
+        expect(__getGmxApiReadinessCoordinatorStateForTests()).toEqual({
+          active: false,
+          joinCount: 0,
+        });
+        expect(getPaperRuntimeReadinessSnapshot(
+          Date.now(),
+          coordinatorEnv,
+        ).scheduler.inFlight).toBe(false);
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(unhandled).toEqual([]);
+      expect(calls).toEqual([
+        { method: 'GET', path: '/markets/tickers' },
+        { method: 'GET', path: '/markets/tickers' },
+      ]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+      stopPaperRuntimeReadinessScheduler();
+    }
+  });
+
+  it('stale completion은 newer shared flight와 join count를 해제하지 않는다', async () => {
+    let releaseFirst: (() => void) | null = null;
+    let releaseSecond: (() => void) | null = null;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const secondGate = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    let canaryCall = 0;
+    refreshCanarySpy.mockImplementation(async () => {
+      canaryCall += 1;
+      await (canaryCall === 1 ? firstGate : secondGate);
+      return emptyCanaryEvidence();
+    });
+    installCoordinatorDeps();
+
+    const staleFlight = runGmxApiReadinessRefresh({ singlePeerOnly: true });
+    await vi.waitFor(() => expect(refreshCanarySpy).toHaveBeenCalledTimes(1));
+
+    __resetGmxApiReadinessCoordinatorForTests();
+    installCoordinatorDeps();
+    const newerFlight = runGmxApiReadinessRefresh({ singlePeerOnly: true });
+    await vi.waitFor(() => expect(refreshCanarySpy).toHaveBeenCalledTimes(2));
+    const newerJoin = runGmxApiReadinessRefresh({ singlePeerOnly: true });
+    expect(__getGmxApiReadinessCoordinatorStateForTests()).toEqual({
+      active: true,
+      joinCount: 1,
+    });
+
+    releaseFirst!();
+    await staleFlight;
+    expect(__getGmxApiReadinessCoordinatorStateForTests()).toEqual({
+      active: true,
+      joinCount: 1,
+    });
+    expect(getPaperRuntimeReadinessSnapshot(
+      Date.now(),
+      coordinatorEnv,
+    ).scheduler.inFlight).toBe(true);
+
+    releaseSecond!();
+    await Promise.all([newerFlight, newerJoin]);
+    expect(__getGmxApiReadinessCoordinatorStateForTests()).toEqual({
+      active: false,
+      joinCount: 0,
+    });
+    expect(getPaperRuntimeReadinessSnapshot(
+      Date.now(),
+      coordinatorEnv,
+    ).scheduler.inFlight).toBe(false);
+    expect(runPaperCycleSpy).toHaveBeenCalledTimes(2);
+    expect(refreshStopSpy).toHaveBeenCalledTimes(2);
+  });
+
   it('scheduler stop 뒤 예약된 stale timer가 PAPER cycle을 다시 시작하지 않는다', async () => {
     vi.useFakeTimers();
     try {
@@ -469,6 +575,46 @@ describe('POST /api/executor/gmx-api/readiness/refresh', () => {
     } finally {
       stopPaperRuntimeReadinessScheduler();
       vi.useRealTimers();
+    }
+  });
+
+  it('scheduler peer read 중 stop → canary/PAPER/Stop 후속 external read 0회', async () => {
+    const { t, calls } = makeSpyTransport(true);
+    coordinatorTransport = t;
+    let releasePeer: (() => void) | null = null;
+    const peerGate = new Promise<void>((resolve) => {
+      releasePeer = resolve;
+    });
+    const originalGetJson = t.getJson.bind(t);
+    const peerRead = vi.spyOn(t, 'getJson').mockImplementation(async (path) => {
+      await peerGate;
+      return originalGetJson(path);
+    });
+    installCoordinatorDeps();
+
+    try {
+      startPaperRuntimeReadinessScheduler();
+      await vi.waitFor(() => expect(peerRead).toHaveBeenCalledTimes(1));
+
+      stopPaperRuntimeReadinessScheduler();
+      releasePeer!();
+      await vi.waitFor(() => expect(
+        __getGmxApiReadinessCoordinatorStateForTests(),
+      ).toEqual({
+        active: false,
+        joinCount: 0,
+      }));
+
+      expect(calls).toEqual([{ method: 'GET', path: '/markets/tickers' }]);
+      expect(refreshCanarySpy).not.toHaveBeenCalled();
+      expect(runPaperCycleSpy).not.toHaveBeenCalled();
+      expect(refreshStopSpy).not.toHaveBeenCalled();
+      expect(dbWriteCalls).toEqual([]);
+    } finally {
+      const release = releasePeer as unknown as (() => void) | null;
+      release?.();
+      stopPaperRuntimeReadinessScheduler();
+      peerRead.mockRestore();
     }
   });
 
