@@ -58,6 +58,7 @@ import { getLastPreflight, isPreflightPassedFresh, runGmxLivePreflight, PREFLIGH
 import { deriveCanaryDecimalsReadiness } from '../lib/canaryDecimalsReadiness';
 import { getPaperRuntimeReadinessSnapshot } from '../lib/paperRuntimeReadiness';
 import { runGmxApiReadinessRefresh } from '../lib/gmxApiReadinessCoordinator';
+import { getPaperStopReadinessEvidence } from '../lib/paperStopReadinessEvidence';
 
 const router = Router();
 
@@ -228,6 +229,7 @@ async function buildGmxApiStatusSnapshot() {
 
   // ── 6H-2B §12 — 보호 주문(durable protection) 관측값 (조회 전용) ────────────
   const stopCapability = getStopExecutionCapability();
+  const paperStopReadinessEvidence = getPaperStopReadinessEvidence(Date.now(), env);
   let protectionCounts: Record<string, number> | null = null;
   let blockingProtectionCount: number | null = null;
   let staleStopCount: number | null = null;
@@ -346,6 +348,7 @@ async function buildGmxApiStatusSnapshot() {
       boundary: 'READ_ONLY_STATUS_NOT_EXECUTION_AUTHORIZATION',
       paperMode: process.env.WORKER_ENGINE_MODE === 'PAPER',
       schemaPin: { sdk: '@gmx-io/sdk@1.7.0', stopLossDecrease: 6 },
+      readinessEvidence: paperStopReadinessEvidence,
     },
     protectionCounts,
     blockingProtectionCount,
@@ -448,6 +451,7 @@ router.post('/executor/gmx-api/readiness/refresh', requireOperatorAuth, async (_
         },
         canaryEvidence: refreshResult.canaryEvidence,
         paperRuntimeReadiness: refreshResult.paperRuntimeReadiness,
+        paperStopReadinessEvidence: refreshResult.paperStopReadinessEvidence,
         stopCapability: refreshResult.stopCapability,
       },
       status: snapshot,

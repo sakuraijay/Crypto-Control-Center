@@ -92,6 +92,88 @@ function fmtPct(value: number | null, digits = 3): string {
 
 type PaperReadinessView = NonNullable<GmxApiStatusView['paperRuntimeReadiness']>;
 type PaperCostView = PaperReadinessView['costs']['BTC'];
+type StopReadinessEvidenceView = NonNullable<NonNullable<GmxApiStatusView['stopCapability']>['readinessEvidence']>;
+
+export function PaperStopReadinessEvidence({ evidence }: { evidence: StopReadinessEvidenceView }) {
+  return (
+    <div
+      className="sm:col-span-2 w-full space-y-2 rounded border border-sky-500/30 bg-sky-500/5 p-2"
+      data-testid="paper-stop-readiness-evidence"
+    >
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <p className="text-[11px] font-semibold text-sky-300">PAPER Stop Readiness Evidence</p>
+          <p className="text-[10px] text-sky-200">
+            진단 전용·읽기 전용 · status는 권한 아님 · 실행 승인 아님
+          </p>
+          <p className="font-mono text-[10px] text-muted-foreground">
+            {evidence.scope} · {evidence.boundary} · executionAuthorized {String(evidence.executionAuthorized)}
+          </p>
+        </div>
+        <Badge tone="warn">READ-ONLY / NOT EXECUTION AUTHORIZATION</Badge>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6">
+        <Row
+          label="Readiness complete"
+          tone={evidence.readinessComplete ? 'ok' : 'error'}
+          value={String(evidence.readinessComplete)}
+        />
+        <Row
+          label="Freshness / generation"
+          tone={evidence.fresh ? 'ok' : 'warn'}
+          value={`${evidence.fresh ? 'FRESH' : 'STALE'} · generation ${evidence.generation ?? '—'}`}
+        />
+        <Row label="Evaluated" tone="muted" value={fmtEpochMs(evidence.evaluatedAtMs)} />
+        <Row label="Expires" tone={evidence.fresh ? 'muted' : 'warn'} value={fmtEpochMs(evidence.expiresAtMs)} />
+      </div>
+
+      <div className="space-y-1">
+        <p className="text-[10px] font-semibold text-muted-foreground">Missing condition IDs</p>
+        <div className="flex flex-wrap gap-1" data-testid="paper-stop-readiness-missing-ids">
+          {evidence.missingConditionIds.length === 0
+            ? <span className="text-[10px] text-muted-foreground">없음</span>
+            : evidence.missingConditionIds.map((id) => <Badge key={id} tone="warn">{id}</Badge>)}
+        </div>
+      </div>
+
+      {evidence.reasons.length > 0 && (
+        <div className="space-y-0.5" data-testid="paper-stop-readiness-reasons">
+          {evidence.reasons.map((reason) => (
+            <p key={reason} className="text-[10px] text-amber-300">• {reason}</p>
+          ))}
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-2">
+        {evidence.conditions.map((condition) => (
+          <div
+            key={condition.id}
+            className="rounded border border-border/60 bg-background/50 p-2 space-y-1"
+            data-testid={`paper-stop-readiness-condition-${condition.id}`}
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-[11px] font-semibold">{condition.label} · {condition.id}</span>
+              <Badge tone={evidenceTone(condition.status)}>{evidenceLabel(condition.status)}</Badge>
+            </div>
+            <p className="font-mono text-[10px] text-muted-foreground">
+              category {condition.category} · source {condition.source ?? '—'}
+            </p>
+            <p className="text-[10px] text-muted-foreground">
+              observed {fmtEpochMs(condition.observedAtMs)} · age {fmtAge(condition.ageMs)}
+              {' · '}{condition.fresh ? 'FRESH' : 'NOT FRESH'}
+            </p>
+            {(condition.failureId || condition.detail) && (
+              <p className="text-[10px] text-amber-300">
+                failureId {condition.failureId ?? '—'} · detail {condition.detail ?? '—'}
+              </p>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 function PaperCostDiagnostics({ symbol, cost }: { symbol: 'BTC' | 'ETH'; cost: PaperCostView }) {
   const diagnostics = cost.diagnostics;
@@ -356,6 +438,9 @@ export function GmxApiStatusCard() {
                   ))
                 )}
               </div>
+              {s.stopCapability.readinessEvidence && (
+                <PaperStopReadinessEvidence evidence={s.stopCapability.readinessEvidence} />
+              )}
             </>
           )}
           <Row label="보호 주문 (차단/전체)"

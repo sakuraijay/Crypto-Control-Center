@@ -23,7 +23,6 @@ import {
 import {
   reconcileOnRestart,
   loadEmergencyStopFromDb,
-  refreshStopExecutionCapability,
   startPeriodicIntentReconciliation,
   stopPeriodicIntentReconciliation,
 } from "./workers/liveTestExecutor";
@@ -136,7 +135,13 @@ export function startServer({ httpServer, setDelegate, isShuttingDown }: Startup
       // DB의 emergency-stop 복원 전에 낙관 평가되는 race를 금지한다.
       loadEmergencyStopFromDb()
         .then(() => reconcileOnRestart())
-        .then(() => refreshStopExecutionCapability())
+        .then(async () => {
+          if (process.env.WORKER_ENGINE_MODE !== 'PAPER') {
+            const { refreshStopExecutionCapability } =
+              await import('./workers/liveTestExecutor');
+            await refreshStopExecutionCapability();
+          }
+        })
         .catch((err: unknown) => {
           logger.warn({ err }, "Startup safety reconciliation incomplete (fail-closed maintained)");
         });

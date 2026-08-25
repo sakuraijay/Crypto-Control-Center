@@ -55,6 +55,34 @@ export interface GmxApiStatusView {
     boundary: 'READ_ONLY_STATUS_NOT_EXECUTION_AUTHORIZATION';
     paperMode: boolean;
     schemaPin: { sdk: string; stopLossDecrease: number };
+    /**
+     * PAPER Stop readiness diagnostics. Display-only evidence; it cannot grant
+     * execution authorization.
+     */
+    readinessEvidence?: {
+      scope: 'PAPER_READ_ONLY_STOP_READINESS';
+      boundary: 'READ_ONLY_NOT_EXECUTION_AUTHORIZATION';
+      readinessComplete: boolean;
+      executionAuthorized: false;
+      generation: number | null;
+      evaluatedAtMs: number | null;
+      expiresAtMs: number | null;
+      fresh: boolean;
+      reasons: string[];
+      missingConditionIds: string[];
+      conditions: Array<{
+        id: string;
+        label: string;
+        category: 'supporting_readonly' | 'execution_required';
+        status: 'verified' | 'failed' | 'stale' | 'not_evaluated';
+        source: string | null;
+        observedAtMs: number | null;
+        ageMs: number | null;
+        fresh: boolean;
+        failureId: string | null;
+        detail: string | null;
+      }>;
+    };
   };
   protectionCounts?: Record<string, number> | null;
   blockingProtectionCount?: number | null;

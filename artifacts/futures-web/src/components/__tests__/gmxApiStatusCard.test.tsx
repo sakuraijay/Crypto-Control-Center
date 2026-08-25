@@ -15,7 +15,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
-import { GmxApiStatusCard, PaperCostDetails } from '../GmxApiStatusCard';
+import { GmxApiStatusCard, PaperCostDetails, PaperStopReadinessEvidence } from '../GmxApiStatusCard';
 import {
   fetchGmxApiStatus, postGmxApiReadinessRefresh, classifyGmxApiHttpFailure,
   type GmxApiStatusView,
@@ -585,5 +585,118 @@ describe('GmxApiStatusCard — PAPER runtime fixture', () => {
     expect(html).toContain('HTTP 503');
     expect(html).toContain('retry 0');
     expect(html).toContain('failover 1');
+  });
+});
+
+describe('GmxApiStatusCard — PAPER Stop readiness evidence', () => {
+  const COMPLETE_EVIDENCE: NonNullable<
+    NonNullable<GmxApiStatusView['stopCapability']>['readinessEvidence']
+  > = {
+    scope: 'PAPER_READ_ONLY_STOP_READINESS',
+    boundary: 'READ_ONLY_NOT_EXECUTION_AUTHORIZATION',
+    readinessComplete: true,
+    executionAuthorized: false,
+    generation: 12,
+    evaluatedAtMs: 1_777_000_000_000,
+    expiresAtMs: 1_777_000_060_000,
+    fresh: true,
+    reasons: [],
+    missingConditionIds: [],
+    conditions: [{
+      id: 'readonly_config',
+      label: 'Read-only config',
+      category: 'supporting_readonly',
+      status: 'verified',
+      source: 'server-config',
+      observedAtMs: 1_776_999_997_000,
+      ageMs: 3_000,
+      fresh: true,
+      failureId: null,
+      detail: 'verified without execution',
+    }],
+  };
+
+  it('complete evidence의 세대·시각·freshness·조건을 표시한다', () => {
+    const html = renderToStaticMarkup(<PaperStopReadinessEvidence evidence={COMPLETE_EVIDENCE} />);
+    expect(html).toContain('Readiness complete');
+    expect(html).toContain('true');
+    expect(html).toContain('FRESH · generation 12');
+    expect(html).toContain('Evaluated');
+    expect(html).toContain('Expires');
+    expect(html).toContain('Read-only config · readonly_config');
+    expect(html).toContain('supporting_readonly');
+    expect(html).toContain('VERIFIED');
+    expect(html).toContain('source server-config');
+    expect(html).toContain('age 3초 · FRESH');
+  });
+
+  it('failed/stale/not_evaluated 조건과 missing IDs 및 실패 세부를 표시한다', () => {
+    const evidence: typeof COMPLETE_EVIDENCE = {
+      ...COMPLETE_EVIDENCE,
+      readinessComplete: false,
+      fresh: false,
+      reasons: ['required checks incomplete'],
+      missingConditionIds: ['signer_ready', 'submission_ready'],
+      conditions: [
+        {
+          ...COMPLETE_EVIDENCE.conditions[0],
+          id: 'signer_ready',
+          label: 'Signer ready',
+          category: 'execution_required',
+          status: 'failed',
+          fresh: false,
+          failureId: 'SIGNER_DISABLED',
+          detail: 'signer is disabled',
+        },
+        {
+          ...COMPLETE_EVIDENCE.conditions[0],
+          id: 'prices_fresh',
+          label: 'Prices fresh',
+          status: 'stale',
+          fresh: false,
+          ageMs: 120_000,
+          failureId: 'PRICE_STALE',
+          detail: 'price observation expired',
+        },
+        {
+          ...COMPLETE_EVIDENCE.conditions[0],
+          id: 'submission_ready',
+          label: 'Submission ready',
+          category: 'execution_required',
+          status: 'not_evaluated',
+          source: null,
+          observedAtMs: null,
+          ageMs: null,
+          fresh: false,
+          failureId: null,
+          detail: 'not evaluated in PAPER',
+        },
+      ],
+    };
+    const html = renderToStaticMarkup(<PaperStopReadinessEvidence evidence={evidence} />);
+    for (const marker of [
+      'FAILED', 'STALE', 'NOT EVALUATED', 'signer_ready', 'submission_ready',
+      'SIGNER_DISABLED', 'signer is disabled', 'PRICE_STALE', 'price observation expired',
+      'source —', 'NOT FRESH', 'required checks incomplete',
+    ]) expect(html).toContain(marker);
+  });
+
+  it('optional evidence가 없는 기존 stopCapability 응답은 그대로 허용한다', () => {
+    const backwardCompatible: NonNullable<GmxApiStatusView['stopCapability']> = {
+      ...STATUS_FIXTURE.stopCapability!,
+    };
+    expect(backwardCompatible.readinessEvidence).toBeUndefined();
+    const cardSrc = readFileSync(path.resolve(__dirname, '../GmxApiStatusCard.tsx'), 'utf8');
+    expect(cardSrc).toContain('s.stopCapability.readinessEvidence &&');
+  });
+
+  it('authorization disclaimer를 정확히 표시한다', () => {
+    const html = renderToStaticMarkup(<PaperStopReadinessEvidence evidence={COMPLETE_EVIDENCE} />);
+    expect(html).toContain('진단 전용·읽기 전용 · status는 권한 아님 · 실행 승인 아님');
+    expect(html).toContain('READ-ONLY / NOT EXECUTION AUTHORIZATION');
+    expect(html).toContain('PAPER_READ_ONLY_STOP_READINESS');
+    expect(html).toContain('READ_ONLY_NOT_EXECUTION_AUTHORIZATION');
+    expect(html).toContain('executionAuthorized false');
+    expect(COMPLETE_EVIDENCE.executionAuthorized).toBe(false);
   });
 });

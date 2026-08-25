@@ -27,6 +27,13 @@ import {
   getStopExecutionCapability,
   type StopExecutionCapabilitySnapshot,
 } from './stopExecutionCapabilityState';
+import {
+  beginPaperStopReadinessEvidenceGeneration,
+  getPaperStopReadinessEvidence,
+  publishPaperStopReadinessEvidence,
+  publishPaperStopReadinessEvidenceUnavailable,
+  type PaperStopReadinessEvidence,
+} from './paperStopReadinessEvidence';
 
 export interface GmxApiPeerHealth {
   peerHost: string;
@@ -42,6 +49,7 @@ export interface GmxApiReadinessRefreshResult {
   peerHealth: GmxApiPeerHealth[] | null;
   canaryEvidence: ManualCanaryReadonlyEvidence;
   paperRuntimeReadiness: PaperRuntimeReadinessView;
+  paperStopReadinessEvidence: PaperStopReadinessEvidence;
   stopCapability: StopCapability;
 }
 
@@ -126,6 +134,7 @@ async function performRefresh(
   options: GmxApiReadinessRefreshOptions,
   deps: CoordinatorDeps,
   currentGeneration: number,
+  paperEvidencePublicationToken: number | null,
 ): Promise<GmxApiReadinessRefreshResult> {
   const transport = options.transport ?? deps.createTransport(deps.env);
   const readonlyEnabled = transport.readonlyEnabled;
@@ -134,58 +143,116 @@ async function performRefresh(
   let peerHealth: GmxApiPeerHealth[] | null = null;
   let canaryEvidence: ManualCanaryReadonlyEvidence = { decimals: {}, costs: {} };
   let paperRuntimeReadiness = deps.getPaperSnapshot(Date.now(), deps.env);
+  let paperStopReadinessEvidence = getPaperStopReadinessEvidence(Date.now(), deps.env);
   let stopCapability = deps.getStopCapability();
+  let paperStage: 'peer' | 'canary' | 'paper' = 'peer';
   const snapshot = (): GmxApiReadinessRefreshResult => ({
     generation: currentGeneration,
     readonlyEnabled,
     peerHealth,
     canaryEvidence,
     paperRuntimeReadiness,
+    paperStopReadinessEvidence,
     stopCapability,
   });
-
-  if (!shouldContinue()) return snapshot();
-  if (readonlyEnabled) {
-    peerHealth = [];
-    for (const base of transport.peers) {
-      if (!shouldContinue()) return snapshot();
-      const peerTransport = options.peerTransportFactory
-        ? options.peerTransportFactory(base)
-        : deps.createPeerTransport(deps.env, base);
-      const result = await peerTransport.getJson('/markets/tickers');
-      if (!shouldContinue()) return snapshot();
-      peerHealth.push(result.ok
-        ? { peerHost: result.peerHost, ok: true }
-        : {
-          peerHost: new URL(base).host,
-          ok: false,
-          kind: result.kind,
-        });
-      if (options.singlePeerOnly) break;
-    }
-  }
-
-  if (readonlyEnabled) {
-    if (!shouldContinue()) return snapshot();
-    canaryEvidence = await deps.refreshCanary();
-    if (!shouldContinue()) return snapshot();
-  }
-
-  if (readonlyEnabled && deps.env.WORKER_ENGINE_MODE === 'PAPER') {
-    if (!shouldContinue()) return snapshot();
-    paperRuntimeReadiness = await deps.runPaperCycle({
-      forceDeployment: options.forceDeployment !== false,
-      preloadedCanary: canaryEvidence,
+  const publishUnavailable = (
+    failureId: string,
+    reason: string,
+    failedConditionIds: string[] = [],
+  ): void => {
+    if (deps.env.WORKER_ENGINE_MODE !== 'PAPER'
+      || paperEvidencePublicationToken === null) return;
+    paperStopReadinessEvidence = publishPaperStopReadinessEvidenceUnavailable({
+      generation: currentGeneration,
+      publicationToken: paperEvidencePublicationToken,
+      env: deps.env,
+      readonlyEnabled,
+      peerHealth,
+      failureId,
+      reason,
+      failedConditionIds,
     });
-    if (!shouldContinue()) return snapshot();
-  }
+  };
+  const cancelledSnapshot = (): GmxApiReadinessRefreshResult => {
+    publishUnavailable(
+      'PAPER_READINESS_GENERATION_CANCELLED',
+      'Current PAPER readiness generation was cancelled (fail-closed).',
+    );
+    return snapshot();
+  };
 
-  if (readonlyEnabled && deps.env.WORKER_ENGINE_MODE !== 'PAPER') {
-    if (!shouldContinue()) return snapshot();
-    stopCapability = await deps.refreshStopCapability();
-  }
+  try {
+    if (!shouldContinue()) return cancelledSnapshot();
+    if (readonlyEnabled) {
+      peerHealth = [];
+      for (const base of transport.peers) {
+        if (!shouldContinue()) return cancelledSnapshot();
+        const peerTransport = options.peerTransportFactory
+          ? options.peerTransportFactory(base)
+          : deps.createPeerTransport(deps.env, base);
+        const result = await peerTransport.getJson('/markets/tickers');
+        if (!shouldContinue()) return cancelledSnapshot();
+        peerHealth.push(result.ok
+          ? { peerHost: result.peerHost, ok: true }
+          : {
+            peerHost: new URL(base).host,
+            ok: false,
+            kind: result.kind,
+          });
+        if (options.singlePeerOnly) break;
+      }
+    }
 
-  return snapshot();
+    if (readonlyEnabled) {
+      paperStage = 'canary';
+      if (!shouldContinue()) return cancelledSnapshot();
+      canaryEvidence = await deps.refreshCanary();
+      if (!shouldContinue()) return cancelledSnapshot();
+    }
+
+    if (readonlyEnabled && deps.env.WORKER_ENGINE_MODE === 'PAPER') {
+      paperStage = 'paper';
+      if (!shouldContinue()) return cancelledSnapshot();
+      paperRuntimeReadiness = await deps.runPaperCycle({
+        forceDeployment: options.forceDeployment !== false,
+        preloadedCanary: canaryEvidence,
+      });
+      if (!shouldContinue()) return cancelledSnapshot();
+      paperStopReadinessEvidence = publishPaperStopReadinessEvidence({
+        generation: currentGeneration,
+        publicationToken: paperEvidencePublicationToken!,
+        env: deps.env,
+        readonlyEnabled,
+        peerHealth,
+        paperRuntimeReadiness,
+      });
+    } else if (deps.env.WORKER_ENGINE_MODE === 'PAPER') {
+      publishUnavailable(
+        'GMX_API_READONLY_REQUIRED',
+        'GMX API read-only mode is disabled for the current PAPER generation.',
+        ['readonlyEnabled'],
+      );
+    }
+
+    if (readonlyEnabled && deps.env.WORKER_ENGINE_MODE !== 'PAPER') {
+      if (!shouldContinue()) return snapshot();
+      stopCapability = await deps.refreshStopCapability();
+    }
+
+    return snapshot();
+  } catch (error) {
+    const failedConditionIds = paperStage === 'peer'
+      ? ['healthyPeer']
+      : paperStage === 'canary'
+        ? ['btcDecimals8', 'ethDecimals18', 'btcCostEvidence', 'ethCostEvidence']
+        : ['deploymentVerified'];
+    publishUnavailable(
+      `PAPER_READINESS_${paperStage.toUpperCase()}_FAILED`,
+      `Current PAPER readiness ${paperStage} stage failed (fail-closed).`,
+      failedConditionIds,
+    );
+    throw error;
+  }
 }
 
 export async function runGmxApiReadinessRefresh(
@@ -200,14 +267,36 @@ export async function runGmxApiReadinessRefresh(
   activeJoinCount = 0;
   const currentGeneration = ++generation;
   activeGeneration = currentGeneration;
+  const paperEvidencePublicationToken = deps.env.WORKER_ENGINE_MODE === 'PAPER'
+    ? beginPaperStopReadinessEvidenceGeneration(currentGeneration)
+    : null;
   deps.setCoordinatorInFlight(true);
   // Defer the production work by one microtask so the shared-flight identity is
   // published before even the first peer transport operation can begin.
   const refreshPromise = Promise.resolve().then(() =>
-    performRefresh(options, deps, currentGeneration));
+    performRefresh(options, deps, currentGeneration, paperEvidencePublicationToken));
   activeRefreshPromise = refreshPromise;
   try {
     return await refreshPromise;
+  } catch (error) {
+    if (deps.env.WORKER_ENGINE_MODE === 'PAPER'
+      && paperEvidencePublicationToken !== null) {
+      const currentEvidence = getPaperStopReadinessEvidence(Date.now(), deps.env);
+      if (currentEvidence.generation === currentGeneration
+        && currentEvidence.evaluatedAtMs === null) {
+        publishPaperStopReadinessEvidenceUnavailable({
+          generation: currentGeneration,
+          publicationToken: paperEvidencePublicationToken,
+          env: deps.env,
+          readonlyEnabled: deps.env.GMX_API_READONLY_ENABLED === 'true',
+          peerHealth: null,
+          failureId: 'PAPER_READINESS_COORDINATOR_FAILED',
+          reason: 'Current PAPER readiness coordinator generation failed (fail-closed).',
+          failedConditionIds: ['healthyPeer'],
+        });
+      }
+    }
+    throw error;
   } finally {
     if (activeRefreshPromise === refreshPromise) {
       activeRefreshPromise = null;

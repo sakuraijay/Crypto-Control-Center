@@ -71,6 +71,10 @@ import {
   stopPaperRuntimeReadinessScheduler,
 } from '../lib/paperRuntimeReadiness';
 import { getStopExecutionCapability } from '../lib/stopExecutionCapabilityState';
+import {
+  __resetPaperStopReadinessEvidenceForTests,
+  getPaperStopReadinessEvidence,
+} from '../lib/paperStopReadinessEvidence';
 import type { ManualCanaryReadonlyEvidence } from '../lib/manualCanaryReadonlyEvidence';
 import {
   __setManualCanaryReadonlyReadersForTests,
@@ -139,6 +143,7 @@ function makeSpyTransport(readonlyEnabled: boolean) {
 
 beforeEach(() => {
   __resetPaperRuntimeReadinessForTests();
+  __resetPaperStopReadinessEvidenceForTests();
   __resetGmxApiReadinessCoordinatorForTests();
   dbWriteCalls.length = 0;
   process.env.OPERATOR_MASTER_PIN = PIN;
@@ -167,6 +172,7 @@ afterEach(() => {
   __setGmxApiRouteTransportForTests(null);
   __resetGmxApiReadinessCoordinatorForTests();
   __resetPaperRuntimeReadinessForTests();
+  __resetPaperStopReadinessEvidenceForTests();
   __setManualCanaryReadonlyReadersForTests(null);
 });
 afterAll(() => {
@@ -206,7 +212,19 @@ describe('GET /api/executor/gmx-api/status', () => {
     expect(s.stopCapability).toMatchObject({
       scope: 'LIVE_STOP_EXECUTION',
       boundary: 'READ_ONLY_STATUS_NOT_EXECUTION_AUTHORIZATION',
+      readinessEvidence: {
+        scope: 'PAPER_READ_ONLY_STOP_READINESS',
+        boundary: 'READ_ONLY_NOT_EXECUTION_AUTHORIZATION',
+        readinessComplete: false,
+        executionAuthorized: false,
+        generation: null,
+        evaluatedAtMs: null,
+        expiresAtMs: null,
+        fresh: false,
+      },
     });
+    expect(Array.isArray(s.stopCapability.readinessEvidence.conditions)).toBe(true);
+    expect(Array.isArray(s.stopCapability.readinessEvidence.missingConditionIds)).toBe(true);
     expect(typeof s.stopCapability.paperMode).toBe('boolean');
     expect(Array.isArray(s.stopCapability.reasons)).toBe(true);
     expect(s.paperRuntimeReadiness).toMatchObject({
@@ -290,6 +308,91 @@ describe('POST /api/executor/gmx-api/readiness/refresh', () => {
     expect(runPaperCycleSpy).not.toHaveBeenCalled();
     expect(refreshStopSpy).not.toHaveBeenCalled();
     expect(dbWriteCalls).toEqual([]);
+    expect(res.body.refresh.paperStopReadinessEvidence).toMatchObject({
+      generation: 1,
+      readinessComplete: false,
+      fresh: true,
+      executionAuthorized: false,
+    });
+    expect(res.body.refresh.paperStopReadinessEvidence.reasons).toEqual([
+      'GMX API read-only mode is disabled for the current PAPER generation.',
+    ]);
+    expect(res.body.refresh.paperStopReadinessEvidence.conditions
+      .find((condition: { id: string }) => condition.id === 'paperMode'))
+      .toMatchObject({ status: 'verified', fresh: true });
+    expect(res.body.refresh.paperStopReadinessEvidence.conditions
+      .find((condition: { id: string }) => condition.id === 'readonlyEnabled'))
+      .toMatchObject({
+        status: 'failed',
+        failureId: 'GMX_API_READONLY_REQUIRED',
+      });
+  });
+
+  it.each(['canary', 'paper'] as const)(
+    'publishes a sanitized current-generation snapshot when the %s stage throws',
+    async (stage) => {
+      if (stage === 'canary') {
+        refreshCanarySpy.mockRejectedValueOnce(new Error('secret upstream detail'));
+      } else {
+        runPaperCycleSpy.mockRejectedValueOnce(new Error('secret paper detail'));
+      }
+      installCoordinatorDeps();
+
+      await expect(runGmxApiReadinessRefresh({ singlePeerOnly: true }))
+        .rejects.toThrow(`secret ${stage === 'canary' ? 'upstream' : 'paper'} detail`);
+
+      const result = getPaperStopReadinessEvidence(Date.now(), coordinatorEnv);
+      expect(result).toMatchObject({
+        generation: 1,
+        readinessComplete: false,
+        fresh: true,
+        executionAuthorized: false,
+      });
+      expect(result.reasons).toEqual([
+        `Current PAPER readiness ${stage} stage failed (fail-closed).`,
+      ]);
+      expect(JSON.stringify(result)).not.toContain('secret');
+      const failedIds = stage === 'canary'
+        ? ['btcDecimals8', 'ethDecimals18', 'btcCostEvidence', 'ethCostEvidence']
+        : ['deploymentVerified'];
+      for (const id of failedIds) {
+        expect(result.conditions.find((condition) => condition.id === id))
+          .toMatchObject({
+            status: 'failed',
+            failureId: `PAPER_READINESS_${stage.toUpperCase()}_FAILED`,
+            detail: 'The current read-only readiness stage failed.',
+          });
+      }
+      expect(getStopExecutionCapability().available).toBe(false);
+    },
+  );
+
+  it('publishes explicit cancellation without making external calls', async () => {
+    const { t, calls } = makeSpyTransport(true);
+    coordinatorTransport = t;
+    installCoordinatorDeps();
+    const result = await runGmxApiReadinessRefresh({
+      singlePeerOnly: true,
+      shouldContinue: () => false,
+    });
+
+    expect(calls).toEqual([]);
+    expect(refreshCanarySpy).not.toHaveBeenCalled();
+    expect(runPaperCycleSpy).not.toHaveBeenCalled();
+    expect(result.paperStopReadinessEvidence).toMatchObject({
+      generation: 1,
+      readinessComplete: false,
+      fresh: true,
+      executionAuthorized: false,
+      reasons: [
+        'Current PAPER readiness generation was cancelled (fail-closed).',
+      ],
+    });
+    expect(result.paperStopReadinessEvidence.conditions
+      .find((condition) => condition.id === 'paperMode')?.status).toBe('verified');
+    expect(result.paperStopReadinessEvidence.conditions
+      .find((condition) => condition.id === 'healthyPeer')?.status)
+      .toBe('not_evaluated');
   });
 
   it('readonly 켜짐 → 공개 GET/status 조회만 — prepare/submit POST 0회', async () => {
@@ -310,8 +413,15 @@ describe('POST /api/executor/gmx-api/readiness/refresh', () => {
     expect(runPaperCycleSpy).toHaveBeenCalledTimes(1);
     expect(refreshStopSpy).not.toHaveBeenCalled();
     expect(dbWriteCalls).toEqual([]);
+    expect(res.body.refresh.paperStopReadinessEvidence).toMatchObject({
+      scope: 'PAPER_READ_ONLY_STOP_READINESS',
+      executionAuthorized: false,
+      generation: res.body.refresh.generation,
+    });
     // 응답에 최신 스냅샷 동봉
     expect(res.body.status.readyForControlledCanary).toBe(false);
+    expect(res.body.status.stopCapability.available)
+      .toBe(getStopExecutionCapability().available);
   });
 
   it('동시 HTTP/HTTP refresh가 같은 generation을 공유하고 canary read를 한 번만 수행한다', async () => {
@@ -504,6 +614,11 @@ describe('POST /api/executor/gmx-api/readiness/refresh', () => {
 
     releaseFirst!();
     await staleFlight;
+    expect(getPaperStopReadinessEvidence(Date.now(), coordinatorEnv)).toMatchObject({
+      generation: 1,
+      evaluatedAtMs: null,
+      readinessComplete: false,
+    });
     expect(__getGmxApiReadinessCoordinatorStateForTests()).toEqual({
       active: true,
       joinCount: 1,
