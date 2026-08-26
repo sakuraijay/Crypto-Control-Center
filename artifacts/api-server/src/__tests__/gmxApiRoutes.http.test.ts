@@ -76,6 +76,7 @@ import {
   getPaperStopReadinessEvidence,
 } from '../lib/paperStopReadinessEvidence';
 import type { ManualCanaryReadonlyEvidence } from '../lib/manualCanaryReadonlyEvidence';
+import { buildPaperRelayEvidence } from '../lib/paperRelayEvidence';
 import {
   __setManualCanaryReadonlyReadersForTests,
   refreshManualCanaryReadonlyEvidence,
@@ -245,6 +246,51 @@ describe('GET /api/executor/gmx-api/status', () => {
     });
     expect(s.paperRuntimeReadiness.costs.BTC.blockReason).toContain('COST_BTC_NOT_EVALUATED');
     expect(s.paperRuntimeReadiness).toHaveProperty('blockerIds');
+    expect(s.paperRelayEvidence).toMatchObject({
+      scope: 'PAPER_READ_ONLY_RELAY_EVIDENCE',
+      boundary: 'READ_ONLY_NOT_EXECUTION_AUTHORIZATION',
+      executionAuthorized: false,
+      fresh: true,
+    });
+    expect(s.paperRelayEvidence.executionOnly).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: 'canonicalAuthorization',
+        status: 'not_evaluated',
+        failureId: 'CANONICAL_AUTHORIZATION_NOT_EVALUATED_IN_PAPER',
+      }),
+      expect.objectContaining({
+        id: 'actionBudget',
+        status: 'not_evaluated',
+        failureId: 'ACTION_BUDGET_NOT_EVALUATED_IN_PAPER',
+      }),
+      expect.objectContaining({
+        id: 'prepareReconciliation',
+        status: 'not_evaluated',
+      }),
+      expect.objectContaining({
+        id: 'protectionReconciliation',
+        status: 'not_evaluated',
+      }),
+      expect.objectContaining({
+        id: 'settlementReconciliation',
+        status: 'not_evaluated',
+      }),
+    ]));
+    expect(s.canonical).toEqual({
+      authorized: false,
+      approvalRemainingOk: false,
+      reason: 'CANONICAL_AUTHORIZATION_NOT_EVALUATED_IN_PAPER',
+      expiresAt: null,
+      remaining: null,
+    });
+    expect(s.approvalSessionReady).toBeNull();
+    expect(s.actionBudget).toMatchObject({
+      sufficient: false,
+      remainingActions: null,
+      inFlightReservedActions: null,
+      budgetShortfall: null,
+      reasons: ['ACTION_BUDGET_NOT_EVALUATED_IN_PAPER'],
+    });
   });
 
   it('인증 GET은 외부 transport·DB write·execution-eligible evidence를 건드리지 않는다', async () => {
@@ -271,6 +317,53 @@ describe('GET /api/executor/gmx-api/status', () => {
     expect(body).not.toMatch(/Gelato Enterprise|Gas Tank|GELATO_API_KEY/i);
     expect(body).not.toContain(PIN);
     expect(body).not.toMatch(/private[_ ]?key/i);
+    const paperRelayView = JSON.stringify({
+      canonical: res.body.status.canonical,
+      actionBudget: res.body.status.actionBudget,
+      paperRelayEvidence: res.body.status.paperRelayEvidence,
+    });
+    expect(paperRelayView).not.toMatch(/signedPayload|rpcUrl|payload|0x[a-f0-9]{40,}/i);
+  });
+});
+
+describe('PAPER Relay evidence safety contract', () => {
+  it('execution-only 요구는 NOT EVALUATED, 실제 저장 결함만 fail-closed failure ID로 분리한다', () => {
+    const evidence = buildPaperRelayEvidence({
+      nowMs: 1_777_000_000_000,
+      dbOk: false,
+      blockingIntentCount: null,
+      openRelayTaskCount: 1,
+      unresolvedTaskCount: 2,
+      activeRevokeInProgress: null,
+      prepareStageCounts: { API_PREPARED: 1 },
+      blockingProtectionCount: null,
+      uncoveredStopCount: null,
+      legacyZeroFeeCount: null,
+      unsettledLiveTradeCount: null,
+      protectionReconciliation: {
+        lastRunAtMs: 1_776_999_995_000,
+        complete: false,
+        blockNewOpens: true,
+        ambiguousCount: 1,
+      },
+    });
+
+    expect(evidence.executionAuthorized).toBe(false);
+    expect(evidence.executionOnly.every((entry) =>
+      entry.status === 'not_evaluated' && entry.fresh === false)).toBe(true);
+    expect(evidence.failureIds).toEqual(expect.arrayContaining([
+      'PAPER_RELAY_STATUS_DB_READ_FAILED',
+      'BLOCKING_INTENT_READ_FAILED',
+      'OPEN_RELAY_TASK_PRESENT',
+      'UNRESOLVED_RELAY_TASK_PRESENT',
+      'ACTIVE_REVOKE_READ_FAILED',
+      'NON_TERMINAL_PREPARE_TASK_PRESENT',
+      'PROTECTION_ORDER_READ_FAILED',
+      'STOP_COVERAGE_READ_FAILED',
+      'SETTLEMENT_STATUS_READ_FAILED',
+      'STORED_PROTECTION_EVIDENCE_AMBIGUOUS',
+    ]));
+    expect(evidence.safe).toBe(false);
   });
 });
 

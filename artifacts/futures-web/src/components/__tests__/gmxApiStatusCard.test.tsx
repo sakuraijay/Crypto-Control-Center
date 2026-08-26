@@ -15,7 +15,12 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
-import { GmxApiStatusCard, PaperCostDetails, PaperStopReadinessEvidence } from '../GmxApiStatusCard';
+import {
+  GmxApiStatusCard,
+  PaperCostDetails,
+  PaperRelayEvidence,
+  PaperStopReadinessEvidence,
+} from '../GmxApiStatusCard';
 import {
   fetchGmxApiStatus, postGmxApiReadinessRefresh, classifyGmxApiHttpFailure,
   type GmxApiStatusView,
@@ -37,6 +42,67 @@ const STATUS_FIXTURE: GmxApiStatusView = {
     authorized: false, approvalRemainingOk: false,
     reason: 'canonical readback 미조회 — 저장 스냅샷 없음 (fail-closed)',
     expiresAt: null, remaining: null,
+  },
+  paperRelayEvidence: {
+    scope: 'PAPER_READ_ONLY_RELAY_EVIDENCE',
+    boundary: 'READ_ONLY_NOT_EXECUTION_AUTHORIZATION',
+    executionAuthorized: false,
+    evaluatedAtMs: 1_777_000_000_000,
+    fresh: true,
+    safe: true,
+    failureIds: [],
+    executionOnly: [
+      {
+        id: 'canonicalAuthorization',
+        status: 'not_evaluated',
+        fresh: false,
+        observedAtMs: null,
+        ageMs: null,
+        failureId: 'CANONICAL_AUTHORIZATION_NOT_EVALUATED_IN_PAPER',
+      },
+      {
+        id: 'actionBudget',
+        status: 'not_evaluated',
+        fresh: false,
+        observedAtMs: null,
+        ageMs: null,
+        failureId: 'ACTION_BUDGET_NOT_EVALUATED_IN_PAPER',
+      },
+      {
+        id: 'prepareReconciliation',
+        status: 'not_evaluated',
+        fresh: false,
+        observedAtMs: null,
+        ageMs: null,
+        failureId: 'PREPARE_RECONCILIATION_NOT_EVALUATED_IN_PAPER',
+      },
+      {
+        id: 'protectionReconciliation',
+        status: 'not_evaluated',
+        fresh: false,
+        observedAtMs: null,
+        ageMs: null,
+        failureId: 'PROTECTION_RECONCILIATION_NOT_EVALUATED_IN_PAPER',
+      },
+      {
+        id: 'settlementReconciliation',
+        status: 'not_evaluated',
+        fresh: false,
+        observedAtMs: null,
+        ageMs: null,
+        failureId: 'SETTLEMENT_RECONCILIATION_NOT_EVALUATED_IN_PAPER',
+      },
+    ],
+    storedSafety: [
+      {
+        id: 'blockingIntents',
+        status: 'verified',
+        fresh: true,
+        observedAtMs: 1_777_000_000_000,
+        ageMs: 0,
+        failureId: null,
+      },
+    ],
   },
   approvalSessionReady: false,
   blockingIntentCount: 0,
@@ -287,6 +353,21 @@ describe('GmxApiStatusCard — 렌더 계약', () => {
   });
 });
 
+describe('PAPER Relay Evidence 렌더 계약', () => {
+  it('execution-only를 NOT EVALUATED로 표시하고 권한이 아님을 명시한다', () => {
+    const evidence = STATUS_FIXTURE.paperRelayEvidence!;
+    const html = renderToStaticMarkup(<PaperRelayEvidence evidence={evidence} />);
+
+    expect(html).toContain('PAPER Relay Evidence');
+    expect(html).toContain('NOT EVALUATED');
+    expect(html).toContain('READ-ONLY / NOT EXECUTION AUTHORIZATION');
+    expect(html).toContain('CANONICAL_AUTHORIZATION_NOT_EVALUATED_IN_PAPER');
+    expect(html).toContain('ACTION_BUDGET_NOT_EVALUATED_IN_PAPER');
+    expect(html).toContain('저장 안전 결함 없음');
+    expect(html).not.toMatch(/remainingActions|expiresAt|signature|rpcUrl/i);
+  });
+});
+
 describe('소스 계약 (§11 규칙)', () => {
   const cardSrc = readFileSync(path.resolve(__dirname, '../GmxApiStatusCard.tsx'), 'utf8');
   const libSrc = readFileSync(path.resolve(__dirname, '../../lib/gmxApiStatus.ts'), 'utf8');
@@ -365,6 +446,15 @@ describe('소스 계약 (§11 규칙)', () => {
   it('진단 UI는 자동 polling·sign/execute/preflight endpoint를 추가하지 않는다', () => {
     expect(cardSrc).not.toMatch(/setInterval/);
     expect(libSrc).not.toMatch(/\/sign|\/execute|\/preflight|\/prepare|\/submit/);
+  });
+
+  it('PAPER Relay evidence는 execution-only와 저장 안전 결함을 분리한다', () => {
+    for (const label of [
+      'PAPER Relay Evidence',
+      'canonical·action budget·reconciliation은 PAPER에서 평가하지 않습니다',
+      'paper-relay-failure-ids',
+    ]) expect(cardSrc).toContain(label);
+    expect(cardSrc).toContain('!s.paperRelayEvidence');
   });
 
   it('Stop capability는 PAPER에서 전체 사유와 비권한 경계를 보존한다', () => {

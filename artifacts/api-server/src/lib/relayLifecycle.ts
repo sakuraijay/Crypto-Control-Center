@@ -230,6 +230,23 @@ export async function listUnresolvedTasks(limit = 50): Promise<RelayTaskRow[]> {
 }
 
 /**
+ * UNRESOLVED/SUBMITTING 조사 대상 수 — 조회 실패는 null.
+ * 상태/안전 evidence에서 빈 배열 fallback을 정상 0건으로 오인하지 않도록 분리한다.
+ */
+export async function countUnresolvedTasksOrNull(): Promise<number | null> {
+  try {
+    const rows = await db.select({ id: relayTasksTable.id }).from(relayTasksTable)
+      .where(inArray(relayTasksTable.status, [
+        RELAY_TASK_STATUS.UNRESOLVED,
+        RELAY_TASK_STATUS.SUBMITTING,
+      ]));
+    return rows.length;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * 미종결(non-terminal) relay task 수 — 조회 실패는 null (fail-closed 판단용, 5단계).
  * listUnresolvedTasks와 달리 오류를 빈 배열로 삼키지 않는다.
  */

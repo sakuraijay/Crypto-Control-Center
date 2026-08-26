@@ -28,6 +28,31 @@ export interface GmxApiStatusView {
     expiresAt: string | number | null;
     remaining: string | null;
   };
+  paperRelayEvidence?: {
+    scope: 'PAPER_READ_ONLY_RELAY_EVIDENCE';
+    boundary: 'READ_ONLY_NOT_EXECUTION_AUTHORIZATION';
+    executionAuthorized: false;
+    evaluatedAtMs: number;
+    fresh: true;
+    safe: boolean;
+    failureIds: string[];
+    executionOnly: Array<{
+      id: string;
+      status: 'verified' | 'failed' | 'not_evaluated';
+      fresh: boolean;
+      observedAtMs: number | null;
+      ageMs: number | null;
+      failureId: string | null;
+    }>;
+    storedSafety: Array<{
+      id: string;
+      status: 'verified' | 'failed' | 'not_evaluated';
+      fresh: boolean;
+      observedAtMs: number | null;
+      ageMs: number | null;
+      failureId: string | null;
+    }>;
+  } | null;
   approvalSessionReady: boolean | null;
   blockingIntentCount: number | null;
   openRelayTaskCount: number | null;

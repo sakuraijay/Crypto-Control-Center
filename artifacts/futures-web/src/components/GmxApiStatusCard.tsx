@@ -93,6 +93,55 @@ function fmtPct(value: number | null, digits = 3): string {
 type PaperReadinessView = NonNullable<GmxApiStatusView['paperRuntimeReadiness']>;
 type PaperCostView = PaperReadinessView['costs']['BTC'];
 type StopReadinessEvidenceView = NonNullable<NonNullable<GmxApiStatusView['stopCapability']>['readinessEvidence']>;
+type PaperRelayEvidenceView = NonNullable<GmxApiStatusView['paperRelayEvidence']>;
+
+export function PaperRelayEvidence({ evidence }: { evidence: PaperRelayEvidenceView }) {
+  const entries = [...evidence.executionOnly, ...evidence.storedSafety];
+  return (
+    <div
+      className="sm:col-span-2 space-y-2 rounded border border-sky-500/30 bg-sky-500/5 p-2"
+      data-testid="paper-relay-evidence"
+    >
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <p className="text-[11px] font-semibold text-sky-300">PAPER Relay Evidence</p>
+          <p className="text-[10px] text-sky-200">
+            실행 전용 canonical·action budget·reconciliation은 PAPER에서 평가하지 않습니다.
+          </p>
+          <p className="font-mono text-[10px] text-muted-foreground">
+            {evidence.scope} · {evidence.boundary} · executionAuthorized false
+          </p>
+        </div>
+        <Badge tone="warn">READ-ONLY / NOT EXECUTION AUTHORIZATION</Badge>
+      </div>
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-2">
+        {entries.map((entry) => (
+          <div
+            key={entry.id}
+            className="rounded border border-border/60 bg-background/50 p-2"
+            data-testid={`paper-relay-evidence-${entry.id}`}
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="font-mono text-[10px]">{entry.id}</span>
+              <Badge tone={evidenceTone(entry.status)}>
+                {evidenceLabel(entry.status)}
+              </Badge>
+            </div>
+            <p className="text-[10px] text-muted-foreground">
+              {entry.fresh ? 'FRESH' : 'NOT FRESH'} · age {fmtAge(entry.ageMs)}
+              {' · '}failureId {entry.failureId ?? '—'}
+            </p>
+          </div>
+        ))}
+      </div>
+      <div className="flex flex-wrap gap-1" data-testid="paper-relay-failure-ids">
+        {evidence.failureIds.length === 0
+          ? <Badge tone="ok">저장 안전 결함 없음</Badge>
+          : evidence.failureIds.map((id) => <Badge key={id} tone="error">{id}</Badge>)}
+      </div>
+    </div>
+  );
+}
 
 export function PaperStopReadinessEvidence({ evidence }: { evidence: StopReadinessEvidenceView }) {
   return (
@@ -372,20 +421,27 @@ export function GmxApiStatusCard() {
             value={s.emergencyStopActive ? <><Ban className="w-3 h-3" /> 활성</> : '비활성'} />
           <Row label="Delegated signer" tone={signerReady ? 'warn' : 'muted'}
             value={s.signerEnabled ? (s.signerInitialized ? 'initialized' : 'enabled·미초기화') : '비활성'} />
-          <Row label="Owner Approval 세션" tone={triState(s.approvalSessionReady, true, 'OWNER_SIGNATURE_READY', '없음').tone}
-            value={triState(s.approvalSessionReady, true, 'OWNER_SIGNATURE_READY', '없음').text} />
-          <Row label="Canonical verified" tone={s.canonical.authorized ? 'ok' : 'error'}
-            value={s.canonical.authorized ? '검증됨' : '미검증'} />
-          <Row label="Remaining actions" tone={s.canonical.approvalRemainingOk ? 'ok' : 'warn'}
-            value={s.canonical.remaining ?? '—'} />
-          <Row label="Approval expiresAt" tone="muted" value={fmtExpires(s.canonical.expiresAt)} />
+          {s.paperRelayEvidence && <PaperRelayEvidence evidence={s.paperRelayEvidence} />}
+          {!s.paperRelayEvidence && (
+            <>
+              <Row label="Owner Approval 세션" tone={triState(s.approvalSessionReady, true, 'OWNER_SIGNATURE_READY', '없음').tone}
+                value={triState(s.approvalSessionReady, true, 'OWNER_SIGNATURE_READY', '없음').text} />
+              <Row label="Canonical verified" tone={s.canonical.authorized ? 'ok' : 'error'}
+                value={s.canonical.authorized ? '검증됨' : '미검증'} />
+              <Row label="Remaining actions" tone={s.canonical.approvalRemainingOk ? 'ok' : 'warn'}
+                value={s.canonical.remaining ?? '—'} />
+              <Row label="Approval expiresAt" tone="muted" value={fmtExpires(s.canonical.expiresAt)} />
+            </>
+          )}
           <Row label="Active revoke" tone={triState(s.activeRevokeInProgress, false, '없음', '진행 중').tone}
             value={triState(s.activeRevokeInProgress, false, '없음', '진행 중').text} />
           <Row label="Blocking intents" tone={s.blockingIntentCount === null ? 'warn' : s.blockingIntentCount === 0 ? 'ok' : 'error'}
             value={s.blockingIntentCount === null ? '조회 실패' : String(s.blockingIntentCount)} />
           <Row label="Open tasks / Unresolved" tone={s.unresolvedTaskCount === null ? 'warn' : s.unresolvedTaskCount === 0 ? 'ok' : 'error'}
             value={`${s.openRelayTaskCount ?? '조회 실패'} / ${s.unresolvedTaskCount ?? '조회 실패'}`} />
-          <Row label="Reconciliation" tone={s.reconciled ? 'ok' : 'error'} value={s.reconciled ? '완료' : '미완료 — 신규 주문 차단'} />
+          {!s.paperRelayEvidence && (
+            <Row label="Reconciliation" tone={s.reconciled ? 'ok' : 'error'} value={s.reconciled ? '완료' : '미완료 — 신규 주문 차단'} />
+          )}
           <Row label="GMX 실행 구성" tone={s.gmxConfigOk ? 'ok' : 'error'} value={s.gmxConfigOk ? 'OK' : '미완비'} />
           <Row label="Deployment 검증" tone={s.deploymentVerification.ok ? 'ok' : s.deploymentVerification.attempted ? 'error' : 'muted'}
             value={s.deploymentVerification.ok ? `OK (${s.manifestVersion})` : s.deploymentVerification.attempted ? '실패' : '미시도'} />
@@ -405,13 +461,15 @@ export function GmxApiStatusCard() {
               : `${s.prepareStageCounts.PREPARE_REQUESTED ?? 0} / ${s.prepareStageCounts.API_PREPARED ?? 0} / ${s.prepareStageCounts.SUBMITTING ?? 0}`} />
           <Row label="가장 오래된 blocking task" tone="muted"
             value={s.oldestBlockingTaskAt ? new Date(s.oldestBlockingTaskAt).toLocaleString() : '없음'} />
-          <Row label="Prepare startup reconciliation"
-            tone={s.prepareStartupReconciliation.attempted && s.prepareStartupReconciliation.ok ? 'ok' : 'error'}
-            value={s.prepareStartupReconciliation.attempted
-              ? (s.prepareStartupReconciliation.ok
-                ? `완료 (stale ${s.prepareStartupReconciliation.stalePreparedFailed} · 불명 ${s.prepareStartupReconciliation.requestedToUnresolved} · 보류 ${s.prepareStartupReconciliation.apiPreparedHeld})`
-                : '실패 — LIVE 차단')
-              : '미시도 — LIVE 차단'} />
+          {!s.paperRelayEvidence && (
+            <Row label="Prepare startup reconciliation"
+              tone={s.prepareStartupReconciliation.attempted && s.prepareStartupReconciliation.ok ? 'ok' : 'error'}
+              value={s.prepareStartupReconciliation.attempted
+                ? (s.prepareStartupReconciliation.ok
+                  ? `완료 (stale ${s.prepareStartupReconciliation.stalePreparedFailed} · 불명 ${s.prepareStartupReconciliation.requestedToUnresolved} · 보류 ${s.prepareStartupReconciliation.apiPreparedHeld})`
+                  : '실패 — LIVE 차단')
+                : '미시도 — LIVE 차단'} />
+          )}
           {/* ── 6H-2B §12 — stop 실행 능력·보호 주문·action 예산 (조회 전용) ── */}
           <Row label="LIVE Stop 실행 능력"
             tone={s.stopCapability?.available ? 'ok' : 'muted'}
@@ -452,20 +510,20 @@ export function GmxApiStatusCard() {
           <Row label="Stale stop / 비상종료 진행"
             tone={(s.staleStopCount ?? 1) > 0 || (s.emergencyCloseInProgressCount ?? 0) > 0 ? 'warn' : 'ok'}
             value={`${s.staleStopCount ?? '조회 실패'} / ${s.emergencyCloseInProgressCount ?? '조회 실패'}`} />
-          {s.actionBudget && (
+          {s.actionBudget && !s.paperRelayEvidence && (
             <Row label="Action 예산 (잔여/필요)"
               tone={s.actionBudget.sufficient ? 'ok' : 'error'}
               value={s.actionBudget.remainingActions === null
                 ? `조회 실패 — ${s.actionBudget.reasons[0] ?? ''}`
                 : `${s.actionBudget.remainingActions} / ${s.actionBudget.requiredActions}${s.actionBudget.sufficient ? '' : ' — 부족 (자동 확대 금지)'}`} />
           )}
-          {s.actionBudget && (
+          {s.actionBudget && !s.paperRelayEvidence && (
             <Row label="Action 예산 세부 (예약/진행중/부족)"
               tone={(s.actionBudget.budgetShortfall ?? 1) > 0 ? 'error' : 'ok'}
               value={`예약 ${s.actionBudget.reservedEmergencyActions ?? '—'} · 진행중 ${s.actionBudget.inFlightReservedActions ?? '조회실패'} · 부족 ${s.actionBudget.budgetShortfall ?? '조회실패'}`} />
           )}
           {/* ── 6H-2D §6 — autoCancel 정책·예산 버전 ── */}
-          {s.actionBudget?.autoCancelPolicy && (
+          {s.actionBudget?.autoCancelPolicy && !s.paperRelayEvidence && (
             <Row label="autoCancel 정책 (§2)" tone="muted"
               value={`${s.actionBudget.autoCancelPolicy} · 기준 ${s.actionBudget.version ?? '—'} · 최악 경로 「${s.actionBudget.worstCasePath ?? '—'}」 · 권장 Owner count ${s.actionBudget.recommendedOwnerApprovalCount ?? '—'}`} />
           )}
@@ -482,13 +540,13 @@ export function GmxApiStatusCard() {
             value={s.evidenceCollector
               ? `emitter ${s.evidenceCollector.emitterConfigured ? 'OK' : '미설정'} · RPC ${s.evidenceCollector.rpcConfigured ? 'OK' : '미설정'}`
               : '조회 실패'} />
-          {s.protectionReconciliation && (
+          {s.protectionReconciliation && !s.paperRelayEvidence && (
             <Row label="보호 reconciliation (§5)"
               tone={s.protectionReconciliation.complete && !s.protectionReconciliation.blockNewOpens ? 'ok' : 'warn'}
               value={`${s.protectionReconciliation.lastRunAtMs ? new Date(s.protectionReconciliation.lastRunAtMs).toLocaleTimeString() : '미실행'} · ${s.protectionReconciliation.complete ? '완료' : '미완료'}${s.protectionReconciliation.blockNewOpens ? ' · OPEN 차단' : ''} · 무stop ${s.protectionReconciliation.uncoveredCount ?? '—'} / 고아 ${s.protectionReconciliation.staleActiveCount ?? '—'} / 초과 ${s.protectionReconciliation.oversizedCount ?? '—'} / 다중 ${s.protectionReconciliation.multipleActiveCount ?? '—'}`} />
           )}
           {/* ── 6H-2D §5·§9 — ambiguous 증거·finality ── */}
-          {s.protectionReconciliation && (
+          {s.protectionReconciliation && !s.paperRelayEvidence && (
             <Row label="모호 증거 / finality (§5)"
               tone={(s.protectionReconciliation.ambiguousCount ?? 0) > 0 ? 'error' : 'ok'}
               value={`ambiguous ${s.protectionReconciliation.ambiguousCount ?? '—'}건${(s.protectionReconciliation.ambiguousReasons?.length ?? 0) > 0 ? ` (${s.protectionReconciliation.ambiguousReasons!.slice(0, 2).join('; ')})` : ''} · 확정 깊이 ${s.protectionReconciliation.confirmationDepth ?? '—'}블록 · 실행 ${s.protectionReconciliation.lastSource ?? '—'}`} />
@@ -619,7 +677,7 @@ export function GmxApiStatusCard() {
         <div className="space-y-1" data-testid="gmx-api-settlement-evidence">
           <p className="text-[11px] font-semibold text-muted-foreground">Settlement Evidence</p>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6">
-            <Row
+            {!s.paperRelayEvidence && <Row
               label="CLOSE 정산 reconciliation"
               tone={
                 s.settlementReconcile === null
@@ -635,8 +693,8 @@ export function GmxApiStatusCard() {
                     ? `미완료 — ${s.settlementReconcile.unsettledCount}건 중 ${s.settlementReconcile.settledNow}건 정산`
                     : `완료 (${s.settlementReconcile.unsettledCount}건)`
               }
-            />
-            {s.settlementReconcile !== null && s.settlementReconcile.incomplete && s.settlementReconcile.reasons.length > 0 && (
+            />}
+            {!s.paperRelayEvidence && s.settlementReconcile !== null && s.settlementReconcile.incomplete && s.settlementReconcile.reasons.length > 0 && (
               <Row
                 label="정산 차단 사유 (첫 번째)"
                 tone="error"
@@ -671,7 +729,7 @@ export function GmxApiStatusCard() {
         </div>
       )}
 
-      {s && s.blockedReasons.length > 0 && (
+      {s && !s.paperRelayEvidence && s.blockedReasons.length > 0 && (
         <div className="px-2.5 py-1.5 rounded border border-amber-500/40 bg-amber-500/10 text-[11px] text-amber-400 space-y-0.5"
           data-testid="gmx-api-blocked-reasons">
           <p className="font-medium">신규 주문 차단 사유</p>

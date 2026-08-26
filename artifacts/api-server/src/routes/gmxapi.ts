@@ -18,14 +18,14 @@ import { createGmxApiTransport, GMX_API_PEERS, type GmxApiTransport } from '../l
 import { GMX_API_TRANSPORT_GEN } from '../lib/gmxApiOrders';
 import { RELAY_TASK_STATUS, TERMINAL_STATUSES } from '../lib/relayLifecycle';
 import { countBlockingIntentsOrNull } from '../lib/executionIntents';
-import { countOpenRelayTasksOrNull, listUnresolvedTasks } from '../lib/relayLifecycle';
+import { countOpenRelayTasksOrNull, countUnresolvedTasksOrNull } from '../lib/relayLifecycle';
 import {
   getCanonicalSnapshot,
   getDeploymentVerificationState,
   getFeeEstimateState,
   getReadinessRefreshState,
 } from '../lib/relayActivationStatus';
-import { getActiveRevokeSession } from '../lib/revokeSession';
+import { getActiveRevokeSessionReadResult } from '../lib/revokeSession';
 import { resolveGmxLiveRelayConfig } from '../lib/gmxLiveConfig';
 import {
   isDelegatedSignerEnabled,
@@ -59,6 +59,7 @@ import { deriveCanaryDecimalsReadiness } from '../lib/canaryDecimalsReadiness';
 import { getPaperRuntimeReadinessSnapshot } from '../lib/paperRuntimeReadiness';
 import { runGmxApiReadinessRefresh } from '../lib/gmxApiReadinessCoordinator';
 import { getPaperStopReadinessEvidence } from '../lib/paperStopReadinessEvidence';
+import { buildPaperRelayEvidence } from '../lib/paperRelayEvidence';
 
 const router = Router();
 
@@ -74,7 +75,9 @@ function transport(): GmxApiTransport {
 /** GMX API v2 상태 스냅샷 조립 — 외부 호출 0회 (DB read + 메모리 getter만) */
 async function buildGmxApiStatusSnapshot() {
   const env = process.env;
-  const snap = getCanonicalSnapshot();
+  const nowMs = Date.now();
+  const paperMode = env.WORKER_ENGINE_MODE === 'PAPER';
+  const snap = paperMode ? null : getCanonicalSnapshot();
   const canonicalAuthorized = !!snap && snap.confirmed && snap.isSubaccountListed === true;
   let approvalRemainingOk = false;
   if (snap?.remaining && snap?.expiresAt) {
@@ -89,21 +92,23 @@ async function buildGmxApiStatusSnapshot() {
   ]);
   const dbOk = blockingIntents !== null && openRelayTasks !== null;
 
-  let revoke: boolean | null = null;
-  try { revoke = (await getActiveRevokeSession()) !== null; } catch { revoke = null; }
+  const revokeRead = await getActiveRevokeSessionReadResult();
+  const revoke = revokeRead.ok ? revokeRead.session !== null : null;
 
   // Owner approval 세션 준비 여부 — 복호화·signer 접근 없음 (행 존재 여부만)
   let approvalSessionReady: boolean | null = null;
-  try {
-    const rows = await db.select({ id: subaccountApprovalSessionsTable.id })
-      .from(subaccountApprovalSessionsTable)
-      .where(and(
-        eq(subaccountApprovalSessionsTable.purpose, APPROVAL_PURPOSE),
-        eq(subaccountApprovalSessionsTable.status, SESSION_STATUS.OWNER_SIGNATURE_READY),
-      ))
-      .limit(1);
-    approvalSessionReady = rows.length > 0;
-  } catch { approvalSessionReady = null; }
+  if (!paperMode) {
+    try {
+      const rows = await db.select({ id: subaccountApprovalSessionsTable.id })
+        .from(subaccountApprovalSessionsTable)
+        .where(and(
+          eq(subaccountApprovalSessionsTable.purpose, APPROVAL_PURPOSE),
+          eq(subaccountApprovalSessionsTable.status, SESSION_STATUS.OWNER_SIGNATURE_READY),
+        ))
+        .limit(1);
+      approvalSessionReady = rows.length > 0;
+    } catch { approvalSessionReady = null; }
+  }
 
   // GMX API v2 세대 task 현황
   let gmxTaskCounts: Record<string, number> | null = null;
@@ -149,8 +154,7 @@ async function buildGmxApiStatusSnapshot() {
     }));
   } catch { gmxTaskCounts = null; recentGmxTasks = null; prepareStageCounts = null; oldestBlockingTaskAt = null; }
 
-  let unresolvedCount: number | null = null;
-  try { unresolvedCount = (await listUnresolvedTasks(50)).length; } catch { unresolvedCount = null; }
+  const unresolvedCount = await countUnresolvedTasksOrNull();
 
   const fe = getFeeEstimateState();
   const dv = getDeploymentVerificationState();
@@ -256,13 +260,24 @@ async function buildGmxApiStatusSnapshot() {
   if (blockingProtectionCount === null) blockedReasons.push('보호 주문 상태 조회 실패 (fail-closed)');
   else if (blockingProtectionCount > 0) blockedReasons.push(`차단 상태 보호 주문 ${blockingProtectionCount}건 — 해소 전 신규 OPEN 금지`);
   // §7 — action 예산 (canonical remaining 기준, 표시 전용)
-  const actionBudget = evaluateActionBudget({
+  const actionBudget = paperMode ? {
+    sufficient: false,
+    remainingActions: null,
+    requiredActions: 0,
+    reservedEmergencyActions: 0,
+    inFlightReservedActions: null,
+    budgetShortfall: null,
+    budgetBasis: [] as string[],
+    reasons: ['ACTION_BUDGET_NOT_EVALUATED_IN_PAPER'],
+  } : evaluateActionBudget({
     remaining: snap?.remaining ?? null,
     expiresAt: snap?.expiresAt ?? null,
     nowMs: Date.now(),
     inFlightReservedActions: await countInFlightReservedActions(),
   });
-  if (!actionBudget.sufficient) blockedReasons.push(`action 예산 부족/조회불가 — ${actionBudget.reasons[0] ?? ''}`);
+  if (!paperMode && !actionBudget.sufficient) {
+    blockedReasons.push(`action 예산 부족/조회불가 — ${actionBudget.reasons[0] ?? ''}`);
+  }
   // ── 6H-2C §10 — decimals·증거 수집기·reconciliation 관측값 (저장 스냅샷만) ──
   const protectionRecon = getProtectionReconState();
   const decimalsCache = getDecimalsCacheSnapshot(Date.now());
@@ -300,6 +315,28 @@ async function buildGmxApiStatusSnapshot() {
     priceConversionVerified && protectionRecon.complete && !protectionRecon.blockNewOpens &&
     protectionRecon.ambiguousCount === 0 && actionBudget.requiredActions <= 10;
 
+  const paperRelayEvidence = paperMode
+    ? buildPaperRelayEvidence({
+      nowMs,
+      dbOk,
+      blockingIntentCount: blockingIntents,
+      openRelayTaskCount: openRelayTasks,
+      unresolvedTaskCount: unresolvedCount,
+      activeRevokeInProgress: revoke,
+      prepareStageCounts,
+      blockingProtectionCount,
+      uncoveredStopCount,
+      legacyZeroFeeCount,
+      unsettledLiveTradeCount,
+      protectionReconciliation: {
+        lastRunAtMs: protectionRecon.lastRunAtMs,
+        complete: protectionRecon.complete,
+        blockNewOpens: protectionRecon.blockNewOpens,
+        ambiguousCount: protectionRecon.ambiguousCount,
+      },
+    })
+    : null;
+
   return {
     transportGen: GMX_API_TRANSPORT_GEN,
     legacyDisabled: true,
@@ -312,14 +349,20 @@ async function buildGmxApiStatusSnapshot() {
     emergencyStopActive: emergencyStop,
     reconciled,
     dbOk,
-    canonical: {
+    canonical: paperMode ? {
+      authorized: false,
+      approvalRemainingOk: false,
+      reason: 'CANONICAL_AUTHORIZATION_NOT_EVALUATED_IN_PAPER',
+      expiresAt: null,
+      remaining: null,
+    } : {
       authorized: canonicalAuthorized,
       approvalRemainingOk,
       reason: snap?.reason ?? 'canonical readback 미조회 — 저장 스냅샷 없음 (fail-closed)',
       expiresAt: snap?.expiresAt ?? null,
       remaining: snap?.remaining ?? null,
     },
-    approvalSessionReady,
+    approvalSessionReady: paperMode ? null : approvalSessionReady,
     blockingIntentCount: blockingIntents,
     openRelayTaskCount: openRelayTasks,
     unresolvedTaskCount: unresolvedCount,
@@ -331,6 +374,7 @@ async function buildGmxApiStatusSnapshot() {
     manualCanaryPosture,
     executionEligibleCostEvidence: executionCostEvidence,
     paperRuntimeReadiness,
+    paperRelayEvidence,
     lastReadinessRefresh: {
       attempted: lastRefresh.attempted, atMs: lastRefresh.atMs,
       ok: lastRefresh.ok, basis: lastRefresh.basis,
@@ -354,7 +398,13 @@ async function buildGmxApiStatusSnapshot() {
     blockingProtectionCount,
     staleStopCount,
     emergencyCloseInProgressCount,
-    actionBudget: {
+    actionBudget: paperMode ? {
+      ...actionBudget,
+      version: ACTION_BUDGET_VERSION,
+      autoCancelPolicy: AUTO_CANCEL_BUDGET_POLICY,
+      worstCasePath: 'NOT_EVALUATED_IN_PAPER',
+      recommendedOwnerApprovalCount: RECOMMENDED_OWNER_APPROVAL_COUNT,
+    } : {
       sufficient: actionBudget.sufficient,
       remainingActions: actionBudget.remainingActions,
       requiredActions: actionBudget.requiredActions,
@@ -404,7 +454,9 @@ async function buildGmxApiStatusSnapshot() {
       requestedToUnresolved: prepareStartup.requestedToUnresolved,
       apiPreparedHeld: prepareStartup.apiPreparedHeld,
     },
-    blockedReasons,
+    blockedReasons: paperMode
+      ? paperRelayEvidence?.failureIds ?? ['PAPER_RELAY_EVIDENCE_UNAVAILABLE']
+      : blockedReasons,
     notices: [
       '자동 재시도 없음 — UNRESOLVED/API_PREPARED는 운영자 확인 전 어떤 자동 조치도 하지 않습니다.',
       '운영자 확인 전 서명·제출 금지 — 이 화면은 조회 전용이며 강제 완료·삭제·재제출 기능이 없습니다.',
