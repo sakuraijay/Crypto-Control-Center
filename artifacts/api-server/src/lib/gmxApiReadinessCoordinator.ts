@@ -107,10 +107,12 @@ export function __setGmxApiReadinessCoordinatorDepsForTests(
   injectedDeps = deps;
 }
 
-export function __resetGmxApiReadinessCoordinatorForTests(): void {
+export function __resetGmxApiReadinessCoordinatorForTests(
+  options: { preserveGeneration?: boolean } = {},
+): void {
   injectedDeps = null;
   activeRefreshPromise = null;
-  generation = 0;
+  if (!options.preserveGeneration) generation = 0;
   activeGeneration = null;
   activeJoinCount = 0;
   setPaperRuntimeReadinessCoordinatorInFlight(false);

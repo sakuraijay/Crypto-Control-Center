@@ -595,6 +595,7 @@ describe('POST /api/executor/gmx-api/readiness/refresh', () => {
   it('coordinator refresh 실패 뒤 shared in-flight를 해제하고 다음 refresh를 새 generation으로 재실행한다', async () => {
     const { t, calls } = makeSpyTransport(true);
     coordinatorTransport = t;
+    const stopBefore = getStopExecutionCapability();
     refreshCanarySpy
       .mockRejectedValueOnce(new Error('injected readonly failure'))
       .mockResolvedValueOnce(emptyCanaryEvidence());
@@ -604,6 +605,18 @@ describe('POST /api/executor/gmx-api/readiness/refresh', () => {
       singlePeerOnly: true,
     })).rejects.toThrow('injected readonly failure');
 
+    const failedEvidence = getPaperStopReadinessEvidence(Date.now(), coordinatorEnv);
+    expect(failedEvidence).toMatchObject({
+      generation: 1,
+      readinessComplete: false,
+      fresh: true,
+      executionAuthorized: false,
+    });
+    expect(failedEvidence.conditions
+      .filter((condition) => condition.category === 'execution_required')
+      .every((condition) =>
+        condition.status === 'not_evaluated'
+        && /NOT_EVALUATED_IN_PAPER/.test(condition.failureId ?? ''))).toBe(true);
     expect(__getGmxApiReadinessCoordinatorStateForTests()).toEqual({
       active: false,
       joinCount: 0,
@@ -618,9 +631,23 @@ describe('POST /api/executor/gmx-api/readiness/refresh', () => {
     });
 
     expect(retried.generation).toBe(2);
+    expect(retried.paperStopReadinessEvidence).toMatchObject({
+      generation: 2,
+      readinessComplete: false,
+      fresh: true,
+      executionAuthorized: false,
+    });
+    for (const id of ['paperMode', 'readonlyEnabled', 'healthyPeer', 'canonicalCostCap']) {
+      expect(retried.paperStopReadinessEvidence.conditions
+        .find((condition) => condition.id === id)?.status).toBe('verified');
+    }
+    expect(retried.paperStopReadinessEvidence.conditions
+      .filter((condition) => condition.category === 'execution_required')
+      .every((condition) => condition.status === 'not_evaluated')).toBe(true);
     expect(refreshCanarySpy).toHaveBeenCalledTimes(2);
     expect(runPaperCycleSpy).toHaveBeenCalledTimes(1);
     expect(refreshStopSpy).not.toHaveBeenCalled();
+    expect(getStopExecutionCapability()).toEqual(stopBefore);
     expect(__getGmxApiReadinessCoordinatorStateForTests()).toEqual({
       active: false,
       joinCount: 0,
@@ -633,6 +660,81 @@ describe('POST /api/executor/gmx-api/readiness/refresh', () => {
       call.method === 'POST'
       || /rpc|prepare|sign|submit/i.test(call.path))).toBe(false);
     expect(dbWriteCalls).toEqual([]);
+  });
+
+  it('scheduler refresh rejection을 fail-closed로 게시하고 다음 timer generation에서 회복한다', async () => {
+    vi.useFakeTimers();
+    const { t, calls: transportCalls } = makeSpyTransport(true);
+    const getJson = vi.spyOn(t, 'getJson')
+      .mockImplementationOnce(async (path: string) => {
+        transportCalls.push({ method: 'GET', path });
+        throw new Error('injected scheduler peer failure');
+      })
+      .mockImplementation(async (path: string) => {
+        transportCalls.push({ method: 'GET', path });
+        return {
+          ok: true,
+          data: {},
+          peerHost: 'peer-a',
+        };
+      });
+    coordinatorTransport = {
+      ...t,
+      peers: ['https://peer-a'],
+      getJson,
+    } as GmxApiTransport;
+    installCoordinatorDeps();
+    const stopBefore = getStopExecutionCapability();
+    const executionCostBefore = getExecutionEligibleCostEvidence(Date.now());
+
+    try {
+      startPaperRuntimeReadinessScheduler();
+      await vi.waitFor(() => {
+        expect(__getGmxApiReadinessCoordinatorStateForTests().active).toBe(false);
+        expect(getJson).toHaveBeenCalledTimes(1);
+      });
+
+      const failed = getPaperStopReadinessEvidence(Date.now(), coordinatorEnv);
+      expect(failed).toMatchObject({
+        generation: 1,
+        readinessComplete: false,
+        executionAuthorized: false,
+      });
+      expect(failed.conditions.find((condition) => condition.id === 'healthyPeer'))
+        .toMatchObject({
+          status: 'failed',
+          failureId: 'PAPER_READINESS_PEER_FAILED',
+        });
+
+      await vi.advanceTimersByTimeAsync(45_000);
+      await vi.waitFor(() => {
+        expect(getJson).toHaveBeenCalledTimes(2);
+        expect(__getGmxApiReadinessCoordinatorStateForTests().active).toBe(false);
+      });
+
+      const recovered = getPaperStopReadinessEvidence(Date.now(), coordinatorEnv);
+      expect(recovered).toMatchObject({
+        generation: 2,
+        fresh: true,
+        executionAuthorized: false,
+      });
+      expect(recovered.conditions.find((condition) => condition.id === 'healthyPeer')
+        ?.status).toBe('verified');
+      expect(recovered.conditions
+        .filter((condition) => condition.category === 'execution_required')
+        .every((condition) => condition.status === 'not_evaluated')).toBe(true);
+      expect(refreshStopSpy).not.toHaveBeenCalled();
+      expect(getStopExecutionCapability()).toEqual(stopBefore);
+      expect(getExecutionEligibleCostEvidence(Date.now())).toEqual(executionCostBefore);
+      expect(transportCalls).toEqual([
+        { method: 'GET', path: '/markets/tickers' },
+        { method: 'GET', path: '/markets/tickers' },
+      ]);
+      expect(dbWriteCalls).toEqual([]);
+    } finally {
+      stopPaperRuntimeReadinessScheduler();
+      vi.useRealTimers();
+    }
   });
 
   it('거부된 PAPER shared flight 뒤 scheduler generation이 canary/PAPER/stop을 각각 한 번 실행한다', async () => {
@@ -705,10 +807,11 @@ describe('POST /api/executor/gmx-api/readiness/refresh', () => {
     const staleFlight = runGmxApiReadinessRefresh({ singlePeerOnly: true });
     await vi.waitFor(() => expect(refreshCanarySpy).toHaveBeenCalledTimes(1));
 
-    __resetGmxApiReadinessCoordinatorForTests();
+    __resetGmxApiReadinessCoordinatorForTests({ preserveGeneration: true });
     installCoordinatorDeps();
     const newerFlight = runGmxApiReadinessRefresh({ singlePeerOnly: true });
     await vi.waitFor(() => expect(refreshCanarySpy).toHaveBeenCalledTimes(2));
+    expect(__getGmxApiReadinessCoordinatorGenerationForTests()).toBe(2);
     const newerJoin = runGmxApiReadinessRefresh({ singlePeerOnly: true });
     expect(__getGmxApiReadinessCoordinatorStateForTests()).toEqual({
       active: true,
@@ -717,11 +820,17 @@ describe('POST /api/executor/gmx-api/readiness/refresh', () => {
 
     releaseFirst!();
     await staleFlight;
-    expect(getPaperStopReadinessEvidence(Date.now(), coordinatorEnv)).toMatchObject({
-      generation: 1,
+    const whileNewerGenerationIsActive =
+      getPaperStopReadinessEvidence(Date.now(), coordinatorEnv);
+    expect(whileNewerGenerationIsActive).toMatchObject({
+      generation: 2,
       evaluatedAtMs: null,
       readinessComplete: false,
+      executionAuthorized: false,
     });
+    expect(whileNewerGenerationIsActive.conditions
+      .filter((condition) => condition.category === 'execution_required')
+      .every((condition) => condition.status === 'not_evaluated')).toBe(true);
     expect(__getGmxApiReadinessCoordinatorStateForTests()).toEqual({
       active: true,
       joinCount: 1,
@@ -743,6 +852,7 @@ describe('POST /api/executor/gmx-api/readiness/refresh', () => {
     ).scheduler.inFlight).toBe(false);
     expect(runPaperCycleSpy).toHaveBeenCalledTimes(2);
     expect(refreshStopSpy).not.toHaveBeenCalled();
+    expect(dbWriteCalls).toEqual([]);
   });
 
   it('scheduler stop 뒤 예약된 stale timer가 PAPER cycle을 다시 시작하지 않는다', async () => {
