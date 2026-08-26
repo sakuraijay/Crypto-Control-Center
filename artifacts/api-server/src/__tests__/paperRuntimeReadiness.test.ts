@@ -217,9 +217,12 @@ describe('PAPER runtime readiness cycle', () => {
     expect(status.deployment.state).toBe('verified');
     expect(status.rpc).toMatchObject({ state: 'verified', chainId: 42161 });
     expect(status.costs.BTC.effectiveRoundTripCostUsd).toBe(0.453012);
+    expect(status.costs.BTC.evidenceRole).toBe('OBSERVATIONAL_READ_ONLY');
+    expect(status.costs.BTC.observationalFresh).toBe(true);
     expect(status.costs.BTC.capUsd).toBe(0.4);
     expect(status.costs.BTC.capDeltaUsd).toBeCloseTo(0.053012, 6);
     expect(status.costs.BTC.capExcessUsd).toBeCloseTo(0.053012, 6);
+    expect(status.costs.BTC.capExcessRatePct).toBeCloseTo((0.053012 / 0.4) * 100, 8);
     expect(status.costs.BTC.totalCostRatePct).toBeCloseTo((0.453012 / 20) * 100, 8);
     expect(status.costs.BTC.requiredCostReductionUsd).toBeCloseTo(0.053012, 6);
     expect(status.costs.BTC.requiredCostReductionPct).toBeCloseTo((0.053012 / 0.453012) * 100, 8);
@@ -231,6 +234,14 @@ describe('PAPER runtime readiness cycle', () => {
     expect(status.costs.BTC.otherCostUsd).toBe(0);
     expect(status.costs.BTC.withinCap).toBe(false);
     expect(status.costs.BTC.blockReason).toContain('고정 $0.40 cap');
+    expect(status.costs.BTC.executionSnapshot).toMatchObject({
+      fresh: true,
+      eligible: false,
+      authorized: false,
+      maxAgeMs: 30_000,
+      failureId: 'COST_BTC_CAP_EXCEEDED',
+    });
+    expect(status.costs.BTC.executionSnapshot.blockReason).toContain('OPEN/Canary fail-closed 차단');
     expect(status.blockerIds).toContain('btc_cost_cap');
 
     // Diagnostic cache must never create execution-eligible authorization.
@@ -285,10 +296,12 @@ describe('PAPER runtime readiness cycle', () => {
     expect(stale.rpc.state).toBe('stale');
     expect(stale.costs.BTC.state).toBe('stale');
     expect(stale.costs.BTC).toMatchObject({
+      observationalFresh: false,
       capUsd: null,
       effectiveRoundTripCostUsd: null,
       totalCostRatePct: null,
       capExcessUsd: null,
+      capExcessRatePct: null,
       requiredCostReductionUsd: null,
       requiredCostReductionPct: null,
       breakEvenGrossMoveUsd: null,
@@ -297,6 +310,12 @@ describe('PAPER runtime readiness cycle', () => {
       source: null,
     });
     expect(stale.costs.BTC.blockReason).toContain('COST_BTC_STALE');
+    expect(stale.costs.BTC.executionSnapshot).toMatchObject({
+      fresh: false,
+      eligible: false,
+      authorized: false,
+      failureId: 'COST_BTC_EXECUTION_SNAPSHOT_INELIGIBLE',
+    });
 
     __resetPaperRuntimeReadinessForTests();
     const failedDeps = depsFrom();
@@ -368,6 +387,30 @@ describe('PAPER runtime readiness cycle', () => {
     expect(status.costs.BTC.blockReason).toContain('COST_BTC_INVALID');
     expect(status.blockerIds).toContain('btc_cost_snapshot');
     expect(getExecutionEligibleCostEvidence(NOW).fresh).toBe(false);
+  });
+
+  it('금액을 포함한 notional 결속 실패도 공개 사유에서는 금액을 제거한다', async () => {
+    const result = canaryResult();
+    const btcCost = result.costs.BTC;
+    if (!btcCost.ok || !btcCost.snapshot) throw new Error('BTC fixture snapshot required');
+    btcCost.snapshot.notionalUsd = 1;
+
+    const status = await runPaperRuntimeReadinessCycle({
+      deps: depsFrom(result),
+      forceDeployment: true,
+    });
+    const btc = status.costs.BTC;
+
+    expect(btc.state).toBe('failed');
+    expect(btc.failureId).toBe('COST_BTC_INVALID');
+    expect(btc.effectiveRoundTripCostUsd).toBeNull();
+    expect(btc.capUsd).toBeNull();
+    expect(btc.capExcessUsd).toBeNull();
+    expect(btc.blockReason).toBe(
+      'COST_BTC_INVALID — read-only 비용 snapshot 검증 실패 (금액 비공개, fail-closed)',
+    );
+    expect(btc.blockReason).not.toContain('$');
+    expect(btc.executionSnapshot.blockReason).not.toContain('$');
   });
 
   it('비용 실패 성분·안전한 source·응답 분류·failover와 시각을 보존한다', async () => {

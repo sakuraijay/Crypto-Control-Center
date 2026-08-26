@@ -208,6 +208,8 @@ const STATUS_FIXTURE: GmxApiStatusView = {
     },
     costs: {
       BTC: {
+        evidenceRole: 'OBSERVATIONAL_READ_ONLY',
+        observationalFresh: true,
         state: 'verified',
         attemptedAtMs: 1_777_000_000_000,
         observedAtMs: 1_776_999_996_000,
@@ -235,17 +237,28 @@ const STATUS_FIXTURE: GmxApiStatusView = {
         totalCostRatePct: 2.265055,
         capDeltaUsd: 0.053011,
         capExcessUsd: 0.053011,
+        capExcessRatePct: 13.25275,
         requiredCostReductionUsd: 0.053011,
         requiredCostReductionPct: 11.701923,
         breakEvenGrossMoveUsd: 0.453011,
         breakEvenGrossMovePct: 2.265055,
         withinCap: false,
         blockReason: 'BTC round-trip 비용이 고정 $0.40 cap을 $0.053011 초과',
+        executionSnapshot: {
+          fresh: true,
+          eligible: false,
+          authorized: false,
+          maxAgeMs: 30_000,
+          failureId: 'COST_BTC_CAP_EXCEEDED',
+          blockReason: 'COST_BTC_CAP_EXCEEDED — OPEN/Canary fail-closed 차단',
+        },
         source: 'GMX_API',
         apiTimestamp: '2026-04-25T22:13:16.000Z',
         fetchedAt: '2026-04-25T22:13:16.000Z',
       },
       ETH: {
+        evidenceRole: 'OBSERVATIONAL_READ_ONLY',
+        observationalFresh: true,
         state: 'verified',
         attemptedAtMs: 1_777_000_000_000,
         observedAtMs: 1_776_999_996_000,
@@ -273,12 +286,21 @@ const STATUS_FIXTURE: GmxApiStatusView = {
         totalCostRatePct: 0.61,
         capDeltaUsd: -0.278,
         capExcessUsd: 0,
+        capExcessRatePct: 0,
         requiredCostReductionUsd: 0,
         requiredCostReductionPct: 0,
         breakEvenGrossMoveUsd: 0.122,
         breakEvenGrossMovePct: 0.61,
         withinCap: true,
         blockReason: null,
+        executionSnapshot: {
+          fresh: true,
+          eligible: true,
+          authorized: false,
+          maxAgeMs: 30_000,
+          failureId: null,
+          blockReason: null,
+        },
         source: 'GMX_API',
         apiTimestamp: '2026-04-25T22:13:16.000Z',
         fetchedAt: '2026-04-25T22:13:16.000Z',
@@ -580,10 +602,18 @@ describe('GmxApiStatusCard — PAPER runtime fixture', () => {
     expect(btc.effectiveRoundTripCostUsd).toBe(0.453011);
     expect(btc.capUsd).toBe(0.4);
     expect(btc.capDeltaUsd).toBe(0.053011);
+    expect(btc.capExcessRatePct).toBe(13.25275);
     expect(btc.totalCostRatePct).toBe(2.265055);
     expect(btc.requiredCostReductionUsd).toBe(0.053011);
     expect(btc.breakEvenGrossMovePct).toBe(2.265055);
     expect(btc.withinCap).toBe(false);
+    expect(btc.observationalFresh).toBe(true);
+    expect(btc.executionSnapshot).toMatchObject({
+      fresh: true,
+      eligible: false,
+      authorized: false,
+      failureId: 'COST_BTC_CAP_EXCEEDED',
+    });
     expect(STATUS_FIXTURE.paperRuntimeReadiness!.blockerIds).toContain('btc_cost_cap');
   });
 
@@ -601,6 +631,7 @@ describe('GmxApiStatusCard — PAPER runtime fixture', () => {
       ...fresh,
       state: 'stale' as const,
       fresh: false,
+      observationalFresh: false,
       failureId: null,
       blockReason: 'COST_BTC_STALE — read-only 비용 snapshot이 만료됨',
       positionFeeUsd: null,
@@ -619,11 +650,20 @@ describe('GmxApiStatusCard — PAPER runtime fixture', () => {
       capUsd: null,
       capDeltaUsd: null,
       capExcessUsd: null,
+      capExcessRatePct: null,
       requiredCostReductionUsd: null,
       requiredCostReductionPct: null,
       breakEvenGrossMoveUsd: null,
       breakEvenGrossMovePct: null,
       withinCap: null,
+      executionSnapshot: {
+        fresh: false,
+        eligible: false,
+        authorized: false as const,
+        maxAgeMs: 30_000,
+        failureId: 'COST_BTC_EXECUTION_SNAPSHOT_INELIGIBLE',
+        blockReason: 'COST_BTC_EXECUTION_SNAPSHOT_INELIGIBLE — OPEN/Canary fail-closed 차단',
+      },
       source: null,
       apiTimestamp: null,
       fetchedAt: null,
@@ -675,6 +715,69 @@ describe('GmxApiStatusCard — PAPER runtime fixture', () => {
     expect(html).toContain('HTTP 503');
     expect(html).toContain('retry 0');
     expect(html).toContain('failover 1');
+  });
+
+  it('fresh observational 비용과 execution snapshot 차단을 별도 표시한다', () => {
+    const html = renderToStaticMarkup(
+      <PaperCostDetails symbol="BTC" cost={STATUS_FIXTURE.paperRuntimeReadiness!.costs.BTC} />,
+    );
+    expect(html).toContain('관측 evidence FRESH');
+    expect(html).toContain('실행 snapshot INELIGIBLE');
+    expect(html).toContain('실행 권한 NONE (read-only)');
+    expect(html).toContain('초과 $0.053011 (13.253%)');
+    expect(html).toContain('COST_BTC_CAP_EXCEEDED');
+    expect(html).toContain('OPEN/Canary fail-closed 차단');
+  });
+
+  it('failed observational 비용은 금액 없이 고정 failure ID만 표시한다', () => {
+    const fresh = STATUS_FIXTURE.paperRuntimeReadiness!.costs.BTC;
+    const failed = {
+      ...fresh,
+      state: 'failed' as const,
+      fresh: false,
+      observationalFresh: false,
+      failureId: 'COST_BTC_INVALID',
+      blockReason: 'COST_BTC_INVALID — read-only 비용 snapshot 검증 실패 (금액 비공개, fail-closed)',
+      positionFeeUsd: null,
+      executionFeeUsd: null,
+      estimatedPriceImpactUsd: null,
+      fundingFeeUsd: null,
+      borrowingFeeUsd: null,
+      estimatedExitFeeUsd: null,
+      estimatedExitPriceImpactUsd: null,
+      tradingFeesUsd: null,
+      priceImpactTotalUsd: null,
+      carryCostUsd: null,
+      otherCostUsd: null,
+      effectiveRoundTripCostUsd: null,
+      totalCostRatePct: null,
+      capUsd: null,
+      capDeltaUsd: null,
+      capExcessUsd: null,
+      capExcessRatePct: null,
+      requiredCostReductionUsd: null,
+      requiredCostReductionPct: null,
+      breakEvenGrossMoveUsd: null,
+      breakEvenGrossMovePct: null,
+      withinCap: null,
+      source: null,
+      apiTimestamp: null,
+      fetchedAt: null,
+      executionSnapshot: {
+        fresh: false,
+        eligible: false,
+        authorized: false as const,
+        maxAgeMs: 30_000,
+        failureId: 'COST_BTC_EXECUTION_SNAPSHOT_INELIGIBLE',
+        blockReason: 'COST_BTC_EXECUTION_SNAPSHOT_INELIGIBLE — 실행 적격 비용 snapshot 미확보 (금액 비공개) — OPEN/Canary fail-closed 차단',
+      },
+    };
+
+    const html = renderToStaticMarkup(<PaperCostDetails symbol="BTC" cost={failed} />);
+    expect(html).toContain('COST_BTC_INVALID');
+    expect(html).toContain('금액 비공개');
+    expect(html).not.toContain('$');
+    expect(html).not.toContain('상위 주문금액');
   });
 });
 

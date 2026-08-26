@@ -235,14 +235,24 @@ describe('GET /api/executor/gmx-api/status', () => {
     expect(s.paperRuntimeReadiness).toHaveProperty('decimals.BTC.state');
     expect(s.paperRuntimeReadiness).toHaveProperty('costs.BTC.capUsd', null);
     expect(s.paperRuntimeReadiness.costs.BTC).toMatchObject({
+      evidenceRole: 'OBSERVATIONAL_READ_ONLY',
+      observationalFresh: false,
       effectiveRoundTripCostUsd: null,
       totalCostRatePct: null,
       capExcessUsd: null,
+      capExcessRatePct: null,
       requiredCostReductionUsd: null,
       requiredCostReductionPct: null,
       breakEvenGrossMoveUsd: null,
       breakEvenGrossMovePct: null,
       source: null,
+      executionSnapshot: {
+        fresh: false,
+        eligible: false,
+        authorized: false,
+        maxAgeMs: 30_000,
+        failureId: 'COST_BTC_EXECUTION_SNAPSHOT_INELIGIBLE',
+      },
     });
     expect(s.paperRuntimeReadiness.costs.BTC.blockReason).toContain('COST_BTC_NOT_EVALUATED');
     expect(s.paperRuntimeReadiness).toHaveProperty('blockerIds');

@@ -199,6 +199,8 @@ export interface GmxApiStatusView {
       chainId: number | null;
     };
     costs: Record<'BTC' | 'ETH', {
+      evidenceRole: 'OBSERVATIONAL_READ_ONLY';
+      observationalFresh: boolean;
       state: 'not_evaluated' | 'verified' | 'stale' | 'failed';
       attemptedAtMs: number | null;
       observedAtMs: number | null;
@@ -226,12 +228,21 @@ export interface GmxApiStatusView {
       totalCostRatePct: number | null;
       capDeltaUsd: number | null;
       capExcessUsd: number | null;
+      capExcessRatePct: number | null;
       requiredCostReductionUsd: number | null;
       requiredCostReductionPct: number | null;
       breakEvenGrossMoveUsd: number | null;
       breakEvenGrossMovePct: number | null;
       withinCap: boolean | null;
       blockReason: string | null;
+      executionSnapshot: {
+        fresh: boolean;
+        eligible: boolean;
+        authorized: false;
+        maxAgeMs: number;
+        failureId: string | null;
+        blockReason: string | null;
+      };
       source: string | null;
       apiTimestamp: string | null;
       fetchedAt: string | null;

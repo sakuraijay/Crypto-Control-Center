@@ -8,8 +8,10 @@
  */
 import {
   COST_SNAPSHOT_TTL_MS,
+  EXECUTION_ELIGIBLE_MAX_AGE_MS,
   sanitizeCostError,
   validateCostSnapshot,
+  validateExecutionEligibleSnapshot,
   type CostSnapshot,
 } from './costSnapshot';
 import { MANUAL_CANARY_CAPS } from './manualCanaryCaps';
@@ -186,6 +188,8 @@ export interface PaperCostReadinessSourceTraceView {
 }
 
 export interface PaperCostEvidenceView extends PaperEvidenceMeta {
+  evidenceRole: 'OBSERVATIONAL_READ_ONLY';
+  observationalFresh: boolean;
   symbol: CanarySymbol;
   direction: 'LONG';
   notionalUsd: number;
@@ -206,12 +210,21 @@ export interface PaperCostEvidenceView extends PaperEvidenceMeta {
   totalCostRatePct: number | null;
   capDeltaUsd: number | null;
   capExcessUsd: number | null;
+  capExcessRatePct: number | null;
   requiredCostReductionUsd: number | null;
   requiredCostReductionPct: number | null;
   breakEvenGrossMoveUsd: number | null;
   breakEvenGrossMovePct: number | null;
   withinCap: boolean | null;
   blockReason: string | null;
+  executionSnapshot: {
+    fresh: boolean;
+    eligible: boolean;
+    authorized: false;
+    maxAgeMs: number;
+    failureId: string | null;
+    blockReason: string | null;
+  };
   source: string | null;
   apiTimestamp: string | null;
   fetchedAt: string | null;
@@ -859,20 +872,47 @@ function costView(symbol: CanarySymbol, nowMs: number): PaperCostEvidenceView {
     : null;
   const capDelta = total !== null ? total - cap : null;
   const capExcess = capDelta !== null ? Math.max(0, capDelta) : null;
+  const capExcessRatePct = capExcess !== null
+    ? (capExcess / cap) * 100
+    : null;
   const requiredReductionPct = total !== null && capExcess !== null
     ? (total === 0 ? 0 : (capExcess / total) * 100)
     : null;
   const blockReason = meta.state === 'verified'
     ? (capExcess !== null && capExcess > 0
-      ? `${symbol} round-trip 비용이 고정 $${cap.toFixed(2)} cap을 $${capExcess.toFixed(6)} 초과`
+      ? `COST_${symbol}_CAP_EXCEEDED — $${PAPER_COST_NOTIONAL_USD} LONG ${PAPER_COST_HOLDING_HOURS}h round-trip 비용이 고정 $${cap.toFixed(2)} cap을 $${capExcess.toFixed(6)} (${capExcessRatePct?.toFixed(3)}%) 초과 — OPEN/Canary fail-closed 차단`
       : null)
     : meta.state === 'stale'
       ? `COST_${symbol}_STALE — read-only 비용 snapshot이 만료됨`
       : meta.state === 'failed'
-        ? `${meta.failureId ?? `COST_${symbol}_FAILED`} — ${meta.detail ?? '비용 snapshot 검증 실패'}`
+        ? `${meta.failureId ?? `COST_${symbol}_FAILED`} — read-only 비용 snapshot 검증 실패 (금액 비공개, fail-closed)`
         : `COST_${symbol}_NOT_EVALUATED — read-only 비용 snapshot 미평가`;
+  const market = MARKET_BY_SYMBOL_SERVER.get(symbol)?.marketToken ?? null;
+  const executionValidation = snapshot && market
+    ? validateExecutionEligibleSnapshot(snapshot, {
+      market,
+      isLong: true,
+      orderType: 'MarketIncrease',
+      notionalUsd: PAPER_COST_NOTIONAL_USD,
+    }, nowMs)
+    : { ok: false as const, reason: '관측 비용 snapshot 또는 공식 market 결속 없음' };
+  const executionSnapshotFresh = executionValidation.ok;
+  const executionSnapshotEligible = executionSnapshotFresh
+    && capExcess !== null
+    && capExcess === 0;
+  const executionFailureId = !executionSnapshotFresh
+    ? `COST_${symbol}_EXECUTION_SNAPSHOT_INELIGIBLE`
+    : executionSnapshotEligible
+      ? null
+      : `COST_${symbol}_CAP_EXCEEDED`;
+  const executionBlockReason = executionSnapshotEligible
+    ? null
+    : blockReason ?? `${executionFailureId} — 실행 적격 비용 snapshot 미확보 (금액 비공개) — OPEN/Canary fail-closed 차단`;
+
   return {
     ...meta,
+    evidenceRole: 'OBSERVATIONAL_READ_ONLY',
+    observationalFresh: meta.fresh,
     symbol,
     direction: 'LONG',
     notionalUsd: PAPER_COST_NOTIONAL_USD,
@@ -893,12 +933,21 @@ function costView(symbol: CanarySymbol, nowMs: number): PaperCostEvidenceView {
     totalCostRatePct,
     capDeltaUsd: capDelta,
     capExcessUsd: capExcess,
+    capExcessRatePct,
     requiredCostReductionUsd: capExcess,
     requiredCostReductionPct: requiredReductionPct,
     breakEvenGrossMoveUsd: total,
     breakEvenGrossMovePct: totalCostRatePct,
     withinCap: total === null ? null : total <= cap,
     blockReason,
+    executionSnapshot: {
+      fresh: executionSnapshotFresh,
+      eligible: executionSnapshotEligible,
+      authorized: false,
+      maxAgeMs: EXECUTION_ELIGIBLE_MAX_AGE_MS,
+      failureId: executionFailureId,
+      blockReason: executionBlockReason,
+    },
     source: snapshot?.source ?? null,
     apiTimestamp: snapshot?.apiTimestamp ?? null,
     fetchedAt: snapshot?.fetchedAt ?? null,

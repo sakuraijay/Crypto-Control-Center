@@ -286,9 +286,14 @@ export function PaperCostDetails({
 
   return (
     <>
+      <p className="font-mono text-[10px] text-muted-foreground" data-testid={`paper-cost-${symbol.toLowerCase()}-evidence-boundary`}>
+        관측 evidence {cost.observationalFresh ? 'FRESH' : 'STALE'}
+        {' · '}실행 snapshot {cost.executionSnapshot.eligible ? 'ELIGIBLE' : 'INELIGIBLE'}
+        {' · '}실행 권한 {cost.executionSnapshot.authorized ? 'GRANTED' : 'NONE (read-only)'}
+      </p>
       <p className={cn('font-mono text-[12px]', overCap ? 'text-red-300' : 'text-foreground')}>
         총 {fmtUsd(cost.effectiveRoundTripCostUsd)} · notional 대비 {fmtPct(cost.totalCostRatePct)}
-        {' · '}cap {fmtUsd(cost.capUsd)} · 초과 {fmtUsd(cost.capExcessUsd)}
+        {' · '}cap {fmtUsd(cost.capUsd)} · 초과 {fmtUsd(cost.capExcessUsd)} ({fmtPct(cost.capExcessRatePct)})
       </p>
       <p className="font-mono text-[10px] text-muted-foreground leading-relaxed">
         거래수수료 {fmtUsd(cost.tradingFeesUsd)} · 가스 {fmtUsd(cost.executionFeeUsd)}
@@ -311,7 +316,11 @@ export function PaperCostDetails({
         source {cost.source ?? '—'} · fetched {cost.fetchedAt ?? '—'} · observed {fmtEpochMs(cost.observedAtMs)} · age {fmtAge(cost.ageMs)}
       </p>
       <PaperCostDiagnostics symbol={symbol} cost={cost} />
-      {cost.blockReason && <p className="text-[10px] text-red-300">{cost.blockReason}</p>}
+      {cost.executionSnapshot.blockReason && (
+        <p className="text-[10px] text-red-300" data-testid={`paper-cost-${symbol.toLowerCase()}-execution-block`}>
+          {cost.executionSnapshot.blockReason}
+        </p>
+      )}
     </>
   );
 }
