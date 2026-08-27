@@ -63,6 +63,12 @@ export interface OfflineThresholdResult {
   aggregateOos: OfflineSampleResult;
 }
 
+export interface OfflineWalkForwardView {
+  config: any;
+  input: any;
+  thresholds: OfflineThresholdResult[];
+}
+
 export interface OfflineBtcReport {
   status: 'OK' | 'UNAVAILABLE';
   generatedAtMs: number;
@@ -81,10 +87,11 @@ export interface OfflineBtcReport {
     riskCount: number;
   };
   issues: string[];
-  walkForward: {
-    config: any;
-    input: any;
-    thresholds: OfflineThresholdResult[];
+  walkForward: OfflineWalkForwardView | null;
+  researchPreview: {
+    status: 'MODELED_ONLY';
+    limitations: string[];
+    walkForward: OfflineWalkForwardView;
   } | null;
   autoPromotionAllowed: boolean;
   liveExecutionAuthorized: boolean;
@@ -191,8 +198,9 @@ export function OfflineBtcReportView() {
       .then(json => {
          if (active) {
             setData(json);
-            if (json.walkForward?.thresholds?.length > 0) {
-              setActiveThreshold(json.walkForward.thresholds[0].threshold);
+            const report = json.walkForward ?? json.researchPreview?.walkForward;
+            if (report?.thresholds?.length > 0) {
+              setActiveThreshold(report.thresholds[0].threshold);
             }
             setLoading(false);
          }
@@ -230,7 +238,10 @@ export function OfflineBtcReportView() {
 
   if (!data) return null;
 
-  const thresholdData = data.walkForward?.thresholds.find(t => t.threshold === activeThreshold);
+  const displayedWalkForward = data.walkForward ?? data.researchPreview?.walkForward ?? null;
+  const isModeledPreview = data.walkForward === null
+    && data.researchPreview?.status === 'MODELED_ONLY';
+  const thresholdData = displayedWalkForward?.thresholds.find(t => t.threshold === activeThreshold);
   const activeOos = thresholdData?.aggregateOos;
 
   return (
@@ -242,6 +253,8 @@ export function OfflineBtcReportView() {
             Task 150 Report
             {data.status === 'OK' ? (
               <span className="px-2 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-[10px] uppercase tracking-wider font-semibold flex items-center gap-1.5"><CheckCircle2 className="w-3 h-3"/> OK</span>
+            ) : isModeledPreview ? (
+              <span className="px-2 py-0.5 rounded bg-sky-500/10 border border-sky-500/20 text-sky-400 text-[10px] uppercase tracking-wider font-semibold flex items-center gap-1.5"><ShieldAlert className="w-3 h-3"/> MODELED PREVIEW</span>
             ) : (
               <span className="px-2 py-0.5 rounded bg-amber-500/10 border border-amber-500/20 text-amber-400 text-[10px] uppercase tracking-wider font-semibold flex items-center gap-1.5"><ShieldAlert className="w-3 h-3"/> UNAVAILABLE</span>
             )}
@@ -353,7 +366,7 @@ export function OfflineBtcReportView() {
       </div>
 
       {/* Walk Forward Content */}
-      {data.status === 'UNAVAILABLE' || !data.walkForward ? (
+      {!displayedWalkForward ? (
         <div className="bg-card border border-border rounded-lg p-16 text-center space-y-4 shadow-sm">
           <div className="w-12 h-12 rounded-full bg-amber-500/10 flex items-center justify-center mx-auto mb-2">
             <ShieldAlert className="w-6 h-6 text-amber-500" />
@@ -365,9 +378,17 @@ export function OfflineBtcReportView() {
         </div>
       ) : (
         <div className="space-y-6">
+          {isModeledPreview && (
+            <div className="bg-sky-500/10 border border-sky-500/30 rounded-lg p-4">
+              <h3 className="text-xs font-bold text-sky-400 uppercase tracking-wider mb-2">Research-only modeled results</h3>
+              <p className="text-xs text-sky-300/80 leading-relaxed">
+                비용과 Risk evidence가 관측값이 아니므로 이 결과는 전략 비교용입니다. PAPER readiness, 자동 승격, LIVE 실행 근거로 사용할 수 없습니다.
+              </p>
+            </div>
+          )}
           {/* Threshold Tabs */}
           <div className="flex flex-wrap gap-2">
-            {data.walkForward.thresholds.map(t => (
+            {displayedWalkForward.thresholds.map(t => (
               <button
                 key={t.threshold}
                 onClick={() => setActiveThreshold(t.threshold)}

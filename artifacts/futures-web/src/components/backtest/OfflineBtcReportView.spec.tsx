@@ -51,6 +51,7 @@ describe('OfflineBtcReportView', () => {
       },
       issues: ['No immutable evidence'],
       walkForward: null,
+      researchPreview: null,
       autoPromotionAllowed: false,
       liveExecutionAuthorized: false,
     };
@@ -71,6 +72,62 @@ describe('OfflineBtcReportView', () => {
     
     // Check that missing provenance renders as "-" (which is our fallback)
     expect(screen.getAllByText('-').length).toBeGreaterThan(0);
+  });
+
+  it('renders modeled research metrics without changing promotion or LIVE locks', async () => {
+    const metrics = {
+      tradeCount: 0,
+      grossReturnPct: null,
+      netReturnPct: null,
+      winRatePct: null,
+      maxDrawdownPct: null,
+      profitFactor: null,
+      expectancyUsd: null,
+      averageR: null,
+      sharpe: null,
+      sortino: null,
+      maxConsecutiveWins: 0,
+      maxConsecutiveLosses: 0,
+      costs: { feesUsd: 0, slippageUsd: 0, fundingUsd: 0, borrowingUsd: 0, impactUsd: 0, totalUsd: 0 },
+      equityCurve: [],
+    };
+    const aggregateOos = {
+      metrics,
+      trades: [],
+      blocked: {},
+      breakdown: { month: {}, direction: {}, strategy: {}, regime: {}, profile: {} },
+    };
+    const modeledReport = {
+      status: 'UNAVAILABLE',
+      generatedAtMs: 1700000000000,
+      provenance: {
+        datasetId: 'modeled-btc-data',
+        source: 'immutable fixture',
+        license: null,
+        immutable: true,
+        checksumAlgorithm: 'SHA-256',
+        checksums: { '15m': 'a', '1h': 'b', '4h': 'c', costs: 'd', risk: 'e' },
+        period: { fromMs: 1600000000000, toMs: 1700000000000 },
+      },
+      evidence: { candleCounts: { '15m': 1000, '1h': 1000, '4h': 1000 }, costCount: 1000, riskCount: 1000 },
+      issues: ['cost evidence is MODELED, not OBSERVED'],
+      walkForward: null,
+      researchPreview: {
+        status: 'MODELED_ONLY',
+        limitations: ['research only'],
+        walkForward: { config: {}, input: {}, thresholds: [{ threshold: 60, folds: [], aggregateOos }] },
+      },
+      autoPromotionAllowed: false,
+      liveExecutionAuthorized: false,
+    };
+
+    (global.fetch as any).mockResolvedValueOnce({ ok: true, json: async () => modeledReport });
+    render(<OfflineBtcReportView />);
+
+    await waitFor(() => expect(screen.getByText('MODELED PREVIEW')).toBeInTheDocument());
+    expect(screen.getByText('Research-only modeled results')).toBeInTheDocument();
+    expect(screen.getByText('Sensitivity: 60')).toBeInTheDocument();
+    expect(screen.getAllByText('LOCKED')).toHaveLength(2);
   });
 
   it('renders OK state with metrics and tabs', async () => {
@@ -157,6 +214,7 @@ describe('OfflineBtcReportView', () => {
           }
         ]
       },
+      researchPreview: null,
       autoPromotionAllowed: false,
       liveExecutionAuthorized: false,
     };

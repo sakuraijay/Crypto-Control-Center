@@ -18,6 +18,7 @@ describe('offline BTC dataset/report boundary', () => {
     expect(report.provenance.checksumAlgorithm).toBe('SHA-256');
     expect(report.provenance.period).toEqual({ fromMs: null, toMs: null });
     expect(report.issues.join(' ')).toContain('합성');
+    expect(report.researchPreview).toBeNull();
     expect(report.autoPromotionAllowed).toBe(false);
     expect(report.liveExecutionAuthorized).toBe(false);
   });
@@ -43,6 +44,7 @@ describe('offline BTC dataset/report boundary', () => {
     });
     expect(report.status).toBe('UNAVAILABLE');
     expect(report.walkForward).toBeNull();
+    expect(report.researchPreview).toBeNull();
     expect(report.issues.join(' ')).toMatch(/OHLCV|timeframe/);
     expect(report.issues.join(' ')).toContain('lookback');
     expect(report.issues.join(' ')).toContain('cost/funding');
@@ -59,6 +61,12 @@ describe('GET /api/backtest/offline-btc-report bounded contract', () => {
     expect(response.body.provenance.source).not.toContain('GMX');
     expect(response.body.status).toBe('UNAVAILABLE');
     expect(response.body.walkForward).toBeNull();
+    expect(response.body.researchPreview.status).toBe('MODELED_ONLY');
+    expect(response.body.researchPreview.walkForward.status).toBe('OK');
+    expect(response.body.researchPreview.walkForward.thresholds.map((row: { threshold: number }) => row.threshold))
+      .toEqual([60, 65, 70, 75, 80]);
+    expect(response.body.autoPromotionAllowed).toBe(false);
+    expect(response.body.liveExecutionAuthorized).toBe(false);
     expect(response.body.issues.join(' ')).toContain('cost evidence is MODELED');
     expect(response.body.issues.join(' ')).toContain('risk evidence is ASSUMED');
   });
@@ -88,6 +96,7 @@ describe('GET /api/backtest/offline-btc-report bounded contract', () => {
       },
     });
     expect(report.status).toBe('UNAVAILABLE');
+    expect(report.researchPreview).toBeNull();
     expect(report.issues.join(' ')).toContain('checksum 불일치');
   });
 
