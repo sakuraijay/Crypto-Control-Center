@@ -96,3 +96,4 @@
 - [배포 publish marker 동일성](deployment-publish-marker-identity.md) — `Published your App` commit은 부모와 tree가 같을 수 있어 source 감사는 SHA가 아닌 tree hash·diff·asset hash로 판정
 - [PAPER Relay evidence 경계](paper-relay-evidence-boundary.md) — execution-only는 NOT EVALUATED; status의 모든 DB read는 null-preserving failure ID로 fail-closed
 - [Offline backtest evidence classification](offline-backtest-evidence-classification.md) — raw market captures may be immutable while modeled costs or assumed risk still force the report UNAVAILABLE
+- [Decision claim cadence](decision-claim-cadence.md) — 60초 안전 평가는 유지하고 동일 완료봉·symbol·state의 durable claim/downstream만 process 안에서 중복 억제
