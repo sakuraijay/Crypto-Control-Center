@@ -48,6 +48,11 @@ export interface OfflineBtcReport {
   };
   issues: string[];
   walkForward: ReturnType<typeof runOfflineWalkForwardBacktest> | null;
+  researchPreview: {
+    status: 'MODELED_ONLY';
+    limitations: string[];
+    walkForward: ReturnType<typeof runOfflineWalkForwardBacktest>;
+  } | null;
   autoPromotionAllowed: false;
   liveExecutionAuthorized: false;
 }
@@ -109,6 +114,7 @@ export function buildUnavailableOfflineBtcReport(generatedAtMs: number): Offline
       '합성 또는 현재값 대체 없이 보고서를 UNAVAILABLE 처리함',
     ],
     walkForward: null,
+    researchPreview: null,
     autoPromotionAllowed: false,
     liveExecutionAuthorized: false,
   };
@@ -146,32 +152,33 @@ export function buildOfflineBtcReport(input: OfflineBtcReportBuildInput): Offlin
     costCount: dataset.costs.length,
     riskCount: dataset.risks.length,
   };
-  const issues: string[] = [];
-  if (dataset.schemaVersion !== OFFLINE_BTC_DATASET_SCHEMA_VERSION) issues.push('dataset schema version 오류');
-  if (!dataset.provenance.datasetId.trim() || !dataset.provenance.source.trim()) issues.push('provenance 누락');
+  const trustIssues: string[] = [];
+  const integrityIssues: string[] = [];
+  if (dataset.schemaVersion !== OFFLINE_BTC_DATASET_SCHEMA_VERSION) integrityIssues.push('dataset schema version 오류');
+  if (!dataset.provenance.datasetId.trim() || !dataset.provenance.source.trim()) integrityIssues.push('provenance 누락');
   if (dataset.provenance.costEvidenceKind !== 'OBSERVED') {
-    issues.push(`cost evidence is ${dataset.provenance.costEvidenceKind ?? 'UNSPECIFIED'}, not OBSERVED`);
+    trustIssues.push(`cost evidence is ${dataset.provenance.costEvidenceKind ?? 'UNSPECIFIED'}, not OBSERVED`);
   }
   if (dataset.provenance.riskEvidenceKind !== 'OBSERVED') {
-    issues.push(`risk evidence is ${dataset.provenance.riskEvidenceKind ?? 'UNSPECIFIED'}, not OBSERVED`);
+    trustIssues.push(`risk evidence is ${dataset.provenance.riskEvidenceKind ?? 'UNSPECIFIED'}, not OBSERVED`);
   }
   for (const key of ['15m', '1h', '4h', 'costs', 'risk'] as const) {
-    if (!/^[a-f0-9]{64}$/i.test(dataset.provenance.checksums[key] ?? '')) issues.push(`${key} SHA-256 checksum 누락`);
+    if (!/^[a-f0-9]{64}$/i.test(dataset.provenance.checksums[key] ?? '')) integrityIssues.push(`${key} SHA-256 checksum 누락`);
   }
   for (const timeframe of ['15m', '1h', '4h'] as const) {
-    issues.push(...candleIssues(timeframe, dataset.candles[timeframe], input.generatedAtMs));
+    integrityIssues.push(...candleIssues(timeframe, dataset.candles[timeframe], input.generatedAtMs));
     if (dataset.provenance.checksums[timeframe] !== checksum(dataset.candles[timeframe])) {
-      issues.push(`${timeframe} checksum 불일치`);
+      integrityIssues.push(`${timeframe} checksum 불일치`);
     }
   }
-  if (dataset.provenance.checksums.costs !== checksum(dataset.costs)) issues.push('costs checksum 불일치');
-  if (dataset.provenance.checksums.risk !== checksum(dataset.risks)) issues.push('risk checksum 불일치');
-  if (Object.values(evidence.candleCounts).some(count => count === 0)) issues.push('3 timeframe OHLCV 누락');
+  if (dataset.provenance.checksums.costs !== checksum(dataset.costs)) integrityIssues.push('costs checksum 불일치');
+  if (dataset.provenance.checksums.risk !== checksum(dataset.risks)) integrityIssues.push('risk checksum 불일치');
+  if (Object.values(evidence.candleCounts).some(count => count === 0)) integrityIssues.push('3 timeframe OHLCV 누락');
   for (const timeframe of ['15m', '1h', '4h'] as const) {
-    if (evidence.candleCounts[timeframe] < 60) issues.push(`${timeframe} feature lookback 부족`);
+    if (evidence.candleCounts[timeframe] < 60) integrityIssues.push(`${timeframe} feature lookback 부족`);
   }
-  if (evidence.costCount === 0) issues.push('historical cost/funding evidence 누락');
-  if (evidence.riskCount === 0) issues.push('historical risk evidence 누락');
+  if (evidence.costCount === 0) integrityIssues.push('historical cost/funding evidence 누락');
+  if (evidence.riskCount === 0) integrityIssues.push('historical risk evidence 누락');
   for (const row of dataset.costs) {
     if (![row.observedAtMs, row.feeBpsPerSide, row.entrySlippageBps, row.exitSlippageBps,
       row.fundingBpsPerHour, row.borrowingBpsPerHour, row.impactBps].every(Number.isFinite)
@@ -179,7 +186,7 @@ export function buildOfflineBtcReport(input: OfflineBtcReportBuildInput): Offlin
        || row.fundingBpsPerHour < 0 || row.borrowingBpsPerHour < 0 || row.impactBps < 0
        || !Number.isFinite(row.validFromMs) || !Number.isFinite(row.validUntilMs)
        || row.validFromMs! > row.observedAtMs || row.validUntilMs! <= row.validFromMs!) {
-      issues.push(`historical cost/funding evidence INVALID: ${String(row.observedAtMs)}`);
+      integrityIssues.push(`historical cost/funding evidence INVALID: ${String(row.observedAtMs)}`);
       break;
     }
   }
@@ -187,12 +194,13 @@ export function buildOfflineBtcReport(input: OfflineBtcReportBuildInput): Offlin
   const last = dataset.candles['15m'].at(-1);
   const lastClose = last ? last.t + STEPS['15m'] : null;
   if (dataset.provenance.period.fromMs !== first || dataset.provenance.period.toMs !== lastClose) {
-    issues.push('provenance 기간과 15m evidence 기간 불일치');
+    integrityIssues.push('provenance 기간과 15m evidence 기간 불일치');
   }
-  if (issues.length > 0) {
+  if (integrityIssues.length > 0) {
     return {
       status: 'UNAVAILABLE', generatedAtMs: input.generatedAtMs,
-      provenance: dataset.provenance, evidence, issues, walkForward: null,
+      provenance: dataset.provenance, evidence,
+      issues: [...trustIssues, ...integrityIssues], walkForward: null, researchPreview: null,
       autoPromotionAllowed: false, liveExecutionAuthorized: false,
     };
   }
@@ -262,6 +270,31 @@ export function buildOfflineBtcReport(input: OfflineBtcReportBuildInput): Offlin
     config: input.config ?? DEFAULT_OFFLINE_WALK_FORWARD_CONFIG,
     maxFolds: input.maxFolds,
   });
+  if (trustIssues.length > 0) {
+    const previewAvailable = walkForward.status === 'OK';
+    return {
+      status: 'UNAVAILABLE',
+      generatedAtMs: input.generatedAtMs,
+      provenance: dataset.provenance,
+      evidence,
+      issues: [
+        ...trustIssues,
+        ...walkForward.issues,
+        '연구용 modeled preview는 PAPER readiness 또는 실행 승격 근거가 아님',
+      ],
+      walkForward: null,
+      researchPreview: previewAvailable ? {
+        status: 'MODELED_ONLY',
+        limitations: [
+          ...trustIssues,
+          '결과는 연구 비교용이며 자동 승격·PAPER/LIVE 실행에 사용할 수 없음',
+        ],
+        walkForward,
+      } : null,
+      autoPromotionAllowed: false,
+      liveExecutionAuthorized: false,
+    };
+  }
   return {
     status: walkForward.status,
     generatedAtMs: input.generatedAtMs,
@@ -269,6 +302,7 @@ export function buildOfflineBtcReport(input: OfflineBtcReportBuildInput): Offlin
     evidence,
     issues: walkForward.issues,
     walkForward,
+    researchPreview: null,
     autoPromotionAllowed: false,
     liveExecutionAuthorized: false,
   };
