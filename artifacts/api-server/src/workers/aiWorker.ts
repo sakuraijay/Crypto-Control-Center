@@ -81,6 +81,11 @@ const WORKER_DECISION_STATE_CODE: Record<AiOperatingState, number> = {
   SPOT: 0, LONG: 1, SHORT: 2, HEDGE: 3, CASH: 4,
 };
 
+type DecisionClaimResult =
+  | { status: "CLAIMED" }
+  | { status: "CONFLICT" }
+  | { status: "ERROR" };
+
 /** Collision-free negative PK within the fixed worker symbol/state domain.
  * PostgreSQL serial values are positive, while a completed 15m candle slot and
  * fixed symbol/state code deterministically identify one worker decision. */
@@ -290,6 +295,13 @@ class WorkerManager {
   private prevState: AiOperatingState = 'CASH';
 
   /**
+   * 이 process가 이미 atomic DB claim을 완료했거나 기존 claim을 확인한 마지막 결정 ID.
+   * 영속화하지 않는다: 재시작·다중 인스턴스는 반드시 DB claim을 다시 거쳐야 한다.
+   * 완료봉만이 아니라 symbol/state까지 포함해 같은 봉 안의 보호 상태 전환을 막지 않는다.
+   */
+  private lastDecisionIdentity: string | null = null;
+
+  /**
    * 계좌 Equity High-Water Mark (USD).
    * tradingCapital + totalRealizedPnl + totalUnrealizedPnl의 최댓값.
    * 재시작 시 초기화 — 최대 드로다운 강제는 HWM 수립 이후부터 적용.
@@ -374,6 +386,7 @@ class WorkerManager {
     if (this.active) return;
     const generation = ++this.lifecycleGeneration;
     this.active = true;
+    this.lastDecisionIdentity = null;
 
     // GMX 가격 폴러가 아직 시작되지 않았으면 시작
     ensureGmxPoller();
@@ -888,9 +901,10 @@ class WorkerManager {
     }
   }
 
-  /** 결정을 ai_decisions 테이블에 저장한다. 성공 여부를 반환한다 (Task #111 —
-   *  서버 PAPER 실행은 결정이 durable하게 기록된 후에만 허용). */
-  private async persistDecision(decision: ServerAiDecision): Promise<boolean> {
+  /** 결정을 ai_decisions 테이블에 atomic claim한다 (Task #111 —
+   *  서버 PAPER 실행은 결정이 durable하게 기록된 후에만 허용).
+   *  CONFLICT는 정상 replay/경합이며 ERROR와 구분하되 둘 다 downstream을 차단한다. */
+  private async persistDecision(decision: ServerAiDecision): Promise<DecisionClaimResult> {
     try {
       const dbIdMatch = /^worker:(-\d+):/.exec(decision.id);
       const dbId = Number(dbIdMatch?.[1]);
@@ -911,10 +925,10 @@ class WorkerManager {
         fullJson:         JSON.stringify(decision),
         testMode:         decision.testMode ?? false,
       }).onConflictDoNothing({ target: aiDecisionsTable.id }).returning({ id: aiDecisionsTable.id });
-      return inserted.length === 1;
+      return { status: inserted.length === 1 ? "CLAIMED" : "CONFLICT" };
     } catch (err) {
       console.error("[AIWorker] persistDecision 실패:", err);
-      return false;
+      return { status: "ERROR" };
     }
   }
 
@@ -1662,7 +1676,6 @@ class WorkerManager {
 
       // 전체 결정 객체 조립
       const decisionCreatedAt = new Date().toISOString();
-      const candleMs = 15 * 60_000;
       const upstreamObservedAt = analyses.map(analysis =>
         this.lastTickUpdatedAtBySymbol.get(analysis.symbol) ?? 0);
       if (upstreamObservedAt.some(value => !Number.isSafeInteger(value) || value <= 0)) {
@@ -1672,7 +1685,7 @@ class WorkerManager {
       // Strictly before the oldest upstream observation is a completed boundary
       // shared by every symbol used by this decision. Never use local wall time.
       const completedCandleCloseTime =
-        Math.floor((oldestObservedAt - 1) / candleMs) * candleMs;
+        Math.floor((oldestObservedAt - 1) / WORKER_DECISION_CANDLE_MS) * WORKER_DECISION_CANDLE_MS;
       const decisionEvaluatedAtMs = Date.parse(decisionCreatedAt);
       let decisionId = buildWorkerDecisionIdentity({
         symbol: engineResult.primarySymbol,
@@ -1771,10 +1784,22 @@ class WorkerManager {
       // 결정이 durable하게 기록된 후에만 실행을 허용해야, close-all 영속 write 실패 후
       // 크래시해도 재시작 reconciliation이 마지막 영속 결정(CASH/NO_TRADE)에서 의도를
       // 복원할 수 있다. 기록 실패 = 실행 불가 (fail-closed).
-      const decisionPersisted = await this.persistDecision(decision);
+      if (this.lastDecisionIdentity === decision.id) {
+        console.info(
+          `[AIWorker] 사이클 #${cycleNum} 동일 완료봉 결정 ${decision.id} 이미 처리됨 — ` +
+          "DB claim과 one-shot downstream 생략",
+        );
+        return;
+      }
+      const decisionClaim = await this.persistDecision(decision);
       if (!this.isCurrentGeneration(capturedGeneration)) return;
-      if (!decisionPersisted) {
-        console.error(`[AIWorker] 사이클 #${cycleNum} 결정 영속 claim 실패/중복 — 모든 downstream dispatch 차단 (fail-closed)`);
+      if (decisionClaim.status === "ERROR") {
+        console.error(`[AIWorker] 사이클 #${cycleNum} 결정 영속 claim 실패 — 모든 downstream dispatch 차단, 다음 cycle 재시도 (fail-closed)`);
+        return;
+      }
+      this.lastDecisionIdentity = decision.id;
+      if (decisionClaim.status === "CONFLICT") {
+        console.info(`[AIWorker] 사이클 #${cycleNum} 완료봉 결정이 이미 claim됨 — 모든 downstream dispatch 차단 (fail-closed)`);
         return;
       }
       if (nextStrategyLifecycleSnapshot !== null) {

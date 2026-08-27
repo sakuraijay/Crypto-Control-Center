@@ -83,6 +83,16 @@ vi.mock('../workers/stateEngine', () => ({
   runAiEngine: vi.fn(),
 }));
 
+vi.mock('../lib/tradeSettlement', () => ({
+  reconcileLiveSettlements: vi.fn(async () => ({
+    ok: true,
+    unsettledCount: 0,
+    settledNow: 0,
+    incomplete: false,
+    reasons: [],
+  })),
+}));
+
 vi.mock('../lib/riskProfiles', () => ({
   applyRiskProfileToLimits: (base: Record<string, unknown>) => base,
   promoteRiskProfileAtSafeBoundary: async (base: Record<string, unknown>) => ({
@@ -222,6 +232,7 @@ vi.mock('../workers/serverPaperExecutor', () => ({
 import { buildWorkerDecisionIdentity, workerManager } from '../workers/aiWorker';
 import { runAiEngine }   from '../workers/stateEngine';
 import { getCachedPrices } from '../routes/gmx';
+import { reconcileLiveSettlements } from '../lib/tradeSettlement';
 import {
   aiDecisionsTable,
   db,
@@ -293,6 +304,7 @@ function resetWorker() {
   wm.lastCycleAt             = null;
   wm.lastCycleResult         = null;
   wm.prevState               = 'CASH';
+  wm.lastDecisionIdentity      = null;
   wm.equityHighWaterMark     = null;
   wm.lastLimitsUsed          = null;
   wm.liveTestAccumLossUsd    = 0;
@@ -589,7 +601,7 @@ describe('completed-candle decision replay idempotency', () => {
     let insertAttempt = 0;
     _dbInsertImpl = () => (++insertAttempt === 1 ? [{ id: firstIdentity.dbId }] : []);
     const wm = workerManager as unknown as {
-      persistDecision(decision: unknown): Promise<boolean>;
+      persistDecision(decision: unknown): Promise<{ status: 'CLAIMED' | 'CONFLICT' | 'ERROR' }>;
     };
     const decision = {
       ...CASH_DECISION,
@@ -604,13 +616,178 @@ describe('completed-candle decision replay idempotency', () => {
 
     for (let replay = 0; replay < 2; replay++) {
       const durableClaim = await wm.persistDecision(decision);
-      if (durableClaim) {
+      if (durableClaim.status === 'CLAIMED') {
         await openServerPaperPosition({} as never);
       }
     }
 
     expect(db.insert).toHaveBeenCalledTimes(2);
     expect(openServerPaperPosition).toHaveBeenCalledTimes(1);
+  });
+
+  it('concurrent identical claims produce one durable winner', async () => {
+    const identity = buildWorkerDecisionIdentity({
+      symbol: 'BTC',
+      operatingState: 'LONG',
+      sourceCandleCloseTime: 1_800_000_000_000,
+      evaluatedAtMs: 1_800_000_000_001,
+    });
+    let insertAttempt = 0;
+    _dbInsertImpl = () => (++insertAttempt === 1 ? [{ id: identity.dbId }] : []);
+    const wm = workerManager as unknown as {
+      persistDecision(decision: unknown): Promise<{ status: 'CLAIMED' | 'CONFLICT' | 'ERROR' }>;
+    };
+    const decision = {
+      ...CASH_DECISION,
+      id: identity.decisionId,
+      createdAt: '2027-01-15T08:00:01.000Z',
+      primarySymbol: 'BTC',
+      source: 'server_worker',
+      testMode: false,
+      paperExecuted: false,
+      paperOrderId: null,
+    };
+
+    const claims = await Promise.all([
+      wm.persistDecision(decision),
+      wm.persistDecision(decision),
+    ]);
+
+    expect(claims.map(claim => claim.status).sort()).toEqual(['CLAIMED', 'CONFLICT']);
+    expect(db.insert).toHaveBeenCalledTimes(2);
+  });
+
+  it('same completed candle skips repeated DB claim and downstream in one process', async () => {
+    vi.useFakeTimers({ now: 1_800_000_000_000 });
+    setupDbSequence();
+    vi.mocked(runAiEngine).mockReturnValue(
+      CASH_DECISION as unknown as ReturnType<typeof runAiEngine>,
+    );
+    const wm = workerManager as unknown as {
+      runCycle(): Promise<void>;
+      maybeCreateApproval(...args: unknown[]): Promise<boolean>;
+      runServerPaperExecution(...args: unknown[]): Promise<void>;
+    };
+    const approvalDispatch = vi.spyOn(wm, 'maybeCreateApproval').mockResolvedValue(false);
+    const paperDispatch = vi.spyOn(wm, 'runServerPaperExecution').mockResolvedValue();
+
+    try {
+      await workerManager.start();
+      await wm.runCycle();
+      const firstDecisionClaims = _dbInsertTables.filter(table => table === aiDecisionsTable).length;
+      const firstIntelDispatches = vi.mocked(runIntelServiceCycle).mock.calls.length;
+
+      await wm.runCycle();
+
+      expect(_dbInsertTables.filter(table => table === aiDecisionsTable)).toHaveLength(firstDecisionClaims);
+      expect(approvalDispatch).toHaveBeenCalledTimes(1);
+      expect(paperDispatch).toHaveBeenCalledTimes(1);
+      expect(runIntelServiceCycle).toHaveBeenCalledTimes(firstIntelDispatches);
+      expect(reconcileLiveSettlements).toHaveBeenCalledTimes(2);
+    } finally {
+      workerManager.stop();
+      approvalDispatch.mockRestore();
+      paperDispatch.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('next completed candle permits exactly one new claim and dispatch', async () => {
+    vi.useFakeTimers({ now: 1_800_000_000_000 });
+    setupDbSequence();
+    vi.mocked(runAiEngine).mockReturnValue(
+      CASH_DECISION as unknown as ReturnType<typeof runAiEngine>,
+    );
+    const wm = workerManager as unknown as {
+      runCycle(): Promise<void>;
+      lastTickUpdatedAtBySymbol: Map<string, number>;
+    };
+
+    try {
+      await workerManager.start();
+      await wm.runCycle();
+      const firstClaims = _dbInsertTables.filter(table => table === aiDecisionsTable).length;
+      const firstDispatches = vi.mocked(runIntelServiceCycle).mock.calls.length;
+
+      for (const symbol of ['BTC', 'ETH']) {
+        const previous = wm.lastTickUpdatedAtBySymbol.get(symbol)!;
+        wm.lastTickUpdatedAtBySymbol.set(symbol, previous + 15 * 60_000);
+      }
+      await wm.runCycle();
+      await wm.runCycle();
+
+      expect(_dbInsertTables.filter(table => table === aiDecisionsTable)).toHaveLength(firstClaims + 1);
+      expect(runIntelServiceCycle).toHaveBeenCalledTimes(firstDispatches + 1);
+    } finally {
+      workerManager.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it('same candle permits a changed symbol/state identity after fresh risk and settlement evaluation', async () => {
+    vi.useFakeTimers({ now: 1_800_000_000_000 });
+    setupDbSequence();
+    vi.mocked(runAiEngine)
+      .mockReturnValueOnce(CASH_DECISION as unknown as ReturnType<typeof runAiEngine>)
+      .mockReturnValueOnce({
+        ...CASH_DECISION,
+        operatingState: 'LONG',
+        primarySymbol: 'BTC',
+        riskApproved: true,
+        executionType: 'perp_long_open',
+      } as unknown as ReturnType<typeof runAiEngine>);
+    const wm = workerManager as unknown as {
+      runCycle(): Promise<void>;
+      runServerPaperExecution(...args: unknown[]): Promise<void>;
+    };
+    const paperDispatch = vi.spyOn(wm, 'runServerPaperExecution').mockResolvedValue();
+    const settlementCallsBefore = vi.mocked(reconcileLiveSettlements).mock.calls.length;
+
+    try {
+      await workerManager.start();
+      await wm.runCycle();
+      const firstClaims = _dbInsertTables.filter(table => table === aiDecisionsTable).length;
+
+      await wm.runCycle();
+
+      expect(_dbInsertTables.filter(table => table === aiDecisionsTable)).toHaveLength(firstClaims + 1);
+      expect(paperDispatch).toHaveBeenCalledTimes(2);
+      expect(reconcileLiveSettlements).toHaveBeenCalledTimes(settlementCallsBefore + 2);
+    } finally {
+      workerManager.stop();
+      paperDispatch.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('DB claim error is retried, but a confirmed conflict suppresses later same-candle attempts', async () => {
+    vi.useFakeTimers({ now: 1_800_000_000_000 });
+    setupDbSequence();
+    vi.mocked(runAiEngine).mockReturnValue(
+      CASH_DECISION as unknown as ReturnType<typeof runAiEngine>,
+    );
+    let decisionClaimAttempts = 0;
+    _dbInsertImpl = () => {
+      if (_dbInsertTables.at(-1) !== aiDecisionsTable) return [{ id: 'auxiliary-row' }];
+      decisionClaimAttempts += 1;
+      if (decisionClaimAttempts === 1) throw new Error('transient decision DB failure');
+      return [];
+    };
+    const wm = workerManager as unknown as { runCycle(): Promise<void> };
+
+    try {
+      await workerManager.start();
+      await wm.runCycle();
+      await wm.runCycle();
+      await wm.runCycle();
+
+      expect(decisionClaimAttempts).toBe(2);
+      expect(runIntelServiceCycle).not.toHaveBeenCalled();
+      expect(openServerPaperPosition).not.toHaveBeenCalled();
+    } finally {
+      workerManager.stop();
+      vi.useRealTimers();
+    }
   });
 
   it('restart replay claim blocks duplicate approval, LIVE intent/order dispatch, and Intel cycle', async () => {
@@ -822,7 +999,7 @@ describe('crash-restart — Strategy SHADOW lifecycle DB 복원', () => {
     const firstWorker = workerManager as unknown as {
       strategyLifecycleSnapshot: typeof firstBaseline | null;
       strategyLifecycleRestoreBlocked: boolean;
-      persistDecision(decision: unknown): Promise<boolean>;
+      persistDecision(decision: unknown): Promise<{ status: 'CLAIMED' | 'CONFLICT' | 'ERROR' }>;
     };
     firstWorker.strategyLifecycleSnapshot = firstBaseline;
     firstWorker.strategyLifecycleRestoreBlocked = false;
@@ -850,7 +1027,7 @@ describe('crash-restart — Strategy SHADOW lifecycle DB 복원', () => {
         lifecycleSnapshot: firstOutputSnapshot,
       },
     });
-    expect(persisted).toBe(true);
+    expect(persisted.status).toBe('CLAIMED');
     expect(db.insert).toHaveBeenCalledTimes(1);
     const persistedRow = _dbValuesInputs.find((value): value is { fullJson: string } =>
       typeof value === 'object' && value !== null
