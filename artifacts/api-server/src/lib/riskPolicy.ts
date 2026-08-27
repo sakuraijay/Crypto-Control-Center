@@ -9,28 +9,30 @@
  */
 
 export const RISK_POLICY = {
-  /** 최종 기준 자본 (USDC) */
+  /** 현재 승인된 Active Trading Capital (USDC). Planned Seed와 별개. */
   initialCapitalUsd: 1000,
-  /** 위험계산에 사용할 수 있는 최대 기준 자본 — equity가 커져도 이 이상 안 씀 */
+  /** 현재 단계에서 위험계산에 사용할 수 있는 최대 Active Capital */
   maxRiskCapitalUsd: 1000,
-  /** 일일 1차 수익 목표 (+5%) — 도달 시 신규 진입 금지 */
+  /** 일일 과열 방지 1차 상한 (+5%) — 수익 목표가 아님 */
   primaryProfitTargetPercent: 5,
-  /** 일일 절대 수익 상한 (+10%) — 도달 시 전량 종료 + 잠금 */
+  /** 일일 절대 과열 상한 (+10%) — 수익 목표가 아님 */
   absoluteProfitCapPercent: 10,
   /** Profit Protection 후 보호 수익 floor (+3.5%) */
   protectedProfitFloorPercent: 3.5,
-  /** 거래당 기본 허용손실 (0.75%) */
-  baseRiskPerTradePercent: 0.75,
-  /** 거래당 절대 최대손실 (1%) */
-  maxRiskPerTradePercent: 1,
-  /** 일일 Defensive Mode 진입 손실 (-2%) */
-  defensiveModeLossPercent: 2,
-  /** 일일 최대손실 (-3%) — 도달 시 전량 종료 + 일일 잠금 */
-  dailyMaxLossPercent: 3,
+  /** 거래당 기본 허용손실 (Active Capital의 0.25%) */
+  baseRiskPerTradePercent: 0.25,
+  /** 거래당 절대 최대손실 (Active Capital의 0.5%) */
+  maxRiskPerTradePercent: 0.5,
+  /** 일일 Defensive Mode 진입 손실 (-0.5%) — 1% 일일 잠금 전에 선제 축소 */
+  defensiveModeLossPercent: 0.5,
+  /** 일일 최대손실 (-1%) — 도달 시 전량 종료 + 일일 잠금 */
+  dailyMaxLossPercent: 1,
   /** 주간 최대손실 (-8%) */
   weeklyMaxLossPercent: 8,
-  /** 전체 강제중단 equity 하한 — 최초 $1,000 대비 -15% */
-  hardStopEquityUsd: 850,
+  /** 전체 강제중단 equity 하한 — 현재 Active $1,000 대비 -8% */
+  hardStopEquityUsd: 920,
+  /** 현재 Active 단계의 포지션당 담보 절대 상한 */
+  maxMarginPerTradeUsd: 334,
   /** 기본 최대 레버리지 */
   baseMaxLeverage: 3,
   /** 조건부 최대 레버리지 (현재 비활성) */
@@ -39,8 +41,8 @@ export const RISK_POLICY = {
   conditional5xEnabled: false,
   /** 동시 포지션 최대 */
   maxConcurrentPositions: 1,
-  /** 버전 프로필이 요청할 수 있는 절대 동시 포지션 상한 */
-  maxProfileConcurrentPositions: 2,
+  /** 버전 프로필이 요청할 수 있는 절대 동시 포지션 상한 — profile로 완화 금지 */
+  maxProfileConcurrentPositions: 1,
   /** Manila 거래일 기준 신규 진입 최대 횟수 */
   maxDailyEntries: 3,
   /** 연속 순손실 즉시 중단 기준 */
@@ -59,6 +61,22 @@ export const RISK_POLICY = {
 
 export type RiskPolicy = typeof RISK_POLICY;
 
+/**
+ * 자본 의미의 authoritative 분리.
+ * plannedSeed는 계획/평가 기준일 뿐 wallet 입금·Active 증액·실행 권한이 아니다.
+ */
+export const CAPITAL_PLAN = {
+  plannedSeedCapitalUsd: 10_000,
+  activeTradingCapitalUsd: RISK_POLICY.maxRiskCapitalUsd,
+  reserveCapitalPercent: 20,
+  reserveCapitalUsd: RISK_POLICY.maxRiskCapitalUsd * 0.20,
+  deployableActiveCapitalUsd: RISK_POLICY.maxRiskCapitalUsd * 0.80,
+  onchainBalanceSource: 'GMX_RPC_READ_ONLY',
+  plannedSeedAuthorizesFunding: false,
+  plannedSeedAuthorizesPromotion: false,
+  monthlyNetReturnReferenceRangePercent: [1, 3] as const,
+} as const;
+
 /** 서버가 기준 자본에서 파생한 달러 한도 (§3 — 파생값은 저장하지 않고 계산) */
 export interface DerivedRiskTargets {
   /** 오늘 위험계산 기준금액 = min(startOfDayEquity, 1000) */
@@ -71,7 +89,7 @@ export interface DerivedRiskTargets {
   protectedProfitFloorUsd: number;
   /** -2% Defensive 진입 달러값 (양수 표기) */
   defensiveModeLossUsd: number;
-  /** -3% 일일 최대손실 달러값 (양수 표기) */
+  /** -1% 일일 최대손실 달러값 (양수 표기) */
   dailyMaxLossUsd: number;
 }
 
@@ -89,16 +107,16 @@ export function deriveDailyTargets(dailyRiskCapitalUsd: number): DerivedRiskTarg
 }
 
 // ── 소프트 KPI(dailyTargetUSDT) 정책 결속 ─────────────────────────────────────
-// dailyTargetUSDT는 모니터링 전용 soft KPI지만, 정책 파생 상한(+10% = $100 @
-// $1,000 기준)을 초과해 저장·표시되는 것은 금지한다. 화면·API·worker의 목표
+// dailyTargetUSDT는 모니터링 전용 soft KPI지만, 과열 상한(+10% = $100 @
+// 현재 Active $1,000)을 초과해 저장·표시되는 것은 금지한다. 화면·API·worker의
 // 표시는 항상 riskDerivedTargets(=deriveDailyTargets)를 원본으로 삼고, legacy
 // 저장값(예: 구형 $500)은 실행·표시·목표 판단에 사용하지 않는다.
 
-/** 정책 파생 일일 1차 목표 달러값 — $1,000 기준 +5% = $50 */
+/** 정책 파생 일일 1차 과열 상한 — Active $1,000 기준 +5% = $50 */
 export const POLICY_DAILY_TARGET_USD =
   RISK_POLICY.maxRiskCapitalUsd * RISK_POLICY.primaryProfitTargetPercent / 100;
 
-/** 정책 파생 일일 절대 수익 상한 달러값 — $1,000 기준 +10% = $100 */
+/** 정책 파생 일일 절대 과열 상한 — Active $1,000 기준 +10% = $100 */
 export const POLICY_DAILY_TARGET_CAP_USD =
   RISK_POLICY.maxRiskCapitalUsd * RISK_POLICY.absoluteProfitCapPercent / 100;
 
@@ -148,11 +166,52 @@ export type CanaryPolicy = typeof CANARY_POLICY;
 /** 승급 사다리 — 자동 승급 절대 금지, 각 단계는 별도 운영자 승인 (§13) */
 export const CAPITAL_TIER_LADDER = [
   { tier: 'CANARY', capitalUsd: 15,   requirement: '주문경로 Canary — OPEN 1회 + CLOSE/보호 주문 검증' },
-  { tier: 'T100',   capitalUsd: 100,  requirement: '최소 20건' },
-  { tier: 'T300',   capitalUsd: 300,  requirement: '최소 50건 · 비용 차감 후 양수' },
-  { tier: 'T500',   capitalUsd: 500,  requirement: '최대낙폭 10% 이내' },
-  { tier: 'T1000',  capitalUsd: 1000, requirement: '최소 100건 및 RiskEngine 검증' },
+  { tier: 'ACTIVE_1000',  capitalUsd: 1_000,  requirement: '현재 단계 · 자동 증액 금지' },
+  { tier: 'ACTIVE_2500',  capitalUsd: 2_500,  requirement: '비용 차감 후 양의 기대값 · GMX 주문/체결/정산 일치 · Stop/비상청산 가능 · unresolved 0 · Risk 준수 · Canary · 사용자 승인' },
+  { tier: 'ACTIVE_5000',  capitalUsd: 5_000,  requirement: '직전 단계 재검증 · 비용/Stop/정산/Risk/Canary 증거 · 사용자 승인' },
+  { tier: 'ACTIVE_10000', capitalUsd: 10_000, requirement: '직전 단계 재검증 · 비용/Stop/정산/Risk/Canary 증거 · 사용자 승인' },
 ] as const;
+
+export type ActiveCapitalStage = 1_000 | 2_500 | 5_000 | 10_000;
+
+export interface CapitalPromotionEvidence {
+  fromCapitalUsd: ActiveCapitalStage;
+  toCapitalUsd: ActiveCapitalStage;
+  positiveNetExpectancyAfterCosts: boolean;
+  gmxOrderExecutionSettlementMatched: boolean;
+  stopLossExecutable: boolean;
+  emergencyCloseExecutable: boolean;
+  unresolvedCount: number | null;
+  drawdownWithinLimit: boolean;
+  dailyLossWithinLimit: boolean;
+  stageCanaryVerified: boolean;
+  userReportReviewed: boolean;
+  userExplicitlyApproved: boolean;
+}
+
+export type CapitalPromotionResult =
+  | { allowed: true }
+  | { allowed: false; reasons: string[] };
+
+/** 단계 증액은 순차 승격 + 전 증거 + 사용자 명시 승인일 때만 허용된다. */
+export function evaluateCapitalPromotion(input: CapitalPromotionEvidence): CapitalPromotionResult {
+  const stages: readonly ActiveCapitalStage[] = [1_000, 2_500, 5_000, 10_000];
+  const from = stages.indexOf(input.fromCapitalUsd);
+  const sequential = from >= 0 && stages[from + 1] === input.toCapitalUsd;
+  const reasons: string[] = [];
+  if (!sequential) reasons.push('Active Capital은 1,000→2,500→5,000→10,000 순차 승격만 허용');
+  if (!input.positiveNetExpectancyAfterCosts) reasons.push('비용 차감 후 양의 기대값 미확인');
+  if (!input.gmxOrderExecutionSettlementMatched) reasons.push('GMX 주문/체결/정산 일치 미확인');
+  if (!input.stopLossExecutable) reasons.push('Stop-Loss 실제 실행 가능성 미확인');
+  if (!input.emergencyCloseExecutable) reasons.push('비상청산 실제 실행 가능성 미확인');
+  if (input.unresolvedCount !== 0) reasons.push('unresolved 0 미확인');
+  if (!input.drawdownWithinLimit) reasons.push('Drawdown 제한 준수 미확인');
+  if (!input.dailyLossWithinLimit) reasons.push('일일 손실 제한 준수 미확인');
+  if (!input.stageCanaryVerified) reasons.push('해당 단계 Canary 검증 미완료');
+  if (!input.userReportReviewed) reasons.push('사용자 보고 검토 미완료');
+  if (!input.userExplicitlyApproved) reasons.push('사용자 명시 승인 없음');
+  return reasons.length === 0 ? { allowed: true } : { allowed: false, reasons };
+}
 
 export interface CanaryGateInput {
   /** 서버 authoritative 플래그 (환경/DB) — 브라우저 값 사용 금지 */

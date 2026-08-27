@@ -203,7 +203,7 @@ export default function Dashboard() {
       {/* ── Beta RC 상태 (읽기 전용 관제) ── */}
       <BetaRcStatusCard />
 
-      {/* ── $1,000 최종 운용 정책 (6H-1) ── */}
+      {/* ── Planned $10,000 / current Active $1,000 운용 정책 ── */}
       <RiskPolicyCard />
       <RiskExecutionStatusCard />
 

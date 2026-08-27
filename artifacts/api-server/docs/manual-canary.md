@@ -108,6 +108,13 @@ GMX_API_ORDER_SUBMISSION_ENABLED=false 유지. 실제 canary는 별도 운영자
 - 총 비용률은 `roundTripCost / $20`, cap 초과액은
   `max(0, roundTripCost - $0.40)`, 필요 절감률은
   `cap 초과액 / roundTripCost`로만 계산한다.
+- 현재 관측된 `$20 LONG / 1h` 총 비용 약 `$0.48`은 canonical `$0.40`
+  cap을 초과하므로 Canary는 차단 상태다. 이 한 점을 더 큰 주문에 선형
+  외삽하지 않는다. 경제적 최소 주문규모는 동일 market/direction/holding
+  조건에서 여러 notional의 fresh 공식 quote를 읽기 전용으로 sweep하고
+  `expectedGrossEdge(N) - effectiveRoundTripCost(N) > 0`인 최소 N을 찾아야 한다.
+  양의 기대값 근거와 Stop 실행 가능성이 모두 없으면 최소 주문규모는
+  `Unavailable`이며 주문 확대 근거로 사용할 수 없다.
 - 비용 회수 최소 gross move/edge는 총비용 USD와 `$20` 대비 총 비용률이다.
   이는 수익 보장이나 주문 크기 확대 제안이 아니다.
 - snapshot이 missing/stale/invalid이면 비용 성분·총액·비율·절감값·손익분기값과

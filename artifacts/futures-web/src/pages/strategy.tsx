@@ -231,7 +231,7 @@ export default function Strategy() {
               <div>Current strategy values stay unchanged; the existing server safety policy remains authoritative.</div>
               <ul className="mt-1 space-y-0.5 opacity-80 list-disc list-inside ml-1">
                 <li>Signal Threshold: 80</li>
-                <li>Max Risk: 0.75% per trade</li>
+                <li>Max Risk: 0.25% base / 0.5% absolute per trade</li>
                 <li>Reserve Cash: {limits.reserveCashPct}%</li>
                 <li>Max Margin: ${limits.maxMarginPerTrade.toLocaleString()}</li>
                 <li>Max Positions: 1</li>
@@ -240,7 +240,7 @@ export default function Strategy() {
                 <li>Exposure: ${Math.min(limits.maxTotalExposureUSDT, 3000).toLocaleString()}</li>
               </ul>
               <div className="mt-2 p-2 bg-background border border-border rounded text-[10px] leading-relaxed">
-                <span className="font-semibold text-foreground">Allocated capital:</span> ${limits.tradingCapital.toLocaleString()} allows at most <strong className="text-foreground">${(limits.tradingCapital * 0.0075).toLocaleString()}</strong> risk per trade.
+                 <span className="font-semibold text-foreground">Active capital:</span> ${limits.tradingCapital.toLocaleString()} allows <strong className="text-foreground">${(limits.tradingCapital * 0.0025).toLocaleString()}</strong> base / <strong className="text-foreground">${(limits.tradingCapital * 0.005).toLocaleString()}</strong> absolute loss risk per trade.
               </div>
             </div>
             <Button
@@ -260,17 +260,17 @@ export default function Strategy() {
             <div className="text-[10px] text-muted-foreground flex-1 flex flex-col gap-1">
               <div>Higher entry rates and scaled exposure. Use only in strong trending markets.</div>
               <ul className="mt-1 space-y-0.5 opacity-80 list-disc list-inside ml-1">
-                <li>Signal Threshold: 70</li>
-                <li>Max Risk: 1% per trade</li>
-                <li>Reserve Cash: 10%</li>
-                <li>Max Margin: $500</li>
-                <li>Max Positions: 2</li>
-                <li>Cooldown: 10m</li>
+                <li>Signal Threshold: 80 (완화 금지)</li>
+                <li>Max Risk: 0.5% per trade</li>
+                <li>Reserve Cash: ≥20%</li>
+                <li>Max Margin: 기존 보수 한도 유지</li>
+                <li>Max Positions: 1</li>
+                <li>Cooldown: ≥30m</li>
                 <li>Max Leverage: ≤3x</li>
                 <li>Exposure: Min(Capital × 3, $3,000) = ${Math.min(limits.tradingCapital * 3, 3000).toLocaleString()}</li>
               </ul>
               <div className="mt-2 p-2 bg-background border border-border rounded text-[10px] leading-relaxed">
-                <span className="font-semibold text-foreground">Capital Impact:</span> At ${limits.tradingCapital.toLocaleString()} trading capital, max risk (1%) allows <strong className="text-foreground">${((limits.tradingCapital * 1) / 100).toLocaleString()}</strong> risk per trade.
+                 <span className="font-semibold text-foreground">Capital Impact:</span> At ${limits.tradingCapital.toLocaleString()} Active Capital, the absolute 0.5% cap allows <strong className="text-foreground">${((limits.tradingCapital * 0.5) / 100).toLocaleString()}</strong> loss risk per trade.
               </div>
             </div>
             <Button
@@ -394,13 +394,13 @@ export default function Strategy() {
               <TrendingUp className="w-4 h-4 text-[var(--color-long)]" /> Trading Capital &amp; KPI
             </h2>
             <p className="text-[10px] text-muted-foreground mt-2 leading-relaxed">
-              <span className="text-foreground font-medium">Trading Capital</span>은 실제 지갑 USDC 잔고를 초과할 수 없습니다.
-              일일 PnL KPI는 모니터링 전용 — AI 진입 결정과 무관합니다.
+               Planned Seed $10,000은 계획 기준일 뿐입니다. <span className="text-foreground font-medium">Approved Active Stage</span>는 현재 $1,000이며, 아래 Current Risk Sizing Capital 및 실제 지갑 USDC 잔고와 별도입니다.
+               일일 5~10%는 수익 목표가 아닌 과열 상한이고, 월 1~3%는 평가 참고치일 뿐입니다.
             </p>
           </div>
           <Card className="p-0 overflow-hidden divide-y divide-border">
             {([
-              { key: 'tradingCapital',   label: 'Trading Capital (시드머니)', prefix: '$', step: 1000, max: 1_000_000 },
+               { key: 'tradingCapital',   label: 'Current Risk Sizing Capital (Approved Active $1,000 이하)', prefix: '$', step: 1000, max: 1_000 },
               { key: 'dailyTargetUSDT',  label: '일일 PnL KPI (소프트 목표)', prefix: '$', step: 10,   max: 100 },
             ] as const).map(item => (
               <div key={item.key} className="flex flex-col px-4 py-3 hover:bg-muted/30 transition-colors gap-1.5">
@@ -470,7 +470,7 @@ export default function Strategy() {
                     </div>
                     <div className="flex items-start gap-1 text-[9px] text-muted-foreground/70">
                       <Info className="w-2.5 h-2.5 shrink-0 mt-0.5" />
-                      확정 RiskPolicy 파생값(읽기 전용): 1차 목표 +5% = ${POLICY_DAILY_TARGET_USD} · 절대 상한 +10% = ${POLICY_DAILY_TARGET_CAP_USD} — 이 상한을 초과해 저장할 수 없습니다
+                       확정 RiskPolicy 파생값(읽기 전용): 과열 경계 +5% = ${POLICY_DAILY_TARGET_USD} · 절대 과열 상한 +10% = ${POLICY_DAILY_TARGET_CAP_USD} — 강제 수익 목표가 아닙니다
                     </div>
                   </div>
                 )}

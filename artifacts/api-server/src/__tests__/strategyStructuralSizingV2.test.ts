@@ -35,10 +35,10 @@ const risk = (overrides: Partial<StrategyRiskAdapterDecision> = {}): StrategyRis
 const profile = (overrides: Partial<AppliedRiskProfileSnapshot['derivedLimits']> = {}): AppliedRiskProfileSnapshot => ({
   name: 'conservative', version: 'risk-profile/v1', appliedAt: '2026-08-23T10:00:00.000Z',
   derivedLimits: {
-    immediateEntryThreshold: 80, maxRiskPerTradePct: 0.75, reserveCashPct: 20,
+    immediateEntryThreshold: 80, maxRiskPerTradePct: 0.25, reserveCashPct: 20,
     maxMarginPerTradeUsd: 334, maxConcurrentPositions: 1, cooldownMinutes: 30,
     maxLeverage: 3, maxTotalExposureUsd: 3_000, allocatedTradingCapitalUsd: 1_000,
-    maxRiskPerTradeUsd: 7.5, ...overrides,
+    maxRiskPerTradeUsd: 2.5, ...overrides,
   },
 });
 
@@ -55,8 +55,8 @@ describe('Strategy Structural Stop sizing advisory', () => {
     expect(result).toMatchObject({
       schemaVersion: STRATEGY_STRUCTURAL_SIZING_VERSION,
       status: 'SIZED', direction: 'LONG', stopDistanceFraction: 0.02,
-      allowedRiskUsd: 7.5, effectiveStopLossFraction: 0.024,
-      maxNotionalBeforeRiskReductionUsd: 312.5, finalAdvisoryNotionalUsd: 312.5,
+      allowedRiskUsd: 2.5, effectiveStopLossFraction: 0.024,
+      maxNotionalBeforeRiskReductionUsd: 104.16666666666667, finalAdvisoryNotionalUsd: 104.16666666666667,
       authority: 'ADVISORY_ONLY', executionAuthorized: false,
       approvalCreationAllowed: false, paperPositionMutationAllowed: false,
       livePositionMutationAllowed: false,
@@ -69,7 +69,7 @@ describe('Strategy Structural Stop sizing advisory', () => {
     const result = buildStrategyStructuralSizingAdvisory(value);
     expect(result).toMatchObject({
       status: 'SIZED', riskSizeFactor: 0.5,
-      maxNotionalBeforeRiskReductionUsd: 312.5, finalAdvisoryNotionalUsd: 156.25,
+      maxNotionalBeforeRiskReductionUsd: 104.16666666666667, finalAdvisoryNotionalUsd: 52.083333333333336,
     });
   });
 

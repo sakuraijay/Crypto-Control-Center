@@ -16,7 +16,8 @@ export interface IndicatorConfig {
 export interface RiskLimits {
   // ── Capital settings ─────────────────────────────────────────────────────
   /**
-   * Seed money committed to trading (USDT).
+   * Current risk-sizing capital (USDT), bounded by the approved Active stage.
+   * This is not Planned Seed Capital and may be smaller than the approved stage.
    * Must not exceed actual wallet USDC equity — validated on the Strategy page.
    * Basis for drawdown %, max-risk-per-symbol, and profit-lock calculations.
    */
@@ -83,7 +84,7 @@ const DEFAULT_INDICATORS: IndicatorConfig[] = [
   { id: 'combined', name: 'Combined Scoring',     enabled: true,  params: { minScore: 60 } },
 ];
 
-// 6H-1 $1,000 최종 운용 정책 기본값 — 서버 clampRiskLimits와 정합.
+// 현재 승인된 Active $1,000 운용 정책 기본값 — Planned Seed $10,000과 분리.
 // 구형 $10,000/$500/$1,500/10x 기본값은 제거됨.
 const DEFAULT_LIMITS: RiskLimits = {
   // Capital
@@ -95,9 +96,9 @@ const DEFAULT_LIMITS: RiskLimits = {
   maxMarginPerTrade:           334,   // ≈ capital/3 — 1포지션 담보 상한
   maxLeverage:                   3,   // 기본 3x — 조건부 5x 비활성
   maxSimultaneousPositions:      1,   // 동시 포지션 1개
-  dailyLossLimitUSDT:           30,   // -3% 일일 손실 한도
+  dailyLossLimitUSDT:           10,   // -1% 일일 손실 한도
   weeklyLossLimitUSDT:          80,   // -8% 주간 손실 한도
-  maxDrawdownPercent:           15,   // hard stop equity $850 (-15%)
+  maxDrawdownPercent:            8,   // hard stop equity $920 (-8%)
   consecutiveLossLimit:          3,   // 연속 손실 3회 중단
   cooldownMinutes:              30,
   maxTradesPerHour:              6,

@@ -43,10 +43,10 @@ const risk = (overrides: Partial<RiskEvaluationResult> = {}): RiskEvaluationResu
 const profile: AppliedRiskProfileSnapshot = {
   name: 'conservative', version: 'risk-profile/v1', appliedAt: '2026-08-23T11:00:00.000Z',
   derivedLimits: {
-    immediateEntryThreshold: 80, maxRiskPerTradePct: 0.75, reserveCashPct: 20,
+    immediateEntryThreshold: 80, maxRiskPerTradePct: 0.25, reserveCashPct: 20,
     maxMarginPerTradeUsd: 334, maxConcurrentPositions: 1, cooldownMinutes: 30,
     maxLeverage: 3, maxTotalExposureUsd: 3_000, allocatedTradingCapitalUsd: 1_000,
-    maxRiskPerTradeUsd: 7.5,
+    maxRiskPerTradeUsd: 2.5,
   },
 };
 const context = (overrides: Partial<StrategyStructuralSizingMarketContext> = {}):
@@ -77,7 +77,7 @@ describe('Strategy Structural sizing Worker read-only bridge', () => {
       paperPositionMutationAllowed: false, livePositionMutationAllowed: false,
     });
     expect(value.sizings[0]).toMatchObject({
-      status: 'SIZED', finalAdvisoryNotionalUsd: 312.5,
+      status: 'SIZED', finalAdvisoryNotionalUsd: 104.16666666666667,
     });
   });
 

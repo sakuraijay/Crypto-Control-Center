@@ -139,13 +139,13 @@ const INITIAL_DELAY_MS = 30_000;
  * 구형 $10,000/$500/$1,500 기본값은 6H-1에서 제거됨.
  */
 export const DEFAULT_LIMITS: RiskLimits = {
-  dailyLossLimitUSDT:  RISK_POLICY.maxRiskCapitalUsd * RISK_POLICY.dailyMaxLossPercent / 100,   // $30
-  maxDrawdownPercent:        15,   // hard stop -15% ($850)과 정합
+  dailyLossLimitUSDT:  RISK_POLICY.maxRiskCapitalUsd * RISK_POLICY.dailyMaxLossPercent / 100,   // $10
+  maxDrawdownPercent:         8,   // Active $1,000 대비 hard stop -8% ($920)
   consecutiveLossLimit: RISK_POLICY.maxConsecutiveLosses,                                        // 3
   maxLeverage:          RISK_POLICY.baseMaxLeverage,                                             // 3x
-  maxMarginPerTrade:        334,   // ≈ capital/3 — 1포지션 담보 상한
+  maxMarginPerTrade: RISK_POLICY.maxMarginPerTradeUsd,
   maxTotalExposureUSDT: RISK_POLICY.maxRiskCapitalUsd * RISK_POLICY.baseMaxLeverage,             // $3,000
-  tradingCapital:       RISK_POLICY.initialCapitalUsd,                                           // $1,000
+  tradingCapital:       RISK_POLICY.initialCapitalUsd,                                           // Active $1,000
   reserveCashPct:            20,
   profitLockThresholdPct: RISK_POLICY.primaryProfitTargetPercent,                                // 5%
   maxSimultaneousPositions: RISK_POLICY.maxConcurrentPositions,                                  // 1
@@ -1011,6 +1011,22 @@ class WorkerManager {
       if ('dailyTargetUSDT' in merged) {
         merged.dailyTargetUSDT = clampDailyTargetUSDT(merged.dailyTargetUSDT);
       }
+      // legacy/직접 DB 값도 새 절대 정책보다 완화될 수 없다 (DB 무변경).
+      merged.tradingCapital = Math.min(
+        RISK_POLICY.maxRiskCapitalUsd,
+        Math.max(0, Number(merged.tradingCapital) || 0),
+      );
+      merged.reserveCashPct = Math.max(20, Math.min(100, Number(merged.reserveCashPct) || 20));
+      merged.dailyLossLimitUSDT = Math.min(
+        RISK_POLICY.maxRiskCapitalUsd * RISK_POLICY.dailyMaxLossPercent / 100,
+        Math.max(0, Number(merged.dailyLossLimitUSDT) || 0),
+      );
+      merged.maxDrawdownPercent = Math.min(8, Math.max(0, Number(merged.maxDrawdownPercent) || 0));
+      merged.maxSimultaneousPositions = RISK_POLICY.maxConcurrentPositions;
+      merged.maxMarginPerTrade = Math.min(
+        RISK_POLICY.maxMarginPerTradeUsd,
+        Math.max(0, Number(merged.maxMarginPerTrade) || 0),
+      );
       return merged;
     } catch (err) {
       console.warn('[AIWorker] loadStrategyLimits 실패 — DEFAULT_LIMITS 사용:', (err as Error).message);

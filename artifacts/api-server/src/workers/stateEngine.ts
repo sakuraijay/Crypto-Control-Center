@@ -17,6 +17,7 @@ import type {
   Position,
   RiskLimits,
 } from './serverTypes';
+import { RISK_POLICY } from '../lib/riskPolicy';
 
 // ── Config constants ──────────────────────────────────────────────────────────
 
@@ -295,7 +296,7 @@ export function runAiEngine(
 
   const profitLockStage = computeProfitLockStage(
     dailyRealizedPnlUsd,
-    tradingCapital > 0 ? tradingCapital : (limits.tradingCapital ?? 10_000),
+    tradingCapital > 0 ? tradingCapital : (limits.tradingCapital ?? RISK_POLICY.initialCapitalUsd),
     limits.profitLockThresholdPct ?? 1,
   );
 
@@ -383,7 +384,7 @@ export function runAiEngine(
     ? positions.some(position => position.symbol === best.symbol)
     : false;
 
-  const reservedCash = (limits.tradingCapital ?? 10_000) * ((limits.reserveCashPct ?? 0) / 100);
+  const reservedCash = (limits.tradingCapital ?? RISK_POLICY.initialCapitalUsd) * ((limits.reserveCashPct ?? 0) / 100);
   const deployableBalance = Math.max(0, account.availableBalance - reservedCash);
 
   // Priority 1: HEDGE
@@ -526,7 +527,7 @@ export function runAiEngine(
           .filter(p => p.symbol === primarySym)
           .reduce((s, p) => s + (p.collateralUsd ?? 0), 0);
         const newMargin = (sizeUsd ?? 0) / Math.max(1, leverage ?? 1);
-        const symbolMarginLimit = (limits.tradingCapital ?? 10_000) * ((limits.maxRiskPerSymbolPct ?? 10) / 100);
+        const symbolMarginLimit = (limits.tradingCapital ?? RISK_POLICY.initialCapitalUsd) * ((limits.maxRiskPerSymbolPct ?? 10) / 100);
         if (existingSymbolMargin + newMargin > symbolMarginLimit) {
           riskApproved = false;
           riskVetoReason = `${best?.displaySymbol ?? primarySym} margin $${(existingSymbolMargin + newMargin).toFixed(0)} would exceed cap`;

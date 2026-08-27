@@ -92,10 +92,10 @@ const BASE_OPEN = {
     version: 'risk-profile/v1' as const,
     appliedAt: '2026-08-21T00:00:00.000Z',
     derivedLimits: {
-      immediateEntryThreshold: 80, maxRiskPerTradePct: 0.75, reserveCashPct: 20,
+      immediateEntryThreshold: 80, maxRiskPerTradePct: 0.25, reserveCashPct: 20,
       maxMarginPerTradeUsd: 334, maxConcurrentPositions: 1, cooldownMinutes: 30,
       maxLeverage: 3, maxTotalExposureUsd: 3_000,
-      allocatedTradingCapitalUsd: 1_000, maxRiskPerTradeUsd: 7.5,
+      allocatedTradingCapitalUsd: 1_000, maxRiskPerTradeUsd: 2.5,
     },
   },
 };

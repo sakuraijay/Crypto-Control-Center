@@ -94,12 +94,12 @@ export function isAppliedRiskProfileSnapshot(value: unknown): value is AppliedRi
       && limits.maxRiskPerTradePct === RISK_POLICY.baseRiskPerTradePercent
       && limits.maxConcurrentPositions === RISK_POLICY.maxConcurrentPositions;
   }
-  return limits.immediateEntryThreshold === 70
-    && limits.maxRiskPerTradePct === 1
-    && limits.reserveCashPct === 10
-    && limits.maxMarginPerTradeUsd <= 500
-    && limits.maxConcurrentPositions === 2
-    && limits.cooldownMinutes === 10
+  return limits.immediateEntryThreshold === 80
+    && limits.maxRiskPerTradePct === RISK_POLICY.maxRiskPerTradePercent
+    && limits.reserveCashPct >= 20
+    && limits.maxMarginPerTradeUsd <= RISK_POLICY.maxMarginPerTradeUsd
+    && limits.maxConcurrentPositions === 1
+    && limits.cooldownMinutes >= 30
     && limits.maxLeverage <= 3
     && limits.maxTotalExposureUsd <= Math.min(
       limits.allocatedTradingCapitalUsd * 3,
@@ -108,8 +108,8 @@ export function isAppliedRiskProfileSnapshot(value: unknown): value is AppliedRi
 }
 
 export const PROFILE_FALLBACK_LIMITS: RiskLimits = {
-  dailyLossLimitUSDT: 30,
-  maxDrawdownPercent: 15,
+  dailyLossLimitUSDT: 10,
+  maxDrawdownPercent: 8,
   consecutiveLossLimit: 3,
   maxLeverage: 3,
   maxMarginPerTrade: 334,
@@ -141,24 +141,29 @@ export function deriveRiskProfileLimits(
   );
 
   if (name === "aggressive") {
-    const reserveCashPct = 10;
+    // 이름은 하위 호환을 위해 유지하되 자본·빈도·신뢰도 안전 한도는 완화하지 않는다.
+    const reserveCashPct = Math.max(20, finite(base.reserveCashPct, 20));
     return {
-      immediateEntryThreshold: 70,
-      maxRiskPerTradePct: Math.min(1, RISK_POLICY.maxRiskPerTradePercent),
+      immediateEntryThreshold: 80,
+      maxRiskPerTradePct: RISK_POLICY.maxRiskPerTradePercent,
       reserveCashPct,
       maxMarginPerTradeUsd: Math.max(
         0,
-        Math.min(500, capital * (1 - reserveCashPct / 100), RISK_POLICY.maxRiskCapitalUsd),
+        Math.min(
+          finite(base.maxMarginPerTrade, RISK_POLICY.maxMarginPerTradeUsd),
+          capital * (1 - reserveCashPct / 100),
+          RISK_POLICY.maxMarginPerTradeUsd,
+        ),
       ),
-      maxConcurrentPositions: Math.min(2, RISK_POLICY.maxProfileConcurrentPositions),
-      cooldownMinutes: 10,
+      maxConcurrentPositions: RISK_POLICY.maxProfileConcurrentPositions,
+      cooldownMinutes: Math.max(30, finite(base.cooldownMinutes, 30)),
       maxLeverage: Math.min(3, RISK_POLICY.baseMaxLeverage),
       maxTotalExposureUsd: Math.max(
         0,
         Math.min(capital * 3, 3_000, RISK_POLICY.maxRiskCapitalUsd * RISK_POLICY.baseMaxLeverage),
       ),
       allocatedTradingCapitalUsd: capital,
-      maxRiskPerTradeUsd: capital * Math.min(1, RISK_POLICY.maxRiskPerTradePercent) / 100,
+      maxRiskPerTradeUsd: capital * RISK_POLICY.maxRiskPerTradePercent / 100,
     };
   }
 
@@ -166,10 +171,10 @@ export function deriveRiskProfileLimits(
   return {
     immediateEntryThreshold: 80,
     maxRiskPerTradePct: maxRiskPct,
-    reserveCashPct: Math.max(0, Math.min(100, finite(base.reserveCashPct, 20))),
+    reserveCashPct: Math.max(20, Math.min(100, finite(base.reserveCashPct, 20))),
     maxMarginPerTradeUsd: Math.max(
       0,
-      Math.min(finite(base.maxMarginPerTrade, 0), RISK_POLICY.maxRiskCapitalUsd),
+      Math.min(finite(base.maxMarginPerTrade, 0), RISK_POLICY.maxMarginPerTradeUsd),
     ),
     maxConcurrentPositions: 1,
     cooldownMinutes: Math.max(0, finite(base.cooldownMinutes, 30)),
@@ -194,12 +199,12 @@ export function applyRiskProfileToLimits(
   return {
     ...base,
     tradingCapital: d.allocatedTradingCapitalUsd,
-    reserveCashPct: d.reserveCashPct,
-    maxMarginPerTrade: d.maxMarginPerTradeUsd,
-    maxSimultaneousPositions: d.maxConcurrentPositions,
+    reserveCashPct: Math.max(20, d.reserveCashPct),
+    maxMarginPerTrade: Math.min(RISK_POLICY.maxMarginPerTradeUsd, d.maxMarginPerTradeUsd),
+    maxSimultaneousPositions: Math.min(RISK_POLICY.maxConcurrentPositions, d.maxConcurrentPositions),
     maxLeverage: d.maxLeverage,
     maxTotalExposureUSDT: d.maxTotalExposureUsd,
-    cooldownMinutes: d.cooldownMinutes,
+    cooldownMinutes: Math.max(30, d.cooldownMinutes),
   };
 }
 

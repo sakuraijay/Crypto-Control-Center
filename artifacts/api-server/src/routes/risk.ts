@@ -4,7 +4,7 @@
  */
 import { Router, type IRouter } from 'express';
 import {
-  RISK_POLICY, CANARY_POLICY, CAPITAL_TIER_LADDER,
+  RISK_POLICY, CANARY_POLICY, CAPITAL_PLAN, CAPITAL_TIER_LADDER,
   deriveDailyTargets, deriveWeeklyMaxLossUsd, deriveTradeRiskUsd,
   isAutoPromotionAllowed,
 } from '../lib/riskPolicy';
@@ -22,9 +22,22 @@ router.get('/risk/policy', (_req, res) => {
     const derived = status.riskDerivedTargets
       ?? deriveDailyTargets(RISK_POLICY.maxRiskCapitalUsd);
     const trade = deriveTradeRiskUsd(RISK_POLICY.maxRiskCapitalUsd);
+    const riskSizingCapitalUsd = status.lastLimitsUsed?.tradingCapital
+      ?? CAPITAL_PLAN.activeTradingCapitalUsd;
+    const riskSizingReservePercent = status.lastLimitsUsed?.reserveCashPct
+      ?? CAPITAL_PLAN.reserveCapitalPercent;
+    const riskSizingReserveUsd = riskSizingCapitalUsd * riskSizingReservePercent / 100;
 
     res.json({
       policy: RISK_POLICY,
+      capital: {
+        ...CAPITAL_PLAN,
+        riskSizingCapitalUsd,
+        riskSizingReserveUsd,
+        riskSizingReservePercent,
+        onchainBalanceUsd: null,
+        onchainBalanceAuthoritative: false,
+      },
       canary: CANARY_POLICY,
       tierLadder: CAPITAL_TIER_LADDER,
       autoPromotionAllowed: isAutoPromotionAllowed(),

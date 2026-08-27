@@ -152,10 +152,10 @@ const CONSERVATIVE_PROFILE = {
   version: 'risk-profile/v1' as const,
   appliedAt: '2026-08-21T00:00:00.000Z',
   derivedLimits: {
-    immediateEntryThreshold: 80, maxRiskPerTradePct: 0.75, reserveCashPct: 20,
+    immediateEntryThreshold: 80, maxRiskPerTradePct: 0.25, reserveCashPct: 20,
     maxMarginPerTradeUsd: 334, maxConcurrentPositions: 1, cooldownMinutes: 30,
     maxLeverage: 3, maxTotalExposureUsd: 3_000,
-    allocatedTradingCapitalUsd: 1_000, maxRiskPerTradeUsd: 7.5,
+    allocatedTradingCapitalUsd: 1_000, maxRiskPerTradeUsd: 2.5,
   },
 };
 
@@ -296,48 +296,48 @@ describe('E2E §6 — 중복 진입 차단', () => {
     expect(store.trades.filter((r) => r['action'] === 'OPEN')).toHaveLength(1);
   });
 
-  it('aggressive는 서로 다른 두 심볼 슬롯만 허용하고 세 번째/동일 심볼은 차단', async () => {
+  it('aggressive 이름을 선택해도 동시 포지션 1개 한도는 완화되지 않는다', async () => {
     const profile = {
       name: 'aggressive' as const,
       version: 'risk-profile/v1' as const,
       appliedAt: new Date(T0).toISOString(),
       derivedLimits: {
-        immediateEntryThreshold: 70, maxRiskPerTradePct: 1, reserveCashPct: 10,
-        maxMarginPerTradeUsd: 500, maxConcurrentPositions: 2, cooldownMinutes: 10,
+        immediateEntryThreshold: 80, maxRiskPerTradePct: 0.5, reserveCashPct: 20,
+        maxMarginPerTradeUsd: 334, maxConcurrentPositions: 1, cooldownMinutes: 30,
         maxLeverage: 3, maxTotalExposureUsd: 3_000,
-        allocatedTradingCapitalUsd: 1_000, maxRiskPerTradeUsd: 10,
+        allocatedTradingCapitalUsd: 1_000, maxRiskPerTradeUsd: 5,
       },
     };
     const first = await openServerPaperPosition({
       decisionId: 'dec-slot-1', symbol: 'BTC', side: 'LONG', sizeUsd: 300, leverage: 3,
       quote: { priceUsd: 50_000, ageMs: 5_000 }, tpPriceUsd: null,
-      openPositionCount: 0, maxConcurrentPositions: 2, entriesManilaDay: 0,
+      openPositionCount: 0, maxConcurrentPositions: 1, entriesManilaDay: 0,
       riskProfileSnapshot: profile, nowMs: T0,
     });
     const second = await openServerPaperPosition({
       decisionId: 'dec-slot-2', symbol: 'ETH', side: 'SHORT', sizeUsd: 300, leverage: 3,
       quote: { priceUsd: 3_000, ageMs: 5_000 }, tpPriceUsd: null,
-      openPositionCount: 1, maxConcurrentPositions: 2, entriesManilaDay: 1,
+      openPositionCount: 1, maxConcurrentPositions: 1, entriesManilaDay: 1,
       riskProfileSnapshot: profile, nowMs: T0 + 1,
     });
     const third = await openServerPaperPosition({
       decisionId: 'dec-slot-3', symbol: 'SOL', side: 'LONG', sizeUsd: 300, leverage: 3,
       quote: { priceUsd: 150, ageMs: 5_000 }, tpPriceUsd: null,
-      openPositionCount: 2, maxConcurrentPositions: 2, entriesManilaDay: 2,
+      openPositionCount: 2, maxConcurrentPositions: 1, entriesManilaDay: 2,
       riskProfileSnapshot: profile, nowMs: T0 + 2,
     });
     const duplicate = await openServerPaperPosition({
       decisionId: 'dec-slot-4', symbol: 'BTC', side: 'LONG', sizeUsd: 300, leverage: 3,
       quote: { priceUsd: 50_000, ageMs: 5_000 }, tpPriceUsd: null,
-      openPositionCount: 1, maxConcurrentPositions: 2, entriesManilaDay: 2,
+      openPositionCount: 1, maxConcurrentPositions: 1, entriesManilaDay: 2,
       riskProfileSnapshot: profile, nowMs: T0 + 3,
     });
     expect(first.ok).toBe(true);
-    expect(second.ok).toBe(true);
+    expect(second.ok).toBe(false);
     expect(third.ok).toBe(false);
     expect(duplicate.ok).toBe(false);
     const opens = store.trades.filter((r) => r['action'] === 'OPEN');
-    expect(opens.map(row => row['paperPositionSlot'])).toEqual([1, 2]);
+    expect(opens.map(row => row['paperPositionSlot'])).toEqual([1]);
     expect(opens.every(row => row['riskProfileSnapshot'] === profile)).toBe(true);
   });
 });

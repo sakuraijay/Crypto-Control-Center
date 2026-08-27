@@ -149,7 +149,7 @@ export function evaluateRiskState(input: RiskEvaluationInput): RiskEvaluationRes
   }
   if (input.currentEquityUsd !== null && input.currentEquityUsd <= p.hardStopEquityUsd) {
     locks.hardStopReason =
-      `equity $${input.currentEquityUsd.toFixed(2)} ≤ hard stop $${p.hardStopEquityUsd} (최초 $${p.initialCapitalUsd} 대비 -15%)`;
+      `equity $${input.currentEquityUsd.toFixed(2)} ≤ hard stop $${p.hardStopEquityUsd} (현재 Active $${p.initialCapitalUsd} 대비 -8%)`;
     actions.push('CLOSE_ALL_POSITIONS', 'CANCEL_ALL_ORDERS');
     blockReasons.push(locks.hardStopReason);
     return blocked('HARD_STOPPED');

@@ -70,7 +70,7 @@ export interface OfflineWalkForwardConfig {
 }
 
 export const DEFAULT_OFFLINE_WALK_FORWARD_CONFIG: OfflineWalkForwardConfig = Object.freeze({
-  initialCapitalUsd: 1_000,
+  initialCapitalUsd: 10_000,
   positionSizePct: 0.1,
   trainBars: 480,
   oosBars: 144,
