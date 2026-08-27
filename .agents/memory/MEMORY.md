@@ -95,3 +95,4 @@
 - [PAPER Stop readiness 격리](paper-stop-readiness-isolation.md) — read-only 진단 cache는 LIVE 실행 capability와 분리하며 readiness 완료는 실행 권한이 아님
 - [배포 publish marker 동일성](deployment-publish-marker-identity.md) — `Published your App` commit은 부모와 tree가 같을 수 있어 source 감사는 SHA가 아닌 tree hash·diff·asset hash로 판정
 - [PAPER Relay evidence 경계](paper-relay-evidence-boundary.md) — execution-only는 NOT EVALUATED; status의 모든 DB read는 null-preserving failure ID로 fail-closed
+- [Offline backtest evidence classification](offline-backtest-evidence-classification.md) — raw market captures may be immutable while modeled costs or assumed risk still force the report UNAVAILABLE
