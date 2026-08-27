@@ -1,6 +1,7 @@
 import { useState, useCallback } from 'react';
 import { useStrategyContext } from '@/lib/context/StrategyContext';
 import { runBacktest, parseGmxCandles, webIndicatorsToBacktestConfig, type BacktestResult, type BacktestTrade } from '@/lib/backtest/engine';
+import { OfflineBtcReportView } from '@/components/backtest/OfflineBtcReportView';
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
 import { TrendingUp, TrendingDown, Activity, Target, BarChart2, Zap } from 'lucide-react';
 
@@ -100,15 +101,38 @@ export default function BacktestPage() {
 
   const pos = result ? result.totalReturnPct >= 0 : null;
 
+  const [activeTab, setActiveTab] = useState<'interactive' | 'offline'>('interactive');
+
   return (
     <div className="p-6 space-y-6 max-w-[1400px]">
       {/* Header */}
       <div>
         <h1 className="text-2xl font-bold text-foreground">Backtest</h1>
-        <p className="text-sm text-muted-foreground mt-1">
-          Simulate your current strategy against GMX V2 historical price data · Arbitrum One
-        </p>
+        <div className="flex gap-6 border-b border-border mt-4">
+          <button
+            onClick={() => setActiveTab('interactive')}
+            className={`pb-2 text-sm font-semibold tracking-wider uppercase border-b-2 transition-colors ${
+              activeTab === 'interactive' ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            Interactive Simulator
+          </button>
+          <button
+            onClick={() => setActiveTab('offline')}
+            className={`pb-2 text-sm font-semibold tracking-wider uppercase border-b-2 transition-colors ${
+              activeTab === 'offline' ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            Offline BTC Report
+          </button>
+        </div>
       </div>
+
+      {activeTab === 'interactive' ? (
+        <>
+          <p className="text-sm text-muted-foreground mt-4">
+            Simulate your current strategy against GMX V2 historical price data · Arbitrum One
+          </p>
 
       {/* Config + Run */}
       <div className="bg-card border border-border rounded-lg p-4">
@@ -358,6 +382,10 @@ export default function BacktestPage() {
           <p className="text-xs text-muted-foreground">Uses your current Strategy indicator settings — enable/disable indicators on the Strategy page</p>
           <p className="text-xs text-muted-foreground/60">Data source: GMX V2 · Arbitrum One · stats.gmx.io</p>
         </div>
+      )}
+        </>
+      ) : (
+        <OfflineBtcReportView />
       )}
     </div>
   );

@@ -14,6 +14,7 @@ import riskRouter from "./risk";
 import intelRouter from "./intel";
 import canaryRouter from "./canary";
 import signerReadinessRouter from "./signer-readiness";
+import offlineBacktestRouter from "./offline-backtest";
 
 const router: IRouter = Router();
 
@@ -32,5 +33,6 @@ router.use(riskRouter);
 router.use(intelRouter);
 router.use(canaryRouter);
 router.use(signerReadinessRouter);
+router.use(offlineBacktestRouter);
 
 export default router;
