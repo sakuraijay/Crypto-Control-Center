@@ -4,7 +4,7 @@
  * Boundary: immutable historical inputs in, serializable research report out.
  * This module has no DB, network, worker, signer, relay, execution, or order imports.
  */
-import type { MarketRegime } from './regimeEngineV2';
+import type { MarketRegime, RegimeState } from './regimeEngineV2';
 import type { StrategyDirection, StrategyId } from './strategySignalV2';
 import type { Candle } from './types';
 
@@ -27,6 +27,9 @@ export type OfflineBlockedReason =
 
 export interface OfflineHistoricalCostEvidence {
   observedAtMs: number;
+  /** Inclusive/exclusive point-in-time evidence interval, when supplied. */
+  validFromMs?: number;
+  validUntilMs?: number;
   feeBpsPerSide: number;
   entrySlippageBps: number;
   exitSlippageBps: number;
@@ -49,6 +52,9 @@ export interface OfflineDecision {
   targetPrice: number | null;
   riskDecision: OfflineRiskDecision;
   costEvidence: OfflineHistoricalCostEvidence | null;
+  /** Consecutive 15m snapshots used to charge a multi-bar holding interval. */
+  costCoverage?: readonly OfflineHistoricalCostEvidence[];
+  regimeState?: RegimeState | null;
 }
 
 export interface OfflineWalkForwardConfig {
@@ -66,9 +72,9 @@ export interface OfflineWalkForwardConfig {
 export const DEFAULT_OFFLINE_WALK_FORWARD_CONFIG: OfflineWalkForwardConfig = Object.freeze({
   initialCapitalUsd: 1_000,
   positionSizePct: 0.1,
-  trainBars: 96 * 30,
-  oosBars: 96 * 7,
-  stepBars: 96 * 7,
+  trainBars: 480,
+  oosBars: 144,
+  stepBars: 144,
   purgeBars: 1,
   minimumFolds: 3,
   maximumHoldingBars: 16,
@@ -183,6 +189,7 @@ export interface OfflineWalkForwardInput {
   candles15m: readonly Candle[];
   decisions: readonly OfflineDecision[];
   config?: OfflineWalkForwardConfig;
+  maxFolds?: number;
 }
 
 const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
@@ -260,12 +267,40 @@ function validateInputs(input: OfflineWalkForwardInput, config: OfflineWalkForwa
 
 function validateCost(cost: OfflineHistoricalCostEvidence | null, decisionTime: number): boolean {
   if (!cost || !finite(cost.observedAtMs) || cost.observedAtMs > decisionTime) return false;
+  if ((cost.validFromMs === undefined) !== (cost.validUntilMs === undefined)) return false;
+  if (cost.validFromMs !== undefined && (!finite(cost.validFromMs) || !finite(cost.validUntilMs!)
+    || cost.validFromMs > decisionTime || cost.validUntilMs! <= decisionTime)) return false;
+  // Legacy evidence has no claimed interval, but it must still be contemporaneous.
+  if (cost.validFromMs === undefined && decisionTime - cost.observedAtMs > 8 * ONE_HOUR_MS) return false;
   return finite(cost.feeBpsPerSide) && cost.feeBpsPerSide >= 0
     && finite(cost.entrySlippageBps) && cost.entrySlippageBps >= 0
     && finite(cost.exitSlippageBps) && cost.exitSlippageBps >= 0
     && finite(cost.fundingBpsPerHour)
     && finite(cost.borrowingBpsPerHour) && cost.borrowingBpsPerHour >= 0
     && finite(cost.impactBps) && cost.impactBps >= 0;
+}
+
+function holdingCosts(
+  decision: OfflineDecision,
+  entryTime: number,
+  exitTime: number,
+): OfflineHistoricalCostEvidence[] | null {
+  const first = decision.costEvidence;
+  if (!validateCost(first, entryTime)) return null;
+  if (!decision.costCoverage) return first!.validUntilMs !== undefined && first!.validUntilMs < exitTime ? null : [first!];
+  const coverage = [...decision.costCoverage].sort((a, b) => a.validFromMs! - b.validFromMs!);
+  let cursor = entryTime;
+  const selected: OfflineHistoricalCostEvidence[] = [];
+  for (const cost of coverage) {
+    if (!validateCost(cost, Math.max(cursor, cost.validFromMs ?? cursor))
+      || cost.validFromMs === undefined || cost.validUntilMs === undefined) continue;
+    if (cost.validFromMs > cursor) return null; // no fabricated cost through a gap
+    if (cost.validUntilMs <= cursor) continue;
+    selected.push(cost);
+    cursor = Math.min(exitTime, cost.validUntilMs);
+    if (cursor >= exitTime) return selected;
+  }
+  return null;
 }
 
 function addBreakdown(target: Record<string, OfflineBreakdownRow>, key: string, pnl: number): void {
@@ -402,16 +437,20 @@ function simulateWindow(args: {
       if (stopHit) { exitIndex = index; exitPrice = stop; exitReason = 'STOP'; break; }
       if (targetHit) { exitIndex = index; exitPrice = target; exitReason = 'TARGET'; break; }
     }
+    const exitTime = candles[exitIndex].t + FIFTEEN_MINUTES_MS;
+    const coverage = holdingCosts(decision, entry.t, exitTime);
+    if (coverage === null) { blocked.COST_UNAVAILABLE += 1; continue; }
     const sizeUsd = equity * config.positionSizePct * (decision.riskDecision === 'REDUCE' ? 0.5 : 1);
     const direction = side === 'LONG' ? 1 : -1;
     const grossPnlUsd = sizeUsd * direction * ((exitPrice - entry.o) / entry.o);
-    const cost = decision.costEvidence as OfflineHistoricalCostEvidence;
-    const heldHours = Math.max(FIFTEEN_MINUTES_MS, candles[exitIndex].t - entry.t + FIFTEEN_MINUTES_MS) / ONE_HOUR_MS;
-    const feesUsd = sizeUsd * (cost.feeBpsPerSide * 2) / 10_000;
-    const slippageUsd = sizeUsd * (cost.entrySlippageBps + cost.exitSlippageBps) / 10_000;
-    const fundingUsd = sizeUsd * cost.fundingBpsPerHour * heldHours / 10_000;
-    const borrowingUsd = sizeUsd * cost.borrowingBpsPerHour * heldHours / 10_000;
-    const impactUsd = sizeUsd * cost.impactBps / 10_000;
+    const cost = coverage[0];
+    const feesUsd = sizeUsd * (cost.feeBpsPerSide + coverage.at(-1)!.feeBpsPerSide) / 10_000;
+    const slippageUsd = sizeUsd * (cost.entrySlippageBps + coverage.at(-1)!.exitSlippageBps) / 10_000;
+    const fundingUsd = sizeUsd * coverage.reduce((sum, row) => sum + row.fundingBpsPerHour
+      * (Math.min(exitTime, row.validUntilMs ?? exitTime) - Math.max(entry.t, row.validFromMs ?? entry.t)) / ONE_HOUR_MS, 0) / 10_000;
+    const borrowingUsd = sizeUsd * coverage.reduce((sum, row) => sum + row.borrowingBpsPerHour
+      * (Math.min(exitTime, row.validUntilMs ?? exitTime) - Math.max(entry.t, row.validFromMs ?? entry.t)) / ONE_HOUR_MS, 0) / 10_000;
+    const impactUsd = sizeUsd * (cost.impactBps + coverage.at(-1)!.impactBps) / 10_000;
     const totalUsd = feesUsd + slippageUsd + fundingUsd + borrowingUsd + impactUsd;
     const netPnlUsd = grossPnlUsd - totalUsd;
     const riskUsd = sizeUsd * Math.abs(entry.o - stop) / entry.o;
@@ -419,7 +458,7 @@ function simulateWindow(args: {
       decisionId: decision.decisionId, fold, sample, threshold, side,
       strategyId: decision.strategyId, regime: decision.regime, profile: decision.profile,
       signalCloseTime: decision.sourceCandleCloseTime,
-      entryTime: entry.t, exitTime: candles[exitIndex].t + FIFTEEN_MINUTES_MS,
+      entryTime: entry.t, exitTime,
       entryPrice: entry.o, exitPrice,
       grossPnlUsd: round(grossPnlUsd), netPnlUsd: round(netPnlUsd), riskUsd: round(riskUsd),
       rMultiple: round(riskUsd > 0 ? netPnlUsd / riskUsd : 0),
@@ -442,7 +481,42 @@ function aggregateOos(folds: OfflineFoldResult[], initialCapital: number): Offli
   for (const fold of folds) {
     for (const key of Object.keys(blocked) as OfflineBlockedReason[]) blocked[key] += fold.oos.blocked[key];
   }
-  return sampleResult(trades, blocked, initialCapital);
+  const aggregate = sampleResult(trades, blocked, initialCapital);
+  // Each fold deliberately starts with the configured capital.  Do not present
+  // their independently sized dollar PnL as one continuously sized portfolio.
+  // Aggregate fold returns geometrically, while retaining pooled trade/cost
+  // diagnostics for audit.
+  let grossEquity = initialCapital;
+  let netEquity = initialCapital;
+  let peak = initialCapital;
+  let maxDrawdown = 0;
+  const equityCurve: Array<{ time: number; equityUsd: number }> = [];
+  for (const fold of folds) {
+    const metrics = fold.oos.metrics;
+    if (metrics.grossReturnPct !== null) grossEquity *= 1 + metrics.grossReturnPct / 100;
+    const foldStartEquity = netEquity;
+    // Fold curves are normalized to initialCapital. Rebase every intra-fold
+    // point onto the aggregate capital, preserving peak-to-trough DD across
+    // fold boundaries rather than inspecting only each fold's terminal value.
+    for (const point of metrics.equityCurve) {
+      netEquity = foldStartEquity * point.equityUsd / initialCapital;
+      peak = Math.max(peak, netEquity);
+      maxDrawdown = Math.max(maxDrawdown, peak > 0 ? (peak - netEquity) / peak * 100 : 100);
+      equityCurve.push({ time: point.time, equityUsd: round(netEquity) });
+    }
+    if (metrics.netReturnPct !== null && metrics.equityCurve.length === 0) {
+      netEquity = foldStartEquity * (1 + metrics.netReturnPct / 100);
+      peak = Math.max(peak, netEquity);
+      maxDrawdown = Math.max(maxDrawdown, peak > 0 ? (peak - netEquity) / peak * 100 : 100);
+    }
+  }
+  if (trades.length > 0) {
+    aggregate.metrics.grossReturnPct = round((grossEquity / initialCapital - 1) * 100);
+    aggregate.metrics.netReturnPct = round((netEquity / initialCapital - 1) * 100);
+    aggregate.metrics.maxDrawdownPct = round(maxDrawdown);
+    aggregate.metrics.equityCurve = equityCurve;
+  }
+  return aggregate;
 }
 
 export function runOfflineWalkForwardBacktest(input: OfflineWalkForwardInput): OfflineWalkForwardReport {
@@ -466,12 +540,13 @@ export function runOfflineWalkForwardBacktest(input: OfflineWalkForwardInput): O
   for (let start = 0;
     start + config.trainBars + config.purgeBars + config.oosBars <= input.candles15m.length;
     start += config.stepBars) foldStarts.push(start);
-  if (foldStarts.length < config.minimumFolds) {
+  const boundedFoldStarts = foldStarts.slice(0, input.maxFolds ?? foldStarts.length);
+  if (boundedFoldStarts.length < config.minimumFolds) {
     return { ...base, status: 'UNAVAILABLE', issues: ['유효 Walk-Forward fold 부족'], thresholds: [] };
   }
 
   const thresholds = config.thresholds.map(threshold => {
-    const folds = foldStarts.map((trainStart, offset): OfflineFoldResult => {
+    const folds = boundedFoldStarts.map((trainStart, offset): OfflineFoldResult => {
       const trainEnd = trainStart + config.trainBars;
       const oosStart = trainEnd + config.purgeBars;
       const oosEnd = oosStart + config.oosBars;

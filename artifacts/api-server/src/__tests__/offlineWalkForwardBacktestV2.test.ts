@@ -158,4 +158,39 @@ describe('offline BTC walk-forward/OOS backtest v2', () => {
   it('동일 입력은 동일한 결정론적 보고서를 생성한다', () => {
     expect(run()).toEqual(run());
   });
+
+  it('stale snapshot과 holding interval의 cost gap을 fail-closed 처리한다', () => {
+    const stale = decision(5, { costEvidence: { ...decision(5).costEvidence!, observedAtMs: BASE - 10 * 60 * 60 * 1_000 } });
+    expect(run({ decisions: [stale, decision(9)] }).thresholds[0].aggregateOos.blocked.COST_UNAVAILABLE).toBe(1);
+    const gapped = decision(5, {
+      structuralStop: 90,
+      targetPrice: 110,
+      costEvidence: {
+        ...decision(5).costEvidence!, validFromMs: BASE + 6 * STEP, validUntilMs: BASE + 7 * STEP,
+      },
+      costCoverage: [{
+        ...decision(5).costEvidence!, validFromMs: BASE + 6 * STEP, validUntilMs: BASE + 7 * STEP,
+      }],
+    });
+    expect(run({ decisions: [gapped, decision(9)] }).thresholds[0].aggregateOos.blocked.COST_UNAVAILABLE).toBe(1);
+  });
+
+  it('독립 fold sizing을 합산 PnL 수익률로 잘못 표시하지 않고 기하 합성한다', () => {
+    const result = run();
+    const aggregate = result.thresholds[0].aggregateOos.metrics;
+    const folds = result.thresholds[0].folds.map(fold => fold.oos.metrics.netReturnPct! / 100);
+    expect(aggregate.netReturnPct).toBeCloseTo(((1 + folds[0]) * (1 + folds[1]) - 1) * 100, 10);
+    expect(aggregate.equityCurve).toHaveLength(2);
+  });
+
+  it('aggregate OOS drawdown은 fold 종료값이 아니라 rebased intra-fold curve의 peak-to-trough를 사용한다', () => {
+    const metrics = run().thresholds[0].aggregateOos.metrics;
+    let peak = 1_000;
+    let drawdown = 0;
+    for (const point of metrics.equityCurve) {
+      peak = Math.max(peak, point.equityUsd);
+      drawdown = Math.max(drawdown, (peak - point.equityUsd) / peak * 100);
+    }
+    expect(metrics.maxDrawdownPct).toBeCloseTo(drawdown, 10);
+  });
 });
