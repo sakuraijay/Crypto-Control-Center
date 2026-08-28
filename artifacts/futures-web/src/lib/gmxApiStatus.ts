@@ -218,6 +218,8 @@ export interface GmxApiStatusView {
       estimatedPriceImpactUsd: number | null;
       fundingFeeUsd: number | null;
       borrowingFeeUsd: number | null;
+       fundingRatePerHourFraction: number | null;
+       borrowingRatePerHourFraction: number | null;
       estimatedExitFeeUsd: number | null;
       estimatedExitPriceImpactUsd: number | null;
       tradingFeesUsd: number | null;
@@ -281,6 +283,24 @@ export interface GmxApiStatusView {
         lastSuccessAtMs: number | null;
         lastFailureAtMs: number | null;
       };
+    }>;
+    economics: Record<'BTC' | 'ETH', {
+      state: 'AVAILABLE' | 'UNAVAILABLE';
+      reason: string | null;
+      candidateNotionalUsd: number | null;
+      holdingHours: number | null;
+      expectedGrossEdgeFraction: number | null;
+      expectedGrossEdgeUsd: number | null;
+      expectedGrossEdgeSource: string | null;
+      fixedExecutionCostUsd: number | null;
+      variableCostRateFraction: number | null;
+      denominatorFraction: number | null;
+      economicMinimumNotionalUsd: number | null;
+      technicalMinimumNotionalUsd: number;
+      requiredMinimumNotionalUsd: number | null;
+      candidateSufficient: boolean | null;
+      capUsd: number | null;
+      capRelationship: 'WITHIN_CAP' | 'EXCEEDS_CAP' | 'UNAVAILABLE';
     }>;
     blockerIds: string[];
     manualActionHolds: Array<{

@@ -92,6 +92,7 @@ function fmtPct(value: number | null, digits = 3): string {
 
 type PaperReadinessView = NonNullable<GmxApiStatusView['paperRuntimeReadiness']>;
 type PaperCostView = PaperReadinessView['costs']['BTC'];
+type PaperEconomicsView = PaperReadinessView['economics']['BTC'];
 type StopReadinessEvidenceView = NonNullable<NonNullable<GmxApiStatusView['stopCapability']>['readinessEvidence']>;
 type PaperRelayEvidenceView = NonNullable<GmxApiStatusView['paperRelayEvidence']>;
 
@@ -322,6 +323,51 @@ export function PaperCostDetails({
         </p>
       )}
     </>
+  );
+}
+
+export function PaperEconomicsDetails({
+  symbol,
+  economics,
+}: {
+  symbol: 'BTC' | 'ETH';
+  economics: PaperEconomicsView;
+}) {
+  if (economics.state === 'UNAVAILABLE') {
+    return (
+      <div className="text-[10px] text-amber-300" data-testid={`paper-economics-${symbol.toLowerCase()}`}>
+        <p>UNAVAILABLE · {economics.reason ?? '경제성 입력 불완전'}</p>
+        <p className="text-muted-foreground">
+          candidate {fmtUsd(economics.candidateNotionalUsd, 2)}
+          {' · '}expected gross edge —
+          {' · '}economic minimum —
+          {' · '}required max(economic, technical) —
+          {' · '}sufficient —
+        </p>
+      </div>
+    );
+  }
+  return (
+    <div className="font-mono text-[10px] text-muted-foreground" data-testid={`paper-economics-${symbol.toLowerCase()}`}>
+      <p>
+        candidate {fmtUsd(economics.candidateNotionalUsd, 2)}
+        {' · '}expected gross edge {fmtUsd(economics.expectedGrossEdgeUsd)} ({fmtPct(
+          economics.expectedGrossEdgeFraction === null
+            ? null
+            : economics.expectedGrossEdgeFraction * 100,
+        )})
+      </p>
+      <p>
+        economic minimum {fmtUsd(economics.economicMinimumNotionalUsd, 2)}
+        {' · '}technical minimum {fmtUsd(economics.technicalMinimumNotionalUsd, 2)}
+        {' · '}required max(economic, technical) {fmtUsd(economics.requiredMinimumNotionalUsd, 2)}
+      </p>
+      <p>
+        candidate sufficient {economics.candidateSufficient ? 'YES' : 'NO'}
+        {' · '}immutable cap relationship {economics.capRelationship}
+        {' · '}edge source {economics.expectedGrossEdgeSource}
+      </p>
+    </div>
   );
 }
 
@@ -630,6 +676,7 @@ export function GmxApiStatusCard() {
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-2">
             {(['BTC', 'ETH'] as const).map((symbol) => {
               const cost = s.paperRuntimeReadiness!.costs[symbol];
+               const economics = s.paperRuntimeReadiness!.economics[symbol];
               const overCap = cost.withinCap === false;
               return (
                 <div
@@ -650,14 +697,15 @@ export function GmxApiStatusCard() {
                     </Badge>
                   </div>
                   <PaperCostDetails symbol={symbol} cost={cost} />
+                   <PaperEconomicsDetails symbol={symbol} economics={economics} />
                 </div>
               );
             })}
           </div>
 
           <p className="text-[10px] text-muted-foreground">
-            경제성 진단 입력은 LONG · $20 · 1h 관측 시나리오입니다. 비용 상한은 서버 고정 $0.40이며,
-            이 화면은 통과 가능한 주문 크기를 제안하거나 상한을 완화하지 않습니다.
+            경제성 진단은 LONG · $20 · 1h 비용 evidence domain만 사용하며, domain 밖 최소값은 외삽하지 않고 UNAVAILABLE입니다.
+            비용 상한은 서버 고정 $0.40이며, 경제적 최소값은 기존 cap·freshness·Manual Canary gate를 대체하거나 완화하지 않습니다.
           </p>
 
           <div className="space-y-1">

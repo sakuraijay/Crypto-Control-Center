@@ -15,6 +15,10 @@ import { RankingGates } from './ranking';
 import { getCachedPrices, getCachedChange24h, fetchGmxCandles, getCandleFetchStats } from '../routes/gmx';
 import { calibrateBuckets, BucketCalibration } from './calibration';
 import { buildCandidateCostBreakdown } from './costEngine';
+import {
+  clearPaperEconomicEdgeEvidence,
+  setPaperEconomicEdgeEvidenceFromIntelCycle,
+} from '../lib/paperRuntimeReadiness';
 import { lookupSdkIndexToken, ARBITRUM_CHAIN_ID } from '../lib/indexTokenDecimals';
 import { createGmxCostReader, createProductionCostReaderClient, GmxCostReader } from './gmxCostReader';
 import type { CostBreakdownUsd } from './candidate';
@@ -287,6 +291,9 @@ export async function runIntelServiceCycle(input: {
   }
 
   state.inFlight = true;
+  // An edge is valid only for an accepted current Intel cycle; never display a
+  // previous cycle while this one can fail, time out, or be lifecycle-cancelled.
+  clearPaperEconomicEdgeEvidence();
   state.currentCycleId = cycleId;
   state.lastRunAtMs = nowMs;
   state.lastWindowKey = windowKey;
@@ -350,8 +357,16 @@ export async function runIntelServiceCycle(input: {
         startedAtMs, finishedAtMs: Date.now(), error: record.blockedReason,
       };
       if (record.decision === 'BLOCKED') {
+        clearPaperEconomicEdgeEvidence();
         console.warn(`[Intel] 사이클 ${record.cycleId} BLOCKED — ${record.blockedReason}`);
       } else {
+        setPaperEconomicEdgeEvidenceFromIntelCycle({
+          cycleId: record.cycleId,
+          recordNowMs: record.nowMs,
+          generation: capturedGeneration + 1,
+          decision: record.decision,
+          candidates: record.candidates,
+        });
         console.info(`[Intel] 사이클 ${record.cycleId} — universe=${record.universeCount} shortlist=${record.shortlistCount} 결정=${record.decision} (candle req=${h.stats.candleRequests} cacheHit=${h.stats.candleCacheHits})`);
       }
     } else {
@@ -359,6 +374,7 @@ export async function runIntelServiceCycle(input: {
       state.lastAttempt = { cycleId, windowKey, status: 'SKIPPED_IN_FLIGHT', startedAtMs, finishedAtMs: Date.now(), error: null };
     }
   } catch (e) {
+    clearPaperEconomicEdgeEvidence();
     if (!shouldContinue()) return;
     const isBudget = e instanceof RequestBudgetExceededError;
     const isBackoff = e instanceof RateLimitBackoffError;
@@ -408,10 +424,12 @@ export async function runIntelServiceCycle(input: {
 export function stopIntelService(): void {
   lifecycleGeneration += 1;
   state.shutdownRequested = true;
+  clearPaperEconomicEdgeEvidence();
 }
 export function resumeIntelService(): void {
   lifecycleGeneration += 1;
   state.shutdownRequested = false;
+  clearPaperEconomicEdgeEvidence();
 }
 
 export function getIntelServiceState(): Readonly<IntelServiceState> {
@@ -440,6 +458,7 @@ export function __resetIntelServiceForTests(): void {
   handle = null;
   strategyShadowMtfCoordinator = null;
   costReader = null;
+  clearPaperEconomicEdgeEvidence();
 }
 
 /** 테스트 전용 — cost reader 주입 */

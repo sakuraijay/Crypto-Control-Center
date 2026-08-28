@@ -16,10 +16,17 @@ import {
 } from './costSnapshot';
 import { MANUAL_CANARY_CAPS } from './manualCanaryCaps';
 import {
+  calculateEconomicOrderMinimum,
+  type ExpectedGrossEdge,
+  type EconomicOrderMinimumResult,
+} from './economicOrderMinimum';
+import {
   DECIMALS_VERIFIED_MAX_AGE_MS,
   getDecimalsCacheSnapshot,
 } from './indexTokenDecimals';
 import { MARKET_BY_SYMBOL_SERVER } from './gmxMarkets';
+import { INTEL_MEASURED_COST_SOURCE } from '../intel/costEngine';
+import { COST_SOURCE_PIN } from '../intel/dataSource';
 import {
   createRelayReadonlyClient,
   type RelayReadonlyClient,
@@ -36,6 +43,7 @@ export const PAPER_READINESS_REFRESH_INTERVAL_MS = 45_000;
 export const PAPER_DEPLOYMENT_REFRESH_INTERVAL_MS = 5 * 60_000;
 export const PAPER_DEPLOYMENT_EVIDENCE_MAX_AGE_MS = 10 * 60_000;
 export const PAPER_COST_HOLDING_HOURS = 1;
+export const PAPER_ECONOMIC_EDGE_MAX_AGE_MS = COST_SNAPSHOT_TTL_MS;
 export const PAPER_COST_NOTIONAL_USD = 20;
 
 const SYMBOLS = ['BTC', 'ETH'] as const;
@@ -200,6 +208,8 @@ export interface PaperCostEvidenceView extends PaperEvidenceMeta {
   estimatedPriceImpactUsd: number | null;
   fundingFeeUsd: number | null;
   borrowingFeeUsd: number | null;
+  fundingRatePerHourFraction: number | null;
+  borrowingRatePerHourFraction: number | null;
   estimatedExitFeeUsd: number | null;
   estimatedExitPriceImpactUsd: number | null;
   tradingFeesUsd: number | null;
@@ -249,6 +259,7 @@ export interface PaperRuntimeReadinessView {
   deployment: PaperDeploymentEvidenceView;
   rpc: PaperRpcEvidenceView;
   costs: Record<CanarySymbol, PaperCostEvidenceView>;
+  economics: Record<CanarySymbol, EconomicOrderMinimumResult>;
   blockerIds: string[];
   manualActionHolds: Array<{
     id: string;
@@ -313,6 +324,16 @@ let costDiagnosticsState: Record<CanarySymbol, PaperCostReadinessDiagnosticsView
 };
 let deploymentState = emptyAttempt<DeploymentObservation>();
 let rpcState = emptyAttempt<RpcObservation>();
+interface PaperEconomicEdgeObservation {
+  cycleId: string;
+  generation: number;
+  observedAtMs: number;
+  edge: ExpectedGrossEdge;
+}
+let economicEdgeState: Record<CanarySymbol, PaperEconomicEdgeObservation | null> = {
+  BTC: null,
+  ETH: null,
+};
 
 let running = false;
 let inFlight = false;
@@ -562,6 +583,88 @@ function setSuccess<T>(
   entry.failureId = null;
   entry.detail = detail;
   entry.lastGood = observation;
+}
+
+/** Clears advisory Intel edge evidence; this is never an execution capability. */
+export function clearPaperEconomicEdgeEvidence(): void {
+  economicEdgeState = { BTC: null, ETH: null };
+}
+
+/** Read-only diagnostic accessor; deliberately contains no execution authority. */
+export function getPaperEconomicEdgeEvidenceSnapshot(symbol: CanarySymbol): {
+  cycleId: string; generation: number; observedAtMs: number; source: string;
+} | null {
+  const evidence = economicEdgeState[symbol];
+  if (!evidence) return null;
+  return {
+    cycleId: evidence.cycleId,
+    generation: evidence.generation,
+    observedAtMs: evidence.observedAtMs,
+    source: evidence.edge.source,
+  };
+}
+
+/**
+ * Accepts only a persisted, successful IntelCycle OpportunityCandidate. The
+ * narrow structural shape avoids an Intel/DB dependency in this read-only
+ * module while preserving cycle/source/timestamp binding.
+ */
+export function setPaperEconomicEdgeEvidenceFromIntelCycle(input: {
+  cycleId: string;
+  recordNowMs: number;
+  generation: number;
+  decision: 'SELECTED' | 'NO_TRADE' | 'BLOCKED';
+  candidates: ReadonlyArray<{
+    symbol: string; direction: string; decision: string; dataQuality: string;
+    finalNotionalUsd: number | null; expectedGrossWinUsd: number | null;
+    totalExpectedCostUsd: number | null;
+    cost: {
+      holdingHoursAssumed: number | null; costSnapshotFetchedAtMs: number | null; costSource: string | null;
+      entryFeeUsd: number | null; estimatedExitFeeUsd: number | null;
+      fundingCostUsd: number | null; borrowingCostUsd: number | null;
+      priceImpactUsd: number | null; slippageUsd: number | null;
+      gasExecutionFeeUsd: number | null; latencyRiskReserveUsd: number | null;
+      failureRiskReserveUsd: number | null;
+      sourcePin?: string | null;
+    };
+  }>;
+}): void {
+  clearPaperEconomicEdgeEvidence();
+  const now = input.recordNowMs;
+  if (input.decision === 'BLOCKED' || !Number.isInteger(input.generation) || input.generation <= 0
+    || !Number.isFinite(now) || now <= 0 || !input.cycleId.trim()) return;
+  for (const candidate of input.candidates) {
+    const symbol = candidate.symbol.trim().toUpperCase();
+    if ((symbol !== 'BTC' && symbol !== 'ETH') || candidate.direction !== 'LONG'
+      || candidate.decision !== 'SHADOW_ONLY' || candidate.dataQuality !== 'GOOD'
+      || !Number.isFinite(candidate.finalNotionalUsd) || (candidate.finalNotionalUsd ?? 0) <= 0
+      || !Number.isFinite(candidate.expectedGrossWinUsd) || (candidate.expectedGrossWinUsd ?? 0) <= 0
+      || !Number.isFinite(candidate.totalExpectedCostUsd) || (candidate.totalExpectedCostUsd ?? 0) < 0
+      || [
+        candidate.cost.entryFeeUsd, candidate.cost.estimatedExitFeeUsd,
+        candidate.cost.fundingCostUsd, candidate.cost.borrowingCostUsd,
+        candidate.cost.priceImpactUsd, candidate.cost.slippageUsd,
+        candidate.cost.gasExecutionFeeUsd, candidate.cost.latencyRiskReserveUsd,
+        candidate.cost.failureRiskReserveUsd,
+      ].some((value) => !Number.isFinite(value) || (value ?? -1) < 0)
+      || !Number.isFinite(candidate.cost.holdingHoursAssumed) || (candidate.cost.holdingHoursAssumed ?? -1) < 0
+      || !Number.isFinite(candidate.cost.costSnapshotFetchedAtMs)
+      || (candidate.cost.costSnapshotFetchedAtMs ?? 0) <= 0
+      || (candidate.cost.costSnapshotFetchedAtMs ?? 0) > now
+      || now - (candidate.cost.costSnapshotFetchedAtMs ?? 0) > PAPER_ECONOMIC_EDGE_MAX_AGE_MS
+      || candidate.cost.costSource !== INTEL_MEASURED_COST_SOURCE
+      || candidate.cost.sourcePin !== COST_SOURCE_PIN) continue;
+    economicEdgeState[symbol] = {
+      cycleId: input.cycleId,
+      generation: input.generation,
+      observedAtMs: candidate.cost.costSnapshotFetchedAtMs as number,
+      edge: {
+        kind: 'fraction',
+        fraction: (candidate.expectedGrossWinUsd as number) / (candidate.finalNotionalUsd as number),
+        source: `INTEL_CYCLE_OPPORTUNITY_CANDIDATE:${input.cycleId}:${candidate.cost.costSource}`,
+      },
+    };
+  }
 }
 
 function findDecimalsObservation(
@@ -923,6 +1026,8 @@ function costView(symbol: CanarySymbol, nowMs: number): PaperCostEvidenceView {
     estimatedPriceImpactUsd: snapshot?.estimatedPriceImpactUsd ?? null,
     fundingFeeUsd: snapshot?.fundingFeeUsd ?? null,
     borrowingFeeUsd: snapshot?.borrowingFeeUsd ?? null,
+    fundingRatePerHourFraction: snapshot?.fundingRatePerHourFraction ?? null,
+    borrowingRatePerHourFraction: snapshot?.borrowingRatePerHourFraction ?? null,
     estimatedExitFeeUsd: snapshot?.estimatedExitFeeUsd ?? null,
     estimatedExitPriceImpactUsd: snapshot?.estimatedExitPriceImpactUsd ?? null,
     tradingFeesUsd: tradingFees,
@@ -977,6 +1082,43 @@ export function getPaperRuntimeReadinessSnapshot(
     BTC: costView('BTC', nowMs),
     ETH: costView('ETH', nowMs),
   };
+  // The Worker SHADOW envelope contains only expectedNetEdgeBps, not the
+  // selected StrategySignal.grossExpectedEdgeBps. Moreover intelService
+  // currently supplies costsBySymbol={} to that batch, so its candidate gross
+  // edge is not a complete current economics feed. Do not reinterpret net edge,
+  // confidence, or ranking scores as gross edge and do not couple this
+  // read-only cache to persisted decisions.
+  const economics = Object.fromEntries(SYMBOLS.map((symbol) => [symbol,
+    // Edge candidates are distinct from cost readiness. Both have independent
+    // freshness and neither result is execution authorization.
+    (() => {
+      const edgeEvidence = economicEdgeState[symbol];
+      const edgeFresh = edgeEvidence !== null
+        && nowMs >= edgeEvidence.observedAtMs
+        && nowMs - edgeEvidence.observedAtMs <= PAPER_ECONOMIC_EDGE_MAX_AGE_MS;
+      return calculateEconomicOrderMinimum({
+        candidateNotionalUsd: PAPER_COST_NOTIONAL_USD,
+        holdingHours: PAPER_COST_HOLDING_HOURS,
+        expectedGrossEdge: edgeFresh ? edgeEvidence!.edge : null,
+        immutableCostCapUsd: MANUAL_CANARY_CAPS.maxRoundTripCostUsd,
+        cost: {
+          complete: costs[symbol].state === 'verified' && costs[symbol].fresh,
+          evidenceNotionalUsd: costs[symbol].notionalUsd,
+          positionFeeUsd: costs[symbol].positionFeeUsd,
+          executionFeeUsd: costs[symbol].executionFeeUsd,
+          estimatedPriceImpactUsd: costs[symbol].estimatedPriceImpactUsd,
+          estimatedExitFeeUsd: costs[symbol].estimatedExitFeeUsd,
+          estimatedExitPriceImpactUsd: costs[symbol].estimatedExitPriceImpactUsd,
+          fundingFeeUsd: costs[symbol].fundingFeeUsd,
+          borrowingFeeUsd: costs[symbol].borrowingFeeUsd,
+          fundingRatePerHourFraction: costs[symbol].fundingRatePerHourFraction,
+          borrowingRatePerHourFraction: costs[symbol].borrowingRatePerHourFraction,
+          otherCostUsd: costs[symbol].otherCostUsd,
+          effectiveRoundTripCostUsd: costs[symbol].effectiveRoundTripCostUsd,
+        },
+      });
+    })(),
+  ])) as Record<CanarySymbol, EconomicOrderMinimumResult>;
   const deploymentMeta = evidenceMeta(
     deploymentState,
     nowMs,
@@ -1020,6 +1162,7 @@ export function getPaperRuntimeReadinessSnapshot(
       chainId: rpcState.lastGood?.chainId ?? null,
     },
     costs,
+    economics,
     blockerIds: [...new Set(blockerIds)],
     manualActionHolds: MANUAL_ACTION_HOLDS.map((hold) => ({ ...hold })),
   };
@@ -1091,6 +1234,7 @@ export function __resetPaperRuntimeReadinessForTests(): void {
   costDiagnosticsState = { BTC: emptyCostDiagnostics(), ETH: emptyCostDiagnostics() };
   deploymentState = emptyAttempt();
   rpcState = emptyAttempt();
+  clearPaperEconomicEdgeEvidence();
   lastAttemptAtMs = null;
   lastCompletedAtMs = null;
   lastSuccessAtMs = null;

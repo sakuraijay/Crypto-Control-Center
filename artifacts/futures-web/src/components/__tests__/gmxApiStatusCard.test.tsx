@@ -18,6 +18,7 @@ import path from 'node:path';
 import {
   GmxApiStatusCard,
   PaperCostDetails,
+  PaperEconomicsDetails,
   PaperRelayEvidence,
   PaperStopReadinessEvidence,
 } from '../GmxApiStatusCard';
@@ -227,6 +228,8 @@ const STATUS_FIXTURE: GmxApiStatusView = {
         estimatedPriceImpactUsd: 0,
         fundingFeeUsd: 0.000461,
         borrowingFeeUsd: 0.000363,
+        fundingRatePerHourFraction: 0.000461 / 20,
+        borrowingRatePerHourFraction: 0.000363 / 20,
         estimatedExitFeeUsd: 0.012,
         estimatedExitPriceImpactUsd: 0,
         tradingFeesUsd: 0.024,
@@ -276,6 +279,8 @@ const STATUS_FIXTURE: GmxApiStatusView = {
         estimatedPriceImpactUsd: 0,
         fundingFeeUsd: 0.001,
         borrowingFeeUsd: 0.001,
+        fundingRatePerHourFraction: 0.00005,
+        borrowingRatePerHourFraction: 0.00005,
         estimatedExitFeeUsd: 0.01,
         estimatedExitPriceImpactUsd: 0,
         tradingFeesUsd: 0.02,
@@ -304,6 +309,44 @@ const STATUS_FIXTURE: GmxApiStatusView = {
         source: 'GMX_API',
         apiTimestamp: '2026-04-25T22:13:16.000Z',
         fetchedAt: '2026-04-25T22:13:16.000Z',
+      },
+    },
+    economics: {
+      BTC: {
+        state: 'UNAVAILABLE',
+        reason: 'EXPECTED_GROSS_EDGE_UNAVAILABLE',
+        candidateNotionalUsd: 20,
+        holdingHours: 1,
+        expectedGrossEdgeFraction: null,
+        expectedGrossEdgeUsd: null,
+        expectedGrossEdgeSource: null,
+        fixedExecutionCostUsd: null,
+        variableCostRateFraction: null,
+        denominatorFraction: null,
+        economicMinimumNotionalUsd: null,
+        technicalMinimumNotionalUsd: 2.2,
+        requiredMinimumNotionalUsd: null,
+        candidateSufficient: null,
+        capUsd: 0.4,
+        capRelationship: 'UNAVAILABLE',
+      },
+      ETH: {
+        state: 'UNAVAILABLE',
+        reason: 'EXPECTED_GROSS_EDGE_UNAVAILABLE',
+        candidateNotionalUsd: 20,
+        holdingHours: 1,
+        expectedGrossEdgeFraction: null,
+        expectedGrossEdgeUsd: null,
+        expectedGrossEdgeSource: null,
+        fixedExecutionCostUsd: null,
+        variableCostRateFraction: null,
+        denominatorFraction: null,
+        economicMinimumNotionalUsd: null,
+        technicalMinimumNotionalUsd: 2.2,
+        requiredMinimumNotionalUsd: null,
+        candidateSufficient: null,
+        capUsd: 0.4,
+        capRelationship: 'UNAVAILABLE',
       },
     },
     blockerIds: ['deployment', 'rpc', 'btc_cost_cap', 'owner_approval'],
@@ -462,7 +505,7 @@ describe('소스 계약 (§11 규칙)', () => {
       '기타/보수 조정',
     ]) expect(cardSrc).toContain(label);
     expect(cardSrc).toContain('비용 상한은 서버 고정 $0.40');
-    expect(cardSrc).toContain('통과 가능한 주문 크기를 제안하거나 상한을 완화하지 않습니다');
+    expect(cardSrc).toContain('기존 cap·freshness·Manual Canary gate를 대체하거나 완화하지 않습니다');
   });
 
   it('진단 UI는 자동 polling·sign/execute/preflight endpoint를 추가하지 않는다', () => {
@@ -594,6 +637,18 @@ describe('GmxApiStatusCard — Settlement Evidence 렌더 케이스', () => {
 });
 
 describe('GmxApiStatusCard — PAPER runtime fixture', () => {
+  it('BTC/ETH 경제성을 UNAVAILABLE 사유와 candidate로 노출한다', () => {
+    for (const symbol of ['BTC', 'ETH'] as const) {
+      const economics = STATUS_FIXTURE.paperRuntimeReadiness!.economics[symbol];
+      const html = renderToStaticMarkup(
+        <PaperEconomicsDetails symbol={symbol} economics={economics} />,
+      );
+      expect(html).toContain('UNAVAILABLE');
+      expect(html).toContain('EXPECTED_GROSS_EDGE_UNAVAILABLE');
+      expect(html).toContain('candidate $20.00');
+      expect(html).toContain('required max(economic, technical)');
+    }
+  });
   it('$0.453011 BTC LONG $20/1h는 $0.40 cap 초과로 유지된다', () => {
     const btc = STATUS_FIXTURE.paperRuntimeReadiness!.costs.BTC;
     expect(btc.direction).toBe('LONG');

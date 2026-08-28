@@ -8,9 +8,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   __resetPaperRuntimeReadinessForTests,
+  clearPaperEconomicEdgeEvidence,
+  getPaperEconomicEdgeEvidenceSnapshot,
   getPaperRuntimeReadinessSnapshot,
   PAPER_DEPLOYMENT_EVIDENCE_MAX_AGE_MS,
   runPaperRuntimeReadinessCycle,
+  setPaperEconomicEdgeEvidenceFromIntelCycle,
   startPaperRuntimeReadinessScheduler,
   stopPaperRuntimeReadinessScheduler,
 } from '../lib/paperRuntimeReadiness';
@@ -20,6 +23,8 @@ import {
   type CostSnapshot,
 } from '../lib/costSnapshot';
 import { MARKET_BY_SYMBOL_SERVER } from '../lib/gmxMarkets';
+import { INTEL_MEASURED_COST_SOURCE } from '../intel/costEngine';
+import { COST_SOURCE_PIN } from '../intel/dataSource';
 import type { RelayReadonlyClient } from '../lib/relayReadonlyClient';
 
 const NOW = 1_777_000_000_000;
@@ -242,6 +247,17 @@ describe('PAPER runtime readiness cycle', () => {
       failureId: 'COST_BTC_CAP_EXCEEDED',
     });
     expect(status.costs.BTC.executionSnapshot.blockReason).toContain('OPEN/Canary fail-closed 차단');
+    expect(status.economics.BTC).toMatchObject({
+      state: 'UNAVAILABLE',
+      reason: 'EXPECTED_GROSS_EDGE_UNAVAILABLE',
+      candidateNotionalUsd: 20,
+      technicalMinimumNotionalUsd: 2.2,
+    });
+    expect(status.economics.ETH).toMatchObject({
+      state: 'UNAVAILABLE',
+      reason: 'EXPECTED_GROSS_EDGE_UNAVAILABLE',
+      candidateNotionalUsd: 20,
+    });
     expect(status.blockerIds).toContain('btc_cost_cap');
 
     // Diagnostic cache must never create execution-eligible authorization.
@@ -249,6 +265,130 @@ describe('PAPER runtime readiness cycle', () => {
       fresh: false,
       evidence: null,
     });
+  });
+
+  it('accepted current Intel LONG candidate edge makes BTC/ETH economics available and expires/resets fail-closed', async () => {
+    await runPaperRuntimeReadinessCycle({ deps: depsFrom(), forceDeployment: true });
+    setPaperEconomicEdgeEvidenceFromIntelCycle({
+      cycleId: 'intel-current',
+      recordNowMs: NOW,
+      generation: 1,
+      decision: 'NO_TRADE',
+      candidates: (['BTC', 'ETH'] as const).map((symbol) => ({
+        symbol,
+        direction: 'LONG',
+        decision: 'SHADOW_ONLY',
+        dataQuality: 'GOOD',
+        finalNotionalUsd: 20,
+        expectedGrossWinUsd: 1,
+        totalExpectedCostUsd: 0.2,
+        cost: {
+          holdingHoursAssumed: 1,
+          costSnapshotFetchedAtMs: NOW - 4_000,
+          costSource: INTEL_MEASURED_COST_SOURCE,
+          sourcePin: COST_SOURCE_PIN,
+          entryFeeUsd: 0.01, estimatedExitFeeUsd: 0.01, fundingCostUsd: 0.01,
+          borrowingCostUsd: 0.01, priceImpactUsd: 0, slippageUsd: 0,
+          gasExecutionFeeUsd: 0.1, latencyRiskReserveUsd: 0, failureRiskReserveUsd: 0,
+        },
+      })),
+    });
+    const current = getPaperRuntimeReadinessSnapshot(NOW, ENV);
+    expect(current.economics.BTC).toMatchObject({
+      state: 'AVAILABLE', candidateNotionalUsd: 20, expectedGrossEdgeUsd: 1,
+    });
+    expect(current.economics.ETH.state).toBe('AVAILABLE');
+
+    // A fresh, valid edge may still not justify extrapolating the $20 quote.
+    setPaperEconomicEdgeEvidenceFromIntelCycle({
+      cycleId: 'intel-too-small-edge',
+      recordNowMs: NOW,
+      generation: 2,
+      decision: 'NO_TRADE',
+      candidates: (['BTC', 'ETH'] as const).map((symbol) => ({
+        symbol, direction: 'LONG', decision: 'SHADOW_ONLY', dataQuality: 'GOOD',
+        finalNotionalUsd: 20, expectedGrossWinUsd: 0.2, totalExpectedCostUsd: 0.2,
+        cost: {
+          holdingHoursAssumed: 1, costSnapshotFetchedAtMs: NOW - 4_000,
+          costSource: INTEL_MEASURED_COST_SOURCE, sourcePin: COST_SOURCE_PIN,
+          entryFeeUsd: 0.01, estimatedExitFeeUsd: 0.01, fundingCostUsd: 0.01,
+          borrowingCostUsd: 0.01, priceImpactUsd: 0, slippageUsd: 0,
+          gasExecutionFeeUsd: 0.1, latencyRiskReserveUsd: 0, failureRiskReserveUsd: 0,
+        },
+      })),
+    });
+    expect(getPaperRuntimeReadinessSnapshot(NOW, ENV).economics.BTC).toMatchObject({
+      state: 'UNAVAILABLE',
+      reason: 'ECONOMIC_MINIMUM_OUTSIDE_EVIDENCE_DOMAIN',
+    });
+
+    expect(getPaperRuntimeReadinessSnapshot(NOW + 60_001, ENV).economics.BTC).toMatchObject({
+      state: 'UNAVAILABLE', reason: 'EXPECTED_GROSS_EDGE_UNAVAILABLE',
+    });
+    clearPaperEconomicEdgeEvidence();
+    expect(getPaperRuntimeReadinessSnapshot(NOW, ENV).economics.ETH.state).toBe('UNAVAILABLE');
+  });
+
+  it('rejects stale, mismatched, and invalid Intel candidate evidence', () => {
+    const bad = (overrides: Record<string, unknown>) => setPaperEconomicEdgeEvidenceFromIntelCycle({
+      cycleId: 'intel-bad', recordNowMs: NOW, generation: 1, decision: 'SELECTED',
+      candidates: [{
+        symbol: 'BTC', direction: 'LONG', decision: 'SHADOW_ONLY', dataQuality: 'GOOD',
+        finalNotionalUsd: 20, expectedGrossWinUsd: 1, totalExpectedCostUsd: 0.2,
+        cost: {
+          holdingHoursAssumed: 1, costSnapshotFetchedAtMs: NOW - 1_000, costSource: INTEL_MEASURED_COST_SOURCE,
+          sourcePin: COST_SOURCE_PIN,
+          entryFeeUsd: 0.01, estimatedExitFeeUsd: 0.01, fundingCostUsd: 0.01,
+          borrowingCostUsd: 0.01, priceImpactUsd: 0, slippageUsd: 0,
+          gasExecutionFeeUsd: 0.1, latencyRiskReserveUsd: 0, failureRiskReserveUsd: 0,
+        },
+        ...overrides,
+      }] as never,
+    });
+    bad({ direction: 'SHORT' });
+    expect(getPaperRuntimeReadinessSnapshot(NOW, ENV).economics.BTC.state).toBe('UNAVAILABLE');
+    expect(getPaperEconomicEdgeEvidenceSnapshot('BTC')).toBeNull();
+    bad({ dataQuality: 'DEGRADED' });
+    expect(getPaperRuntimeReadinessSnapshot(NOW, ENV).economics.BTC.state).toBe('UNAVAILABLE');
+    expect(getPaperEconomicEdgeEvidenceSnapshot('BTC')).toBeNull();
+    bad({ dataQuality: 'INVALID' });
+    expect(getPaperRuntimeReadinessSnapshot(NOW, ENV).economics.BTC.state).toBe('UNAVAILABLE');
+    expect(getPaperEconomicEdgeEvidenceSnapshot('BTC')).toBeNull();
+    bad({ dataQuality: 'UNAVAILABLE' });
+    expect(getPaperRuntimeReadinessSnapshot(NOW, ENV).economics.BTC.state).toBe('UNAVAILABLE');
+    expect(getPaperEconomicEdgeEvidenceSnapshot('BTC')).toBeNull();
+    bad({ cost: {
+      holdingHoursAssumed: 1, costSnapshotFetchedAtMs: NOW - 1_000, costSource: 'SPOOFED',
+      sourcePin: COST_SOURCE_PIN,
+      entryFeeUsd: 0.01, estimatedExitFeeUsd: 0.01, fundingCostUsd: 0.01,
+      borrowingCostUsd: 0.01, priceImpactUsd: 0, slippageUsd: 0,
+      gasExecutionFeeUsd: 0.1, latencyRiskReserveUsd: 0, failureRiskReserveUsd: 0,
+    } });
+    expect(getPaperRuntimeReadinessSnapshot(NOW, ENV).economics.BTC.state).toBe('UNAVAILABLE');
+    expect(getPaperEconomicEdgeEvidenceSnapshot('BTC')).toBeNull();
+    bad({ cost: {
+      holdingHoursAssumed: 1, costSnapshotFetchedAtMs: NOW - 1_000, costSource: INTEL_MEASURED_COST_SOURCE,
+      sourcePin: null,
+      entryFeeUsd: 0.01, estimatedExitFeeUsd: 0.01, fundingCostUsd: 0.01,
+      borrowingCostUsd: 0.01, priceImpactUsd: 0, slippageUsd: 0,
+      gasExecutionFeeUsd: 0.1, latencyRiskReserveUsd: 0, failureRiskReserveUsd: 0,
+    } });
+    expect(getPaperRuntimeReadinessSnapshot(NOW, ENV).economics.BTC.state).toBe('UNAVAILABLE');
+    expect(getPaperEconomicEdgeEvidenceSnapshot('BTC')).toBeNull();
+    bad({ finalNotionalUsd: Number.NaN });
+    expect(getPaperRuntimeReadinessSnapshot(NOW, ENV).economics.BTC.state).toBe('UNAVAILABLE');
+    bad({ cost: {
+      holdingHoursAssumed: 1, costSnapshotFetchedAtMs: NOW - 60_001, costSource: INTEL_MEASURED_COST_SOURCE,
+      sourcePin: COST_SOURCE_PIN,
+      entryFeeUsd: 0.01, estimatedExitFeeUsd: 0.01, fundingCostUsd: 0.01,
+      borrowingCostUsd: 0.01, priceImpactUsd: 0, slippageUsd: 0,
+      gasExecutionFeeUsd: 0.1, latencyRiskReserveUsd: 0, failureRiskReserveUsd: 0,
+    } });
+    expect(getPaperRuntimeReadinessSnapshot(NOW, ENV).economics.BTC.state).toBe('UNAVAILABLE');
+    setPaperEconomicEdgeEvidenceFromIntelCycle({
+      cycleId: 'blocked', recordNowMs: NOW, generation: 1, decision: 'BLOCKED', candidates: [],
+    });
+    expect(getPaperRuntimeReadinessSnapshot(NOW, ENV).economics.BTC.state).toBe('UNAVAILABLE');
   });
 
   it('wrong source와 partial decimals evidence는 verified로 승격하지 않는다', async () => {

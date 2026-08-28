@@ -98,3 +98,4 @@
 - [Offline backtest evidence classification](offline-backtest-evidence-classification.md) — raw market captures may be immutable while modeled costs or assumed risk still force the report UNAVAILABLE
 - [Decision claim cadence](decision-claim-cadence.md) — 60초 안전 평가는 유지하고 동일 완료봉·symbol·state의 durable claim/downstream만 process 안에서 중복 억제
 - [Post-publish attestation](post-publish-attestation.md) — publish 성공과 safety PASS를 분리; Replit native hook 부재는 GitHub event+schedule, Git-object provenance, null-preserving evidence로 보완
+- [경제적 최소 주문 증거 도메인](economic-minimum-evidence-domain.md) — GMX impact는 비선형이므로 quote notional 밖 최소값을 선형 외삽하지 말고 UNAVAILABLE 처리
