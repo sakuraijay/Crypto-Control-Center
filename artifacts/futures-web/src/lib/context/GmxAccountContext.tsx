@@ -19,6 +19,7 @@ import {
   createContext, useCallback, useContext, useEffect,
   useRef, useState, ReactNode,
 } from 'react';
+import { computeUnrealizedPnlUsd, isNearLiquidation } from '@/lib/gmxPositionMetrics';
 
 // ── Positions are fetched via the API server proxy (/api/gmx/positions) ───────
 //
@@ -305,26 +306,15 @@ export function GmxAccountProvider({ children }: { children: ReactNode }) {
         // Requires: sizeInTokens > 0 AND current mark price in cache.
         // Never estimated — null when either source unavailable.
         const markPriceUsd = markPriceBySymbol[sym] ?? null;
-        let unrealizedPnlUsd: number | null = null;
-        if (p.sizeInTokens && p.sizeInTokens !== '0' && markPriceUsd != null) {
-          try {
-            const sizeInTokensRaw = Number(BigInt(p.sizeInTokens)) / 1e18;
-            if (sizeInTokensRaw > 0 && sizeUsd > 0) {
-              const avgEntryPrice = sizeUsd / sizeInTokensRaw;  // USD per token at entry
-              const pnlPerToken   = p.isLong
-                ? (markPriceUsd - avgEntryPrice)
-                : (avgEntryPrice - markPriceUsd);
-              unrealizedPnlUsd = pnlPerToken * sizeInTokensRaw;
-            }
-          } catch { /* BigInt parse failed — leave null */ }
-        }
+        const unrealizedPnlUsd = computeUnrealizedPnlUsd({
+          sizeUsd,
+          sizeInTokens: p.sizeInTokens,
+          markPriceUsd,
+          isLong: p.isLong,
+        });
 
         // Liquidation warning: mark price within 5% of liquidation price
-        const nearLiquidation =
-          liquidationPrice != null &&
-          markPriceUsd != null &&
-          markPriceUsd > 0 &&
-          Math.abs(markPriceUsd - liquidationPrice) / markPriceUsd <= 0.05;
+        const nearLiquidation = isNearLiquidation(liquidationPrice, markPriceUsd);
 
         return {
           id:               p.id,

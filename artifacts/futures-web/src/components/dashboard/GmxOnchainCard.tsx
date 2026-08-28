@@ -24,6 +24,7 @@ import {
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { useGmxAccount, type GmxOnchainPosition } from '@/lib/context/GmxAccountContext';
+import { summarizeGmxRisk } from '@/lib/gmxPositionMetrics';
 import { cn } from '@/lib/utils';
 import { formatDistanceToNow, format } from 'date-fns';
 import { ko } from 'date-fns/locale';
@@ -206,7 +207,8 @@ export function GmxOnchainCard() {
   const hasStaleError = gmx.error !== null && gmx.status === 'ok' && !hasConsistencyWarning;
 
   /** Total notional exposure across all open positions */
-  const totalExposureUsd = gmx.positions.reduce((s, p) => s + p.sizeUsd, 0);
+  const riskSummary = summarizeGmxRisk(gmx.positions);
+  const totalExposureUsd = riskSummary.totalExposureUsd;
 
   /** Elapsed since last success — drives real-time coloring */
   const elapsedMs = gmx.lastSuccessUpdated ? now - gmx.lastSuccessUpdated.getTime() : null;
@@ -401,26 +403,13 @@ export function GmxOnchainCard() {
               {/* ── 리스크 요약 행 (totalExposure · avgLeverage · nearestLiq) ── */}
               {/* 데이터가 없는 필드는 N/A 표시 — 절대 추정값 사용 안 함 */}
               {gmx.positions.length > 0 && (() => {
-                // avgLeverage: sizeUsd / collateralUsd where leverage is non-null only
-                const levPosns = gmx.positions.filter(p => p.leverage != null);
-                const avgLeverage = levPosns.length > 0
-                  ? levPosns.reduce((s, p) => s + p.leverage!, 0) / levPosns.length
-                  : null;
-
-                // nearestLiquidation: position with smallest |mark - liq| / mark gap
-                // Only positions where BOTH prices are confirmed non-null
-                let nearestGapPct: number | null = null;
-                let nearestLabel = '';
-                for (const p of gmx.positions) {
-                  if (p.liquidationPrice == null || p.markPriceUsd == null || p.markPriceUsd <= 0) continue;
-                  const gap = Math.abs(p.markPriceUsd - p.liquidationPrice) / p.markPriceUsd;
-                  if (nearestGapPct === null || gap < nearestGapPct) {
-                    nearestGapPct = gap;
-                    nearestLabel  = `${p.symbol} ${p.direction}`;
-                  }
-                }
-
-                const totalExp = gmx.positions.reduce((s, p) => s + p.sizeUsd, 0);
+                const {
+                  averageLeverage,
+                  validLeverageCount,
+                  nearestLiquidationGapFraction,
+                  nearestLiquidationLabel,
+                  totalExposureUsd: totalExp,
+                } = riskSummary;
                 return (
                   <div className="grid grid-cols-3 gap-2 mb-3">
                     {/* 총 익스포저 */}
@@ -433,11 +422,11 @@ export function GmxOnchainCard() {
                     {/* 평균 레버리지 */}
                     <div className="flex flex-col gap-0.5 px-2.5 py-2 rounded-lg border border-border bg-card/60">
                       <span className="text-[9px] font-semibold text-muted-foreground uppercase tracking-wider">평균 레버리지</span>
-                      {avgLeverage != null ? (
+                      {averageLeverage != null ? (
                         <>
-                          <span className="font-mono text-xs font-bold text-foreground">{avgLeverage.toFixed(1)}×</span>
-                          {levPosns.length < gmx.positions.length && (
-                            <span className="text-[9px] text-muted-foreground">{levPosns.length}/{gmx.positions.length}개 유효</span>
+                          <span className="font-mono text-xs font-bold text-foreground">{averageLeverage.toFixed(1)}×</span>
+                          {validLeverageCount < gmx.positions.length && (
+                            <span className="text-[9px] text-muted-foreground">{validLeverageCount}/{gmx.positions.length}개 유효</span>
                           )}
                         </>
                       ) : (
@@ -446,19 +435,19 @@ export function GmxOnchainCard() {
                     </div>
                     {/* 최근접 청산거리 */}
                     <div className={`flex flex-col gap-0.5 px-2.5 py-2 rounded-lg border bg-card/60 ${
-                      nearestGapPct !== null && nearestGapPct <= 0.05
+                      nearestLiquidationGapFraction !== null && nearestLiquidationGapFraction <= 0.05
                         ? 'border-[var(--color-short)]/40 bg-[var(--color-short)]/5'
                         : 'border-border'
                     }`}>
                       <span className="text-[9px] font-semibold text-muted-foreground uppercase tracking-wider">최근접 청산거리</span>
-                      {nearestGapPct != null ? (
+                      {nearestLiquidationGapFraction != null ? (
                         <>
                           <span className={`font-mono text-xs font-bold ${
-                            nearestGapPct <= 0.05 ? 'text-[var(--color-short)]' : 'text-foreground'
+                            nearestLiquidationGapFraction <= 0.05 ? 'text-[var(--color-short)]' : 'text-foreground'
                           }`}>
-                            {(nearestGapPct * 100).toFixed(1)}%
+                            {(nearestLiquidationGapFraction * 100).toFixed(1)}%
                           </span>
-                          <span className="text-[9px] text-muted-foreground truncate">{nearestLabel}</span>
+                          <span className="text-[9px] text-muted-foreground truncate">{nearestLiquidationLabel}</span>
                         </>
                       ) : (
                         <span className="font-mono text-xs text-muted-foreground">N/A</span>
