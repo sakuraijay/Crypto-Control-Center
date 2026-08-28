@@ -163,6 +163,8 @@ function readWebAssets() {
 
 function buildReleaseIdentity(releaseSha) {
   const productTree = git(["rev-parse", `${releaseSha}^{tree}`]).toLowerCase();
+  const workspaceHeadSha = git(["rev-parse", "HEAD"]).toLowerCase();
+  const workspaceProductTree = git(["rev-parse", "HEAD^{tree}"]).toLowerCase();
   if (!RELEASE_SHA_PATTERN.test(productTree)) {
     throw new Error("Product tree could not be bound to the release commit");
   }
@@ -172,6 +174,7 @@ function buildReleaseIdentity(releaseSha) {
   const identityBasis = JSON.stringify({
     releaseSha,
     productTree,
+    workspaceSource: { headSha: workspaceHeadSha, productTree: workspaceProductTree },
     safetyContractVersion: SAFETY_CONTRACT_VERSION,
     handoff,
     webAssets,
@@ -183,6 +186,7 @@ function buildReleaseIdentity(releaseSha) {
     productTree,
     buildId: sha256(`${identityBasis}\0${builtAt}`),
     builtAt,
+    workspaceSource: { headSha: workspaceHeadSha, productTree: workspaceProductTree },
     safetyContract: {
       version: SAFETY_CONTRACT_VERSION,
       confirmedOpenInitialStop: handoff,

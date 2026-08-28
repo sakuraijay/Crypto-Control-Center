@@ -34,6 +34,7 @@ const identity = {
   productTree: 'b'.repeat(40),
   buildId: 'c'.repeat(64),
   builtAt: '2026-08-28T10:00:00.000Z',
+  workspaceSource: { headSha: 'a'.repeat(40), productTree: 'b'.repeat(40) },
   safetyContract: {
     version: 'post-publish-safety/v1',
     confirmedOpenInitialStop: {
@@ -120,6 +121,10 @@ describe('read-only release attestation routes', () => {
       stopExecution: { available: false },
     });
     expect(response.body.database).toMatchObject({ complete: true, blockingIntentCount: 0 });
+    expect(response.body.operationalDiagnostics).toMatchObject({
+      schemaVersion: 1,
+      provenance: { status: 'MATCH' },
+    });
     expect(JSON.stringify(response.body)).not.toMatch(
       /privateKey|DATABASE_URL|RPC_URL|SESSION_SECRET|positionId|tradeId|lastCycleResult|pid|nodeEnv/,
     );

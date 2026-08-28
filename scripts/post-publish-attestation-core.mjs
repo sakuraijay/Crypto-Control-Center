@@ -41,6 +41,7 @@ export function recomputeBuildId(identity) {
   const identityBasis = JSON.stringify({
     releaseSha: identity.releaseSha,
     productTree: identity.productTree,
+    workspaceSource: identity.workspaceSource,
     safetyContractVersion: identity.safetyContract.version,
     handoff: identity.safetyContract.confirmedOpenInitialStop,
     webAssets: identity.webAssets,

@@ -22,6 +22,10 @@ export interface ReleaseIdentity {
   productTree: string;
   buildId: string;
   builtAt: string;
+  workspaceSource: {
+    headSha: string;
+    productTree: string;
+  };
   safetyContract: {
     version: 'post-publish-safety/v1';
     confirmedOpenInitialStop: {
@@ -47,6 +51,10 @@ export function parseReleaseIdentity(value: unknown): ReleaseIdentity | null {
       || typeof v.productTree !== 'string' || !RELEASE_SHA_PATTERN.test(v.productTree)
       || typeof v.buildId !== 'string' || !SHA256_PATTERN.test(v.buildId)
       || typeof v.builtAt !== 'string' || !Number.isFinite(Date.parse(v.builtAt))
+      || typeof v.workspaceSource?.headSha !== 'string'
+      || !RELEASE_SHA_PATTERN.test(v.workspaceSource.headSha)
+      || typeof v.workspaceSource?.productTree !== 'string'
+      || !RELEASE_SHA_PATTERN.test(v.workspaceSource.productTree)
       || v.safetyContract?.version !== 'post-publish-safety/v1'
       || handoff?.version !== 'confirmed-open-initial-stop/v1'
       || typeof handoff.sha256 !== 'string' || !SHA256_PATTERN.test(handoff.sha256)

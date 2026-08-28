@@ -15,6 +15,9 @@ import { listRecentIntents } from "../lib/executionIntents";
 import { deriveRelayEnvFlags } from "../lib/relayActivationStatus";
 import { validateEnvAgainstManifest } from "../lib/gmxDeploymentManifest";
 import { getActiveRevokeSession } from "../lib/revokeSession";
+import { getReleaseIdentity } from "../lib/releaseIdentity";
+import { deriveOperationalDiagnostics } from "../lib/operationalDiagnostics";
+import { isSignerInitialized } from "../lib/delegatedSigner";
 
 const router = Router();
 
@@ -98,7 +101,13 @@ router.get("/executor/status", async (_req, res) => {
     try {
       relayFlags = deriveRelayEnvFlags(process.env, validateEnvAgainstManifest(process.env).ok);
     } catch { /* 파생 실패 시 null — 클라이언트는 미확인으로 표시 */ }
-    return res.json({ ...status, activeRevoke, relayFlags });
+    const operationalDiagnostics = deriveOperationalDiagnostics(process.env, {
+      engineMode: status.engineMode,
+      liveExecutionLocked: status.liveExecutionLocked,
+      signerInitialized: isSignerInitialized(),
+      relayFlags,
+    }, getReleaseIdentity());
+    return res.json({ ...status, activeRevoke, relayFlags, operationalDiagnostics });
   } catch {
     return res.json({ ok: false, gmxConnected: false, error: "Failed to read executor status" });
   }

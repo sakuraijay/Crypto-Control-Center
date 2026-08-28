@@ -15,6 +15,7 @@ function identity() {
     productTree: TREE,
     buildId: HASH,
     builtAt: '2026-08-28T10:00:00.000Z',
+    workspaceSource: { headSha: SHA, productTree: TREE },
     safetyContract: {
       version: 'post-publish-safety/v1',
       confirmedOpenInitialStop: {
@@ -40,6 +41,9 @@ describe('release identity parser', () => {
     ['release sha', (v: ReturnType<typeof identity>) => { v.releaseSha = 'bad'; }],
     ['product tree', (v: ReturnType<typeof identity>) => { v.productTree = 'bad'; }],
     ['build id', (v: ReturnType<typeof identity>) => { v.buildId = 'bad'; }],
+    ['workspace source', (v: ReturnType<typeof identity>) => {
+      v.workspaceSource.productTree = 'bad';
+    }],
     ['safety contract', (v: ReturnType<typeof identity>) => {
       v.safetyContract.version = 'wrong' as 'post-publish-safety/v1';
     }],

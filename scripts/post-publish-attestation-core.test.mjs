@@ -18,6 +18,7 @@ function validInput() {
     productTree: TREE,
     buildId: '',
     builtAt: '2026-08-28T10:00:00.000Z',
+    workspaceSource: { headSha: SHA, productTree: TREE },
     safetyContract: {
       version: 'post-publish-safety/v1',
       confirmedOpenInitialStop: {

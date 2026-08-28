@@ -15,6 +15,7 @@ const lib = (name: string) => readFileSync(join(__dir, '../lib', name), 'utf-8')
 
 const relayCard = comp('RelayStatusCard.tsx');
 const readinessCard = comp('ReadinessRefreshCard.tsx');
+const betaRcCard = comp('dashboard/BetaRcStatusCard.tsx');
 const relayStatusLib = lib('relayStatus.ts');
 
 describe('ReadinessRefreshCard — basis/failures 전체 표시', () => {
@@ -26,6 +27,20 @@ describe('ReadinessRefreshCard — basis/failures 전체 표시', () => {
   });
   it('실패 섹션은 fail-closed 표기를 유지한다', () => {
     expect(readinessCard).toContain('fail-closed');
+  });
+});
+
+describe('BetaRcStatusCard — configured/effective drift와 provenance', () => {
+  it('configured / effective / drift reason 순서를 명시한다', () => {
+    expect(betaRcCard).toContain('configured / effective / drift reason');
+    expect(betaRcCard).toMatch(/value\.configured/);
+    expect(betaRcCard).toMatch(/value\.effective/);
+    expect(betaRcCard).toMatch(/value\.driftReason/);
+  });
+  it('provenance mismatch와 누락을 fail-closed로 표시한다', () => {
+    expect(betaRcCard).toContain('Workspace / deployed release provenance');
+    expect(betaRcCard).toContain('UNAVAILABLE (fail-closed)');
+    expect(betaRcCard).toContain('DRIFT / UNAVAILABLE (fail-closed)');
   });
 });
 
