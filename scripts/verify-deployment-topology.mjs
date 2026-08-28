@@ -51,4 +51,21 @@ if (!rootReplit.includes('run = ["pnpm", "run", "start:deploy"]')) {
   throw new Error('.replit deployment must use the single start:deploy entrypoint');
 }
 
+const postPublishWorkflow = readFileSync(
+  new URL('.github/workflows/post-publish-attestation.yml', root),
+  'utf8',
+);
+for (const required of [
+  'deployment_status:',
+  'workflow_dispatch:',
+  'schedule:',
+  'verify-post-publish-attestation.mjs',
+  '--expected-release',
+  'upload-artifact@v4',
+]) {
+  if (!postPublishWorkflow.includes(required)) {
+    throw new Error(`post-publish attestation automation missing: ${required}`);
+  }
+}
+
 console.log('Deployment topology verified: api-server owns port 8080 and all Production web routes');

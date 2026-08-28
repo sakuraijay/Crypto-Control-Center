@@ -1,0 +1,88 @@
+name: Post-publish fail-closed attestation
+
+on:
+  deployment_status:
+  workflow_dispatch:
+    inputs:
+      release_sha:
+        description: Reviewed release commit SHA (blank uses codex/handover-20260820 head)
+        required: false
+        type: string
+  schedule:
+    - cron: '7,37 * * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: post-publish-production-attestation
+  cancel-in-progress: false
+
+jobs:
+  attest-production:
+    if: github.event_name != 'deployment_status' || github.event.deployment_status.state == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      PRODUCTION_URL: https://currencycalc.org
+      RELEASE_BRANCH: codex/handover-20260820
+
+    steps:
+      - name: Checkout attestation implementation
+        uses: actions/checkout@v4
+        with:
+          ref: codex/handover-20260820
+          fetch-depth: 0
+
+      - name: Resolve immutable expected release
+        id: release
+        shell: bash
+        env:
+          INPUT_RELEASE_SHA: ${{ inputs.release_sha }}
+          DEPLOYMENT_SHA: ${{ github.event.deployment.sha }}
+        run: |
+          set -euo pipefail
+          expected="${INPUT_RELEASE_SHA:-}"
+          if [[ -z "$expected" && "${{ github.event_name }}" == "deployment_status" ]]; then
+            expected="${DEPLOYMENT_SHA:-}"
+          fi
+          if [[ -z "$expected" ]]; then
+            git fetch --no-tags origin "refs/heads/${RELEASE_BRANCH}:refs/remotes/origin/${RELEASE_BRANCH}"
+            expected="$(git rev-parse "refs/remotes/origin/${RELEASE_BRANCH}")"
+          fi
+          [[ "$expected" =~ ^[0-9a-f]{40}$ ]]
+          git cat-file -e "${expected}^{commit}"
+          echo "sha=$expected" >> "$GITHUB_OUTPUT"
+
+      - name: Attest public deployment
+        id: attest
+        shell: bash
+        run: |
+          set -o pipefail
+          node scripts/verify-post-publish-attestation.mjs \
+            "$PRODUCTION_URL" \
+            --expected-release "${{ steps.release.outputs.sha }}" \
+            --wait-ms 240000 | tee post-publish-attestation.json
+
+      - name: Preserve machine-readable evidence
+        if: always() && hashFiles('post-publish-attestation.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: post-publish-attestation-${{ steps.release.outputs.sha }}
+          path: post-publish-attestation.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Publish run summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Post-publish fail-closed attestation"
+            echo
+            echo "- Public URL: \`$PRODUCTION_URL\`"
+            echo "- Expected release: \`${{ steps.release.outputs.sha || 'UNAVAILABLE' }}\`"
+            echo "- Result: \`${{ steps.attest.outcome || 'skipped' }}\`"
+            echo
+            echo "A successful build or publish is not a runtime safety PASS."
+          } >> "$GITHUB_STEP_SUMMARY"
