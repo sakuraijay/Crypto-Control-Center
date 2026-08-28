@@ -49,7 +49,11 @@ function validInput() {
         runtime: {
           listeningPort: 8080, engineMode: 'PAPER',
           startedAt: '2026-08-28T10:00:00.000Z',
-          cycleCount: 2, lastCycleAt: '2026-08-28T10:01:30.000Z',
+          cycleCount: 2,
+          schedulerHeartbeatAt: '2026-08-28T10:01:30.000Z',
+          lastDecisionAt: '2026-08-28T10:00:30.000Z',
+          lastCycleAt: '2026-08-28T10:00:30.000Z',
+          lastCycleOutcome: 'SUCCESS',
           lastCycleHasError: false,
           liveExecutionLocked: true, liveTestMode: false, activeRevoke: false,
           networkChainId: 42161, rpcConfigured: true, gmxConnected: true,
@@ -99,7 +103,7 @@ test('fails for wrong source, asset mismatch, unexpected unlock, stale cycle, or
     (i) => { i.expectedReleaseSha = 'd'.repeat(40); },
     (i) => { i.assets[0].sha256 = 'e'.repeat(64); },
     (i) => { i.safety.body.runtime.liveExecutionLocked = false; },
-    (i) => { i.safety.body.runtime.lastCycleAt = '2026-08-28T09:00:00.000Z'; },
+    (i) => { i.safety.body.runtime.schedulerHeartbeatAt = '2026-08-28T09:00:00.000Z'; },
     (i) => { i.safety.body.database.blockingIntentCount = 1; },
   ];
   for (const mutate of cases) {
@@ -120,8 +124,42 @@ test('reports unavailable instead of zero when an endpoint or DB evidence is mis
 
 test('fails closed while cold-start latest cycle still has an error', () => {
   const input = validInput();
+  input.safety.body.runtime.lastCycleOutcome = 'ERROR';
   input.safety.body.runtime.lastCycleHasError = true;
   assert.equal(evaluatePostPublishAttestation(input).overall, 'FAIL');
+});
+
+test('passes duplicate-skip cadence when heartbeat is fresh but the last new decision is old', () => {
+  const input = validInput();
+  input.safety.body.runtime.schedulerHeartbeatAt = '2026-08-28T10:01:50.000Z';
+  input.safety.body.runtime.lastDecisionAt = '2026-08-28T09:30:00.000Z';
+  input.safety.body.runtime.lastCycleAt = '2026-08-28T09:30:00.000Z';
+  input.safety.body.runtime.lastCycleOutcome = 'SAFE_SKIP';
+  assert.equal(evaluatePostPublishAttestation(input).overall, 'PASS');
+});
+
+test('fresh error heartbeat remains FAIL and a later successful recovery passes', () => {
+  const input = validInput();
+  input.safety.body.runtime.schedulerHeartbeatAt = '2026-08-28T10:01:55.000Z';
+  input.safety.body.runtime.lastCycleOutcome = 'ERROR';
+  input.safety.body.runtime.lastCycleHasError = true;
+  assert.equal(evaluatePostPublishAttestation(input).overall, 'FAIL');
+
+  input.safety.body.runtime.schedulerHeartbeatAt = '2026-08-28T10:01:59.000Z';
+  input.safety.body.runtime.lastCycleOutcome = 'SUCCESS';
+  input.safety.body.runtime.lastCycleHasError = false;
+  assert.equal(evaluatePostPublishAttestation(input).overall, 'PASS');
+});
+
+test('missing restart heartbeat is unavailable until the restarted scheduler completes a cycle', () => {
+  const input = validInput();
+  input.safety.body.runtime.schedulerHeartbeatAt = null;
+  input.safety.body.runtime.lastCycleOutcome = null;
+  assert.equal(evaluatePostPublishAttestation(input).runtimeSafety.status, 'UNAVAILABLE');
+
+  input.safety.body.runtime.schedulerHeartbeatAt = '2026-08-28T10:01:59.000Z';
+  input.safety.body.runtime.lastCycleOutcome = 'SUCCESS';
+  assert.equal(evaluatePostPublishAttestation(input).overall, 'PASS');
 });
 
 test('unsafe evidence wins over unrelated unavailable evidence', () => {

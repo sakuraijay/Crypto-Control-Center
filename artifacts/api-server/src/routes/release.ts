@@ -49,12 +49,15 @@ router.get('/release/safety', async (_req, res) => {
       uptimeSeconds: executor.uptimeSeconds,
       workerRunning: executor.workerRunning,
       cycleCount: executor.cycleCount,
+      schedulerHeartbeatAt: executor.schedulerHeartbeatAt,
+      lastDecisionAt: executor.lastDecisionAt,
       lastCycleAt: executor.lastCycleAt,
       lastCycleNumber: executor.lastCycleResult?.cycleNumber ?? null,
       lastCycleAnalysisCount: executor.lastCycleResult?.analysesCount ?? null,
-      lastCycleHasError: executor.lastCycleResult
-        ? typeof executor.lastCycleResult.error === 'string'
-        : null,
+      lastCycleOutcome: executor.lastSchedulerCycleOutcome,
+      lastCycleHasError: executor.lastSchedulerCycleOutcome === null
+        ? null
+        : executor.lastSchedulerCycleOutcome === 'ERROR',
       gmxConnected: executor.gmxConnected,
       networkChainId: executor.networkChainId,
       rpcConfigured: executor.rpcConfigured,

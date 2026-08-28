@@ -118,17 +118,21 @@ export function evaluatePostPublishAttestation(input) {
 
   const nowMs = input.nowMs ?? Date.now();
   const startedAtMs = Date.parse(runtime?.startedAt ?? '');
-  const cycleAtMs = Date.parse(runtime?.lastCycleAt ?? '');
-  const schedulerFresh = Number.isFinite(cycleAtMs) && nowMs - cycleAtMs >= 0
-    && nowMs - cycleAtMs <= 3 * 60_000;
+  const heartbeatAtMs = Date.parse(runtime?.schedulerHeartbeatAt ?? '');
+  const heartbeatAvailable = Number.isFinite(heartbeatAtMs);
+  const schedulerFresh = heartbeatAvailable && nowMs - heartbeatAtMs >= 0
+    && nowMs - heartbeatAtMs <= 3 * 60_000;
   checks.push(
     check('paper-mode', runtime?.engineMode === 'PAPER', `mode=${runtime?.engineMode ?? 'unavailable'}`, !runtime),
     check('scheduler-cycle', Number.isInteger(runtime?.cycleCount) && runtime.cycleCount > 0
-      && Number.isFinite(startedAtMs) && Number.isFinite(cycleAtMs) && cycleAtMs >= startedAtMs
+      && Number.isFinite(startedAtMs) && heartbeatAvailable && heartbeatAtMs >= startedAtMs
       && schedulerFresh,
-    `cycles=${runtime?.cycleCount ?? 'unavailable'} last=${runtime?.lastCycleAt ?? 'unavailable'}`, !runtime),
-    check('cold-start-recovered', runtime?.lastCycleHasError === false,
-      `lastCycleHasError=${String(runtime?.lastCycleHasError)}`, runtime?.lastCycleHasError == null),
+    `cycles=${runtime?.cycleCount ?? 'unavailable'} heartbeat=${runtime?.schedulerHeartbeatAt ?? 'unavailable'} decision=${runtime?.lastDecisionAt ?? 'unavailable'}`,
+    !runtime || !heartbeatAvailable),
+    check('cold-start-recovered',
+      runtime?.lastCycleOutcome === 'SUCCESS' || runtime?.lastCycleOutcome === 'SAFE_SKIP',
+      `lastCycleOutcome=${runtime?.lastCycleOutcome ?? 'unavailable'}`,
+      runtime?.lastCycleOutcome == null),
     check('live-lock', runtime?.liveExecutionLocked === true && runtime?.liveTestMode === false,
       `locked=${String(runtime?.liveExecutionLocked)} liveTest=${String(runtime?.liveTestMode)}`, !runtime),
     check('revoke-lock', runtime?.activeRevoke === false,

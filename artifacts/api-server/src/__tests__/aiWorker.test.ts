@@ -2,16 +2,17 @@
  * AI Worker 통합 테스트
  *
  * WorkerManager 싱글턴(workerManager)을 통해 다음을 검증합니다:
- *  - 정상 사이클 실행 (lastCycleAt 갱신, cycleCount 증가)
+ *  - 정상 사이클 실행 (scheduler heartbeat/decision timestamp 분리, cycleCount 증가)
  *  - 사이클 오류 후 다음 사이클이 계속 스케줄됨 (crash-restart 안전성)
  *  - 재시작 시 DB에서 HWM 복원
  *  - prevState는 DB에 저장되지 않음 — 재시작 시 'CASH'로 초기화 (설계상 의도)
  *  - consecutiveLosses를 DB 거래 내역에서 재계산
  *  - 쿨다운을 마지막 OPEN 거래 시각에서 재계산 (조기 복귀 차단)
  *  - isRunning atomic lock 으로 동시 사이클 방지
- *  - lastCycleAt은 성공 사이클에서만 갱신 (조기 스킵 시 갱신 안 됨)
+ *  - schedulerHeartbeatAt은 duplicate-skip/error 포함 완료 cycle마다 갱신
+ *  - lastDecisionAt은 새 durable decision claim에서만 갱신
  *  - 동일 symbol:operatingState 중복 PENDING 승인 생성 방지
- *  - Worker heartbeat 이상 감지 (lastCycleAt stale 판정)
+ *  - Worker heartbeat 이상 감지 (schedulerHeartbeatAt stale 판정)
  *
  * 외부 시장 데이터·운영 DB·실제 RPC 사용하지 않음.
  * LIVE_EXECUTION_LOCKED = true 상태에서만 테스트.
@@ -301,6 +302,9 @@ function resetWorker() {
   wm.active                  = false;
   wm.isRunning               = false;
   wm.cycleCount              = 0;
+  wm.schedulerHeartbeatAt    = null;
+  wm.lastDecisionAt          = null;
+  wm.lastSchedulerCycleOutcome = null;
   wm.lastCycleAt             = null;
   wm.lastCycleResult         = null;
   wm.prevState               = 'CASH';
@@ -559,6 +563,28 @@ describe('worker lifecycle generation safety', () => {
     expect(wm.cycleTimer).toBeNull();
   });
 
+  it('atomic-lock contention neither claims a heartbeat nor creates a second timer', async () => {
+    vi.useFakeTimers();
+    const wm = workerManager as unknown as {
+      active: boolean;
+      isRunning: boolean;
+      lifecycleGeneration: number;
+      cycleTimer: ReturnType<typeof setTimeout> | null;
+      runCycle(generation: number): Promise<void>;
+    };
+    wm.active = true;
+    const generation = ++wm.lifecycleGeneration;
+    wm.isRunning = true;
+    const ownedTimer = setTimeout(() => undefined, 60_000);
+    wm.cycleTimer = ownedTimer;
+
+    await wm.runCycle(generation);
+
+    expect(wm.cycleTimer).toBe(ownedTimer);
+    expect(workerManager.getStatus().cycleCount).toBe(0);
+    expect(workerManager.getStatus().schedulerHeartbeatAt).toBeNull();
+  });
+
   it('a queued PAPER management callback invoked after stop is a no-op', async () => {
     vi.useFakeTimers();
     setupDbSequence();
@@ -576,6 +602,27 @@ describe('worker lifecycle generation safety', () => {
     queuedPaperTick();
     await Promise.resolve();
     expect(manageServerPaperTick).not.toHaveBeenCalled();
+  });
+
+  it('restart discards the previous lifecycle heartbeat and recovers after its first completed cycle', async () => {
+    vi.useFakeTimers({ now: 1_800_000_000_000 });
+    setupDbSequence();
+    vi.mocked(runAiEngine).mockReturnValue(
+      CASH_DECISION as unknown as ReturnType<typeof runAiEngine>,
+    );
+    const wm = workerManager as unknown as {
+      schedulerHeartbeatAt: Date | null;
+      runCycle(): Promise<void>;
+    };
+
+    wm.schedulerHeartbeatAt = new Date(Date.now() - 30_000);
+    workerManager.stop();
+    setupDbSequence();
+    await workerManager.start();
+    expect(workerManager.getStatus().schedulerHeartbeatAt).toBeNull();
+
+    await wm.runCycle();
+    expect(workerManager.getStatus().schedulerHeartbeatAt).not.toBeNull();
   });
 });
 
@@ -676,18 +723,76 @@ describe('completed-candle decision replay idempotency', () => {
       await wm.runCycle();
       const firstDecisionClaims = _dbInsertTables.filter(table => table === aiDecisionsTable).length;
       const firstIntelDispatches = vi.mocked(runIntelServiceCycle).mock.calls.length;
+      const firstSettlementChecks = vi.mocked(reconcileLiveSettlements).mock.calls.length;
+      const firstStatus = workerManager.getStatus();
 
+      vi.setSystemTime(Date.now() + 60_000);
       await wm.runCycle();
+      const duplicateStatus = workerManager.getStatus();
 
       expect(_dbInsertTables.filter(table => table === aiDecisionsTable)).toHaveLength(firstDecisionClaims);
       expect(approvalDispatch).toHaveBeenCalledTimes(1);
       expect(paperDispatch).toHaveBeenCalledTimes(1);
       expect(runIntelServiceCycle).toHaveBeenCalledTimes(firstIntelDispatches);
-      expect(reconcileLiveSettlements).toHaveBeenCalledTimes(2);
+      expect(reconcileLiveSettlements).toHaveBeenCalledTimes(firstSettlementChecks + 1);
+      expect(Date.parse(duplicateStatus.schedulerHeartbeatAt!))
+        .toBeGreaterThan(Date.parse(firstStatus.schedulerHeartbeatAt!));
+      expect(duplicateStatus.lastDecisionAt).toBe(firstStatus.lastDecisionAt);
+      expect(duplicateStatus.lastCycleAt).toBe(firstStatus.lastCycleAt);
+      expect(duplicateStatus.lastSchedulerCycleOutcome).toBe('SAFE_SKIP');
     } finally {
       workerManager.stop();
       approvalDispatch.mockRestore();
       paperDispatch.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('durable decision claim failure records a fresh ERROR cycle instead of a healthy skip', async () => {
+    vi.useFakeTimers({ now: 1_800_000_000_000 });
+    setupDbSequence();
+    vi.mocked(runAiEngine).mockReturnValue(
+      CASH_DECISION as unknown as ReturnType<typeof runAiEngine>,
+    );
+    const wm = workerManager as unknown as {
+      runCycle(): Promise<void>;
+      persistDecision(...args: unknown[]): Promise<{ status: 'ERROR' }>;
+    };
+    const claim = vi.spyOn(wm, 'persistDecision').mockResolvedValue({ status: 'ERROR' });
+
+    try {
+      await workerManager.start();
+      await wm.runCycle();
+      const status = workerManager.getStatus();
+      expect(status.schedulerHeartbeatAt).not.toBeNull();
+      expect(status.lastSchedulerCycleOutcome).toBe('ERROR');
+      expect(status.lastDecisionAt).toBeNull();
+    } finally {
+      workerManager.stop();
+      claim.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('insufficient analysis records a fresh ERROR cycle and never claims a decision', async () => {
+    vi.useFakeTimers({ now: 1_800_000_000_000 });
+    setupDbSequence();
+    const wm = workerManager as unknown as {
+      priceBuffer: Map<string, number[]>;
+      runCycle(): Promise<void>;
+    };
+
+    try {
+      await workerManager.start();
+      wm.priceBuffer.clear();
+      await wm.runCycle();
+      const status = workerManager.getStatus();
+      expect(status.schedulerHeartbeatAt).not.toBeNull();
+      expect(status.lastSchedulerCycleOutcome).toBe('ERROR');
+      expect(status.lastCycleResult?.error).toContain('가격 히스토리 부족');
+      expect(status.lastDecisionAt).toBeNull();
+    } finally {
+      workerManager.stop();
       vi.useRealTimers();
     }
   });
@@ -1352,12 +1457,14 @@ describe('정상 사이클 실행', () => {
   beforeEach(() => { resetWorker(); });
   afterEach(() => { workerManager.stop(); vi.useRealTimers(); });
 
-  it('30초 경과 후 첫 사이클이 실행되고 lastCycleAt이 갱신된다', async () => {
+  it('첫 사이클이 실행되면 scheduler heartbeat와 새 decision 시각이 각각 갱신된다', async () => {
     setupDbSequence();
     vi.mocked(runAiEngine).mockReturnValue(CASH_DECISION as unknown as ReturnType<typeof runAiEngine>);
     vi.useFakeTimers();
 
     await workerManager.start();
+    expect(workerManager.getStatus().schedulerHeartbeatAt).toBeNull();
+    expect(workerManager.getStatus().lastDecisionAt).toBeNull();
     expect(workerManager.getStatus().lastCycleAt).toBeNull();
 
     // Worker cycle은 60s 타이머 (시작 로그: "60초 AI 사이클, 10초 가격 폴링")
@@ -1365,6 +1472,8 @@ describe('정상 사이클 실행', () => {
 
     const s = workerManager.getStatus();
     expect(s.cycleCount).toBeGreaterThanOrEqual(1);
+    expect(s.schedulerHeartbeatAt).not.toBeNull();
+    expect(s.lastDecisionAt).not.toBeNull();
     expect(s.lastCycleAt).not.toBeNull();
   });
 
@@ -1423,6 +1532,9 @@ describe('사이클 오류 복구 — 다음 사이클 계속', () => {
     if (result?.error) {
       expect(typeof result.error).toBe('string');
     }
+    expect(workerManager.getStatus().schedulerHeartbeatAt).not.toBeNull();
+    expect(workerManager.getStatus().lastDecisionAt).toBeNull();
+    expect(workerManager.getStatus().lastSchedulerCycleOutcome).toBe('ERROR');
     // 워커는 여전히 활성 상태
     const wm = workerManager as unknown as Record<string, unknown>;
     expect(wm.active as boolean).toBe(true);
@@ -1558,35 +1670,35 @@ describe('중복 PENDING 승인 방지', () => {
   });
 });
 
-// ── Worker heartbeat / lastCycleAt 이상 감지 ──────────────────────────────────
+// ── Worker heartbeat / decision freshness 분리 ────────────────────────────────
 
-describe('Worker heartbeat — lastCycleAt 이상 감지', () => {
+describe('Worker heartbeat — scheduler 생존과 새 decision 시각 분리', () => {
   beforeEach(() => { resetWorker(); });
 
-  it('lastCycleAt이 null이면 워커가 아직 첫 사이클을 완료하지 않았다', () => {
+  it('schedulerHeartbeatAt이 null이면 현재 lifecycle에서 아직 cycle을 완료하지 않았다', () => {
     const s = workerManager.getStatus();
-    expect(s.lastCycleAt).toBeNull();
+    expect(s.schedulerHeartbeatAt).toBeNull();
     expect(s.workerRunning).toBe(false);
   });
 
-  it('lastCycleAt을 현재 시각으로 설정하면 fresh 상태로 판정된다', () => {
+  it('schedulerHeartbeatAt을 현재 시각으로 설정하면 fresh 상태로 판정된다', () => {
     const wm = workerManager as unknown as Record<string, unknown>;
-    wm.lastCycleAt = new Date();
+    wm.schedulerHeartbeatAt = new Date();
 
     const s = workerManager.getStatus();
-    const lastAt = s.lastCycleAt ? new Date(s.lastCycleAt) : null;
+    const lastAt = s.schedulerHeartbeatAt ? new Date(s.schedulerHeartbeatAt) : null;
     expect(lastAt).not.toBeNull();
     const elapsedMs = Date.now() - lastAt!.getTime();
     expect(elapsedMs).toBeLessThan(5_000); // 5초 이내 → fresh
   });
 
-  it('lastCycleAt이 5분 이상 전이면 stale로 판정된다 (heartbeat 이상)', () => {
+  it('schedulerHeartbeatAt이 5분 이상 전이면 stale로 판정된다', () => {
     const wm = workerManager as unknown as Record<string, unknown>;
     const STALE_THRESHOLD_MS = 5 * 60 * 1000; // 5분
-    wm.lastCycleAt = new Date(Date.now() - STALE_THRESHOLD_MS - 1000);
+    wm.schedulerHeartbeatAt = new Date(Date.now() - STALE_THRESHOLD_MS - 1000);
 
     const s = workerManager.getStatus();
-    const lastAt = s.lastCycleAt ? new Date(s.lastCycleAt) : null;
+    const lastAt = s.schedulerHeartbeatAt ? new Date(s.schedulerHeartbeatAt) : null;
     expect(lastAt).not.toBeNull();
     const elapsedMs = Date.now() - lastAt!.getTime();
     expect(elapsedMs).toBeGreaterThan(STALE_THRESHOLD_MS);

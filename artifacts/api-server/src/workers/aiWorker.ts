@@ -169,8 +169,17 @@ export interface WorkerCycleResult {
   error?: string;
 }
 
+export type SchedulerCycleOutcome = 'SUCCESS' | 'SAFE_SKIP' | 'ERROR';
+
 export interface WorkerStatus {
   workerRunning: boolean;
+  /** ISO timestamp of the last completed scheduler cycle, including guarded skips/errors. */
+  schedulerHeartbeatAt: string | null;
+  /** ISO timestamp when this process last claimed a new durable decision. */
+  lastDecisionAt: string | null;
+  /** Outcome of the latest completed scheduler cycle in the current lifecycle. */
+  lastSchedulerCycleOutcome: SchedulerCycleOutcome | null;
+  /** @deprecated Compatibility alias for lastDecisionAt. */
   lastCycleAt: string | null;
   lastCycleResult: WorkerCycleResult | null;
   cycleCount: number;
@@ -285,7 +294,16 @@ class WorkerManager {
   /** 완료된 총 사이클 수 */
   private cycleCount = 0;
 
-  /** 마지막 사이클 완료 시각 */
+  /** 현재 lifecycle에서 마지막으로 완료된 scheduler cycle 시각 (skip/error 포함). */
+  private schedulerHeartbeatAt: Date | null = null;
+
+  /** 마지막 새 durable decision claim 시각. */
+  private lastDecisionAt: Date | null = null;
+
+  /** 현재 lifecycle의 마지막 완료 cycle 결과. null = 아직 완료 cycle 없음. */
+  private lastSchedulerCycleOutcome: SchedulerCycleOutcome | null = null;
+
+  /** @deprecated lastDecisionAt 호환 alias. */
   private lastCycleAt: Date | null = null;
 
   /** 마지막 사이클 결과 */
@@ -387,6 +405,9 @@ class WorkerManager {
     const generation = ++this.lifecycleGeneration;
     this.active = true;
     this.lastDecisionIdentity = null;
+    // 이전 lifecycle의 heartbeat를 새 scheduler가 살아 있다는 증거로 재사용하지 않는다.
+    this.schedulerHeartbeatAt = null;
+    this.lastSchedulerCycleOutcome = null;
 
     // GMX 가격 폴러가 아직 시작되지 않았으면 시작
     ensureGmxPoller();
@@ -605,6 +626,9 @@ class WorkerManager {
   getStatus(): WorkerStatus {
     return {
       workerRunning:        this.isRunning,
+      schedulerHeartbeatAt: this.schedulerHeartbeatAt?.toISOString() ?? null,
+      lastDecisionAt:       this.lastDecisionAt?.toISOString() ?? null,
+      lastSchedulerCycleOutcome: this.lastSchedulerCycleOutcome,
       lastCycleAt:          this.lastCycleAt?.toISOString() ?? null,
       lastCycleResult:      this.lastCycleResult,
       cycleCount:           this.cycleCount,
@@ -1259,9 +1283,8 @@ class WorkerManager {
     // Atomic lock: 이전 사이클이 아직 실행 중이면 건너뜀
     if (this.isRunning) {
       console.warn("[AIWorker] 이전 사이클 실행 중 — 이번 사이클 건너뜀");
-      this.cycleTimer = setTimeout(() => {
-        if (this.isCurrentGeneration(capturedGeneration)) void this.runCycle(capturedGeneration);
-      }, CYCLE_INTERVAL_MS);
+      // 진행 중인 cycle의 finally가 다음 단일 timer를 소유한다.
+      // 여기서 heartbeat나 timer를 만들면 미완료 cycle을 생존으로 오인하거나 timer가 증식한다.
       return;
     }
 
@@ -1269,6 +1292,8 @@ class WorkerManager {
     this.cycleCount++;
     const cycleNum = this.cycleCount;
     const cycleStartMs = Date.now();
+    // Fail-safe default: only explicit normal completion or recognized safe skips may clear ERROR.
+    let cycleOutcome: SchedulerCycleOutcome = 'ERROR';
 
     try {
       // 사이클마다 PENDING 세트를 DB에서 재구성 — 승인/거절/만료된 항목 자동 제거
@@ -1338,6 +1363,7 @@ class WorkerManager {
             analysesCount: analyses.length, approvalCreated: false,
             error: `쿨다운 중 (${remainSec}초 남음)`,
           };
+          cycleOutcome = 'SAFE_SKIP';
           return;
         }
       }
@@ -1352,6 +1378,7 @@ class WorkerManager {
           analysesCount: analyses.length, approvalCreated: false,
           error: `시간당 거래 한도 초과 (${paperState.tradesInLastHour}/${maxTradesPerHour}건)`,
         };
+        cycleOutcome = 'SAFE_SKIP';
         return;
       }
 
@@ -1805,6 +1832,7 @@ class WorkerManager {
           `[AIWorker] 사이클 #${cycleNum} 동일 완료봉 결정 ${decision.id} 이미 처리됨 — ` +
           "DB claim과 one-shot downstream 생략",
         );
+        cycleOutcome = 'SAFE_SKIP';
         return;
       }
       const decisionClaim = await this.persistDecision(decision);
@@ -1816,8 +1844,12 @@ class WorkerManager {
       this.lastDecisionIdentity = decision.id;
       if (decisionClaim.status === "CONFLICT") {
         console.info(`[AIWorker] 사이클 #${cycleNum} 완료봉 결정이 이미 claim됨 — 모든 downstream dispatch 차단 (fail-closed)`);
+        cycleOutcome = 'SAFE_SKIP';
         return;
       }
+      const claimedAt = new Date();
+      this.lastDecisionAt = claimedAt;
+      this.lastCycleAt = claimedAt;
       if (nextStrategyLifecycleSnapshot !== null) {
         // durable decision에 snapshot이 포함된 뒤에만 메모리 상태를 전진시킨다.
         this.strategyLifecycleSnapshot = nextStrategyLifecycleSnapshot;
@@ -1872,16 +1904,16 @@ class WorkerManager {
         },
       });
 
-      this.lastCycleAt = new Date();
       this.lastCycleResult = {
         cycleNumber:     cycleNum,
-        at:              this.lastCycleAt.toISOString(),
+        at:              this.lastDecisionAt?.toISOString() ?? new Date().toISOString(),
         operatingState:  decision.operatingState,
         primarySymbol:   decision.primarySymbol,
         confidence:      decision.confidence,
         analysesCount:   analyses.length,
         approvalCreated,
       };
+      cycleOutcome = 'SUCCESS';
 
       console.info(
         `[AIWorker] 사이클 #${cycleNum} 완료 — ` +
@@ -1907,6 +1939,10 @@ class WorkerManager {
       this.isRunning = false;
       // 완료 후 다음 사이클 예약 (setInterval이 아닌 재귀 setTimeout)
       if (this.isCurrentGeneration(capturedGeneration)) {
+        // Scheduler 생존 heartbeat는 decision 생성 여부와 분리한다.
+        // 동일 완료봉 duplicate-skip, 안전 gate 조기 반환, 오류 cycle도 완료된 cycle이다.
+        this.schedulerHeartbeatAt = new Date();
+        this.lastSchedulerCycleOutcome = cycleOutcome;
         this.cycleTimer = setTimeout(() => {
           if (this.isCurrentGeneration(capturedGeneration)) void this.runCycle(capturedGeneration);
         }, CYCLE_INTERVAL_MS);
