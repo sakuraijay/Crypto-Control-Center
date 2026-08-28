@@ -36,6 +36,7 @@ import {
 } from './relayReadinessRefresh';
 import {
   isRelayReadonlyNetworkEnabled,
+  recordDeploymentVerification,
   type DeploymentVerificationState,
 } from './relayActivationStatus';
 import {
@@ -538,9 +539,10 @@ function normalizeCostDiagnostics(
         && component.observedAtMs <= fallbackAtMs + 5_000
         ? component.observedAtMs
         : null;
-      const ageMs = observedAtMs === null ? null : fallbackAtMs - observedAtMs;
-      const stale = ageMs !== null
-        && (ageMs < 0 || ageMs > EXECUTION_ELIGIBLE_MAX_AGE_MS);
+      const ageMs = observedAtMs === null
+        ? null
+        : Math.max(0, fallbackAtMs - observedAtMs);
+      const stale = ageMs !== null && ageMs > EXECUTION_ELIGIBLE_MAX_AGE_MS;
       const rawState = component.state;
       const codeSuffix = component.code.slice(
         `COST_${component.componentId}_`.length,
@@ -910,6 +912,13 @@ async function updateDeploymentAndRpc(
   if (!isRelayReadonlyNetworkEnabled(deps.env)) {
     const detail = 'GMX_RELAY_READONLY_NETWORK_ENABLED 비활성 — 외부 호출 0회';
     setNotEvaluated(deploymentState, atMs, 'DEPLOYMENT_READONLY_DISABLED', detail);
+    recordDeploymentVerification({
+      atMs,
+      ok: false,
+      manifestVersion: null,
+      basis: [],
+      failures: [detail],
+    });
     setNotEvaluated(rpcState, atMs, 'RPC_READONLY_DISABLED', detail);
     return false;
   }
@@ -917,6 +926,13 @@ async function updateDeploymentAndRpc(
   const clientResult = deps.createReadonlyClient(deps.env);
   if (!clientResult.ok) {
     setFailure(deploymentState, atMs, 'DEPLOYMENT_CLIENT_UNAVAILABLE', 'read-only RPC client 생성 실패');
+    recordDeploymentVerification({
+      atMs,
+      ok: false,
+      manifestVersion: null,
+      basis: [],
+      failures: ['read-only RPC client 생성 실패'],
+    });
     setFailure(rpcState, atMs, 'RPC_CLIENT_UNAVAILABLE', 'read-only RPC client 생성 실패');
     return false;
   }
@@ -940,6 +956,17 @@ async function updateDeploymentAndRpc(
       readonlyClient: clientResult.client,
       nowMs: deps.nowMs,
     });
+    recordDeploymentVerification({
+      atMs: result.atMs ?? atMs,
+      ok: result.attempted && result.ok && result.atMs !== null,
+      manifestVersion: result.manifestVersion,
+      basis: result.basis,
+      failures: result.failures.length > 0
+        ? result.failures
+        : result.attempted
+          ? []
+          : ['배포 read-only 검증 미수행'],
+    });
     if (result.attempted && result.ok && result.atMs !== null) {
       setSuccess(deploymentState, atMs, {
         manifestVersion: result.manifestVersion,
@@ -955,6 +982,13 @@ async function updateDeploymentAndRpc(
     );
   } catch {
     setFailure(deploymentState, atMs, 'DEPLOYMENT_VERIFICATION_ERROR', '배포 read-only 검증 예외');
+    recordDeploymentVerification({
+      atMs,
+      ok: false,
+      manifestVersion: null,
+      basis: [],
+      failures: ['배포 read-only 검증 예외'],
+    });
   }
   return false;
 }
@@ -1118,9 +1152,8 @@ function costView(symbol: CanarySymbol, nowMs: number): PaperCostEvidenceView {
   const currentComponents = costDiagnosticsState[symbol].components.map((component) => {
     const ageMs = component.observedAtMs === null
       ? null
-      : nowMs - component.observedAtMs;
-    const stale = ageMs !== null
-      && (ageMs < 0 || ageMs > EXECUTION_ELIGIBLE_MAX_AGE_MS);
+      : Math.max(0, nowMs - component.observedAtMs);
+    const stale = ageMs !== null && ageMs > EXECUTION_ELIGIBLE_MAX_AGE_MS;
     return {
       ...component,
       state: stale ? 'STALE' : component.state,

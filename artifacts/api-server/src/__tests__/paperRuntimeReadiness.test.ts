@@ -26,6 +26,12 @@ import { MARKET_BY_SYMBOL_SERVER } from '../lib/gmxMarkets';
 import { INTEL_MEASURED_COST_SOURCE } from '../intel/costEngine';
 import { COST_SOURCE_PIN } from '../intel/dataSource';
 import type { RelayReadonlyClient } from '../lib/relayReadonlyClient';
+import {
+  __resetDeploymentVerificationForTests,
+  getDeploymentVerificationState,
+  type DeploymentVerificationState,
+} from '../lib/relayActivationStatus';
+import { buildDefaultCanaryDeps } from '../lib/manualCanaryDeps';
 
 const NOW = 1_777_000_000_000;
 const ENV = {
@@ -184,10 +190,12 @@ function depsFrom(result = canaryResult()) {
 beforeEach(() => {
   __resetPaperRuntimeReadinessForTests();
   __resetExecutionEligibleCostEvidenceForTests();
+  __resetDeploymentVerificationForTests();
 });
 
 afterEach(() => {
   __resetPaperRuntimeReadinessForTests();
+  __resetDeploymentVerificationForTests();
 });
 
 describe('PAPER runtime readiness cycle', () => {
@@ -229,6 +237,18 @@ describe('PAPER runtime readiness cycle', () => {
       source: 'sdk+onchain',
     });
     expect(status.deployment.state).toBe('verified');
+    expect(getDeploymentVerificationState()).toMatchObject({
+      attempted: true,
+      atMs: NOW - 2_000,
+      ok: true,
+      manifestVersion: 1,
+      basis: ['verified'],
+      failures: [],
+    });
+    expect(buildDefaultCanaryDeps().deploymentVerified()).toEqual({
+      ok: true,
+      detail: 'manifest v1 검증됨',
+    });
     expect(status.rpc).toMatchObject({ state: 'verified', chainId: 42161 });
     expect(status.costs.BTC.effectiveRoundTripCostUsd).toBe(0.453012);
     expect(status.costs.BTC.evidenceRole).toBe('OBSERVATIONAL_READ_ONLY');
@@ -273,6 +293,44 @@ describe('PAPER runtime readiness cycle', () => {
     expect(getExecutionEligibleCostEvidence(NOW)).toEqual({
       fresh: false,
       evidence: null,
+    });
+  });
+
+  it('배포 재검증이 미수행이면 이전 shared 성공 snapshot을 fail-closed로 덮는다', async () => {
+    await runPaperRuntimeReadinessCycle({
+      deps: depsFrom(),
+      forceDeployment: true,
+    });
+    expect(getDeploymentVerificationState().ok).toBe(true);
+
+    const unattemptedDeps = {
+      ...depsFrom(),
+      refreshDeployment: vi.fn(async (): Promise<DeploymentVerificationState> => ({
+        attempted: false,
+        atMs: null,
+        ok: false,
+        manifestVersion: null,
+        basis: [],
+        failures: [],
+      })),
+    };
+    const status = await runPaperRuntimeReadinessCycle({
+      deps: unattemptedDeps,
+      forceDeployment: true,
+    });
+
+    expect(status.deployment.state).toBe('failed');
+    expect(getDeploymentVerificationState()).toMatchObject({
+      attempted: true,
+      atMs: NOW,
+      ok: false,
+      manifestVersion: null,
+      basis: [],
+      failures: ['배포 read-only 검증 미수행'],
+    });
+    expect(buildDefaultCanaryDeps().deploymentVerified()).toEqual({
+      ok: false,
+      detail: '배포 read-only 검증 미수행',
     });
   });
 
@@ -752,6 +810,42 @@ describe('PAPER runtime readiness cycle', () => {
     expect(serialized).not.toContain('SHOULD_NOT_LEAK');
     expect(serialized).not.toContain('evil.example');
     expect(serialized).not.toContain('secret=value');
+  });
+
+  it('허용된 clock skew의 새 관측은 age 0의 fresh 진단으로 정규화한다', async () => {
+    const result = canaryResult();
+    (result.costs.BTC as unknown as { diagnostics: unknown }).diagnostics = {
+      failures: [],
+      sourceTraces: [],
+      attemptCount: 1,
+      retryCount: 0,
+      failoverCount: 0,
+      attemptedAtMs: NOW + 1,
+      components: [{
+        componentId: 'TICKERS',
+        sourceId: 'GMX_API_MARKETS_TICKERS',
+        state: 'SUCCESS',
+        code: 'COST_TICKERS_SUCCESS',
+        observedAtMs: NOW + 1,
+        ageMs: -1,
+        fresh: true,
+      }],
+    };
+
+    const status = await runPaperRuntimeReadinessCycle({
+      deps: depsFrom(result),
+      forceDeployment: true,
+    });
+
+    expect(status.costs.BTC.diagnostics.components).toEqual([{
+      componentId: 'TICKERS',
+      sourceId: 'GMX_API_MARKETS_TICKERS',
+      state: 'SUCCESS',
+      code: 'COST_TICKERS_SUCCESS',
+      observedAtMs: NOW + 1,
+      ageMs: 0,
+      fresh: true,
+    }]);
   });
 
   it('stop→restart 중 진행 중 cycle을 보존하고 외부 read를 겹치지 않는다', async () => {

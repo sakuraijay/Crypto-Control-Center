@@ -12,7 +12,8 @@ describe('manual Canary cost component diagnostics', () => {
     ['success', true, NOW - 1_000, undefined, 'SUCCESS', 'COST_TICKERS_SUCCESS', true],
     ['missing', false, null, undefined, 'MISSING', 'COST_TICKERS_MISSING', false],
     ['stale', true, NOW - 30_001, undefined, 'STALE', 'COST_TICKERS_STALE', false],
-    ['future timestamp', true, NOW + 1, undefined, 'STALE', 'COST_TICKERS_STALE', false],
+    ['minor future skew', true, NOW + 1, undefined, 'SUCCESS', 'COST_TICKERS_SUCCESS', true],
+    ['invalid future timestamp', true, NOW + 5_001, undefined, 'MISSING', 'COST_TICKERS_MISSING', false],
   ] as const)('classifies %s evidence deterministically', (
     _name,
     available,
@@ -34,8 +35,12 @@ describe('manual Canary cost component diagnostics', () => {
       sourceId: 'GMX_API_MARKETS_TICKERS',
       state,
       code,
-      observedAtMs,
-      ageMs: observedAtMs === null ? null : NOW - observedAtMs,
+      observedAtMs: observedAtMs !== null && observedAtMs <= NOW + 5_000
+        ? observedAtMs
+        : null,
+      ageMs: observedAtMs === null || observedAtMs > NOW + 5_000
+        ? null
+        : Math.max(0, NOW - observedAtMs),
       fresh,
     });
   });

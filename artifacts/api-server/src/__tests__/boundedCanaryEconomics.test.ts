@@ -99,9 +99,37 @@ describe('bounded Controlled Canary economics', () => {
 
     expect(result.search).toMatchObject({
       testedQuoteCount: 10,
-      fetchedQuoteCount: 9,
+      fetchedQuoteCount: 10,
       complete: true,
     });
+    expect(fetchQuote).toHaveBeenCalledTimes(9);
+    expect(fetchQuote.mock.calls.some(([arg]) => arg.notionalUsd === 20)).toBe(false);
+  });
+
+  it('counts a failed seeded exact quote without treating it as a tested point', async () => {
+    const fetchQuote = vi.fn(async ({ notionalUsd }: { notionalUsd: number }) => ({
+      ok: true as const,
+      snapshot: snapshot(notionalUsd, 0.2),
+    }));
+    const result = await exploreBoundedCanaryEconomics({
+      symbol: 'BTC',
+      market: MARKET,
+      fetchQuote,
+      nowMs: () => NOW,
+      seedQuotes: new Map([[20, {
+        ok: false as const,
+        reason: 'seed quote unavailable',
+      }]]),
+    });
+
+    expect(result.status).toBe('UNAVAILABLE');
+    expect(result.search).toMatchObject({
+      testedQuoteCount: 9,
+      fetchedQuoteCount: 10,
+      complete: false,
+    });
+    expect(result.quotes).toHaveLength(9);
+    expect(result.failedNotionalUsd).toBe(20);
     expect(fetchQuote).toHaveBeenCalledTimes(9);
     expect(fetchQuote.mock.calls.some(([arg]) => arg.notionalUsd === 20)).toBe(false);
   });
@@ -315,7 +343,7 @@ describe('bounded Controlled Canary economics', () => {
     expect(result.status).toBe('UNAVAILABLE');
     expect(result.failureId)
       .toBe('BOUNDED_CANARY_BTC_SET_STALE_AT_COMPLETION');
-    expect(result.search.fetchedQuoteCount).toBe(9);
+    expect(result.search.fetchedQuoteCount).toBe(10);
   });
 
   it('is structurally read-only and does not import execution capabilities', () => {

@@ -95,7 +95,7 @@ function completePaperView(): PaperRuntimeReadinessView {
       stepUsd: 2 as const,
       quoteLimit: 10 as const,
       testedQuoteCount: 10,
-      fetchedQuoteCount: 9,
+      fetchedQuoteCount: 10,
       complete: true,
       nonlinearInferenceUsed: false as const,
     },

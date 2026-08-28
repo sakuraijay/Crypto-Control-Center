@@ -186,14 +186,17 @@ export function classifyCostReadinessComponent(args: {
   observedAtMs: number | null | undefined;
   nowMs: number;
 }): CostReadinessComponentDiagnostic {
+  const maxClockSkewMs = 5_000;
   const observedAtMs = typeof args.observedAtMs === 'number'
     && Number.isFinite(args.observedAtMs)
     && args.observedAtMs > 0
+    && args.observedAtMs <= args.nowMs + maxClockSkewMs
     ? args.observedAtMs
     : null;
-  const ageMs = observedAtMs === null ? null : args.nowMs - observedAtMs;
-  const stale = ageMs !== null
-    && (ageMs < 0 || ageMs > EXECUTION_ELIGIBLE_MAX_AGE_MS);
+  const ageMs = observedAtMs === null
+    ? null
+    : Math.max(0, args.nowMs - observedAtMs);
+  const stale = ageMs !== null && ageMs > EXECUTION_ELIGIBLE_MAX_AGE_MS;
   const failed = args.apiResult !== undefined && !args.apiResult.ok;
   const state: CostReadinessComponentState = failed
     ? 'FAILED'

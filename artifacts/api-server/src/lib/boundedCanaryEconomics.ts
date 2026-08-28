@@ -279,9 +279,9 @@ export async function exploreBoundedCanaryEconomics(args: {
       });
     }
 
+    fetchedQuoteCount += 1;
     let result = args.seedQuotes?.get(notionalUsd);
     if (!result) {
-      fetchedQuoteCount += 1;
       try {
         result = await args.fetchQuote({
           symbol: args.symbol,
