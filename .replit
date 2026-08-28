@@ -76,7 +76,7 @@ GMX_API_ORDER_SUBMISSION_ENABLED = "false"
 
 [userenv.production]
 GMX_API_READONLY_ENABLED = "true"
-DELEGATED_SIGNER_ENABLED = "false"
+DELEGATED_SIGNER_ENABLED = "true"
 
 [userenv.development]
 DELEGATED_SIGNER_ENABLED = "false"
