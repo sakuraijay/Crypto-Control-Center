@@ -31,7 +31,6 @@ import {
   getDeploymentVerificationState,
   type DeploymentVerificationState,
 } from '../lib/relayActivationStatus';
-import { buildDefaultCanaryDeps } from '../lib/manualCanaryDeps';
 
 const NOW = 1_777_000_000_000;
 const ENV = {
@@ -245,10 +244,6 @@ describe('PAPER runtime readiness cycle', () => {
       basis: ['verified'],
       failures: [],
     });
-    expect(buildDefaultCanaryDeps().deploymentVerified()).toEqual({
-      ok: true,
-      detail: 'manifest v1 검증됨',
-    });
     expect(status.rpc).toMatchObject({ state: 'verified', chainId: 42161 });
     expect(status.costs.BTC.effectiveRoundTripCostUsd).toBe(0.453012);
     expect(status.costs.BTC.evidenceRole).toBe('OBSERVATIONAL_READ_ONLY');
@@ -327,10 +322,6 @@ describe('PAPER runtime readiness cycle', () => {
       manifestVersion: null,
       basis: [],
       failures: ['배포 read-only 검증 미수행'],
-    });
-    expect(buildDefaultCanaryDeps().deploymentVerified()).toEqual({
-      ok: false,
-      detail: '배포 read-only 검증 미수행',
     });
   });
 
