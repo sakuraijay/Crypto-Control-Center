@@ -118,7 +118,9 @@ import {
   reconcileProtections, checkStartupProtectionCoverage,
   type ProtectionSubmitOutcome,
 } from '../workers/protectionExecutor';
-import { planProtection, transitionProtection, getProtection } from '../lib/protectionOrders';
+import {
+  planProtection, transitionProtection, getProtection, getProtectionLineageForPosition,
+} from '../lib/protectionOrders';
 
 const OPEN = {
   parentOpenIntentId: 'intent-1', evidence: 'OrderExecuted tx=0xabc',
@@ -153,6 +155,34 @@ describe('§3 planProtection / transition (durable 계층)', () => {
     expect((await transitionProtection(id, 'PLANNED', 'PREPARED')).ok).toBe(true);
     expect((await getProtection(id))?.status).toBe('PREPARED');
   });
+  it('재시작 coverage는 terminal Stop에서도 원래 OPEN lineage를 복구한다', async () => {
+    await planProtection({
+      parentOpenIntentId: 'intent:open:general-sol',
+      positionKey: 'position-sol',
+      purpose: 'INITIAL_STOP',
+      symbol: 'SOL',
+      marketAddress: '0x0',
+      isLong: true,
+      sizeDeltaUsd: 10,
+      triggerPriceUsd: 100,
+      acceptablePriceUsd: 99,
+      dayKey: 'd',
+    });
+    await transitionProtection('prot:intent:open:general-sol:INITIAL_STOP', 'PLANNED', 'CANCELLED');
+    expect(await getProtectionLineageForPosition('position-sol')).toEqual({
+      ok: true,
+      parentOpenIntentId: 'intent:open:general-sol',
+    });
+  });
+  it('동일 position의 복수 lineage는 emergency-close 자동 선택을 거부한다', async () => {
+    store.set('legacy-a', {
+      id: 'legacy-a', parentOpenIntentId: 'intent:open:a', positionKey: 'position-shared',
+    });
+    store.set('legacy-b', {
+      id: 'legacy-b', parentOpenIntentId: 'intent:open:b', positionKey: 'position-shared',
+    });
+    expect((await getProtectionLineageForPosition('position-shared')).ok).toBe(false);
+  });
 });
 
 describe('§5 INITIAL_STOP 수명주기', () => {
@@ -175,6 +205,47 @@ describe('§5 INITIAL_STOP 수명주기', () => {
     expect(r2.ok).toBe(false);
     expect(submit).toHaveBeenCalledTimes(1);
     if (!r2.ok) expect(r2.reason).toContain('자동 재제출 금지');
+  });
+  it('재시작 후 persisted SUBMITTED 일반 intent는 재제출하지 않는다', async () => {
+    const generic = {
+      open: {
+        ...OPEN,
+        parentOpenIntentId: 'intent:open:ai/9dc4036f-9083-4670-b28a-e69dfce5fdc3',
+        symbol: 'SOL',
+      },
+      triggerPriceUsd: 145,
+      acceptablePriceUsd: 144.275,
+    };
+    const submit = vi.fn(async (): Promise<ProtectionSubmitOutcome> => ({
+      status: 'ACCEPTED', requestId: 'req-sol', typedDataDigest: null,
+    }));
+    setProtectionSubmitFn(submit);
+    expect((await createInitialStopAfterOpenConfirmed(generic)).ok).toBe(true);
+    expect((await createInitialStopAfterOpenConfirmed(generic)).ok).toBe(false);
+    expect(submit).toHaveBeenCalledTimes(1);
+  });
+  it('deterministic ID의 기존 row 결속이 변조되면 재사용·submit을 거부한다', async () => {
+    await planProtection({
+      parentOpenIntentId: OPEN.parentOpenIntentId,
+      positionKey: 'different-position',
+      purpose: 'INITIAL_STOP',
+      symbol: OPEN.symbol,
+      marketAddress: OPEN.marketAddress,
+      isLong: OPEN.isLong,
+      sizeDeltaUsd: OPEN.confirmedSizeUsd,
+      triggerPriceUsd: STOP_INPUT.triggerPriceUsd,
+      acceptablePriceUsd: STOP_INPUT.acceptablePriceUsd,
+      dayKey: '2026-08-19',
+    });
+    const submit = vi.fn();
+    setProtectionSubmitFn(submit as never);
+    const result = await createInitialStopAfterOpenConfirmed(STOP_INPUT);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toContain('결속 불일치');
+      expect(result.emergencyCloseRequired).toBe(true);
+    }
+    expect(submit).not.toHaveBeenCalled();
   });
   it.each(['PREPARED', 'SUBMITTING'] as const)(
     '동시 pass가 %s claim을 보면 emergency close 요구 없이 대기',

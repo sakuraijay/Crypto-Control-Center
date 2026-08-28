@@ -24,6 +24,8 @@ import { manilaDayKey } from '../lib/profitProtection';
 
 export interface ProtectionSubmitRequest {
   parentOpenIntentId: string;
+  /** finality 검증된 source OPEN relay task. generic protection flow의 좁은 self-exclusion. */
+  sourceOpenTaskId?: string;
   /** OPEN confirmation에서 읽은 exact GMX position key. */
   positionKey: string;
   /** 서버가 확인한 Manual Canary OPEN lineage에서만 true. */
@@ -53,6 +55,8 @@ export function setProtectionSubmitFn(fn: ProtectionSubmitFn | null): void { _su
 
 export interface ConfirmedOpenEvidence {
   parentOpenIntentId: string;
+  /** finality 검증을 통과한 source OPEN relay task (generic handoff self-exclusion용). */
+  sourceOpenTaskId?: string;
   /** 온체인 확정 증거 (OrderExecuted tx 또는 authoritative readback) 요약 */
   evidence: string;
   positionKey: string;
@@ -87,6 +91,28 @@ function existingStopNeedsEmergency(status: string): boolean {
   // startup reconciliation이 crash 잔존 상태를 UNRESOLVED로 바꾸기 전에는
   // loser pass가 emergency close를 발동하면 안 된다.
   return !['PREPARED', 'SUBMITTING', 'SUBMITTED', 'ACTIVE'].includes(status);
+}
+
+function sameFixed(value: unknown, expected: number, digits: number): boolean {
+  const n = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(n) && n.toFixed(digits) === expected.toFixed(digits);
+}
+
+function initialStopBindingMatches(
+  row: Record<string, unknown>,
+  input: InitialStopPlanInput,
+): boolean {
+  const o = input.open;
+  return row.parentOpenIntentId === o.parentOpenIntentId
+    && row.positionKey === o.positionKey
+    && row.purpose === 'INITIAL_STOP'
+    && row.symbol === o.symbol
+    && typeof row.marketAddress === 'string'
+    && row.marketAddress.toLowerCase() === o.marketAddress.toLowerCase()
+    && row.isLong === o.isLong
+    && sameFixed(row.sizeDeltaUsd, o.confirmedSizeUsd, 4)
+    && sameFixed(row.triggerPriceUsd, input.triggerPriceUsd, 8)
+    && sameFixed(row.acceptablePriceUsd, input.acceptablePriceUsd, 8);
 }
 
 async function lostStopTransitionResult(
@@ -148,6 +174,14 @@ export async function createInitialStopAfterOpenConfirmed(
   // 자동 재제출 금지 — 기존 레코드가 PLANNED가 아니면 이 흐름은 재개하지 않는다.
   const row = await getProtection(id);
   if (!row) return { ok: false, protectionId: id, reason: '보호 주문 재조회 실패 — 제출 0회 (fail-closed)', emergencyCloseRequired: true };
+  if (!initialStopBindingMatches(row as unknown as Record<string, unknown>, input)) {
+    return {
+      ok: false,
+      protectionId: id,
+      reason: '기존 INITIAL_STOP durable 결속 불일치 — 재사용/제출 금지 (fail-closed)',
+      emergencyCloseRequired: true,
+    };
+  }
   if (row.status !== 'PLANNED' || row.submitAttempts > 0) {
     return {
       ok: false,
@@ -171,6 +205,7 @@ export async function createInitialStopAfterOpenConfirmed(
   try {
     outcome = await _submitFn({
       parentOpenIntentId: o.parentOpenIntentId,
+      sourceOpenTaskId: o.sourceOpenTaskId,
       positionKey: o.positionKey,
       manualCanary: o.manualCanary === true,
       purpose: 'INITIAL_STOP', symbol: o.symbol, marketAddress: o.marketAddress,
@@ -239,6 +274,14 @@ export async function recordInitialStopHandoffFailure(
   if (!row) {
     return { ok: false, protectionId: planned.protectionId, reason: 'INITIAL_STOP 실패 기록 재조회 실패', emergencyCloseRequired: true };
   }
+  if (!initialStopBindingMatches(row as unknown as Record<string, unknown>, input)) {
+    return {
+      ok: false,
+      protectionId: planned.protectionId,
+      reason: '기존 INITIAL_STOP durable 결속 불일치 — 실패 기록 덮어쓰기 금지',
+      emergencyCloseRequired: true,
+    };
+  }
   if (row.status === 'UNRESOLVED') {
     return { ok: false, protectionId: planned.protectionId, reason, emergencyCloseRequired: true };
   }
@@ -266,6 +309,8 @@ export async function recordInitialStopHandoffFailure(
 
 export interface EmergencyCloseInput {
   parentOpenIntentId: string;
+  /** handoff에서 확인된 source OPEN relay task. 다른 blocking task는 숨기지 않는다. */
+  sourceOpenTaskId?: string;
   positionKey: string;
   symbol: string;
   marketAddress: string;
@@ -316,6 +361,7 @@ export async function runEmergencyClose(input: EmergencyCloseInput): Promise<Sto
   try {
     outcome = await _submitFn({
       parentOpenIntentId: input.parentOpenIntentId,
+      sourceOpenTaskId: input.sourceOpenTaskId,
       positionKey: input.positionKey,
       manualCanary: input.manualCanary === true,
       purpose: 'EMERGENCY_CLOSE', symbol: input.symbol, marketAddress: input.marketAddress,

@@ -264,22 +264,40 @@ export async function countOpenRelayTasksOrNull(): Promise<number | null> {
 
 /**
  * 6G-3 §6 — 특정 transportGen의 미종결(blocking) relay task 수.
- * excludeTaskId는 정확히 자기 task 1건만 제외한다 (다른 task를 숨기지 않음).
+ * excludeTaskId/excludeTaskIds는 호출자가 명시한 정확한 task만 제외한다.
  * 조회 실패 = null (fail-closed 판단용).
  */
 export async function countBlockingRelayTasksOrNull(params: {
   transportGen: string;
   excludeTaskId?: string | null;
+  excludeTaskIds?: readonly string[];
+  /** exact OPEN task+intent 결속이 모두 맞을 때만 source handoff task를 제외한다. */
+  excludeSourceOpen?: { taskId: string; intentId: string } | null;
 }): Promise<number | null> {
   const nonTerminal = (Object.values(RELAY_TASK_STATUS) as RelayTaskStatus[])
     .filter((s) => !TERMINAL_STATUSES.includes(s));
   try {
-    const rows = await db.select({ id: relayTasksTable.id }).from(relayTasksTable)
+    const rows = await db.select({
+      id: relayTasksTable.id,
+      kind: relayTasksTable.kind,
+      intentId: relayTasksTable.intentId,
+    }).from(relayTasksTable)
       .where(and(
         eq(relayTasksTable.transportGen, params.transportGen),
         inArray(relayTasksTable.status, nonTerminal),
       ));
-    return rows.filter((r) => r.id !== (params.excludeTaskId ?? null)).length;
+    const excluded = new Set([
+      ...(params.excludeTaskIds ?? []),
+      ...(params.excludeTaskId ? [params.excludeTaskId] : []),
+    ]);
+    return rows.filter((r) => {
+      if (excluded.has(r.id)) return false;
+      const source = params.excludeSourceOpen;
+      return !(source
+        && r.id === source.taskId
+        && r.kind === 'OPEN'
+        && r.intentId === source.intentId);
+    }).length;
   } catch {
     return null;
   }

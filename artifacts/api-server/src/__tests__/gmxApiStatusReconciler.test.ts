@@ -276,6 +276,29 @@ describe('executed — 온체인 교차검증 후에만 CONFIRMED', () => {
     expect(transitionSpy).toHaveBeenCalledTimes(1);
   });
 
+  it('일반 UUID intent도 prefix 분류 없이 handoff한 뒤에만 terminal 전이', async () => {
+    const intentId = 'intent:open:ai/9dc4036f-9083-4670-b28a-e69dfce5fdc3';
+    dbState.rows = [row({ intentId })];
+    eventsState.classify = {
+      kind: 'executed', txHash: TX, blockNumber: '100',
+      emitterAddress: '0x' + 'e'.repeat(40),
+    };
+    const handoff = vi.fn(async () => ({ handled: true as const, basis: 'general stop durable' }));
+    setConfirmedOpenHandoff(handoff);
+    const t = makeTransport(() => ({
+      status: 'executed', requestId: 'req-1', executionTxHash: TX, orderKeys: [ORDER_KEY],
+    }));
+    const s = await reconcileGmxApiTasks(deps(t, makeOnchain(receiptSuccess)));
+    expect(s.transitioned).toBe(1);
+    expect(handoff).toHaveBeenCalledTimes(1);
+    expect(handoff).toHaveBeenCalledWith(expect.objectContaining({ intentId }));
+    expect(resolveIntentSpy).toHaveBeenCalledWith(
+      intentId,
+      'CONFIRMED',
+      expect.objectContaining({ orderKey: ORDER_KEY }),
+    );
+  });
+
   it('handoff 미처리/실패 → OPEN task와 intent를 terminal로 풀지 않음', async () => {
     dbState.rows = [row()];
     eventsState.classify = {

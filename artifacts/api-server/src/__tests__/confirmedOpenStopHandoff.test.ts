@@ -10,6 +10,7 @@ const ORDER_KEY = '0x' + '3'.repeat(64);
 const TX = '0x' + '4'.repeat(64);
 const EMITTER = '0x' + '5'.repeat(40);
 const INTENT_ID = 'intent:open:manual-canary:2026-08-19';
+const GENERAL_INTENT_ID = 'intent:open:ai-decision/9dc4036f-9083-4670-b28a-e69dfce5fdc3';
 const NOW = new Date('2026-08-19T12:00:00.000Z');
 
 const evidence = {
@@ -28,7 +29,6 @@ function makeDeps(): ConfirmedOpenStopHandoffDeps {
     now: () => NOW,
     finalityDepth: 15,
     expectedCollateralToken: '0x' + '6'.repeat(40),
-    postureAllowed: vi.fn(() => true),
     loadIntent: vi.fn(async () => ({
       id: INTENT_ID, orderType: 'open', symbol: 'ETH', isLong: true,
     })),
@@ -86,6 +86,38 @@ describe('finalized OPEN → INITIAL_STOP handoff', () => {
     expect(deps.runEmergencyClose).not.toHaveBeenCalled();
   });
 
+  it('일반 intent와 비-Canary symbol도 persisted OPEN/position/plan 결속으로 handoff한다', async () => {
+    const deps = makeDeps();
+    const generalEvidence = { ...evidence, intentId: GENERAL_INTENT_ID };
+    vi.mocked(deps.loadIntent).mockResolvedValue({
+      id: GENERAL_INTENT_ID, orderType: 'open', symbol: 'SOL', isLong: false,
+    });
+    vi.mocked(deps.fetchPositions).mockResolvedValue([{
+      positionKey: POSITION_KEY, marketAddress: MARKET,
+      collateralToken: '0x' + '6'.repeat(40), isLong: false, sizeUsd: 37.5,
+    }]);
+    vi.mocked(deps.loadStopPlan).mockResolvedValue({
+      ok: true,
+      plan: {
+        status: 'PENDING', triggerPriceUsd: 145, acceptablePriceUsd: 145.725,
+        marketAddress: MARKET, symbol: 'SOL', isLong: false,
+      },
+    });
+    const result = await runConfirmedOpenStopHandoff(generalEvidence, deps);
+    expect(result.handled).toBe(true);
+    expect(deps.createInitialStop).toHaveBeenCalledTimes(1);
+    expect(deps.createInitialStop).toHaveBeenCalledWith(expect.objectContaining({
+      open: expect.objectContaining({
+        parentOpenIntentId: GENERAL_INTENT_ID,
+        symbol: 'SOL',
+        isLong: false,
+        confirmedSizeUsd: 37.5,
+      }),
+    }));
+    const input = vi.mocked(deps.createInitialStop).mock.calls[0][0];
+    expect(input.open.manualCanary).toBeUndefined();
+  });
+
   it('status/event finality 미충족은 position/Stop 계층에 도달하지 않는다', async () => {
     const deps = makeDeps();
     const result = await runConfirmedOpenStopHandoff(
@@ -107,6 +139,32 @@ describe('finalized OPEN → INITIAL_STOP handoff', () => {
     expect(result.handled).toBe(false);
     expect(deps.createInitialStop).not.toHaveBeenCalled();
     expect(deps.runEmergencyClose).not.toHaveBeenCalled();
+  });
+
+  it('pre-OPEN Stop plan 누락은 일반 OPEN을 terminal로 풀지 않고 deterministic emergency-close로 수렴', async () => {
+    const deps = makeDeps();
+    vi.mocked(deps.loadStopPlan).mockResolvedValue({ ok: true, plan: null });
+    const result = await runConfirmedOpenStopHandoff(
+      { ...evidence, intentId: GENERAL_INTENT_ID },
+      {
+        ...deps,
+        loadIntent: vi.fn(async () => ({
+          id: GENERAL_INTENT_ID, orderType: 'open', symbol: 'ETH', isLong: true,
+        })),
+      },
+    );
+    expect(result.handled).toBe(true);
+    expect(deps.createInitialStop).not.toHaveBeenCalled();
+    expect(deps.runEmergencyClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('Stop plan 누락 + emergency durable 저장 실패는 OPEN terminal 전환을 금지', async () => {
+    const deps = makeDeps();
+    vi.mocked(deps.loadStopPlan).mockResolvedValue({ ok: false, plan: null });
+    vi.mocked(deps.runEmergencyClose).mockResolvedValue({ ok: false, protectionId: null });
+    const result = await runConfirmedOpenStopHandoff(evidence, deps);
+    expect(result.handled).toBe(false);
+    expect(deps.createInitialStop).not.toHaveBeenCalled();
   });
 
   for (const [name, override] of [

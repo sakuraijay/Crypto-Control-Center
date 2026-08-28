@@ -435,6 +435,70 @@ describe('6G-3 §6 — 중앙 게이트 blocking task', () => {
     expect(await countBlockingRelayTasksOrNull({ transportGen: GMX_API_TRANSPORT_GEN })).toBe(3);
   });
 
+  it('confirmed OPEN source 결속만 제외해 보호 flow 1회를 허용한다', async () => {
+    const sourceIntentId = 'intent:open:general-sol';
+    store.tasks.push({
+      id: 'source-open',
+      idempotencyKey: 'source-key',
+      kind: 'OPEN',
+      status: RELAY_TASK_STATUS.TASK_ACCEPTED,
+      transportGen: GMX_API_TRANSPORT_GEN,
+      intentId: sourceIntentId,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const { transport, calls } = mockTransport();
+    const r = await runGmxApiSubmitFlow(flowInput(transport, {
+      allowedBlockingSourceOpen: { taskId: 'source-open', intentId: sourceIntentId },
+      kind: 'CLOSE',
+      activation: fullActivation({ kind: 'CLOSE' }),
+      reevaluateActivation: async () => fullActivation({ kind: 'CLOSE' }),
+    }));
+    expect(r.submitted).toBe(true);
+    expect(r.prepareCalls).toBe(1);
+    expect(r.signCalls).toBe(1);
+    expect(r.submitCalls).toBe(1);
+    expect(calls.submit).toBe(1);
+  });
+
+  it('source task ID의 intent 결속이 다르거나 unrelated blocker가 있으면 보호 flow를 차단한다', async () => {
+    store.tasks.push(
+      {
+        id: 'source-open',
+        idempotencyKey: 'source-key',
+        kind: 'OPEN',
+        status: RELAY_TASK_STATUS.TASK_ACCEPTED,
+        transportGen: GMX_API_TRANSPORT_GEN,
+        intentId: 'intent:open:actual',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+      {
+        id: 'unrelated',
+        idempotencyKey: 'unrelated-key',
+        kind: 'CLOSE',
+        status: RELAY_TASK_STATUS.UNRESOLVED,
+        transportGen: GMX_API_TRANSPORT_GEN,
+        intentId: 'intent:close:other',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+    );
+    const { transport, calls } = mockTransport();
+    const prepareSpy = vi.fn();
+    const r = await runGmxApiSubmitFlow(flowInput(transport, {
+      allowedBlockingSourceOpen: {
+        taskId: 'source-open',
+        intentId: 'intent:open:spoofed',
+      },
+      prepareOrder: prepareSpy,
+    }));
+    expect(r.submitted).toBe(false);
+    expect(prepareSpy).not.toHaveBeenCalled();
+    expect(calls.submit).toBe(0);
+    expect(r.blockReasons.join(' ')).toContain('미종결 relay task 2건');
+  });
+
   it('제출 직전 다른 blocking task 등장 → CANCELLED·제출 0회', async () => {
     const { transport, calls } = mockTransport();
     const r = await runGmxApiSubmitFlow(flowInput(transport, {

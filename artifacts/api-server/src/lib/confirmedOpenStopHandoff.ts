@@ -29,13 +29,16 @@ export interface HandoffStopPlan {
 
 export interface HandoffOpenConfirmation {
   parentOpenIntentId: string;
+  /** finality 검증을 통과한 source OPEN relay task. 보호 flow에서 이 한 건만 self-exclude한다. */
+  sourceOpenTaskId: string;
   evidence: string;
   positionKey: string;
   symbol: string;
   marketAddress: string;
   isLong: boolean;
   confirmedSizeUsd: number;
-  manualCanary: true;
+  /** 결정적 Manual Canary intent에서만 true. 일반 OPEN은 생략한다. */
+  manualCanary?: true;
 }
 
 export interface HandoffStopInput {
@@ -64,7 +67,6 @@ export interface ConfirmedOpenStopHandoffDeps {
   now(): Date;
   finalityDepth: number;
   expectedCollateralToken: string;
-  postureAllowed(): boolean;
   loadIntent(id: string): Promise<HandoffIntent | null>;
   marketAddressForSymbol(symbol: string): string | null;
   fetchPositions(): Promise<HandoffPosition[] | null>;
@@ -121,9 +123,6 @@ export async function runConfirmedOpenStopHandoff(
   evidence: ConfirmedOpenHandoffInput,
   deps: ConfirmedOpenStopHandoffDeps,
 ): Promise<ConfirmedOpenHandoffResult> {
-  if (!evidence.intentId.startsWith('intent:open:manual-canary:') || !deps.postureAllowed()) {
-    return { handled: false, reason: 'Manual Canary OPEN lineage/posture 불일치 — handoff 차단' };
-  }
   if (evidence.confirmations < deps.finalityDepth
       || !hasBytes32(evidence.orderKey)
       || !hasBytes32(evidence.executionTxHash)
@@ -157,19 +156,10 @@ export async function runConfirmedOpenStopHandoff(
     return { handled: false, reason: 'authoritative position collateral token 불일치' };
   }
 
-  const loadedPlan = await deps.loadStopPlan(evidence.intentId);
-  const planned = loadedPlan.plan;
-  if (!loadedPlan.ok || !planned || planned.status !== 'PENDING'
-      || planned.marketAddress?.toLowerCase() !== pos.marketAddress.toLowerCase()
-      || planned.isLong !== pos.isLong
-      || planned.symbol !== intent.symbol
-      || !Number.isFinite(planned.triggerPriceUsd) || Number(planned.triggerPriceUsd) <= 0
-      || !Number.isFinite(planned.acceptablePriceUsd) || Number(planned.acceptablePriceUsd) <= 0) {
-    return { handled: false, reason: 'pre-OPEN durable stop plan 누락/불일치' };
-  }
-
+  const manualCanary = evidence.intentId.startsWith('intent:open:manual-canary:');
   const open: HandoffOpenConfirmation = {
     parentOpenIntentId: evidence.intentId,
+    sourceOpenTaskId: evidence.taskId,
     evidence:
       `OrderExecuted tx=${evidence.executionTxHash} orderKey=${evidence.orderKey} ` +
       `emitter=${evidence.emitterAddress} block=${evidence.resolutionBlock} confirmations=${evidence.confirmations}`,
@@ -178,8 +168,24 @@ export async function runConfirmedOpenStopHandoff(
     marketAddress: pos.marketAddress,
     isLong: pos.isLong,
     confirmedSizeUsd: pos.sizeUsd,
-    manualCanary: true,
+    ...(manualCanary ? { manualCanary: true as const } : {}),
   };
+
+  const loadedPlan = await deps.loadStopPlan(evidence.intentId);
+  const planned = loadedPlan.plan;
+  if (!loadedPlan.ok || !planned || planned.status !== 'PENDING'
+      || planned.marketAddress?.toLowerCase() !== pos.marketAddress.toLowerCase()
+      || planned.isLong !== pos.isLong
+      || planned.symbol !== intent.symbol
+      || !Number.isFinite(planned.triggerPriceUsd) || Number(planned.triggerPriceUsd) <= 0
+      || !Number.isFinite(planned.acceptablePriceUsd) || Number(planned.acceptablePriceUsd) <= 0) {
+    const reason = 'pre-OPEN durable stop plan 누락/불일치';
+    const emergency = await deps.runEmergencyClose(open, `INITIAL_STOP handoff 실패 — ${reason}`, deps.now());
+    return emergency.protectionId !== null
+      ? { handled: true, basis: `INITIAL_STOP plan invalid + EMERGENCY_CLOSE convergence (${reason})` }
+      : { handled: false, reason: `${reason}; emergency durable 저장 실패 — OPEN terminal 전환 금지` };
+  }
+
   const now = deps.now();
   const input: HandoffStopInput = {
     open,

@@ -104,6 +104,7 @@ export {
 import { evaluateActionBudget } from '../lib/actionBudget';
 import {
   listBlockingProtections, listActiveProtections, recordProtectionEvidenceFields,
+  getProtectionLineageForPosition,
 } from '../lib/protectionOrders';
 // ── 6H-2C §3·§4 — decimals 권위 소스 + 온체인 증거 수집기 ────────────────────
 import {
@@ -902,7 +903,6 @@ export async function runConfirmedOpenInitialStopHandoff(
     now: () => new Date(),
     finalityDepth: EVIDENCE_CONFIRMATION_DEPTH,
     expectedCollateralToken: USDC_ADDRESS,
-    postureAllowed: () => isManualCanarySignerRestoreAllowed(process.env).allowed,
     loadIntent: getExecutionIntent,
     marketAddressForSymbol: (symbol) => MARKET_BY_SYMBOL_SERVER.get(symbol)?.marketToken ?? null,
     fetchPositions: fetchAuthoritativeOpenPositions,
@@ -937,9 +937,8 @@ export async function runConfirmedOpenInitialStopHandoff(
       try { nonce = canonical?.approvalNonce == null ? null : BigInt(canonical.approvalNonce); }
       catch { nonce = null; }
       if (!owner || !signer || !isSignerInitialized() || nonce === null) return false;
-      const stored = await getStoredPublicSignerAddress(EXPECTED_CANARY_SIGNER);
+      const stored = await getStoredPublicSignerAddress(signer);
       if (!stored.ok
-          || stored.address.toLowerCase() !== EXPECTED_CANARY_SIGNER.toLowerCase()
           || signer.toLowerCase() !== stored.address.toLowerCase()) {
         return false;
       }
@@ -954,13 +953,14 @@ export async function runConfirmedOpenInitialStopHandoff(
     recordStopFailure: recordInitialStopHandoffFailure,
     runEmergencyClose: async (open, reason, now) => runEmergencyClose({
       parentOpenIntentId: open.parentOpenIntentId,
+      sourceOpenTaskId: open.sourceOpenTaskId,
       positionKey: open.positionKey,
       symbol: open.symbol,
       marketAddress: open.marketAddress,
       isLong: open.isLong,
       fullSizeUsd: open.confirmedSizeUsd,
       reason,
-      manualCanary: true,
+      ...(open.manualCanary ? { manualCanary: true as const } : {}),
       now,
     }),
   });
@@ -1041,9 +1041,17 @@ export function wireProtectionExecution(): void {
 
     const manualCanary = isManualCanaryProtectionRequest(req);
     const activationArgs = {
-      kind: 'CLOSE' as const, liveTestMode: true, manualCanary,
+      kind: 'CLOSE' as const,
+      // Manual Canary는 기존 LIVE TEST 복원 경계, 일반 confirmed OPEN은
+      // 정상 LIVE activation 경계를 통과해야 한다. 둘 다 잠금 상태에서는
+      // prepare/sign/submit 전에 fail-closed 된다.
+      // 보호 주문은 hardened LIVE TEST execution gate를 공통으로 사용한다.
+      // 일반 경로는 manualCanary=false이므로 PAPER 예외를 얻지 못하고
+      // WORKER_ENGINE_MODE=LIVE 및 모든 LIVE 잠금을 추가로 통과해야 한다.
+      liveTestMode: true,
+      manualCanary,
       dbOk: true, rpcOk: Boolean(process.env.GMX_RPC_URL),
-      selfIntentId: null,
+      selfIntentId: req.parentOpenIntentId,
     };
     const res = await executeViaGmxApi({
       transport: getGmxApiTransport(),
@@ -1063,6 +1071,9 @@ export function wireProtectionExecution(): void {
         if (!snap?.approvalNonce) return null;
         try { return BigInt(snap.approvalNonce); } catch { return null; }
       })(),
+      allowedBlockingSourceOpen: req.sourceOpenTaskId
+        ? { taskId: req.sourceOpenTaskId, intentId: req.parentOpenIntentId }
+        : null,
     });
     if (res.finalStatus === 'TASK_ACCEPTED' && res.submitted) {
       // 6H-2D §2 — 서명 결속 시점에 typed data에서 실제 추출된 인코딩값만 기록.
@@ -1220,9 +1231,15 @@ export async function runProtectionPass(source: 'startup' | 'periodic' = 'period
       for (const u of cov.uncovered) {
         const p = posList.find((x) => x.positionKey === u.positionKey);
         if (!p) continue;
+        const lineage = await getProtectionLineageForPosition(u.positionKey);
+        if (!lineage.ok) {
+          console.error(`[LiveTestExecutor] emergency close lineage 확인 실패: ${lineage.reason}`);
+          continue;
+        }
         console.error(`[LiveTestExecutor] 🚨 ACTIVE stop 없는 포지션 ${u.positionKey} ($${u.sizeUsd}) — emergency close 시도`);
         const r = await runEmergencyClose({
-          parentOpenIntentId: u.positionKey, positionKey: u.positionKey,
+          parentOpenIntentId: lineage.parentOpenIntentId ?? u.positionKey,
+          positionKey: u.positionKey,
           symbol: p.marketAddress, marketAddress: p.marketAddress, isLong: p.isLong,
           fullSizeUsd: u.sizeUsd, reason: 'ACTIVE stop 부재 — 무방비 포지션 (§6)',
         });

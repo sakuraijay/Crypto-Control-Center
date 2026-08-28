@@ -597,6 +597,14 @@ export interface ExecuteViaGmxApiInput {
   openPosition?: OpenPositionEvidence | null;
   /** canonical approval nonce (재확인용). null = 미확인 → approval 동봉 불가 */
   canonicalNonce: bigint | null;
+  /**
+   * confirmed OPEN 보호 flow에서만: finality 검증된 source OPEN relay task 한 건.
+   * submit flow는 이 ID만 blocking count에서 제외하며 다른 task는 모두 보존한다.
+   */
+  allowedBlockingSourceOpen?: {
+    taskId: string;
+    intentId: string;
+  } | null;
   nowMs?: number;
 }
 
@@ -723,6 +731,7 @@ function makeFlowInput(
     // STOP_LOSS는 위험감소 주문 — durable flow/activation gate에는 CLOSE 계열로 취급
     kind: req.kind === 'OPEN' ? 'OPEN' as const : 'CLOSE' as const,
     intentId: input.intentId,
+    allowedBlockingSourceOpen: input.allowedBlockingSourceOpen ?? null,
     approvalSessionId: null,
     // 6G-3 §3 — 외부 prepare 호출 전에 결정되는 flow idempotency key.
     // intent 1건당 relay task 1건 (intent id 자체가 결정적 idempotent id).
