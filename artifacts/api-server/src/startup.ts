@@ -47,6 +47,7 @@ import {
   startPaperRuntimeReadinessScheduler,
   stopPaperRuntimeReadinessScheduler,
 } from "./lib/paperRuntimeReadiness";
+import { invalidateExpiredOwnerSignatureReadySessions } from "./lib/ownerApprovalExpiry";
 
 let devWebProxy: DevWebProxyHandle | null = null;
 
@@ -80,9 +81,6 @@ export function startServer({ httpServer, setDelegate, isShuttingDown }: Startup
     devWebProxy = attachDevWebProxy(app, httpServer);
   }
 
-  // Start internal executor RPC health monitor (non-blocking)
-  startRpcHealthMonitor();
-
   // 본체 로드 완료 — 이제 모든 요청은 Express app이 처리한다.
   // (migration 완료 전에는 app.ts의 readiness 게이트가 /api에 503,
   //  /healthz에 503 JSON을 반환한다 — 기존 동작 그대로.)
@@ -92,15 +90,41 @@ export function startServer({ httpServer, setDelegate, isShuttingDown }: Startup
   // Run database migrations, then open the API and start background services.
   // Each migration file uses IF NOT EXISTS guards — safe to run on every start.
   runMigrations()
-    .then(() => {
+    .then(async () => {
       // 종료 신호가 이미 들어온 경우: ready 전환·백그라운드 서비스 기동 생략
       // (server.close() 드레인 중 worker/signer가 새로 시작되는 race 방지)
       if (isShuttingDown()) {
         logger.info("Shutdown in progress — skipping post-migration startup");
         return;
       }
+
+      const expiryIsolation =
+        await invalidateExpiredOwnerSignatureReadySessions();
+      if (!expiryIsolation.ok) {
+        logger.error(
+          {
+            scanned: expiryIsolation.scanned,
+            invalidated: expiryIsolation.invalidated,
+            conflicts: expiryIsolation.conflicts,
+          },
+          "Expired owner-signature isolation incomplete — API readiness remains closed",
+        );
+        return;
+      }
+      logger.info(
+        {
+          scanned: expiryIsolation.scanned,
+          invalidated: expiryIsolation.invalidated,
+        },
+        "Expired owner-signature isolation complete",
+      );
+
       markReady();
       logger.info("Migrations complete — API ready");
+
+      // 만료 owner-signature capability 격리가 완료된 뒤에만 최초 외부 RPC
+      // health check를 시작한다. 격리 실패/경합 시 위에서 return하므로 network 0회.
+      startRpcHealthMonitor();
 
       // Delegated signer: DELEGATED_SIGNER_ENABLED=true(정확히 'true')일 때만
       // 키 복원/신규 생성 시도. 기본값(미설정)에서는 DB 접근·키 생성·SESSION_SECRET
