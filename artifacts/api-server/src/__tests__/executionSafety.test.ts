@@ -144,6 +144,8 @@ vi.mock('../lib/protectionOrders', () => ({
 const ENV_KEYS = [
   'WORKER_ENGINE_MODE', 'LIVE_TEST_EXECUTION_LOCKED', 'DELEGATED_SIGNER_ENABLED', 'GMX_RPC_URL',
   'GMX_SUBACCOUNT_GELATO_RELAY_ROUTER_ADDRESS', 'GMX_EVENT_EMITTER_ADDRESS', 'GMX_DATA_STORE_ADDRESS',
+  'AUTO_WORKER_LIVE_ENABLED', 'GMX_API_ORDER_SUBMISSION_ENABLED',
+  'GMX_RELAY_SUBMISSION_ENABLED', 'GMX_RELAY_SUBMIT_NETWORK_ENABLED',
 ] as const;
 
 // legacy 주문 경로 Production 차단 가드 (gmxDelegatedTrading.test.ts에서 이동 —
@@ -458,6 +460,46 @@ describe('executeLiveTestOrder — 중앙 게이트 통합 (writeContract 도달
     expect(r.ok).toBe(false);
     expect(r.txHash).toBeNull();
     expect(r.error).toMatch(/CENTRAL GATE/);
+  });
+
+  it('승인 플래그 3개가 켜져도 PAPER + AUTO false + Relay disabled + signer/canonical false면 prepare/sign/submit 0회', async () => {
+    process.env.WORKER_ENGINE_MODE = 'PAPER';
+    process.env.AUTO_WORKER_LIVE_ENABLED = 'false';
+    process.env.DELEGATED_SIGNER_ENABLED = 'true';
+    process.env.GMX_API_ORDER_SUBMISSION_ENABLED = 'true';
+    process.env.LIVE_TEST_EXECUTION_LOCKED = 'false';
+    process.env.GMX_RELAY_SUBMISSION_ENABLED = 'false';
+    process.env.GMX_RELAY_SUBMIT_NETWORK_ENABLED = 'false';
+    process.env.GMX_RPC_URL = 'https://rpc';
+
+    const delegatedSigner = await import('../lib/delegatedSigner');
+    vi.mocked(delegatedSigner.isSignerInitialized).mockReturnValue(false);
+    const { recordCanonicalSnapshot } = await import('../lib/relayActivationStatus');
+    recordCanonicalSnapshot({
+      atMs: Date.now(),
+      confirmed: false,
+      reason: 'canonical delegation unavailable',
+      approvalNonce: null,
+      isSubaccountListed: false,
+      expiresAt: null,
+      remaining: null,
+    });
+    const gmxExecution = await import('../lib/gmxApiExecution');
+    vi.mocked(gmxExecution.executeViaGmxApi).mockClear();
+
+    const { executeLiveTestOrder } = await import('../workers/liveTestExecutor');
+    const result = await executeLiveTestOrder(orderParams());
+
+    expect(result.ok).toBe(false);
+    expect(result.txHash).toBeNull();
+    expect(gmxExecution.executeViaGmxApi).not.toHaveBeenCalled();
+    expect(gmxFlowState.result).toMatchObject({
+      prepareCalls: 0,
+      signCalls: 0,
+      submitCalls: 0,
+    });
+
+    vi.mocked(delegatedSigner.isSignerInitialized).mockReturnValue(true);
   });
 
   it('unlock + LIVE여도 DELEGATED_SIGNER_ENABLED 미설정이면 차단', async () => {

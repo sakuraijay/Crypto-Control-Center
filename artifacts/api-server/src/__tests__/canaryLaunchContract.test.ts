@@ -82,11 +82,11 @@ describe('PAPER-only release configuration', () => {
 
     expect(shared).toContain('WORKER_ENGINE_MODE = "PAPER"');
     expect(shared).toContain('AUTO_WORKER_LIVE_ENABLED = "false"');
-    expect(production).toContain('DELEGATED_SIGNER_ENABLED = "false"');
+    expect(production).toContain('DELEGATED_SIGNER_ENABLED = "true"');
     expect(production).toContain(
-      'GMX_API_ORDER_SUBMISSION_ENABLED = "false"',
+      'GMX_API_ORDER_SUBMISSION_ENABLED = "true"',
     );
-    expect(production).toContain('LIVE_TEST_EXECUTION_LOCKED = "true"');
+    expect(production).toContain('LIVE_TEST_EXECUTION_LOCKED = "false"');
     expect(production).not.toContain(
       'GMX_RELAY_SUBMISSION_ENABLED = "true"',
     );

@@ -47,7 +47,6 @@ import {
   startPaperRuntimeReadinessScheduler,
   stopPaperRuntimeReadinessScheduler,
 } from "./lib/paperRuntimeReadiness";
-import { invalidateExpiredOwnerSignatureReadySessions } from "./lib/ownerApprovalExpiry";
 
 let devWebProxy: DevWebProxyHandle | null = null;
 
@@ -98,32 +97,12 @@ export function startServer({ httpServer, setDelegate, isShuttingDown }: Startup
         return;
       }
 
-      const expiryIsolation =
-        await invalidateExpiredOwnerSignatureReadySessions();
-      if (!expiryIsolation.ok) {
-        logger.error(
-          {
-            scanned: expiryIsolation.scanned,
-            invalidated: expiryIsolation.invalidated,
-            conflicts: expiryIsolation.conflicts,
-          },
-          "Expired owner-signature isolation incomplete — API readiness remains closed",
-        );
-        return;
-      }
-      logger.info(
-        {
-          scanned: expiryIsolation.scanned,
-          invalidated: expiryIsolation.invalidated,
-        },
-        "Expired owner-signature isolation complete",
-      );
-
       markReady();
       logger.info("Migrations complete — API ready");
 
-      // 만료 owner-signature capability 격리가 완료된 뒤에만 최초 외부 RPC
-      // health check를 시작한다. 격리 실패/경합 시 위에서 return하므로 network 0회.
+      // 만료 owner-signature 세션은 상태/submit 경계에서 논리적으로 차단한다.
+      // Startup과 상태 조회는 세션을 UPDATE하지 않으며 persistent cleanup은
+      // 별도의 명시적 operator action에만 맡긴다.
       startRpcHealthMonitor();
 
       // Delegated signer: DELEGATED_SIGNER_ENABLED=true(정확히 'true')일 때만

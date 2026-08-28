@@ -24,11 +24,12 @@ export function isExpiredOrMalformedOwnerApprovalTimestamp(
 }
 
 /**
- * Expired owner-signature capabilities are invalidated before API readiness.
+ * Explicit operator cleanup primitive for expired owner-signature capabilities.
  *
  * This function performs DB reads and conditional DB updates only. It does not
  * decrypt signatures, initialize a signer, perform RPC/network I/O, authorize a
  * subaccount, submit an order, move funds, or alter LIVE execution gates.
+ * Startup and status/readiness routes must never invoke it.
  */
 export async function invalidateExpiredOwnerSignatureReadySessions(
   nowSeconds: bigint = BigInt(Math.floor(Date.now() / 1000)),

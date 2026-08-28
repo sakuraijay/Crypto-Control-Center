@@ -282,23 +282,24 @@ describe('invalidateExpiredOwnerSignatureReadySessions', () => {
     expect(state.rows[0].status).toBe('OWNER_SIGNATURE_READY');
   });
 
-  it('keeps readiness and external RPC after successful expiry isolation', () => {
+  it('keeps persistent cleanup out of startup and status paths', () => {
     const source = readFileSync(
       new URL('../startup.ts', import.meta.url),
       'utf8',
     );
-    const isolateAt = source.indexOf(
-      'await invalidateExpiredOwnerSignatureReadySessions()',
+    const signerReadiness = readFileSync(
+      new URL('../routes/signer-readiness.ts', import.meta.url),
+      'utf8',
     );
-    const readyAt = source.indexOf('markReady();', isolateAt);
-    const rpcAt = source.indexOf('startRpcHealthMonitor();', isolateAt);
 
-    expect(isolateAt).toBeGreaterThan(-1);
-    expect(readyAt).toBeGreaterThan(isolateAt);
-    expect(rpcAt).toBeGreaterThan(readyAt);
-    expect(source.slice(isolateAt, readyAt)).toContain(
-      'if (!expiryIsolation.ok)',
+    expect(source).not.toContain(
+      'invalidateExpiredOwnerSignatureReadySessions',
     );
-    expect(source.slice(isolateAt, readyAt)).toContain('return;');
+    expect(signerReadiness).not.toContain(
+      'invalidateExpiredOwnerSignatureReadySessions',
+    );
+    expect(signerReadiness).toContain(
+      'staleOwnerSignatureReadySessionCount',
+    );
   });
 });
