@@ -5,6 +5,10 @@ import {
   type CostSnapshot,
 } from './costSnapshot';
 import { MANUAL_CANARY_CAPS } from './manualCanaryCaps';
+import type {
+  CostReadinessAttemptDiagnostics,
+  CostReadinessComponentDiagnostic,
+} from './manualCanaryCostFetcher';
 
 export const BOUNDED_CANARY_NOTIONALS_USD =
   Object.freeze([2, 4, 6, 8, 10, 12, 14, 16, 18, 20] as const);
@@ -58,11 +62,101 @@ export interface BoundedCanaryEconomicResult {
   expiresAtMs: number | null;
   failureId: string | null;
   detail: string;
+  failedNotionalUsd: number | null;
+  componentDiagnostics: CostReadinessComponentDiagnostic[];
+}
+
+const COMPONENT_ORDER = [
+  'TICKERS',
+  'MARKETS_INFO',
+  'SDK_PRICE_IMPACT',
+  'FUNDING',
+  'BORROWING',
+] as const;
+const COMPONENT_SOURCE = {
+  TICKERS: 'GMX_API_MARKETS_TICKERS',
+  MARKETS_INFO: 'GMX_API_MARKETS_INFO',
+  SDK_PRICE_IMPACT: 'GMX_SDK_PRICE_IMPACT',
+  FUNDING: 'GMX_API_MARKETS_TICKERS',
+  BORROWING: 'GMX_API_MARKETS_TICKERS',
+} as const;
+const COMPONENT_STATES = new Set(['SUCCESS', 'FAILED', 'MISSING', 'STALE']);
+const COMPONENT_FAILURE_SUFFIXES = new Set([
+  'FAILED',
+  'CONFIG',
+  'TIMEOUT',
+  'NETWORK',
+  '4XX',
+  '429',
+  '5XX',
+  'DECODE',
+  'RPC',
+  'CACHE',
+  'VALIDATION',
+  'UNAVAILABLE',
+]);
+const COMPONENT_CODE =
+  /^COST_(TICKERS|MARKETS_INFO|SDK_PRICE_IMPACT|FUNDING|BORROWING)_(SUCCESS|FAILED|MISSING|STALE|CONFIG|TIMEOUT|NETWORK|4XX|429|5XX|DECODE|RPC|CACHE|VALIDATION|UNAVAILABLE)$/;
+
+function normalizeComponentDiagnostics(
+  value: unknown,
+  nowMs: number,
+): CostReadinessComponentDiagnostic[] {
+  if (!Array.isArray(value)) return [];
+  const records = value.filter((entry): entry is Record<string, unknown> =>
+    entry !== null && typeof entry === 'object');
+  return COMPONENT_ORDER.flatMap((componentId) => {
+    const sourceId = COMPONENT_SOURCE[componentId];
+    const record = records.find((entry) =>
+      entry.componentId === componentId && entry.sourceId === sourceId);
+    if (!record
+      || typeof record.state !== 'string'
+      || !COMPONENT_STATES.has(record.state)
+      || typeof record.code !== 'string'
+      || !COMPONENT_CODE.test(record.code)
+      || !record.code.startsWith(`COST_${componentId}_`)) return [];
+    const observedAtMs = typeof record.observedAtMs === 'number'
+      && Number.isFinite(record.observedAtMs)
+      && record.observedAtMs > 0
+      && record.observedAtMs <= nowMs
+      ? record.observedAtMs
+      : null;
+    const ageMs = observedAtMs === null ? null : nowMs - observedAtMs;
+    const stale = ageMs !== null && ageMs > EXECUTION_ELIGIBLE_MAX_AGE_MS;
+    const rawState = record.state as CostReadinessComponentDiagnostic['state'];
+    const codeSuffix = record.code.slice(`COST_${componentId}_`.length);
+    if (rawState === 'SUCCESS' && (observedAtMs === null || codeSuffix !== 'SUCCESS')) {
+      return [];
+    }
+    if (rawState === 'MISSING' && codeSuffix !== 'MISSING') return [];
+    if (rawState === 'STALE'
+      && (observedAtMs === null || !stale || codeSuffix !== 'STALE')) return [];
+    if (rawState === 'FAILED' && !COMPONENT_FAILURE_SUFFIXES.has(codeSuffix)) return [];
+    const state = stale ? 'STALE' : rawState;
+    return [{
+      componentId,
+      sourceId,
+      state,
+      code: stale ? `COST_${componentId}_STALE` : record.code,
+      observedAtMs,
+      ageMs,
+      fresh: !stale && state === 'SUCCESS',
+    }];
+  });
+}
+
+function normalizeFailedNotional(value: unknown): number | null {
+  return typeof value === 'number'
+    && BOUNDED_CANARY_NOTIONALS_USD.includes(
+      value as typeof BOUNDED_CANARY_NOTIONALS_USD[number],
+    )
+    ? value
+    : null;
 }
 
 export type BoundedCanaryQuoteResult =
-  | { ok: true; snapshot: CostSnapshot }
-  | { ok: false; reason: string };
+  | { ok: true; snapshot: CostSnapshot; diagnostics?: CostReadinessAttemptDiagnostics }
+  | { ok: false; reason: string; diagnostics?: CostReadinessAttemptDiagnostics };
 
 const constraints = Object.freeze({
   maxNotionalUsd: 20 as const,
@@ -107,6 +201,8 @@ function unavailable(args: {
   evaluatedAtMs: number;
   failureId: string;
   detail: string;
+  failedNotionalUsd?: number | null;
+  componentDiagnostics?: CostReadinessComponentDiagnostic[];
 }): BoundedCanaryEconomicResult {
   return {
     status: 'UNAVAILABLE',
@@ -129,6 +225,9 @@ function unavailable(args: {
     expiresAtMs: null,
     failureId: args.failureId,
     detail: sanitizeCostError(args.detail),
+    failedNotionalUsd: args.failedNotionalUsd ?? null,
+    componentDiagnostics: args.componentDiagnostics?.map((entry) => ({ ...entry }))
+      ?? [],
   };
 }
 
@@ -151,6 +250,7 @@ export async function exploreBoundedCanaryEconomics(args: {
   const points: BoundedCanaryQuotePoint[] = [];
   let fetchedQuoteCount = 0;
   let earliestExpiryMs = Number.POSITIVE_INFINITY;
+  let latestComponents: CostReadinessComponentDiagnostic[] = [];
 
   if (!immutableCapsMatch()) {
     return unavailable({
@@ -204,8 +304,12 @@ export async function exploreBoundedCanaryEconomics(args: {
         evaluatedAtMs: args.nowMs(),
         failureId: `BOUNDED_CANARY_${args.symbol}_QUOTE_UNAVAILABLE`,
         detail: result.reason,
+        failedNotionalUsd: notionalUsd,
+        componentDiagnostics: result.diagnostics?.components,
       });
     }
+    latestComponents = result.diagnostics?.components?.map((entry) => ({ ...entry }))
+      ?? latestComponents;
 
     const snapshot = result.snapshot;
     if (Math.abs(snapshot.notionalUsd - notionalUsd) > 1e-9) {
@@ -275,6 +379,12 @@ export async function exploreBoundedCanaryEconomics(args: {
       evaluatedAtMs,
       failureId: `BOUNDED_CANARY_${args.symbol}_SET_STALE_AT_COMPLETION`,
       detail: 'bounded quote 집합 완료 전에 earliest quote freshness 만료',
+      componentDiagnostics: latestComponents.map((entry) => ({
+        ...entry,
+        state: 'STALE',
+        code: `COST_${entry.componentId}_STALE`,
+        fresh: false,
+      })),
     });
   }
   const status: BoundedCanaryEconomicStatus =
@@ -304,6 +414,8 @@ export async function exploreBoundedCanaryEconomics(args: {
     detail: status === 'AVAILABLE'
       ? 'cap 이내 exact quote 관측점이 존재함 — 관측 grid 밖 구간은 추정하지 않음'
       : '모든 bounded exact quote 관측점이 round-trip cost cap을 초과',
+    failedNotionalUsd: null,
+    componentDiagnostics: latestComponents,
   };
 }
 
@@ -311,19 +423,35 @@ export function expireBoundedCanaryEconomicResult(
   result: BoundedCanaryEconomicResult,
   nowMs: number,
 ): BoundedCanaryEconomicResult {
+  const componentDiagnostics = normalizeComponentDiagnostics(
+    result.componentDiagnostics,
+    nowMs,
+  );
+  const normalized = {
+    ...result,
+    failedNotionalUsd: normalizeFailedNotional(result.failedNotionalUsd),
+    componentDiagnostics,
+  };
   if (
-    result.status === 'UNAVAILABLE'
-    || result.expiresAtMs === null
-    || nowMs <= result.expiresAtMs
+    normalized.status === 'UNAVAILABLE'
+    || normalized.expiresAtMs === null
+    || nowMs <= normalized.expiresAtMs
   ) {
-    return result;
+    return normalized;
   }
   return unavailable({
-    symbol: result.symbol,
-    points: result.quotes,
-    fetchedQuoteCount: result.search.fetchedQuoteCount,
+    symbol: normalized.symbol,
+    points: normalized.quotes,
+    fetchedQuoteCount: normalized.search.fetchedQuoteCount,
     evaluatedAtMs: nowMs,
-    failureId: `BOUNDED_CANARY_${result.symbol}_STALE`,
+    failureId: `BOUNDED_CANARY_${normalized.symbol}_STALE`,
     detail: 'bounded Canary quote 집합 freshness 만료 — 재조회 필요',
+    componentDiagnostics: componentDiagnostics.map((entry) => ({
+      ...entry,
+      state: 'STALE',
+      code: `COST_${entry.componentId}_STALE`,
+      ageMs: entry.observedAtMs === null ? null : nowMs - entry.observedAtMs,
+      fresh: false,
+    })),
   });
 }

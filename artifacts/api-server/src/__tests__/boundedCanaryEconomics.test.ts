@@ -149,6 +149,113 @@ describe('bounded Controlled Canary economics', () => {
     expect(result.observedAffordableRanges).toEqual([]);
   });
 
+  it('preserves structured component evidence for the failed exact quote', async () => {
+    const component = {
+      componentId: 'SDK_PRICE_IMPACT' as const,
+      sourceId: 'GMX_SDK_PRICE_IMPACT' as const,
+      state: 'MISSING' as const,
+      code: 'COST_SDK_PRICE_IMPACT_MISSING',
+      observedAtMs: null,
+      ageMs: null,
+      fresh: false,
+    };
+    const result = await exploreBoundedCanaryEconomics({
+      symbol: 'BTC',
+      market: MARKET,
+      fetchQuote: async () => ({
+        ok: false,
+        reason: 'price impact unavailable',
+        diagnostics: {
+          firstFailure: null,
+          failures: [],
+          sourceTraces: [],
+          attemptCount: 1,
+          retryCount: 0,
+          failoverCount: 0,
+          attemptedAtMs: NOW,
+          components: [component],
+        },
+      }),
+      nowMs: () => NOW,
+    });
+
+    expect(result).toMatchObject({
+      status: 'UNAVAILABLE',
+      failureId: 'BOUNDED_CANARY_BTC_QUOTE_UNAVAILABLE',
+      failedNotionalUsd: 2,
+      componentDiagnostics: [component],
+    });
+  });
+
+  it('drops hostile bounded component diagnostics at the public freshness boundary', () => {
+    const result = expireBoundedCanaryEconomicResult({
+      status: 'UNAVAILABLE',
+      symbol: 'BTC',
+      boundary: 'READ_ONLY_OBSERVED_GRID_NOT_EXECUTION_AUTHORIZATION',
+      constraints: {
+        maxNotionalUsd: 20,
+        maxCollateralUsd: 10,
+        maxLeverage: 2,
+        maxRoundTripCostUsd: 0.4,
+      },
+      search: {
+        minNotionalUsd: 2,
+        maxNotionalUsd: 20,
+        stepUsd: 2,
+        quoteLimit: 10,
+        testedQuoteCount: 0,
+        fetchedQuoteCount: 0,
+        complete: false,
+        nonlinearInferenceUsed: false,
+      },
+      quotes: [],
+      observedAffordableRanges: [],
+      evaluatedAtMs: NOW,
+      expiresAtMs: null,
+      failureId: 'BOUNDED_CANARY_BTC_QUOTE_UNAVAILABLE',
+      detail: 'safe',
+      failedNotionalUsd: 999,
+      componentDiagnostics: [{
+        componentId: 'TICKERS',
+        sourceId: 'GMX_API_MARKETS_TICKERS',
+        state: 'FAILED',
+        code: 'https://evil.example/?signature=SHOULD_NOT_LEAK',
+        observedAtMs: NOW,
+        ageMs: 0,
+        fresh: true,
+      }, {
+        componentId: 'MARKETS_INFO',
+        sourceId: 'GMX_API_MARKETS_INFO',
+        state: 'SUCCESS',
+        code: 'COST_MARKETS_INFO_SUCCESS',
+        observedAtMs: null,
+        ageMs: null,
+        fresh: true,
+      }, {
+        componentId: 'SDK_PRICE_IMPACT',
+        sourceId: 'GMX_SDK_PRICE_IMPACT',
+        state: 'SUCCESS',
+        code: 'COST_SDK_PRICE_IMPACT_5XX',
+        observedAtMs: NOW,
+        ageMs: 0,
+        fresh: true,
+      }, {
+        componentId: 'FUNDING',
+        sourceId: 'GMX_API_MARKETS_TICKERS',
+        state: 'SUCCESS',
+        code: 'COST_FUNDING_SUCCESS',
+        observedAtMs: NOW + 1,
+        ageMs: -1,
+        fresh: true,
+      }],
+    }, NOW);
+
+    expect(result.failedNotionalUsd).toBeNull();
+    expect(result.componentDiagnostics).toEqual([]);
+    expect(JSON.stringify(result)).not.toContain('evil.example');
+    expect(JSON.stringify(result)).not.toContain('SHOULD_NOT_LEAK');
+  });
+
   it('expires the whole quote set without reusing stale affordable points', async () => {
     const result = await exploreBoundedCanaryEconomics({
       symbol: 'BTC',

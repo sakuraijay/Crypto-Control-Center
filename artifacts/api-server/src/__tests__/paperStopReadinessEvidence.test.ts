@@ -31,6 +31,7 @@ function completePaperView(): PaperRuntimeReadinessView {
     lastAttemptAtMs: NOW,
     lastSuccessAtMs: NOW,
     lastFailureAtMs: null,
+    components: [],
   };
   const cost = (symbol: 'BTC' | 'ETH') => ({
     ...verifiedMeta(),
@@ -104,6 +105,8 @@ function completePaperView(): PaperRuntimeReadinessView {
     expiresAtMs: NOW + 30_000,
     failureId: null,
     detail: 'injected bounded read-only evidence',
+    failedNotionalUsd: null,
+    componentDiagnostics: [],
   });
   return {
     boundary: 'READ_ONLY_NOT_EXECUTION_AUTHORIZATION',

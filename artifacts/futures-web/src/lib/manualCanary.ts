@@ -46,6 +46,25 @@ export interface CanaryExecuteResponse {
 
 export interface CanaryStage { status: string; detail: string }
 
+export interface CanaryCostComponentDiagnostic {
+  componentId: 'TICKERS' | 'MARKETS_INFO' | 'SDK_PRICE_IMPACT' | 'FUNDING' | 'BORROWING';
+  sourceId: 'GMX_API_MARKETS_TICKERS' | 'GMX_API_MARKETS_INFO' | 'GMX_SDK_PRICE_IMPACT';
+  state: 'SUCCESS' | 'FAILED' | 'MISSING' | 'STALE';
+  code: string;
+  observedAtMs: number | null;
+  ageMs: number | null;
+  fresh: boolean;
+}
+
+export interface BoundedCanaryEconomics {
+  status: 'AVAILABLE' | 'UNECONOMIC' | 'UNAVAILABLE';
+  symbol: 'BTC' | 'ETH';
+  failureId: string | null;
+  detail: string;
+  failedNotionalUsd: number | null;
+  componentDiagnostics: CanaryCostComponentDiagnostic[];
+}
+
 export interface CanaryStatusResponse {
   ok: boolean;
   caps: CanaryCaps;
@@ -59,6 +78,7 @@ export interface CanaryStatusResponse {
     confirmed: CanaryStage; readback: CanaryStage;
   };
   blockers: CanaryBlocker[];
+  boundedCanaryEconomics?: Record<'BTC' | 'ETH', BoundedCanaryEconomics>;
 }
 
 export type CanaryFetchResult<T> =

@@ -272,8 +272,16 @@ export async function refreshManualCanaryReadonlyEvidence(
       };
     const market = MARKET_BY_SYMBOL_SERVER.get(symbol);
     const seedQuotes = new Map<number, import('./boundedCanaryEconomics').BoundedCanaryQuoteResult>();
-    if (cost.ok) seedQuotes.set(20, { ok: true, snapshot: cost.snapshot });
-    else seedQuotes.set(20, { ok: false, reason: cost.reason });
+    if (cost.ok) seedQuotes.set(20, {
+      ok: true,
+      snapshot: cost.snapshot,
+      diagnostics: cost.diagnostics,
+    });
+    else seedQuotes.set(20, {
+      ok: false,
+      reason: cost.reason,
+      diagnostics: cost.diagnostics,
+    });
     boundedEconomics[symbol] = market
       ? await exploreBoundedCanaryEconomics({
         symbol,
@@ -281,8 +289,16 @@ export async function refreshManualCanaryReadonlyEvidence(
         fetchQuote: async (input) => {
           const quote = await costReader(input);
           return quote.ok
-            ? { ok: true, snapshot: quote.snapshot }
-            : { ok: false, reason: quote.reason };
+            ? {
+              ok: true,
+              snapshot: quote.snapshot,
+              diagnostics: quote.diagnostics,
+            }
+            : {
+              ok: false,
+              reason: quote.reason,
+              diagnostics: quote.diagnostics,
+            };
         },
         nowMs: () => Date.now(),
         seedQuotes,
@@ -313,6 +329,8 @@ export async function refreshManualCanaryReadonlyEvidence(
         expiresAtMs: null,
         failureId: `BOUNDED_CANARY_${symbol}_MARKET_UNAVAILABLE`,
         detail: '공식 market registry 없음',
+        failedNotionalUsd: null,
+        componentDiagnostics: [],
       };
   }
   return { decimals, costs, boundedEconomics };

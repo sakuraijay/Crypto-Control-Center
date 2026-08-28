@@ -14,6 +14,7 @@ import {
   type GmxApiErrorKind,
   type GmxApiResult,
 } from './gmxApiTransport';
+import { EXECUTION_ELIGIBLE_MAX_AGE_MS } from './costSnapshot';
 
 export type CostReadinessFailureClass =
   | 'config'
@@ -57,6 +58,45 @@ export interface CostReadinessAttemptDiagnostics {
   retryCount: number;
   failoverCount: number;
   attemptedAtMs: number;
+  components?: CostReadinessComponentDiagnostic[];
+}
+
+export type CostReadinessComponentState =
+  | 'SUCCESS'
+  | 'FAILED'
+  | 'MISSING'
+  | 'STALE';
+
+export interface CostReadinessComponentDiagnostic {
+  componentId:
+    | 'TICKERS'
+    | 'MARKETS_INFO'
+    | 'SDK_PRICE_IMPACT'
+    | 'FUNDING'
+    | 'BORROWING';
+  sourceId:
+    | 'GMX_API_MARKETS_TICKERS'
+    | 'GMX_API_MARKETS_INFO'
+    | 'GMX_SDK_PRICE_IMPACT';
+  state: CostReadinessComponentState;
+  code: string;
+  observedAtMs: number | null;
+  ageMs: number | null;
+  fresh: boolean;
+}
+
+export function oldestRequiredImpactObservedAtMs(
+  marketsInfoObservedAtMs: number | null | undefined,
+  indexPriceObservedAtMs: number | null | undefined,
+): number | null {
+  return typeof marketsInfoObservedAtMs === 'number'
+    && Number.isFinite(marketsInfoObservedAtMs)
+    && marketsInfoObservedAtMs > 0
+    && typeof indexPriceObservedAtMs === 'number'
+    && Number.isFinite(indexPriceObservedAtMs)
+    && indexPriceObservedAtMs > 0
+    ? Math.min(marketsInfoObservedAtMs, indexPriceObservedAtMs)
+    : null;
 }
 
 export interface FreshExecutionCostObservation {
@@ -138,6 +178,44 @@ function toSourceTrace(
   };
 }
 
+export function classifyCostReadinessComponent(args: {
+  componentId: CostReadinessComponentDiagnostic['componentId'];
+  sourceId: CostReadinessComponentDiagnostic['sourceId'];
+  apiResult?: GmxApiResult<unknown>;
+  available: boolean;
+  observedAtMs: number | null | undefined;
+  nowMs: number;
+}): CostReadinessComponentDiagnostic {
+  const observedAtMs = typeof args.observedAtMs === 'number'
+    && Number.isFinite(args.observedAtMs)
+    && args.observedAtMs > 0
+    ? args.observedAtMs
+    : null;
+  const ageMs = observedAtMs === null ? null : args.nowMs - observedAtMs;
+  const stale = ageMs !== null
+    && (ageMs < 0 || ageMs > EXECUTION_ELIGIBLE_MAX_AGE_MS);
+  const failed = args.apiResult !== undefined && !args.apiResult.ok;
+  const state: CostReadinessComponentState = failed
+    ? 'FAILED'
+    : !args.available || observedAtMs === null
+      ? 'MISSING'
+      : stale
+        ? 'STALE'
+        : 'SUCCESS';
+  const suffix = failed && args.apiResult && !args.apiResult.ok
+    ? publicFailureClass(args.apiResult.kind).toUpperCase()
+    : state;
+  return {
+    componentId: args.componentId,
+    sourceId: args.sourceId,
+    state,
+    code: `COST_${args.componentId}_${suffix}`,
+    observedAtMs,
+    ageMs,
+    fresh: state === 'SUCCESS',
+  };
+}
+
 export async function buildFreshExecutionCostBreakdown(args: {
   marketToken: string;
   symbol: string;
@@ -204,6 +282,10 @@ export async function buildFreshExecutionCostObservation(args: {
   const missing = missingCostComponents(breakdown);
   const tickersResult = latestApiResult(apiAttempts, '/v1/markets/tickers');
   const marketsInfoResult = latestApiResult(apiAttempts, '/v1/markets/info');
+  const impactObservedAtMs = oldestRequiredImpactObservedAtMs(
+    impactInputs?.observedAtMs,
+    indexTick?.observedAtMs,
+  );
   const failures: CostReadinessComponentFailure[] = [];
 
   // 실제 prerequisite 순서로만 기록한다. downstream null 성분을 중복 원인으로
@@ -284,6 +366,50 @@ export async function buildFreshExecutionCostObservation(args: {
       result,
     ));
   const attempts = apiAttempts.map(({ result }) => result);
+  const components: CostReadinessComponentDiagnostic[] = [
+    classifyCostReadinessComponent({
+      componentId: 'TICKERS',
+      sourceId: 'GMX_API_MARKETS_TICKERS',
+      apiResult: tickersResult,
+      available: rates !== null,
+      observedAtMs: rates?.observedAtMs,
+      nowMs,
+    }),
+    classifyCostReadinessComponent({
+      componentId: 'MARKETS_INFO',
+      sourceId: 'GMX_API_MARKETS_INFO',
+      apiResult: marketsInfoResult,
+      available: impactInputs !== null,
+      observedAtMs: impactInputs?.observedAtMs,
+      nowMs,
+    }),
+    classifyCostReadinessComponent({
+      componentId: 'SDK_PRICE_IMPACT',
+      sourceId: 'GMX_SDK_PRICE_IMPACT',
+      available: breakdown.impactDetail !== null
+        && breakdown.impactDetail !== undefined
+        && impactInputs !== null
+        && indexTick !== null,
+      observedAtMs: impactObservedAtMs,
+      nowMs,
+    }),
+    classifyCostReadinessComponent({
+      componentId: 'FUNDING',
+      sourceId: 'GMX_API_MARKETS_TICKERS',
+      apiResult: tickersResult,
+      available: rates !== null && breakdown.fundingCostUsd !== null,
+      observedAtMs: rates?.observedAtMs,
+      nowMs,
+    }),
+    classifyCostReadinessComponent({
+      componentId: 'BORROWING',
+      sourceId: 'GMX_API_MARKETS_TICKERS',
+      apiResult: tickersResult,
+      available: rates !== null && breakdown.borrowingCostUsd !== null,
+      observedAtMs: rates?.observedAtMs,
+      nowMs,
+    }),
+  ];
   return {
     breakdown,
     diagnostics: {
@@ -294,6 +420,7 @@ export async function buildFreshExecutionCostObservation(args: {
       retryCount: attempts.reduce((sum, result) => sum + (result.retryCount ?? 0), 0),
       failoverCount: attempts.reduce((sum, result) => sum + (result.failoverCount ?? 0), 0),
       attemptedAtMs,
+      components,
     },
   };
 }

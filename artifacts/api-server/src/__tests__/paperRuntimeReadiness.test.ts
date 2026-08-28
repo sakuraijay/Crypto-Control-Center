@@ -103,6 +103,15 @@ function canaryResult(options: {
         retryCount: 0,
         failoverCount: 1,
         attemptedAtMs: NOW - 500,
+        components: [{
+          componentId: 'TICKERS' as const,
+          sourceId: 'GMX_API_MARKETS_TICKERS' as const,
+          state: 'FAILED' as const,
+          code: 'COST_TICKERS_5XX',
+          observedAtMs: null,
+          ageMs: null,
+          fresh: false,
+        }],
       },
     };
   };
@@ -598,6 +607,15 @@ describe('PAPER runtime readiness cycle', () => {
         lastAttemptAtMs: NOW - 500,
         lastSuccessAtMs: null,
         lastFailureAtMs: NOW - 500,
+        components: [{
+          componentId: 'TICKERS',
+          sourceId: 'GMX_API_MARKETS_TICKERS',
+          state: 'FAILED',
+          code: 'COST_TICKERS_5XX',
+          observedAtMs: null,
+          ageMs: null,
+          fresh: false,
+        }],
       },
     });
     expect(status.costs.ETH).toMatchObject({
@@ -667,6 +685,39 @@ describe('PAPER runtime readiness cycle', () => {
       retryCount: 999,
       failoverCount: 999,
       attemptedAtMs: Number.POSITIVE_INFINITY,
+      components: [{
+        componentId: 'https://evil.example',
+        sourceId: 'token=SHOULD_NOT_LEAK',
+        state: 'COMPROMISED',
+        code: 'secret=value',
+        observedAtMs: Number.POSITIVE_INFINITY,
+        ageMs: Number.NEGATIVE_INFINITY,
+        fresh: true,
+      }, {
+        componentId: 'TICKERS',
+        sourceId: 'GMX_API_MARKETS_TICKERS',
+        state: 'SUCCESS',
+        code: 'COST_TICKERS_5XX',
+        observedAtMs: NOW - 100,
+        ageMs: 100,
+        fresh: true,
+      }, {
+        componentId: 'MARKETS_INFO',
+        sourceId: 'GMX_API_MARKETS_INFO',
+        state: 'SUCCESS',
+        code: 'COST_MARKETS_INFO_SUCCESS',
+        observedAtMs: null,
+        ageMs: null,
+        fresh: true,
+      }, {
+        componentId: 'SDK_PRICE_IMPACT',
+        sourceId: 'GMX_API_MARKETS_TICKERS',
+        state: 'FAILED',
+        code: 'COST_SDK_PRICE_IMPACT_5XX',
+        observedAtMs: null,
+        ageMs: null,
+        fresh: false,
+      }],
     };
 
     const status = await runPaperRuntimeReadinessCycle({
@@ -694,6 +745,7 @@ describe('PAPER runtime readiness cycle', () => {
         retryCount: 16,
         failoverCount: 16,
         lastAttemptAtMs: NOW,
+        components: [],
       },
     });
     const serialized = JSON.stringify(status.costs.BTC);

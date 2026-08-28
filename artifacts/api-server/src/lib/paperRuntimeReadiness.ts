@@ -84,7 +84,43 @@ const SAFE_COST_SOURCE_IDS = new Set([
   'COST_ENGINE',
   'EXECUTION_COST_SNAPSHOT',
   'EXECUTION_COST_READINESS',
+  'GMX_SDK_PRICE_IMPACT',
 ]);
+const SAFE_COST_COMPONENT_IDS = new Set([
+  'TICKERS',
+  'MARKETS_INFO',
+  'SDK_PRICE_IMPACT',
+  'FUNDING',
+  'BORROWING',
+]);
+const SAFE_COST_COMPONENT_SOURCE = {
+  TICKERS: 'GMX_API_MARKETS_TICKERS',
+  MARKETS_INFO: 'GMX_API_MARKETS_INFO',
+  SDK_PRICE_IMPACT: 'GMX_SDK_PRICE_IMPACT',
+  FUNDING: 'GMX_API_MARKETS_TICKERS',
+  BORROWING: 'GMX_API_MARKETS_TICKERS',
+} as const;
+const SAFE_COST_COMPONENT_STATES = new Set([
+  'SUCCESS',
+  'FAILED',
+  'MISSING',
+  'STALE',
+]);
+const SAFE_COST_COMPONENT_FAILURE_SUFFIXES = new Set([
+  'FAILED',
+  'CONFIG',
+  'TIMEOUT',
+  'NETWORK',
+  '4XX',
+  '429',
+  '5XX',
+  'DECODE',
+  'RPC',
+  'CACHE',
+  'VALIDATION',
+  'UNAVAILABLE',
+]);
+const SAFE_COST_COMPONENT_CODE = /^COST_(TICKERS|MARKETS_INFO|SDK_PRICE_IMPACT|FUNDING|BORROWING)_(SUCCESS|FAILED|MISSING|STALE|CONFIG|TIMEOUT|NETWORK|4XX|429|5XX|DECODE|RPC|CACHE|VALIDATION|UNAVAILABLE)$/;
 const SAFE_COST_FAILURE_CLASSES = new Set([
   'config',
   'timeout',
@@ -176,6 +212,17 @@ export interface PaperCostReadinessDiagnosticsView {
   lastAttemptAtMs: number | null;
   lastSuccessAtMs: number | null;
   lastFailureAtMs: number | null;
+  components: PaperCostReadinessComponentView[];
+}
+
+export interface PaperCostReadinessComponentView {
+  componentId: string;
+  sourceId: string;
+  state: string;
+  code: string;
+  observedAtMs: number | null;
+  ageMs: number | null;
+  fresh: boolean;
 }
 
 export interface PaperCostReadinessFailureView {
@@ -322,6 +369,7 @@ const emptyCostDiagnostics = (): PaperCostReadinessDiagnosticsView => ({
   lastAttemptAtMs: null,
   lastSuccessAtMs: null,
   lastFailureAtMs: null,
+  components: [],
 });
 let costDiagnosticsState: Record<CanarySymbol, PaperCostReadinessDiagnosticsView> = {
   BTC: emptyCostDiagnostics(),
@@ -469,6 +517,54 @@ function normalizeCostDiagnostics(
     })
     .filter((trace): trace is PaperCostReadinessSourceTraceView => trace !== null)
     .slice(0, 4);
+  const components = (Array.isArray(record?.components) ? record.components : [])
+    .map((value): PaperCostReadinessComponentView | null => {
+      const component = asRecord(value);
+      if (!component
+        || typeof component.componentId !== 'string'
+        || !SAFE_COST_COMPONENT_IDS.has(component.componentId)
+        || typeof component.sourceId !== 'string'
+        || !SAFE_COST_SOURCE_IDS.has(component.sourceId)
+        || SAFE_COST_COMPONENT_SOURCE[
+          component.componentId as keyof typeof SAFE_COST_COMPONENT_SOURCE
+        ] !== component.sourceId
+        || typeof component.state !== 'string'
+        || !SAFE_COST_COMPONENT_STATES.has(component.state)
+        || typeof component.code !== 'string'
+        || !SAFE_COST_COMPONENT_CODE.test(component.code)) return null;
+      const observedAtMs = typeof component.observedAtMs === 'number'
+        && Number.isFinite(component.observedAtMs)
+        && component.observedAtMs > 0
+        && component.observedAtMs <= fallbackAtMs + 5_000
+        ? component.observedAtMs
+        : null;
+      const ageMs = observedAtMs === null ? null : fallbackAtMs - observedAtMs;
+      const stale = ageMs !== null
+        && (ageMs < 0 || ageMs > EXECUTION_ELIGIBLE_MAX_AGE_MS);
+      const rawState = component.state;
+      const codeSuffix = component.code.slice(
+        `COST_${component.componentId}_`.length,
+      );
+      if (rawState === 'SUCCESS'
+        && (observedAtMs === null || codeSuffix !== 'SUCCESS')) return null;
+      if (rawState === 'MISSING' && codeSuffix !== 'MISSING') return null;
+      if (rawState === 'STALE'
+        && (observedAtMs === null || !stale || codeSuffix !== 'STALE')) return null;
+      if (rawState === 'FAILED'
+        && !SAFE_COST_COMPONENT_FAILURE_SUFFIXES.has(codeSuffix)) return null;
+      return {
+        componentId: component.componentId,
+        sourceId: component.sourceId,
+        state: stale ? 'STALE' : rawState,
+        code: stale ? `COST_${component.componentId}_STALE` : component.code,
+        observedAtMs,
+        ageMs,
+        fresh: !stale && rawState === 'SUCCESS',
+      };
+    })
+    .filter((component): component is PaperCostReadinessComponentView =>
+      component !== null)
+    .slice(0, 5);
   return {
     firstFailure: failures[0]
       ? { ...failures[0], peerPath: [...failures[0].peerPath] }
@@ -479,6 +575,7 @@ function normalizeCostDiagnostics(
     retryCount: safeCount(record?.retryCount),
     failoverCount: safeCount(record?.failoverCount),
     lastAttemptAtMs: safeTimestamp(record?.attemptedAtMs, fallbackAtMs),
+    components,
   };
 }
 
@@ -1018,6 +1115,20 @@ function costView(symbol: CanarySymbol, nowMs: number): PaperCostEvidenceView {
   const executionBlockReason = executionSnapshotEligible
     ? null
     : blockReason ?? `${executionFailureId} — 실행 적격 비용 snapshot 미확보 (금액 비공개) — OPEN/Canary fail-closed 차단`;
+  const currentComponents = costDiagnosticsState[symbol].components.map((component) => {
+    const ageMs = component.observedAtMs === null
+      ? null
+      : nowMs - component.observedAtMs;
+    const stale = ageMs !== null
+      && (ageMs < 0 || ageMs > EXECUTION_ELIGIBLE_MAX_AGE_MS);
+    return {
+      ...component,
+      state: stale ? 'STALE' : component.state,
+      code: stale ? `COST_${component.componentId}_STALE` : component.code,
+      ageMs,
+      fresh: !stale && component.state === 'SUCCESS',
+    };
+  });
 
   return {
     ...meta,
@@ -1066,6 +1177,7 @@ function costView(symbol: CanarySymbol, nowMs: number): PaperCostEvidenceView {
     diagnostics: {
       ...costDiagnosticsState[symbol],
       failures: costDiagnosticsState[symbol].failures.map((failure) => ({ ...failure })),
+      components: currentComponents,
     },
   };
 }
@@ -1157,6 +1269,8 @@ export function getPaperRuntimeReadinessSnapshot(
       expiresAtMs: null,
       failureId: `BOUNDED_CANARY_${symbol}_NOT_EVALUATED`,
       detail: 'bounded Canary 경제성 진단 미평가',
+      failedNotionalUsd: null,
+      componentDiagnostics: [],
     } satisfies BoundedCanaryEconomicResult];
   })) as Record<CanarySymbol, BoundedCanaryEconomicResult>;
   const deploymentMeta = evidenceMeta(
