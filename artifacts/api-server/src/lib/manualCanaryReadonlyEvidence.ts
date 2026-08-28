@@ -23,6 +23,10 @@ import {
   buildFreshExecutionCostObservation,
   type CostReadinessAttemptDiagnostics,
 } from './manualCanaryCostFetcher';
+import {
+  exploreBoundedCanaryEconomics,
+  type BoundedCanaryEconomicResult,
+} from './boundedCanaryEconomics';
 
 export const MANUAL_CANARY_READONLY_SYMBOLS = ['BTC', 'ETH'] as const;
 export type ManualCanaryReadonlySymbol = (typeof MANUAL_CANARY_READONLY_SYMBOLS)[number];
@@ -38,6 +42,7 @@ export interface ManualCanaryReadonlyEvidence {
     | { ok: true; reason: null; snapshot: CostSnapshot; roundTripCostUsd: number; diagnostics?: CostReadinessAttemptDiagnostics }
     | { ok: false; reason: string; snapshot: null; roundTripCostUsd: null; diagnostics?: CostReadinessAttemptDiagnostics }
   >;
+  boundedEconomics?: Record<ManualCanaryReadonlySymbol, BoundedCanaryEconomicResult>;
 }
 
 export type ManualCanaryReadonlyCostResult =
@@ -235,6 +240,10 @@ export async function refreshManualCanaryReadonlyEvidence(
 ): Promise<ManualCanaryReadonlyEvidence> {
   const decimals: ManualCanaryReadonlyEvidence['decimals'] = {};
   const costs: ManualCanaryReadonlyEvidence['costs'] = {};
+  const boundedEconomics = {} as Record<
+    ManualCanaryReadonlySymbol,
+    BoundedCanaryEconomicResult
+  >;
   const decimalsReader =
     injectedReadonlyReaders?.resolveDecimals ?? resolveCanarySymbolDecimals;
   const costReader =
@@ -261,6 +270,50 @@ export async function refreshManualCanaryReadonlyEvidence(
         roundTripCostUsd: null,
         diagnostics: cost.diagnostics,
       };
+    const market = MARKET_BY_SYMBOL_SERVER.get(symbol);
+    const seedQuotes = new Map<number, import('./boundedCanaryEconomics').BoundedCanaryQuoteResult>();
+    if (cost.ok) seedQuotes.set(20, { ok: true, snapshot: cost.snapshot });
+    else seedQuotes.set(20, { ok: false, reason: cost.reason });
+    boundedEconomics[symbol] = market
+      ? await exploreBoundedCanaryEconomics({
+        symbol,
+        market: market.marketToken,
+        fetchQuote: async (input) => {
+          const quote = await costReader(input);
+          return quote.ok
+            ? { ok: true, snapshot: quote.snapshot }
+            : { ok: false, reason: quote.reason };
+        },
+        nowMs: () => Date.now(),
+        seedQuotes,
+      })
+      : {
+        status: 'UNAVAILABLE',
+        symbol,
+        boundary: 'READ_ONLY_OBSERVED_GRID_NOT_EXECUTION_AUTHORIZATION',
+        constraints: {
+          maxNotionalUsd: 20,
+          maxCollateralUsd: 10,
+          maxLeverage: 2,
+          maxRoundTripCostUsd: 0.4,
+        },
+        search: {
+          minNotionalUsd: 2,
+          maxNotionalUsd: 20,
+          stepUsd: 2,
+          quoteLimit: 10,
+          testedQuoteCount: 0,
+          fetchedQuoteCount: 0,
+          complete: false,
+          nonlinearInferenceUsed: false,
+        },
+        quotes: [],
+        observedAffordableRanges: [],
+        evaluatedAtMs: Date.now(),
+        expiresAtMs: null,
+        failureId: `BOUNDED_CANARY_${symbol}_MARKET_UNAVAILABLE`,
+        detail: '공식 market registry 없음',
+      };
   }
-  return { decimals, costs };
+  return { decimals, costs, boundedEconomics };
 }

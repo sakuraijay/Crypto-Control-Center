@@ -45,7 +45,9 @@ describe('manualCanaryReadonlyEvidence import isolation', () => {
     expect(calls).toEqual([
       'decimals:BTC',
       'cost:BTC',
+      'cost:BTC',
       'decimals:ETH',
+      'cost:ETH',
       'cost:ETH',
     ]);
     expect(result.decimals.BTC.ok).toBe(true);
@@ -53,6 +55,14 @@ describe('manualCanaryReadonlyEvidence import isolation', () => {
       ok: false,
       snapshot: null,
       roundTripCostUsd: null,
+    });
+    expect(result.boundedEconomics?.BTC).toMatchObject({
+      status: 'UNAVAILABLE',
+      search: {
+        testedQuoteCount: 0,
+        fetchedQuoteCount: 1,
+        complete: false,
+      },
     });
     expect(forbiddenLoads).toEqual([]);
   });

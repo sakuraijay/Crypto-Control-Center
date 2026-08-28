@@ -585,7 +585,9 @@ describe('POST /api/executor/gmx-api/readiness/refresh', () => {
     expect(readerCalls).toEqual([
       'decimals:BTC',
       'cost:BTC',
+      'cost:BTC',
       'decimals:ETH',
+      'cost:ETH',
       'cost:ETH',
     ]);
     expect(calls).toEqual([{ method: 'GET', path: '/markets/tickers' }]);
@@ -1086,7 +1088,9 @@ describe('POST /api/executor/gmx-api/readiness/refresh', () => {
       expect(evidenceReads).toEqual([
         'decimals:BTC',
         'cost:BTC',
+        'cost:BTC',
         'decimals:ETH',
+        'cost:ETH',
         'cost:ETH',
       ]);
       expect(__getGmxApiReadinessCoordinatorStateForTests()).toEqual({
@@ -1165,7 +1169,9 @@ describe('POST /api/executor/gmx-api/readiness/refresh', () => {
       expect(evidenceReads).toEqual([
         'decimals:BTC',
         'cost:BTC',
+        'cost:BTC',
         'decimals:ETH',
+        'cost:ETH',
         'cost:ETH',
       ]);
       expect(__getGmxApiReadinessCoordinatorStateForTests()).toEqual({

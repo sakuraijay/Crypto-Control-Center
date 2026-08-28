@@ -38,6 +38,10 @@ import {
   isRelayReadonlyNetworkEnabled,
   type DeploymentVerificationState,
 } from './relayActivationStatus';
+import {
+  expireBoundedCanaryEconomicResult,
+  type BoundedCanaryEconomicResult,
+} from './boundedCanaryEconomics';
 
 export const PAPER_READINESS_REFRESH_INTERVAL_MS = 45_000;
 export const PAPER_DEPLOYMENT_REFRESH_INTERVAL_MS = 5 * 60_000;
@@ -260,6 +264,7 @@ export interface PaperRuntimeReadinessView {
   rpc: PaperRpcEvidenceView;
   costs: Record<CanarySymbol, PaperCostEvidenceView>;
   economics: Record<CanarySymbol, EconomicOrderMinimumResult>;
+  boundedCanaryEconomics: Record<CanarySymbol, BoundedCanaryEconomicResult>;
   blockerIds: string[];
   manualActionHolds: Array<{
     id: string;
@@ -322,6 +327,7 @@ let costDiagnosticsState: Record<CanarySymbol, PaperCostReadinessDiagnosticsView
   BTC: emptyCostDiagnostics(),
   ETH: emptyCostDiagnostics(),
 };
+let boundedCanaryEconomicsState: Record<CanarySymbol, BoundedCanaryEconomicResult> | null = null;
 let deploymentState = emptyAttempt<DeploymentObservation>();
 let rpcState = emptyAttempt<RpcObservation>();
 interface PaperEconomicEdgeObservation {
@@ -692,6 +698,7 @@ function updateCanaryEvidence(
   atMs: number,
   decimalsEntries: ReturnType<typeof getDecimalsCacheSnapshot>,
 ): boolean {
+  boundedCanaryEconomicsState = result.boundedEconomics ?? null;
   let allObserved = true;
   for (const symbol of SYMBOLS) {
     const decimalResult = result.decimals[symbol];
@@ -1119,6 +1126,39 @@ export function getPaperRuntimeReadinessSnapshot(
       });
     })(),
   ])) as Record<CanarySymbol, EconomicOrderMinimumResult>;
+  const boundedCanaryEconomics = Object.fromEntries(SYMBOLS.map((symbol) => {
+    const current = boundedCanaryEconomicsState?.[symbol];
+    if (current) {
+      return [symbol, expireBoundedCanaryEconomicResult(current, nowMs)];
+    }
+    return [symbol, {
+      status: 'UNAVAILABLE',
+      symbol,
+      boundary: 'READ_ONLY_OBSERVED_GRID_NOT_EXECUTION_AUTHORIZATION',
+      constraints: {
+        maxNotionalUsd: 20,
+        maxCollateralUsd: 10,
+        maxLeverage: 2,
+        maxRoundTripCostUsd: 0.4,
+      },
+      search: {
+        minNotionalUsd: 2,
+        maxNotionalUsd: 20,
+        stepUsd: 2,
+        quoteLimit: 10,
+        testedQuoteCount: 0,
+        fetchedQuoteCount: 0,
+        complete: false,
+        nonlinearInferenceUsed: false,
+      },
+      quotes: [],
+      observedAffordableRanges: [],
+      evaluatedAtMs: nowMs,
+      expiresAtMs: null,
+      failureId: `BOUNDED_CANARY_${symbol}_NOT_EVALUATED`,
+      detail: 'bounded Canary 경제성 진단 미평가',
+    } satisfies BoundedCanaryEconomicResult];
+  })) as Record<CanarySymbol, BoundedCanaryEconomicResult>;
   const deploymentMeta = evidenceMeta(
     deploymentState,
     nowMs,
@@ -1163,6 +1203,7 @@ export function getPaperRuntimeReadinessSnapshot(
     },
     costs,
     economics,
+    boundedCanaryEconomics,
     blockerIds: [...new Set(blockerIds)],
     manualActionHolds: MANUAL_ACTION_HOLDS.map((hold) => ({ ...hold })),
   };
@@ -1232,6 +1273,7 @@ export function __resetPaperRuntimeReadinessForTests(): void {
   decimalsState = { BTC: emptyAttempt(), ETH: emptyAttempt() };
   costState = { BTC: emptyAttempt(), ETH: emptyAttempt() };
   costDiagnosticsState = { BTC: emptyCostDiagnostics(), ETH: emptyCostDiagnostics() };
+  boundedCanaryEconomicsState = null;
   deploymentState = emptyAttempt();
   rpcState = emptyAttempt();
   clearPaperEconomicEdgeEvidence();

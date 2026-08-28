@@ -78,6 +78,33 @@ function completePaperView(): PaperRuntimeReadinessView {
     fetchedAt: new Date(NOW - 1_000).toISOString(),
     diagnostics,
   });
+  const bounded = (symbol: 'BTC' | 'ETH') => ({
+    status: 'AVAILABLE' as const,
+    symbol,
+    boundary: 'READ_ONLY_OBSERVED_GRID_NOT_EXECUTION_AUTHORIZATION' as const,
+    constraints: {
+      maxNotionalUsd: 20 as const,
+      maxCollateralUsd: 10 as const,
+      maxLeverage: 2 as const,
+      maxRoundTripCostUsd: 0.4 as const,
+    },
+    search: {
+      minNotionalUsd: 2 as const,
+      maxNotionalUsd: 20 as const,
+      stepUsd: 2 as const,
+      quoteLimit: 10 as const,
+      testedQuoteCount: 10,
+      fetchedQuoteCount: 9,
+      complete: true,
+      nonlinearInferenceUsed: false as const,
+    },
+    quotes: [],
+    observedAffordableRanges: [],
+    evaluatedAtMs: NOW,
+    expiresAtMs: NOW + 30_000,
+    failureId: null,
+    detail: 'injected bounded read-only evidence',
+  });
   return {
     boundary: 'READ_ONLY_NOT_EXECUTION_AUTHORIZATION',
     paperMode: true,
@@ -99,6 +126,10 @@ function completePaperView(): PaperRuntimeReadinessView {
     deployment: { ...verifiedMeta(), manifestVersion: 1 },
     rpc: { ...verifiedMeta(), chainId: 42161 },
     costs: { BTC: cost('BTC'), ETH: cost('ETH') },
+    boundedCanaryEconomics: {
+      BTC: bounded('BTC'),
+      ETH: bounded('ETH'),
+    },
     economics: {
       BTC: {
         state: 'UNAVAILABLE' as const,

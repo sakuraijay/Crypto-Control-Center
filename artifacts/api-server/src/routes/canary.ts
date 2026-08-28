@@ -17,6 +17,7 @@ import {
   getCanaryStatus, MANUAL_CANARY_CAPS, type ManualCanaryDeps,
 } from '../lib/manualCanary';
 import { buildDefaultCanaryDeps } from '../lib/manualCanaryDeps';
+import { getPaperRuntimeReadinessSnapshot } from '../lib/paperRuntimeReadiness';
 
 const router: IRouter = Router();
 
@@ -28,7 +29,13 @@ function deps(): ManualCanaryDeps { return _depsOverride ?? buildDefaultCanaryDe
 router.get('/executor/canary/status', requireOperatorAuth, async (_req, res) => {
   try {
     const status = await getCanaryStatus(deps());
-    return res.json({ ...status, ok: true });
+    const paperReadiness =
+      getPaperRuntimeReadinessSnapshot(Date.now(), process.env);
+    return res.json({
+      ...status,
+      boundedCanaryEconomics: paperReadiness.boundedCanaryEconomics,
+      ok: true,
+    });
   } catch (e: unknown) {
     return res.status(500).json({ ok: false, error: sanitizeRpcError(e) });
   }
