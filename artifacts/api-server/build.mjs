@@ -130,6 +130,21 @@ function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
+function configuredSafetyFlags(env) {
+  const relayMode = env.GMX_RELAY_MODE === "LIVE" || env.GMX_RELAY_MODE === "DRY_RUN"
+    ? env.GMX_RELAY_MODE : "DISABLED";
+  return {
+    engineMode: env.WORKER_ENGINE_MODE === "LIVE" ? "LIVE" : "PAPER",
+    autoWorkerLiveEnabled: env.AUTO_WORKER_LIVE_ENABLED === "true",
+    liveTestExecutionLocked: env.LIVE_TEST_EXECUTION_LOCKED !== "false",
+    delegatedSignerEnabled: env.DELEGATED_SIGNER_ENABLED === "true",
+    gmxOrderSubmissionEnabled: env.GMX_API_ORDER_SUBMISSION_ENABLED === "true",
+    relaySubmissionEnabled: env.GMX_RELAY_SUBMISSION_ENABLED === "true",
+    relaySubmitNetworkEnabled: env.GMX_RELAY_NETWORK_ENABLED === "true",
+    relayMode,
+  };
+}
+
 function buildHandoffContract(releaseSha) {
   const parts = HANDOFF_CONTRACT_FILES.map((relativePath) => {
     const source = git(["show", `${releaseSha}:${relativePath}`]);
@@ -165,6 +180,7 @@ function buildReleaseIdentity(releaseSha) {
   const productTree = git(["rev-parse", `${releaseSha}^{tree}`]).toLowerCase();
   const workspaceHeadSha = git(["rev-parse", "HEAD"]).toLowerCase();
   const workspaceProductTree = git(["rev-parse", "HEAD^{tree}"]).toLowerCase();
+  const buildConfiguredSafetyFlags = configuredSafetyFlags(process.env);
   if (!RELEASE_SHA_PATTERN.test(productTree)) {
     throw new Error("Product tree could not be bound to the release commit");
   }
@@ -175,6 +191,7 @@ function buildReleaseIdentity(releaseSha) {
     releaseSha,
     productTree,
     workspaceSource: { headSha: workspaceHeadSha, productTree: workspaceProductTree },
+    configuredSafetyFlags: buildConfiguredSafetyFlags,
     safetyContractVersion: SAFETY_CONTRACT_VERSION,
     handoff,
     webAssets,
@@ -187,6 +204,7 @@ function buildReleaseIdentity(releaseSha) {
     buildId: sha256(`${identityBasis}\0${builtAt}`),
     builtAt,
     workspaceSource: { headSha: workspaceHeadSha, productTree: workspaceProductTree },
+    configuredSafetyFlags: buildConfiguredSafetyFlags,
     safetyContract: {
       version: SAFETY_CONTRACT_VERSION,
       confirmedOpenInitialStop: handoff,

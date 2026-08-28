@@ -34,7 +34,6 @@ export interface OperationalDiagnostics {
 interface RuntimeObservation {
   engineMode: 'PAPER' | 'LIVE';
   liveExecutionLocked: boolean;
-  signerInitialized: boolean;
   relayFlags: {
     relaySubmitNetworkEnabled: boolean;
     relaySubmissionEnabled: boolean;
@@ -64,23 +63,15 @@ export function deriveOperationalDiagnostics(
   runtime: RuntimeObservation,
   identity: ReleaseIdentity | null,
 ): OperationalDiagnostics {
-  const configuredMode = env.WORKER_ENGINE_MODE === 'LIVE' ? 'LIVE' : 'PAPER';
-  const configuredLock = env.LIVE_TEST_EXECUTION_LOCKED !== 'false';
-  const configuredSigner = bool(env.DELEGATED_SIGNER_ENABLED);
-  const configuredOrderSubmission = bool(env.GMX_API_ORDER_SUBMISSION_ENABLED);
-  const relaySubmission = bool(env.GMX_RELAY_SUBMISSION_ENABLED);
-  const relayNetwork = bool(env.GMX_RELAY_NETWORK_ENABLED);
+  const configured = identity?.configuredSafetyFlags;
+  const effectiveMode = env.WORKER_ENGINE_MODE === 'LIVE' ? 'LIVE' : 'PAPER';
+  const effectiveLock = runtime.liveExecutionLocked;
+  const effectiveSigner = bool(env.DELEGATED_SIGNER_ENABLED);
+  const effectiveOrderSubmission = bool(env.GMX_API_ORDER_SUBMISSION_ENABLED);
+  const effectiveRelaySubmission = bool(env.GMX_RELAY_SUBMISSION_ENABLED);
+  const effectiveRelayNetwork = bool(env.GMX_RELAY_NETWORK_ENABLED);
   const modeRaw = env.GMX_RELAY_MODE;
-  const configuredRelayMode = modeRaw === 'LIVE' || modeRaw === 'DRY_RUN' ? modeRaw : 'DISABLED';
-
-  const effectiveOrderSubmission = configuredOrderSubmission
-    && !runtime.liveExecutionLocked
-    && runtime.signerInitialized;
-  const effectiveRelaySubmission = runtime.relayFlags === null ? null
-    : runtime.relayFlags.relaySubmissionEnabled
-      && runtime.relayFlags.relaySubmitNetworkEnabled
-      && runtime.relayFlags.relayMode === 'LIVE'
-      && runtime.signerInitialized;
+  const effectiveRelayMode = modeRaw === 'LIVE' || modeRaw === 'DRY_RUN' ? modeRaw : 'DISABLED';
 
   const workspace = identity?.workspaceSource;
   const releaseAvailable = identity !== null;
@@ -117,47 +108,45 @@ export function deriveOperationalDiagnostics(
   return {
     schemaVersion: 1,
     flags: {
-      engineMode: item(configuredMode, runtime.engineMode, 'configured engine mode와 runtime mode 불일치'),
+      engineMode: item(
+        configured?.engineMode ?? null,
+        runtime.engineMode === effectiveMode ? runtime.engineMode : effectiveMode,
+        'build configured engine mode와 current process mode 불일치',
+      ),
       autoWorkerLiveEnabled: item(
+        configured?.autoWorkerLiveEnabled ?? null,
         bool(env.AUTO_WORKER_LIVE_ENABLED),
-        bool(env.AUTO_WORKER_LIVE_ENABLED),
-        'AUTO Worker LIVE configured/effective 불일치',
+        'build configured AUTO Worker LIVE와 current process flag 불일치',
       ),
       liveTestExecutionLocked: item(
-        configuredLock,
-        runtime.liveExecutionLocked,
-        'configured execution lock과 runtime lock 불일치',
+        configured?.liveTestExecutionLocked ?? null,
+        effectiveLock,
+        'build configured execution lock과 current runtime lock 불일치',
       ),
       delegatedSignerEnabled: item(
-        configuredSigner,
-        configuredSigner && runtime.signerInitialized,
-        configuredSigner
-          ? 'delegated signer는 enabled지만 runtime signer가 미초기화'
-          : 'delegated signer runtime 상태가 configured disabled와 불일치',
+        configured?.delegatedSignerEnabled ?? null,
+        effectiveSigner,
+        'build configured delegated signer flag와 current process flag 불일치',
       ),
       gmxOrderSubmissionEnabled: item(
-        configuredOrderSubmission,
+        configured?.gmxOrderSubmissionEnabled ?? null,
         effectiveOrderSubmission,
-        configuredOrderSubmission
-          ? 'order submission configured지만 execution lock 또는 signer 초기화 조건 미충족'
-          : 'order submission runtime 상태가 configured disabled와 불일치',
+        'build configured GMX submission flag와 current process flag 불일치',
       ),
       relaySubmissionEnabled: item(
-        relaySubmission,
-        effectiveRelaySubmission,
-        relaySubmission
-          ? 'Relay submission configured지만 mode/network/signer 조건 미충족'
-          : 'Relay submission runtime 상태가 configured disabled와 불일치',
+        configured?.relaySubmissionEnabled ?? null,
+        runtime.relayFlags === null ? null : effectiveRelaySubmission,
+        'build configured Relay submission flag와 current process flag 불일치',
       ),
       relaySubmitNetworkEnabled: item(
-        relayNetwork,
-        runtime.relayFlags?.relaySubmitNetworkEnabled ?? null,
-        'Relay submit network configured/effective 불일치',
+        configured?.relaySubmitNetworkEnabled ?? null,
+        runtime.relayFlags === null ? null : effectiveRelayNetwork,
+        'build configured Relay network flag와 current process flag 불일치',
       ),
       relayMode: item(
-        configuredRelayMode,
-        runtime.relayFlags?.relayMode ?? null,
-        'Relay mode configured/effective 불일치',
+        configured?.relayMode ?? null,
+        runtime.relayFlags === null ? null : effectiveRelayMode,
+        'build configured Relay mode와 current process mode 불일치',
       ),
     },
     provenance,

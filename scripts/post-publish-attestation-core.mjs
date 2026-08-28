@@ -42,6 +42,7 @@ export function recomputeBuildId(identity) {
     releaseSha: identity.releaseSha,
     productTree: identity.productTree,
     workspaceSource: identity.workspaceSource,
+    configuredSafetyFlags: identity.configuredSafetyFlags,
     safetyContractVersion: identity.safetyContract.version,
     handoff: identity.safetyContract.confirmedOpenInitialStop,
     webAssets: identity.webAssets,

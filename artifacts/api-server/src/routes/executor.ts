@@ -17,7 +17,6 @@ import { validateEnvAgainstManifest } from "../lib/gmxDeploymentManifest";
 import { getActiveRevokeSession } from "../lib/revokeSession";
 import { getReleaseIdentity } from "../lib/releaseIdentity";
 import { deriveOperationalDiagnostics } from "../lib/operationalDiagnostics";
-import { isSignerInitialized } from "../lib/delegatedSigner";
 
 const router = Router();
 
@@ -104,7 +103,6 @@ router.get("/executor/status", async (_req, res) => {
     const operationalDiagnostics = deriveOperationalDiagnostics(process.env, {
       engineMode: status.engineMode,
       liveExecutionLocked: status.liveExecutionLocked,
-      signerInitialized: isSignerInitialized(),
       relayFlags,
     }, getReleaseIdentity());
     return res.json({ ...status, activeRevoke, relayFlags, operationalDiagnostics });

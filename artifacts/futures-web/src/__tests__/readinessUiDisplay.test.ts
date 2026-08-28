@@ -32,13 +32,13 @@ describe('ReadinessRefreshCard — basis/failures 전체 표시', () => {
 
 describe('BetaRcStatusCard — configured/effective drift와 provenance', () => {
   it('configured / effective / drift reason 순서를 명시한다', () => {
-    expect(betaRcCard).toContain('configured / effective / drift reason');
+    expect(betaRcCard).toContain('build configured / current process effective / drift reason');
     expect(betaRcCard).toMatch(/value\.configured/);
     expect(betaRcCard).toMatch(/value\.effective/);
     expect(betaRcCard).toMatch(/value\.driftReason/);
   });
   it('provenance mismatch와 누락을 fail-closed로 표시한다', () => {
-    expect(betaRcCard).toContain('Workspace / deployed release provenance');
+    expect(betaRcCard).toContain('Build workspace snapshot / embedded release provenance');
     expect(betaRcCard).toContain('UNAVAILABLE (fail-closed)');
     expect(betaRcCard).toContain('DRIFT / UNAVAILABLE (fail-closed)');
   });

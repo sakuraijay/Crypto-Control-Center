@@ -16,6 +16,16 @@ function identity() {
     buildId: HASH,
     builtAt: '2026-08-28T10:00:00.000Z',
     workspaceSource: { headSha: SHA, productTree: TREE },
+    configuredSafetyFlags: {
+      engineMode: 'PAPER' as const,
+      autoWorkerLiveEnabled: false,
+      liveTestExecutionLocked: true,
+      delegatedSignerEnabled: false,
+      gmxOrderSubmissionEnabled: false,
+      relaySubmissionEnabled: false,
+      relaySubmitNetworkEnabled: false,
+      relayMode: 'DISABLED' as const,
+    },
     safetyContract: {
       version: 'post-publish-safety/v1',
       confirmedOpenInitialStop: {
@@ -43,6 +53,9 @@ describe('release identity parser', () => {
     ['build id', (v: ReturnType<typeof identity>) => { v.buildId = 'bad'; }],
     ['workspace source', (v: ReturnType<typeof identity>) => {
       v.workspaceSource.productTree = 'bad';
+    }],
+    ['configured safety flags', (v: ReturnType<typeof identity>) => {
+      v.configuredSafetyFlags.relayMode = 'bad' as 'DISABLED';
     }],
     ['safety contract', (v: ReturnType<typeof identity>) => {
       v.safetyContract.version = 'wrong' as 'post-publish-safety/v1';

@@ -35,6 +35,16 @@ const identity = {
   buildId: 'c'.repeat(64),
   builtAt: '2026-08-28T10:00:00.000Z',
   workspaceSource: { headSha: 'a'.repeat(40), productTree: 'b'.repeat(40) },
+  configuredSafetyFlags: {
+    engineMode: 'PAPER',
+    autoWorkerLiveEnabled: false,
+    liveTestExecutionLocked: true,
+    delegatedSignerEnabled: false,
+    gmxOrderSubmissionEnabled: false,
+    relaySubmissionEnabled: false,
+    relaySubmitNetworkEnabled: false,
+    relayMode: 'DISABLED',
+  },
   safetyContract: {
     version: 'post-publish-safety/v1',
     confirmedOpenInitialStop: {

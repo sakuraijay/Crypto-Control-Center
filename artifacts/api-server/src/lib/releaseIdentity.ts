@@ -26,6 +26,16 @@ export interface ReleaseIdentity {
     headSha: string;
     productTree: string;
   };
+  configuredSafetyFlags: {
+    engineMode: 'PAPER' | 'LIVE';
+    autoWorkerLiveEnabled: boolean;
+    liveTestExecutionLocked: boolean;
+    delegatedSignerEnabled: boolean;
+    gmxOrderSubmissionEnabled: boolean;
+    relaySubmissionEnabled: boolean;
+    relaySubmitNetworkEnabled: boolean;
+    relayMode: 'DISABLED' | 'DRY_RUN' | 'LIVE';
+  };
   safetyContract: {
     version: 'post-publish-safety/v1';
     confirmedOpenInitialStop: {
@@ -46,6 +56,7 @@ export function parseReleaseIdentity(value: unknown): ReleaseIdentity | null {
   if (!value || typeof value !== 'object') return null;
   const v = value as Partial<ReleaseIdentity>;
   const handoff = v.safetyContract?.confirmedOpenInitialStop;
+  const flags = v.configuredSafetyFlags;
   if (v.schemaVersion !== RELEASE_IDENTITY_SCHEMA_VERSION
       || typeof v.releaseSha !== 'string' || !RELEASE_SHA_PATTERN.test(v.releaseSha)
       || typeof v.productTree !== 'string' || !RELEASE_SHA_PATTERN.test(v.productTree)
@@ -55,6 +66,14 @@ export function parseReleaseIdentity(value: unknown): ReleaseIdentity | null {
       || !RELEASE_SHA_PATTERN.test(v.workspaceSource.headSha)
       || typeof v.workspaceSource?.productTree !== 'string'
       || !RELEASE_SHA_PATTERN.test(v.workspaceSource.productTree)
+      || (flags?.engineMode !== 'PAPER' && flags?.engineMode !== 'LIVE')
+      || typeof flags?.autoWorkerLiveEnabled !== 'boolean'
+      || typeof flags?.liveTestExecutionLocked !== 'boolean'
+      || typeof flags?.delegatedSignerEnabled !== 'boolean'
+      || typeof flags?.gmxOrderSubmissionEnabled !== 'boolean'
+      || typeof flags?.relaySubmissionEnabled !== 'boolean'
+      || typeof flags?.relaySubmitNetworkEnabled !== 'boolean'
+      || (flags?.relayMode !== 'DISABLED' && flags?.relayMode !== 'DRY_RUN' && flags?.relayMode !== 'LIVE')
       || v.safetyContract?.version !== 'post-publish-safety/v1'
       || handoff?.version !== 'confirmed-open-initial-stop/v1'
       || typeof handoff.sha256 !== 'string' || !SHA256_PATTERN.test(handoff.sha256)

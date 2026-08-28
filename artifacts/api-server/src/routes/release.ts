@@ -7,7 +7,6 @@ import { readRuntimeDbSafetyEvidence } from '../lib/runtimeSafetyEvidence';
 import { getStopExecutionCapability } from '../lib/stopExecutionCapabilityState';
 import { getExecutorStatus } from '../workers/internalExecutor';
 import { deriveOperationalDiagnostics } from '../lib/operationalDiagnostics';
-import { isSignerInitialized } from '../lib/delegatedSigner';
 
 const router = Router();
 
@@ -41,7 +40,6 @@ router.get('/release/safety', async (_req, res) => {
   const operationalDiagnostics = deriveOperationalDiagnostics(process.env, {
     engineMode: executor.engineMode,
     liveExecutionLocked: executor.liveExecutionLocked,
-    signerInitialized: isSignerInitialized(),
     relayFlags,
   }, identity);
   return res.json({

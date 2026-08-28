@@ -196,7 +196,7 @@ export function BetaRcStatusCard() {
             </div>
             <div className={diagnostics.provenance.status === 'MATCH'
               ? 'text-muted-foreground' : 'text-amber-400'}>
-              Workspace / deployed release provenance: {diagnostics.provenance.status}
+              Build workspace snapshot / embedded release provenance: {diagnostics.provenance.status}
               {' · '}commit {diagnostics.provenance.sameCommit === null
                 ? 'N/A' : diagnostics.provenance.sameCommit ? 'same' : 'different'}
               {' · '}tree {diagnostics.provenance.sameProductTree === null
@@ -204,7 +204,8 @@ export function BetaRcStatusCard() {
               {diagnostics.provenance.driftReason && ` · ${diagnostics.provenance.driftReason}`}
             </div>
             <div className="text-[10px] text-muted-foreground">
-              값 순서: configured / effective / drift reason
+              값 순서: build configured / current process effective / drift reason
+              {' · '}이 항목은 플래그 drift이며 실제 주문 적격성을 의미하지 않습니다.
             </div>
           </>
         )}
