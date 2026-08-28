@@ -38,6 +38,20 @@
 - Reserved VM 단일 프로세스·단일 포트 배포 구조
 - api-server가 API + 정적 웹 + SPA fallback을 단일 포트로 제공
 
+### Task #173 — Canary read-only 진단 정합성 (완료)
+
+- PAPER readiness와 Canary status/preflight가 공용 deployment verification
+  snapshot을 사용하도록 정합성을 맞추고, 실패·미시도 결과도 fail-closed로 반영
+- bounded quote grid의 exact seed quote 계수와 실제 관측 배열을 일치시키고,
+  최대 5초 clock skew는 age 0으로 정규화하되 더 먼 미래 시각은 거부
+- 구현 `315f4099d4e52c8c340fa88f4f03a97b2fa3e39d`, CI 보정
+  `56253280e327d031ef6c42357b456943fa29dfce`가 원격 브랜치와 PR #1에 반영됨
+- 집중 회귀 54개, 전체 API 2,093개, Web 379개, TypeScript 및 production
+  build/topology 검증 통과; 독립 검토 PASS
+- GitHub Actions CI run #192 Quality Gate SUCCESS
+- `$0.40` cost cap과 Owner Approval, canonical delegation, signer, stop,
+  execution gate는 변경하지 않았으며 Production publish/deploy는 별도 범위
+
 ## 테스트 기준
 
 - api-server 318개 + futures-web 53개 = **총 371개** PASS
