@@ -255,6 +255,20 @@ describe('GET /api/executor/gmx-api/status', () => {
       },
     });
     expect(s.paperRuntimeReadiness.costs.BTC.blockReason).toContain('COST_BTC_NOT_EVALUATED');
+    expect(s.paperRuntimeReadiness.boundedCanaryEconomics).toEqual({
+      BTC: expect.objectContaining({
+        status: 'UNAVAILABLE',
+        boundary: 'READ_ONLY_OBSERVED_GRID_NOT_EXECUTION_AUTHORIZATION',
+        failureId: 'BOUNDED_CANARY_BTC_NOT_EVALUATED',
+        observedAffordableRanges: [],
+      }),
+      ETH: expect.objectContaining({
+        status: 'UNAVAILABLE',
+        boundary: 'READ_ONLY_OBSERVED_GRID_NOT_EXECUTION_AUTHORIZATION',
+        failureId: 'BOUNDED_CANARY_ETH_NOT_EVALUATED',
+        observedAffordableRanges: [],
+      }),
+    });
     expect(s.paperRuntimeReadiness).toHaveProperty('blockerIds');
     expect(s.paperRelayEvidence).toMatchObject({
       scope: 'PAPER_READ_ONLY_RELAY_EVIDENCE',

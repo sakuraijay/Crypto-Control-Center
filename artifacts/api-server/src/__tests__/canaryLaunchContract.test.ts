@@ -965,6 +965,36 @@ describe('#142 Canary Launch Contract — HTTP auth failure coverage', () => {
     expect(defaultDepsFactory).toHaveBeenCalledTimes(0);
   });
 
+  it('authenticated status exposes bounded economics as read-only, never authorization', async () => {
+    vi.stubEnv('OPERATOR_MASTER_PIN', 'canary-test-pin-142');
+    const { deps, forbidden } = makeContractDeps();
+    __setCanaryDepsForTests(deps);
+
+    const res = await request(app)
+      .get('/api/executor/canary/status')
+      .set('x-operator-pin', 'canary-test-pin-142');
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.boundedCanaryEconomics).toEqual({
+      BTC: expect.objectContaining({
+        status: 'UNAVAILABLE',
+        boundary: 'READ_ONLY_OBSERVED_GRID_NOT_EXECUTION_AUTHORIZATION',
+        observedAffordableRanges: [],
+      }),
+      ETH: expect.objectContaining({
+        status: 'UNAVAILABLE',
+        boundary: 'READ_ONLY_OBSERVED_GRID_NOT_EXECUTION_AUTHORIZATION',
+        observedAffordableRanges: [],
+      }),
+    });
+    expect(res.body.boundedCanaryEconomics).not.toHaveProperty('executionAuthorized');
+    expect(forbidden.executeOrder).not.toHaveBeenCalled();
+    expect(forbidden.closePosition).not.toHaveBeenCalled();
+    expect(forbidden.runEmergencyClose).not.toHaveBeenCalled();
+    expect(forbidden.recordCostEvidenceForExecution).not.toHaveBeenCalled();
+  });
+
   it('narrow dependency type has no execution capabilities', () => {
     const narrowDeps: ManualCanaryPreflightDeps = makePreflightOnlyDeps().preflightDeps;
     expect('executeOrder' in narrowDeps).toBe(false);
