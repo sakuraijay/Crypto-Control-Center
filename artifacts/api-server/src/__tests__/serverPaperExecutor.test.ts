@@ -177,6 +177,18 @@ describe('openServerPaperPosition — fail-closed', () => {
     if (!r.ok) expect(r.reason).toContain('stale');
   });
 
+  it.each([-1, Number.NaN, Number.POSITIVE_INFINITY])(
+    '시세 age 비정상(%s) → NO_TRADE, OPEN 기록 없음',
+    async (ageMs) => {
+      const r = await openServerPaperPosition({
+        ...BASE_OPEN, quote: { priceUsd: 50_000, ageMs },
+      });
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.reason).toContain('age 비정상');
+      expect(db.insert).not.toHaveBeenCalled();
+    },
+  );
+
   it('시세 부재/0 → NO_TRADE (합성 가격 금지)', async () => {
     expect((await openServerPaperPosition({ ...BASE_OPEN, quote: null })).ok).toBe(false);
     expect((await openServerPaperPosition({ ...BASE_OPEN, quote: { priceUsd: 0, ageMs: 1 } })).ok).toBe(false);
@@ -269,6 +281,21 @@ describe('closeServerPaperPosition', () => {
     expect(db.insert).not.toHaveBeenCalled();
     expect(db.update).not.toHaveBeenCalled();
   });
+
+  it.each([-1, Number.NaN, Number.POSITIVE_INFINITY])(
+    '시세 age 비정상(%s) → 청산 보류, CLOSE 기록·OPEN 갱신 없음',
+    async (ageMs) => {
+      vi.mocked(db.select).mockImplementation(() => makeChain(() => [serverOpenRow()]) as never);
+      const r = await closeServerPaperPosition({
+        openTradeId: 'open-1', reason: 'STOP_LOSS', kind: 'FULL',
+        quote: { priceUsd: 49_000, ageMs },
+      });
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.reason).toContain('보류');
+      expect(db.insert).not.toHaveBeenCalled();
+      expect(db.update).not.toHaveBeenCalled();
+    },
+  );
 
   it('서버 관리 행이 아니면 거부', async () => {
     vi.mocked(db.select).mockImplementation(() => makeChain(() => [serverOpenRow({ managedBy: null })]) as never);
@@ -372,6 +399,18 @@ describe('manageServerPaperTick', () => {
     expect(db.insert).not.toHaveBeenCalled();
     expect(getServerPaperStatus().lastTickStale).toBe(true);
   });
+
+  it.each([-1, Number.NaN, Number.POSITIVE_INFINITY])(
+    '시세 age 비정상(%s) → 관리·PnL 계산 모두 fail-closed',
+    async (ageMs) => {
+      vi.mocked(db.select).mockImplementation(() => makeChain(() => [serverOpenRow()]) as never);
+      await manageServerPaperTick(() => ({ priceUsd: 40_000, ageMs }));
+      expect(db.insert).not.toHaveBeenCalled();
+      const status = getServerPaperStatus();
+      expect(status.lastTickStale).toBe(true);
+      expect(status.openPositions[0]?.unrealizedPnlUsd).toBeNull();
+    },
+  );
 
   it('SL/TP 사이 가격 → 청산 없음', async () => {
     vi.mocked(db.select).mockImplementation(() => makeChain(() => [serverOpenRow()]) as never);

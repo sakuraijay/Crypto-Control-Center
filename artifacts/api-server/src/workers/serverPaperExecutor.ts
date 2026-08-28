@@ -48,6 +48,10 @@ export const REDUCE70_KEY_PREFIX = "serverPaperReduce70:";
 // ── 타입 ──────────────────────────────────────────────────────────────────────
 
 export interface PriceQuote { priceUsd: number; ageMs: number }
+
+function isUsableQuoteAge(ageMs: number, maxAgeMs: number): boolean {
+  return fin(ageMs) && ageMs >= 0 && ageMs <= maxAgeMs;
+}
 export type PriceLookup = (symbol: string) => PriceQuote | null;
 
 export interface ServerPaperOpenArgs {
@@ -201,7 +205,14 @@ function toView(row: TradeRow, quote: PriceQuote | null): ServerPaperOpenPositio
   const entry = parseFloat(row.price ?? "0") || 0;
   const side = row.side === "SHORT" ? "SHORT" : "LONG";
   let unrealized: number | null = null;
-  if (quote && quote.ageMs <= MAX_MANAGE_PRICE_AGE_MS && entry > 0 && quote.priceUsd > 0 && sizeInUsd > 0) {
+  if (
+    quote
+    && fin(quote.priceUsd)
+    && isUsableQuoteAge(quote.ageMs, MAX_MANAGE_PRICE_AGE_MS)
+    && entry > 0
+    && quote.priceUsd > 0
+    && sizeInUsd > 0
+  ) {
     const dir = side === "LONG" ? 1 : -1;
     unrealized = ((quote.priceUsd - entry) / entry) * sizeInUsd * dir;
   }
@@ -279,8 +290,8 @@ export async function openServerPaperPosition(
   if (!q || !fin(q.priceUsd) || q.priceUsd <= 0) {
     return record({ ok: false, reason: "NO_TRADE: 실시세 없음 — 합성 가격 대체 금지" });
   }
-  if (!fin(q.ageMs) || q.ageMs > MAX_ENTRY_PRICE_AGE_MS) {
-    return record({ ok: false, reason: `NO_TRADE: 시세 stale (${Math.round(q.ageMs / 1000)}s > ${MAX_ENTRY_PRICE_AGE_MS / 1000}s)` });
+  if (!isUsableQuoteAge(q.ageMs, MAX_ENTRY_PRICE_AGE_MS)) {
+    return record({ ok: false, reason: `NO_TRADE: 시세 age 비정상/stale (${q.ageMs})` });
   }
 
   // ── 비용 결속 (fail-closed — rate 포함 필수, 없으면 청산 정산 불가) ────────
@@ -405,7 +416,12 @@ export async function closeServerPaperPosition(
 
   // 시세 신선도 — stale이면 청산 보류 (합성 가격 정산 금지, 다음 틱 재시도)
   const q = args.quote;
-  if (!q || !fin(q.priceUsd) || q.priceUsd <= 0 || q.ageMs > MAX_MANAGE_PRICE_AGE_MS) {
+  if (
+    !q
+    || !fin(q.priceUsd)
+    || q.priceUsd <= 0
+    || !isUsableQuoteAge(q.ageMs, MAX_MANAGE_PRICE_AGE_MS)
+  ) {
     record(args.kind, args.reason, false, "시세 stale/부재 — 청산 보류");
     return { ok: false, reason: "시세 stale/부재 — 청산 보류 (다음 틱 재시도)" };
   }
@@ -750,7 +766,12 @@ export async function manageServerPaperTick(
       if (!shouldContinue()) return;
       const quote = getQuote(row.symbol);
 
-      if (!quote || !fin(quote.priceUsd) || quote.priceUsd <= 0 || quote.ageMs > MAX_MANAGE_PRICE_AGE_MS) {
+      if (
+        !quote
+        || !fin(quote.priceUsd)
+        || quote.priceUsd <= 0
+        || !isUsableQuoteAge(quote.ageMs, MAX_MANAGE_PRICE_AGE_MS)
+      ) {
         state.lastTickStale = true; // stale — 이번 틱 관리 스킵 (합성 가격 금지)
         continue;
       }
