@@ -291,6 +291,10 @@ describe('invalidateExpiredOwnerSignatureReadySessions', () => {
       new URL('../routes/signer-readiness.ts', import.meta.url),
       'utf8',
     );
+    const subaccountStatus = readFileSync(
+      new URL('../routes/livetest.ts', import.meta.url),
+      'utf8',
+    );
 
     expect(source).not.toContain(
       'invalidateExpiredOwnerSignatureReadySessions',
@@ -301,5 +305,6 @@ describe('invalidateExpiredOwnerSignatureReadySessions', () => {
     expect(signerReadiness).toContain(
       'staleOwnerSignatureReadySessionCount',
     );
+    expect(subaccountStatus).toContain('persistInvalidation: false');
   });
 });

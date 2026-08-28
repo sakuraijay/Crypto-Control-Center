@@ -190,6 +190,23 @@ afterEach(() => { vi.restoreAllMocks(); });
 
 // ════════════ A) 영속화 우선 순서 ════════════
 describe('6G-3 §3 — 외부 prepare 호출 전 영속화', () => {
+  it('canonical delegation=false면 signer가 초기화되어도 prepare·서명·제출 0회', async () => {
+    const { transport, calls } = mockTransport();
+    const prepareSpy = vi.fn(async () => ({ ok: true, data: {}, peerHost: 'x' } as never));
+    const signSpy = vi.fn(async () => ({ ok: true as const, signature: '0xsig-secret' }));
+    const r = await runGmxApiSubmitFlow(flowInput(transport, {
+      activation: fullActivation({ canonicalAuthorized: false }),
+      prepareOrder: prepareSpy,
+      signTypedData: signSpy,
+    }));
+    expect(prepareSpy).not.toHaveBeenCalled();
+    expect(signSpy).not.toHaveBeenCalled();
+    expect(r.prepareCalls).toBe(0);
+    expect(r.signCalls).toBe(0);
+    expect(r.submitCalls).toBe(0);
+    expect(calls.submit).toBe(0);
+  });
+
   it('task insert 실패 → prepare·서명·제출 0회', async () => {
     store.failInsert = true;
     const { transport, calls } = mockTransport();

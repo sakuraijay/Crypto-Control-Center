@@ -447,6 +447,7 @@ export async function getActiveReadySession(params: {
   expectedOwner: Address | null;
   expectedSubaccount: Address | null;
   canonicalNonce: bigint | null;   // null = canonical 미확인 (무효화 판단 보류)
+  persistInvalidation?: boolean;   // status/readiness 조회는 false: 논리적 차단만, DB write 금지
 }): Promise<ActiveSessionSummary | null> {
   let rows: SubaccountApprovalSessionRow[];
   try {
@@ -462,21 +463,43 @@ export async function getActiveReadySession(params: {
   const row = rows[0];
   if (!row) return null;
 
+  const nowSeconds = BigInt(Math.floor(Date.now() / 1000));
+  const isExpiredOrMalformed = (value: string): boolean => {
+    if (!/^(0|[1-9]\d*)$/.test(value)) return true;
+    try {
+      const parsed = BigInt(value);
+      return parsed > ((1n << 256n) - 1n) || parsed <= nowSeconds;
+    } catch {
+      return true;
+    }
+  };
+  // 만료/비정상 READY는 조회 시 논리적으로만 무효화한다. Persistent cleanup은
+  // 명시적 operator action 전용이며 status/startup에서 자동 UPDATE하지 않는다.
+  if (
+    params.persistInvalidation === false
+    && (isExpiredOrMalformed(row.expiresAt) || isExpiredOrMalformed(row.deadline))
+  ) {
+    return null;
+  }
+
+  const invalidateIfAllowed = async (reason: string): Promise<void> => {
+    if (params.persistInvalidation !== false) await markInvalid(row.id, reason);
+  };
   if (params.expectedOwner && row.mainAccount !== params.expectedOwner.toLowerCase()) {
-    await markInvalid(row.id, 'main account 변경');
+    await invalidateIfAllowed('main account 변경');
     return null;
   }
   if (params.expectedSubaccount && row.subaccount !== params.expectedSubaccount.toLowerCase()) {
-    await markInvalid(row.id, 'signer 변경');
+    await invalidateIfAllowed('signer 변경');
     return null;
   }
   if (params.canonicalNonce !== null && BigInt(row.approvalNonce) !== params.canonicalNonce) {
-    await markInvalid(row.id, 'canonical nonce 변경');
+    await invalidateIfAllowed('canonical nonce 변경');
     return null;
   }
   // canonical 8 불변식 — 레거시(≠8) READY 세션은 즉시 무효화 (fail-closed)
   if (BigInt(row.maxAllowedCount) !== APPROVAL_LIMITS.CANONICAL_MAX_ALLOWED_COUNT) {
-    await markInvalid(row.id, `maxAllowedCount ${row.maxAllowedCount} ≠ canonical ${APPROVAL_LIMITS.CANONICAL_MAX_ALLOWED_COUNT}`);
+    await invalidateIfAllowed(`maxAllowedCount ${row.maxAllowedCount} ≠ canonical ${APPROVAL_LIMITS.CANONICAL_MAX_ALLOWED_COUNT}`);
     return null;
   }
 

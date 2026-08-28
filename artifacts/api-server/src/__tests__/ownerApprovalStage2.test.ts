@@ -567,6 +567,33 @@ describe('getActiveReadySession — account/signer/nonce 변경 시 무효', () 
     expect(s).not.toBeNull();
     expect(store.rows[0].status).toBe(SESSION_STATUS.OWNER_SIGNATURE_READY);
   });
+
+  it('만료 READY → null이지만 DB 상태는 변경하지 않음', async () => {
+    await makeReady();
+    store.rows[0].expiresAt = '1';
+    const s = await getActiveReadySession({
+      expectedOwner: owner.address,
+      expectedSubaccount: signer.address,
+      canonicalNonce: 5n,
+      persistInvalidation: false,
+    });
+    expect(s).toBeNull();
+    expect(store.rows[0].status).toBe(SESSION_STATUS.OWNER_SIGNATURE_READY);
+    expect(store.rows[0].invalidReason).toBeNull();
+  });
+
+  it('read-only 상태 조회 옵션은 불일치도 null 처리하되 DB를 변경하지 않음', async () => {
+    await makeReady();
+    const s = await getActiveReadySession({
+      expectedOwner: other.address,
+      expectedSubaccount: signer.address,
+      canonicalNonce: 5n,
+      persistInvalidation: false,
+    });
+    expect(s).toBeNull();
+    expect(store.rows[0].status).toBe(SESSION_STATUS.OWNER_SIGNATURE_READY);
+    expect(store.rows[0].invalidReason).toBeNull();
+  });
 });
 
 // ── 상태 판정: disabled 플래그·블록 timestamp ────────────────────────────────

@@ -212,12 +212,13 @@ router.get('/executor/subaccount-auth', async (_req, res) => {
       nowSec,
     });
 
-    // READY 세션 조회 — canonical nonce와 불일치 시 내부에서 즉시 무효화됨.
-    // canonical 미확인이면 nonce 판단 보류(null).
+    // READY 세션 조회는 read-only: 만료/불일치 세션은 논리적으로만 무효 처리한다.
+    // Persistent cleanup은 명시적 operator action 전용이다.
     const readySession = await getActiveReadySession({
       expectedOwner: mainAccount,
       expectedSubaccount: (signerAddress as Address | null),
       canonicalNonce: canonical.onchain ? canonical.onchain.approvalNonce : null,
+      persistInvalidation: false,
     });
 
     // 상태 표시 규칙: 서명만 저장된 경우(canonical 미등록) OWNER_SIGNATURE_READY 노출.
