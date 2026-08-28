@@ -97,6 +97,7 @@ vi.mock('../lib/ownerApprovalSession', () => ({
 import {
   EXPIRED_OWNER_SIGNATURE_REASON,
   invalidateExpiredOwnerSignatureReadySessions,
+  isExpiredOrMalformedOwnerApprovalTimestamp,
 } from '../lib/ownerApprovalExpiry';
 
 const NOW = 2_000n;
@@ -123,6 +124,46 @@ beforeEach(() => {
 });
 
 describe('invalidateExpiredOwnerSignatureReadySessions', () => {
+  it('exposes the same strict timestamp guard for submit-time revalidation', () => {
+    expect(isExpiredOrMalformedOwnerApprovalTimestamp('2000', NOW)).toBe(true);
+    expect(isExpiredOrMalformedOwnerApprovalTimestamp('1999', NOW)).toBe(true);
+    expect(isExpiredOrMalformedOwnerApprovalTimestamp('2001', NOW)).toBe(false);
+    expect(isExpiredOrMalformedOwnerApprovalTimestamp('0x7d1', NOW)).toBe(true);
+    expect(isExpiredOrMalformedOwnerApprovalTimestamp('+2001', NOW)).toBe(true);
+    expect(isExpiredOrMalformedOwnerApprovalTimestamp(' 2001', NOW)).toBe(true);
+    expect(isExpiredOrMalformedOwnerApprovalTimestamp('02001', NOW)).toBe(true);
+    expect(
+      isExpiredOrMalformedOwnerApprovalTimestamp((1n << 256n).toString(), NOW),
+    ).toBe(true);
+  });
+
+  it('keeps submit selection fail-closed before signature decryption', () => {
+    const source = readFileSync(
+      new URL('../lib/gmxApiExecution.ts', import.meta.url),
+      'utf8',
+    );
+    const selectorAt = source.indexOf(
+      'export async function getReadyApprovalForSubmit',
+    );
+    const expiryAt = source.indexOf(
+      'isExpiredOrMalformedOwnerApprovalTimestamp(row.expiresAt',
+      selectorAt,
+    );
+    const deadlineAt = source.indexOf(
+      'isExpiredOrMalformedOwnerApprovalTimestamp(row.deadline',
+      selectorAt,
+    );
+    const decryptAt = source.indexOf(
+      'decryptSensitiveHex(row.encryptedSignature)',
+      selectorAt,
+    );
+
+    expect(selectorAt).toBeGreaterThan(-1);
+    expect(expiryAt).toBeGreaterThan(selectorAt);
+    expect(deadlineAt).toBeGreaterThan(expiryAt);
+    expect(decryptAt).toBeGreaterThan(deadlineAt);
+  });
+
   it('invalidates only expired or malformed APPROVAL READY sessions', async () => {
     state.rows = [
       row({ id: 'expired-expires', expiresAt: '2000' }),

@@ -14,7 +14,10 @@ export interface OwnerApprovalExpiryResult {
   conflicts: number;
 }
 
-function isExpiredOrMalformed(value: string, nowSeconds: bigint): boolean {
+export function isExpiredOrMalformedOwnerApprovalTimestamp(
+  value: string,
+  nowSeconds: bigint,
+): boolean {
   if (!/^(0|[1-9][0-9]*)$/.test(value)) return true;
   const parsed = BigInt(value);
   return parsed > UINT256_MAX || parsed <= nowSeconds;
@@ -51,8 +54,8 @@ export async function invalidateExpiredOwnerSignatureReadySessions(
   }
 
   const expired = rows.filter((row) =>
-    isExpiredOrMalformed(row.expiresAt, nowSeconds)
-    || isExpiredOrMalformed(row.deadline, nowSeconds),
+    isExpiredOrMalformedOwnerApprovalTimestamp(row.expiresAt, nowSeconds)
+    || isExpiredOrMalformedOwnerApprovalTimestamp(row.deadline, nowSeconds),
   );
 
   let invalidated = 0;

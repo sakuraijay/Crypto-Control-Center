@@ -67,6 +67,35 @@ const FAIL = (d: string): CheckOutcome => ({ ok: false, detail: d });
 const NOW = new Date('2026-08-19T03:00:00Z');
 const DAY = manilaDayKey(NOW);
 
+describe('PAPER-only release configuration', () => {
+  it('keeps shared and production execution gates fail-closed', () => {
+    const source = readFileSync(
+      new URL('../../../../.replit', import.meta.url),
+      'utf8',
+    );
+    const shared = source.match(
+      /\[userenv\.shared\]([\s\S]*?)(?=\n\[userenv\.production\])/,
+    )?.[1] ?? '';
+    const production = source.match(
+      /\[userenv\.production\]([\s\S]*?)(?=\n\[userenv\.development\])/,
+    )?.[1] ?? '';
+
+    expect(shared).toContain('WORKER_ENGINE_MODE = "PAPER"');
+    expect(shared).toContain('AUTO_WORKER_LIVE_ENABLED = "false"');
+    expect(production).toContain('DELEGATED_SIGNER_ENABLED = "false"');
+    expect(production).toContain(
+      'GMX_API_ORDER_SUBMISSION_ENABLED = "false"',
+    );
+    expect(production).toContain('LIVE_TEST_EXECUTION_LOCKED = "true"');
+    expect(production).not.toContain(
+      'GMX_RELAY_SUBMISSION_ENABLED = "true"',
+    );
+    expect(production).not.toContain(
+      'GMX_RELAY_SUBMIT_NETWORK_ENABLED = "true"',
+    );
+  });
+});
+
 // ── Forbidden capability spy registry ─────────────────────────────────────────
 /**
  * Forbidden capabilities that must never be called/accessed during preflight.

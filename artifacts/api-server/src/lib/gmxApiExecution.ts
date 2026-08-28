@@ -29,6 +29,7 @@ import {
   decryptSensitiveHex,
 } from './delegatedSigner';
 import { SESSION_STATUS, APPROVAL_PURPOSE, APPROVAL_LIMITS, getConfiguredMainAccount } from './ownerApprovalSession';
+import { isExpiredOrMalformedOwnerApprovalTimestamp } from './ownerApprovalExpiry';
 import { GMX_DEPLOYMENT_MANIFEST } from './gmxDeploymentManifest';
 import { USDC_ADDRESS, ZERO_ADDRESS, usdSizeToGmx, usdToUsdcWei } from './gmxContracts';
 import { GMX_API_CHAIN_ID, type GmxApiResult, type GmxApiTransport } from './gmxApiTransport';
@@ -484,6 +485,13 @@ export async function getReadyApprovalForSubmit(params: {
   if (!row) return { ok: false, reason: 'OWNER_SIGNATURE_READY approval 세션 없음' };
   if (row.mainAccount !== params.expectedOwner.toLowerCase()) return { ok: false, reason: 'approval main account 불일치' };
   if (row.subaccount !== params.expectedSubaccount.toLowerCase()) return { ok: false, reason: 'approval subaccount 불일치' };
+  const nowSeconds = BigInt(Math.floor(Date.now() / 1000));
+  if (
+    isExpiredOrMalformedOwnerApprovalTimestamp(row.expiresAt, nowSeconds)
+    || isExpiredOrMalformedOwnerApprovalTimestamp(row.deadline, nowSeconds)
+  ) {
+    return { ok: false, reason: 'approval 만료 또는 timestamp 비정상 — 제출 차단 (fail-closed)' };
+  }
   if (params.canonicalNonce !== null && BigInt(row.approvalNonce) !== params.canonicalNonce) {
     return { ok: false, reason: 'approval nonce가 canonical과 불일치' };
   }
