@@ -7,6 +7,7 @@ import {
 } from '@workspace/db';
 import { eq, inArray } from 'drizzle-orm';
 import { isDelegatedSignerEnabled, isSignerInitialized } from '../lib/delegatedSigner';
+import { validateCanonicalSubaccountRouterEnv } from '../lib/gmxCanonicalSubaccountRouterAudit';
 import { isLiveTestExecutionLocked } from '../lib/liveTestGate';
 import { requireOperatorAuth } from '../lib/operatorAuthGuard';
 
@@ -85,6 +86,7 @@ router.get('/executor/signer/readiness', requireOperatorAuth, async (_req, res) 
     const submitFlagEnabled = process.env.GMX_API_ORDER_SUBMISSION_ENABLED === 'true';
     const liveTestMode = isLiveTestMode(strategyConfigs[0]?.limits);
     const runtimeSignerInitialized = isSignerInitialized();
+    const canonicalSubaccountRouter = validateCanonicalSubaccountRouterEnv(process.env);
 
     const signerRecordsPresent = {
       encryptedSigner: signerKeys.has('delegatedSignerEncryptedKey'),
@@ -101,6 +103,7 @@ router.get('/executor/signer/readiness', requireOperatorAuth, async (_req, res) 
     if (!delegatedSignerEnabled) blockedReasons.push('DELEGATED_SIGNER_DISABLED');
     if (!submitFlagEnabled) blockedReasons.push('ORDER_SUBMISSION_DISABLED');
     if (!liveTestMode) blockedReasons.push('LIVE_TEST_MODE_DISABLED');
+    if (!canonicalSubaccountRouter.ok) blockedReasons.push('CANONICAL_SUBACCOUNT_ROUTER_INVALID');
     if (!signerRecordsPresent.encryptedSigner) blockedReasons.push('ENCRYPTED_SIGNER_RECORD_MISSING');
     if (!signerRecordsPresent.metadata) blockedReasons.push('SIGNER_METADATA_RECORD_MISSING');
     if (!signerRecordsPresent.publicSigner) blockedReasons.push('PUBLIC_SIGNER_RECORD_MISSING');
@@ -117,6 +120,7 @@ router.get('/executor/signer/readiness', requireOperatorAuth, async (_req, res) 
         delegatedSignerEnabled,
         submitFlagEnabled,
         liveTestMode,
+        canonicalSubaccountRouterValid: canonicalSubaccountRouter.ok,
         signerRecordsPresent,
         runtimeSignerInitialized,
         staleOwnerSignatureReadySessionCount,

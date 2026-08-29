@@ -12,11 +12,9 @@
  *   GMX_ORDER_VAULT_ADDRESS         — OrderVault 컨트랙트 주소
  */
 
-import { validateCanonicalSubaccountRouterEnv } from './gmxCanonicalSubaccountRouterAudit';
-
 // ── Arbitrum One 고정 주소 ─────────────────────────────────────────────────────
 /** USDC (Native) on Arbitrum One — 6 decimals */
-export const USDC_ADDRESS = '0xaf88d065e77c8C2239327C5EDb3A432268e5831' as const;
+export const USDC_ADDRESS = '0xaf88d065e77c8cC2239327C5EDb3A432268e5831' as const;
 /** ARB token on Arbitrum One — 18 decimals */
 export const ARB_ADDRESS  = '0x912CE59144191C1204E64559FE8253a0e49E6548' as const;
 /** GMX V2 ExchangeRouter on Arbitrum One */
@@ -33,16 +31,16 @@ export function getExecutionFeeWei(): bigint {
   return 1_500_000_000_000_000n; // 0.0015 ETH default
 }
 
-/**
- * Canonical SubaccountRouter 주소.
- * 형식만 맞는 임의 주소를 허용하지 않고 공식 Arbitrum audit pin과 일치해야 한다.
- */
+/** SubaccountRouter 주소 — GMX_SUBACCOUNT_ROUTER_ADDRESS 환경변수 필수 */
 export function getSubaccountRouterAddress(): `0x${string}` {
-  const validation = validateCanonicalSubaccountRouterEnv(process.env);
-  if (!validation.ok) {
-    throw new Error('[GMX] canonical SubaccountRouter validation failed (fail-closed)');
+  const addr = process.env.GMX_SUBACCOUNT_ROUTER_ADDRESS?.trim();
+  if (!addr || !addr.startsWith('0x') || addr.length !== 42) {
+    throw new Error(
+      '[GMX] GMX_SUBACCOUNT_ROUTER_ADDRESS 환경변수가 설정되지 않았거나 잘못됨. ' +
+      'GMX 공식 배포에서 SubaccountRouter 주소를 확인 후 Replit Secrets에 설정하세요.'
+    );
   }
-  return process.env.GMX_SUBACCOUNT_ROUTER_ADDRESS!.trim() as `0x${string}`;
+  return addr as `0x${string}`;
 }
 
 /** OrderVault 주소 — GMX_ORDER_VAULT_ADDRESS 환경변수 필수 */
@@ -79,6 +77,7 @@ export const GMX_DECREASE_SWAP_TYPE = {
 // ⚠️ 라이브 전 Arbiscan에서 실제 ABI 검증 필수
 // https://arbiscan.io/address/<GMX_SUBACCOUNT_ROUTER_ADDRESS>#readContract
 export const SUBACCOUNT_ROUTER_ABI = [
+  // ── View ──────────────────────────────────────────────────────────────────
   {
     name: 'subaccounts',
     type: 'function',
@@ -92,6 +91,8 @@ export const SUBACCOUNT_ROUTER_ABI = [
       { name: 'expiresAt',        type: 'uint256' },
     ],
   },
+
+  // ── Main Account Actions (MetaMask으로 서명) ───────────────────────────────
   {
     name: 'addSubaccount',
     type: 'function',
@@ -110,6 +111,8 @@ export const SUBACCOUNT_ROUTER_ABI = [
     inputs: [{ name: 'subaccount', type: 'address' }],
     outputs: [],
   },
+
+  // ── Subaccount Actions (서버 사이너가 서명) ────────────────────────────────
   {
     name: 'multicall',
     type: 'function',
@@ -118,13 +121,14 @@ export const SUBACCOUNT_ROUTER_ABI = [
     outputs: [{ name: 'results', type: 'bytes[]' }],
   },
   {
+    // 메인 계정의 USDC를 OrderVault로 전송 (메인 계정이 Router에 approve 필요)
     name: 'sendTokens',
     type: 'function',
     stateMutability: 'nonpayable',
     inputs: [
-      { name: 'account',  type: 'address' },
+      { name: 'account',  type: 'address' }, // 메인 지갑 (USDC 소스)
       { name: 'token',    type: 'address' },
-      { name: 'receiver', type: 'address' },
+      { name: 'receiver', type: 'address' }, // OrderVault
       { name: 'amount',   type: 'uint256' },
     ],
     outputs: [],
@@ -204,6 +208,7 @@ export const SUBACCOUNT_ROUTER_ABI = [
   },
 ] as const;
 
+// ── ERC-20 (USDC approve) ABI ─────────────────────────────────────────────────
 export const ERC20_APPROVE_ABI = [
   {
     name: 'approve',
@@ -227,33 +232,43 @@ export const ERC20_APPROVE_ABI = [
   },
 ] as const;
 
+// ── 가격 변환 유틸리티 ─────────────────────────────────────────────────────────
+// GMX V2 내부 가격 단위 = USD * 1e30
 const PRICE_PRECISION = 10n ** 30n;
 
+/** USD 숫자(예: 2500.5) → GMX V2 price bigint (1e30 기준) */
 export function usdToGmxPrice(usdNumber: number): bigint {
-  const scaled = BigInt(Math.round(usdNumber * 1_000_000));
-  return scaled * (PRICE_PRECISION / 1_000_000n);
+  // 소수점 6자리까지 보존 후 1e24 곱셈으로 1e30 도달
+  const scaled = BigInt(Math.round(usdNumber * 1_000_000)); // 1e6 precision
+  return scaled * (PRICE_PRECISION / 1_000_000n);           // → 1e30
 }
 
+/** USD 포지션 크기 → GMX V2 sizeDeltaUsd bigint (1e30) */
 export function usdSizeToGmx(usdSize: number): bigint {
   return usdToGmxPrice(usdSize);
 }
 
+/** USDC 수량(달러) → USDC wei (6 decimals) */
 export function usdToUsdcWei(usdAmount: number): bigint {
   return BigInt(Math.round(usdAmount * 1_000_000));
 }
 
+/** 롱 포지션 acceptablePrice: 현재가 + slippage% */
 export function acceptablePriceLong(currentPriceUsd: number, slippagePct = 1.0): bigint {
   return usdToGmxPrice(currentPriceUsd * (1 + slippagePct / 100));
 }
 
+/** 숏 포지션 acceptablePrice: 현재가 - slippage% */
 export function acceptablePriceShort(currentPriceUsd: number, slippagePct = 1.0): bigint {
   return usdToGmxPrice(currentPriceUsd * (1 - slippagePct / 100));
 }
 
+/** 롱 청산 acceptablePrice: 현재가 - slippage% (더 낮은 가격 허용) */
 export function acceptablePriceCloseLong(currentPriceUsd: number, slippagePct = 1.0): bigint {
   return usdToGmxPrice(currentPriceUsd * (1 - slippagePct / 100));
 }
 
+/** 숏 청산 acceptablePrice: 현재가 + slippage% (더 높은 가격 허용) */
 export function acceptablePriceCloseShort(currentPriceUsd: number, slippagePct = 1.0): bigint {
   return usdToGmxPrice(currentPriceUsd * (1 + slippagePct / 100));
 }
