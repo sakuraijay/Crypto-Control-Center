@@ -65,7 +65,7 @@
 - 다음 운영 행동은 새 기능 활성화가 아니라 Owner Approval/authorization,
   action budget, Stop readiness를 각각 명시적으로 충족한 뒤 authenticated refresh로
   다시 관측하는 것; 이 작업은 실행·인증 경계와 capital 값을 변경하지 않음
-- focused Web 69개, 전체 API 2,095개, 전체 Web 391개 및 TypeScript 검증 통과
+- focused Web 70개, 전체 API 2,095개, 전체 Web 392개 및 TypeScript 검증 통과
 
 ## 테스트 기준
 

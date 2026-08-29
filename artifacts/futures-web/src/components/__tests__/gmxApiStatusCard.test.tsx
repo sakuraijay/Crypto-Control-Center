@@ -19,6 +19,7 @@ import {
   FAIL_CLOSED_STATUS_MAX_AGE_MS,
   GmxApiStatusCard,
   getGmxApiEvidenceTtlMs,
+  isCurrentGmxApiRequest,
   isPaperCostCapPass,
   isPaperCostEvidenceCurrent,
   isStopCapabilityDisplayAvailable,
@@ -516,7 +517,19 @@ describe('GmxApiStatusCard — fail-closed evidence lifecycle', () => {
       ...liveFresh,
       lastReadinessRefresh: { ...liveFresh.lastReadinessRefresh, ok: false },
     }, 110_000)).toBe(false);
+    expect(isStopCapabilityDisplayAvailable({
+      ...liveFresh,
+      stopCapability: {
+        ...liveFresh.stopCapability,
+        reasons: ['contradictory server evidence'],
+      },
+    }, 110_000)).toBe(false);
     expect(isStopCapabilityDisplayAvailable(liveFresh, 140_002)).toBe(false);
+  });
+
+  it('PIN generation이 바뀐 뒤 완료된 이전 요청 결과는 적용하지 않는다', () => {
+    expect(isCurrentGmxApiRequest(7, 7)).toBe(true);
+    expect(isCurrentGmxApiRequest(7, 8)).toBe(false);
   });
 });
 
@@ -576,6 +589,8 @@ describe('소스 계약 (§11 규칙)', () => {
   it('PIN 변경은 인증된 이전 status snapshot을 즉시 폐기한다', () => {
     expect(cardSrc).toContain('onChange={(e) => changePin(e.target.value)}');
     expect(cardSrc).toContain('운영자 PIN이 변경되어 인증된 이전 readiness 증거를 폐기했습니다');
+    expect(cardSrc).toContain('requestGenerationRef.current += 1');
+    expect(cardSrc).toContain('isCurrentGmxApiRequest(requestGeneration, requestGenerationRef.current)');
   });
 
   it('내부 API는 apiUrl 헬퍼만 사용 (origin root /api 규칙)', () => {

@@ -10,7 +10,7 @@
  *  - PIN은 요청에만 사용, 저장·전달·표시 금지.
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Radio, RefreshCw, Loader2, ShieldAlert, Lock, Ban, CheckCircle2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
@@ -171,6 +171,13 @@ export function isPaperCostCapPass(cost: PaperCostView): boolean {
     && cost.withinCap === true;
 }
 
+export function isCurrentGmxApiRequest(
+  requestGeneration: number,
+  currentGeneration: number,
+): boolean {
+  return requestGeneration === currentGeneration;
+}
+
 export function isStopCapabilityDisplayAvailable(
   status: GmxApiStatusView,
   nowMs: number,
@@ -186,6 +193,7 @@ export function isStopCapabilityDisplayAvailable(
     : FAIL_CLOSED_STATUS_MAX_AGE_MS;
   const evaluationAgeMs = nowMs - evaluatedAtMs;
   return capability?.available === true
+    && capability.reasons.length === 0
     && capability.paperMode === false
     && status.lastReadinessRefresh.ok
     && refreshAtMs !== null
@@ -474,6 +482,7 @@ export function GmxApiStatusCard() {
   const [statusObservedAtMs, setStatusObservedAtMs] = useState<number | null>(null);
   const [loading, setLoading] = useState<'idle' | 'status' | 'refresh'>('idle');
   const [message, setMessage] = useState<{ tone: Tone; text: string } | null>(null);
+  const requestGenerationRef = useRef(0);
 
   const applyResult = useCallback((r: GmxApiFetchResult) => {
     const next = reduceGmxApiCardEvidence(r, Date.now());
@@ -483,6 +492,7 @@ export function GmxApiStatusCard() {
   }, []);
 
   const changePin = useCallback((nextPin: string) => {
+    requestGenerationRef.current += 1;
     setPin(nextPin);
     if (statusObservedAtMs !== null) {
       setStatus(null);
@@ -523,7 +533,11 @@ export function GmxApiStatusCard() {
       return;
     }
     setLoading('status');
-    applyResult(await fetchGmxApiStatus(pin.trim()));
+    const requestGeneration = requestGenerationRef.current;
+    const result = await fetchGmxApiStatus(pin.trim());
+    if (isCurrentGmxApiRequest(requestGeneration, requestGenerationRef.current)) {
+      applyResult(result);
+    }
     setLoading('idle');
   }, [pin, applyResult]);
 
@@ -533,7 +547,11 @@ export function GmxApiStatusCard() {
       return;
     }
     setLoading('refresh');
-    applyResult(await postGmxApiReadinessRefresh(pin.trim()));
+    const requestGeneration = requestGenerationRef.current;
+    const result = await postGmxApiReadinessRefresh(pin.trim());
+    if (isCurrentGmxApiRequest(requestGeneration, requestGenerationRef.current)) {
+      applyResult(result);
+    }
     setLoading('idle');
   }, [pin, applyResult]);
 
