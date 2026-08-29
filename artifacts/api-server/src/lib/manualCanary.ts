@@ -59,6 +59,7 @@ export const PREFLIGHT_OPERATION_ALLOWLIST = Object.freeze({
     'allowance',
     'gmx_api',
     'rpc',
+    'canonical_authorization',
     'reconciliation',
     'open_positions',
     'decimals',
@@ -234,6 +235,8 @@ export interface ManualCanaryPreflightDeps {
   allowance(): Promise<CheckOutcome>;
   gmxApiReadonly(): CheckOutcome;
   rpcHealthy(): Promise<CheckOutcome>;
+  /** 최신 저장 canonical API v2 readback + 기존 OPEN action-budget 정책만 평가한다. */
+  canonicalAuthorization(nowMs: number): Promise<CheckOutcome>;
   reconciliationClean(): Promise<CheckOutcome>;    // blocking intents/tasks/protections=0 + startup reconcile
   openPositionCount(): Promise<number | null>;     // authoritative readback, 실패=null
   openPositions(): Promise<Array<{
@@ -369,6 +372,12 @@ async function evaluateAllChecks(
     await runAllowedPreflightOperation('readonly', 'gmx_api', () => deps.gmxApiReadonly()));
   push('rpc', 'RPC 정상',
     await runAllowedPreflightOperation('readonly', 'rpc', () => deps.rpcHealthy()));
+  push('canonical_authorization', 'canonical API v2 delegated authorization·OPEN action budget',
+    await runAllowedPreflightOperation(
+      'readonly',
+      'canonical_authorization',
+      () => deps.canonicalAuthorization(nowMs),
+    ));
   push('reconciliation', 'reconciliation 완료·미종결 0',
     await runAllowedPreflightOperation('readonly', 'reconciliation', () => deps.reconciliationClean()));
 
@@ -899,7 +908,7 @@ function deriveCanaryBlockers(failedItems: PreflightItem[]): CanaryBlocker[] {
 
   const codeChecks = new Set(['deployment', 'router_pin']);
   const configChecks = new Set(['allowance', 'gmx_api', 'env_submission', 'cost_snapshot', 'signer_binding']);
-  const operatorChecks = new Set(['owner_approval', 'reconciliation', 'rpc', 'open_positions', 'decimals', 'stop_capability', 'accum_loss', 'daily_budget', 'price', 'persist']);
+  const operatorChecks = new Set(['owner_approval', 'canonical_authorization', 'reconciliation', 'rpc', 'open_positions', 'decimals', 'stop_capability', 'accum_loss', 'daily_budget', 'price', 'persist']);
 
   const codeIds = failedItems.filter(i => codeChecks.has(i.id)).map(i => i.id);
   if (codeIds.length > 0) {

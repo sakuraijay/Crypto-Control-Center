@@ -46,6 +46,7 @@ function makeDeps(overrides: Partial<ManualCanaryDeps> = {}) {
     allowance: async () => OK,
     gmxApiReadonly: () => OK,
     rpcHealthy: async () => OK,
+    canonicalAuthorization: async () => OK,
     reconciliationClean: async () => OK,
     openPositionCount: async () => 0,
     openPositions: async () => [
@@ -163,6 +164,16 @@ describe('#135 Manual Controlled Canary — 장애주입', () => {
     });
     const pf = await runCanaryPreflight(deps, 'BTC', 'LONG');
     expect(failedIds(pf.items)).toEqual(expect.arrayContaining(['rpc', 'gmx_api']));
+  });
+
+  it('F5b canonical authorization/action budget 실패 → preflight FAIL·제출 0회', async () => {
+    const { deps, executeOrder } = makeDeps({
+      canonicalAuthorization: async () => FAIL('canonical authorization 비활성'),
+    });
+    const pf = await runCanaryPreflight(deps, 'BTC', 'LONG');
+    expect(pf.ok).toBe(false);
+    expect(failedIds(pf.items)).toContain('canonical_authorization');
+    expect(executeOrder).not.toHaveBeenCalled();
   });
 
   it('F6 미종결 intent/task/protection 존재 → FAIL', async () => {

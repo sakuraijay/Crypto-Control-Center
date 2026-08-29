@@ -28,6 +28,7 @@ import { getStoredPublicSignerAddress, isManualCanarySignerRestoreAllowed } from
 import {
   executeLiveTestOrder, closeLiveTestPosition, fetchAuthoritativeOpenPositions,
   evaluateManualCanaryStopCapability, refreshStopExecutionCapability, isStopExecutionAvailable,
+  countInFlightReservedActions,
 } from '../workers/liveTestExecutor';
 import { runEmergencyClose } from '../workers/protectionExecutor';
 import { workerManager } from '../workers/aiWorker';
@@ -39,6 +40,7 @@ import {
   MANUAL_CANARY_READONLY_SYMBOLS,
   resolveCanarySymbolDecimals,
 } from './manualCanaryReadonlyEvidence';
+import { evaluateManualCanaryCanonicalAuthorization } from './manualCanaryCanonicalAuthorization';
 export {
   __setManualCanaryCostFetcherForTests,
   fetchManualCanaryReadonlyCost,
@@ -119,6 +121,16 @@ export function buildDefaultCanaryDeps(): ManualCanaryDeps {
       const snap = getCanonicalSnapshot();
       if (!snap) return outcome(false, 'canonical readback 스냅샷 없음 — readiness refresh 필요');
       return outcome(snap.confirmed, snap.confirmed ? 'canonical readback 확인' : (snap.reason ?? 'RPC 미확인'));
+    },
+
+    canonicalAuthorization: async (nowMs: number) => {
+      const snapshot = getCanonicalSnapshot();
+      const inFlightReservedActions = await countInFlightReservedActions();
+      return evaluateManualCanaryCanonicalAuthorization(
+        snapshot,
+        nowMs,
+        inFlightReservedActions,
+      );
     },
 
     reconciliationClean: async () => {

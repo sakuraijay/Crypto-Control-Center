@@ -89,6 +89,8 @@ interface CanonicalCheck {
   reason: string | null;
   approvalNonce: bigint | null;
   isSubaccountListed: boolean | null;
+  featureDisabled?: boolean | null;
+  integrationDisabled?: boolean | null;
   expiresAt: string | null;
   remaining: string | null;
 }
@@ -103,6 +105,8 @@ async function checkCanonical(): Promise<CanonicalCheck> {
     reason: result.reason,
     approvalNonce: result.approvalNonce?.toString() ?? null,
     isSubaccountListed: result.isSubaccountListed,
+    featureDisabled: result.featureDisabled ?? null,
+    integrationDisabled: result.integrationDisabled ?? null,
     expiresAt: result.expiresAt,
     remaining: result.remaining,
   });
@@ -144,6 +148,8 @@ async function checkCanonicalInner(): Promise<CanonicalCheck> {
       confirmed: true, reason: null,
       approvalNonce: result.data.approvalNonce,
       isSubaccountListed: result.data.isSubaccountListed,
+      featureDisabled: result.data.featureDisabled,
+      integrationDisabled: result.data.integrationDisabled,
       expiresAt: result.data.expiresAt.toString(),
       remaining: result.data.remaining.toString(),
     };
