@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
+import { GMX_CANONICAL_SUBACCOUNT_ROUTER_AUDIT } from '../lib/gmxCanonicalSubaccountRouterAudit';
 
 type SessionRow = {
   status: string;
@@ -111,6 +112,8 @@ describe('authenticated signer readiness snapshot', () => {
     vi.stubEnv('LIVE_TEST_EXECUTION_LOCKED', 'true');
     vi.stubEnv('DELEGATED_SIGNER_ENABLED', 'true');
     vi.stubEnv('GMX_API_ORDER_SUBMISSION_ENABLED', 'true');
+    vi.stubEnv('GMX_CHAIN_ID', '42161');
+    vi.stubEnv('GMX_SUBACCOUNT_ROUTER_ADDRESS', GMX_CANONICAL_SUBACCOUNT_ROUTER_AUDIT.address);
   });
 
   afterEach(() => {
@@ -148,6 +151,7 @@ describe('authenticated signer readiness snapshot', () => {
       delegatedSignerEnabled: true,
       submitFlagEnabled: true,
       liveTestMode: true,
+      canonicalSubaccountRouterValid: true,
       signerRecordsPresent: {
         encryptedSigner: true,
         metadata: true,
@@ -163,6 +167,7 @@ describe('authenticated signer readiness snapshot', () => {
     expect(result.body.readiness.blockedReasons).toContain(
       'READONLY_SNAPSHOT_CANNOT_VERIFY_CANONICAL_AUTHORIZATION',
     );
+    expect(result.body.readiness.blockedReasons).not.toContain('CANONICAL_SUBACCOUNT_ROUTER_INVALID');
     expect(mocks.selectSpy).toHaveBeenCalledTimes(3);
     expect(mocks.insertSpy).not.toHaveBeenCalled();
     expect(mocks.updateSpy).not.toHaveBeenCalled();
@@ -177,6 +182,19 @@ describe('authenticated signer readiness snapshot', () => {
     expect(serialized.toLowerCase()).not.toContain('encryptedsignature');
     expect(serialized.toLowerCase()).not.toContain('typeddatadigest');
     fetchSpy.mockRestore();
+  });
+
+  it('reports canonical router mismatch as an explicit fail-closed readiness blocker', async () => {
+    vi.stubEnv('GMX_SUBACCOUNT_ROUTER_ADDRESS', '0x1111111111111111111111111111111111111111');
+
+    const result = await request(app)
+      .get('/api/executor/signer/readiness')
+      .set('x-operator-pin', PIN);
+
+    expect(result.status).toBe(200);
+    expect(result.body.readiness.canonicalSubaccountRouterValid).toBe(false);
+    expect(result.body.readiness.actualSubmitPossible).toBe(false);
+    expect(result.body.readiness.blockedReasons).toContain('CANONICAL_SUBACCOUNT_ROUTER_INVALID');
   });
 
   it('fails closed for absent records and restrictive flag combinations', async () => {
@@ -199,6 +217,7 @@ describe('authenticated signer readiness snapshot', () => {
       delegatedSignerEnabled: false,
       submitFlagEnabled: false,
       liveTestMode: false,
+      canonicalSubaccountRouterValid: true,
       signerRecordsPresent: {
         encryptedSigner: false,
         metadata: false,
