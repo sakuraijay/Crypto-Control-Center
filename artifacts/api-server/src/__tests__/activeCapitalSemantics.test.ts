@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { assessActiveCapitalSemantics } from '../lib/activeCapitalSemantics';
+import {
+  assessActiveCapitalSemantics,
+  buildActiveCapitalWorkerBinding,
+} from '../lib/activeCapitalSemantics';
 
 describe('active capital semantics', () => {
   it('keeps observed wallet balance separate from the approved Active Capital stage', () => {
@@ -88,5 +91,57 @@ describe('active capital semantics', () => {
     expect(result.hardStopEvaluationGate).toBe('BLOCK_CAPITAL_CONFIGURATION_DRIFT');
     expect(result.newHardStopEvaluationAllowed).toBe(false);
     expect(result.blockers).toEqual(['ACTIVE_CAPITAL_RUNTIME_UNAVAILABLE']);
+  });
+});
+
+describe('worker active-capital risk binding', () => {
+  it('emits only the minimal aligned HARD_STOP gate fields for RiskStateMachine', () => {
+    const binding = buildActiveCapitalWorkerBinding({
+      runtimeConfiguredCapitalUsd: 1_000,
+      observedWalletBalanceUsd: 24.5,
+      currentRiskEquityUsd: 950,
+      historicalHardStopTriggerReason: null,
+    });
+
+    expect(binding.riskGate).toEqual({
+      newHardStopEvaluationAllowed: true,
+      activeCapitalConfigurationDriftReason: null,
+    });
+    expect(binding.diagnostic.observedWalletBalanceUsd).toBe(24.5);
+    expect(binding.riskGate).not.toHaveProperty('observedWalletBalanceUsd');
+    expect(binding.riskGate).not.toHaveProperty('plannedSeedCapitalUsd');
+  });
+
+  it('turns legacy $24.50 runtime capital into a non-sticky fail-closed drift gate', () => {
+    const binding = buildActiveCapitalWorkerBinding({
+      runtimeConfiguredCapitalUsd: 24.5,
+      observedWalletBalanceUsd: 10_000,
+      currentRiskEquityUsd: 24.5,
+      historicalHardStopTriggerReason: null,
+    });
+
+    expect(binding.riskGate.newHardStopEvaluationAllowed).toBe(false);
+    expect(binding.riskGate.activeCapitalConfigurationDriftReason)
+      .toBe('ACTIVE_CAPITAL_RUNTIME_BELOW_APPROVED_STAGE');
+    expect(binding.diagnostic.walletBalanceTreatedAsActiveCapital).toBe(false);
+  });
+
+  it('preserves historical HARD_STOP review while keeping the risk gate free of wallet/seed values', () => {
+    const binding = buildActiveCapitalWorkerBinding({
+      runtimeConfiguredCapitalUsd: 24.5,
+      observedWalletBalanceUsd: 1_000,
+      currentRiskEquityUsd: 24.5,
+      historicalHardStopTriggerReason: 'legacy hard stop',
+    });
+
+    expect(binding.diagnostic.hardStopEvaluationGate)
+      .toBe('PRESERVE_EXISTING_HARD_STOP_REVIEW');
+    expect(binding.riskGate.newHardStopEvaluationAllowed).toBe(false);
+    expect(binding.riskGate.activeCapitalConfigurationDriftReason)
+      .toBe('ACTIVE_CAPITAL_RUNTIME_BELOW_APPROVED_STAGE');
+    expect(Object.keys(binding.riskGate).sort()).toEqual([
+      'activeCapitalConfigurationDriftReason',
+      'newHardStopEvaluationAllowed',
+    ]);
   });
 });

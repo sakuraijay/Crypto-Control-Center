@@ -52,6 +52,21 @@ export interface ActiveCapitalSemanticsDiagnostic {
   blockers: string[];
 }
 
+/**
+ * Worker가 RiskStateMachine에 전달해야 하는 최소 자본 gate 필드.
+ * 진단 객체 전체를 실행 입력으로 넘기지 않아 Planned Seed/wallet 관측치가
+ * 위험 자본으로 오인되는 경로를 구조적으로 차단한다.
+ */
+export interface ActiveCapitalRiskGateBinding {
+  newHardStopEvaluationAllowed: boolean;
+  activeCapitalConfigurationDriftReason: string | null;
+}
+
+export interface ActiveCapitalWorkerBinding {
+  diagnostic: ActiveCapitalSemanticsDiagnostic;
+  riskGate: ActiveCapitalRiskGateBinding;
+}
+
 function finiteNonNegative(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0
     ? value
@@ -116,5 +131,32 @@ export function assessActiveCapitalSemantics(
     historicalHardStopPreserved: historicalHardStopReviewRequired,
     hardStopEvaluationGate,
     blockers,
+  };
+}
+
+/**
+ * Worker용 binding 생성.
+ *
+ * - 실행 권한은 오직 승인 Active Capital ↔ runtime 정합성으로 판단한다.
+ * - wallet balance/Planned Seed는 진단에만 남고 riskGate 입력에는 들어가지 않는다.
+ * - 기존 HARD_STOP이 있으면 RiskStateMachine의 sticky-lock 우선 규칙이 그대로 작동한다.
+ * - drift 사유는 비영속 진단 문자열이며 HARD_STOP/UNRESOLVED lock을 새로 만들지 않는다.
+ */
+export function buildActiveCapitalWorkerBinding(
+  input: ActiveCapitalSemanticsInput,
+): ActiveCapitalWorkerBinding {
+  const diagnostic = assessActiveCapitalSemantics(input);
+  const activeCapitalBlockers = diagnostic.blockers.filter((reason) =>
+    reason.startsWith('ACTIVE_CAPITAL_RUNTIME_'),
+  );
+
+  return {
+    diagnostic,
+    riskGate: {
+      newHardStopEvaluationAllowed: diagnostic.newHardStopEvaluationAllowed,
+      activeCapitalConfigurationDriftReason: diagnostic.newHardStopEvaluationAllowed
+        ? null
+        : (activeCapitalBlockers.join(', ') || diagnostic.hardStopEvaluationGate),
+    },
   };
 }
