@@ -1,24 +1,26 @@
 /**
- * Canonical GMX SubaccountRouter manifest contract.
- * 네트워크/RPC/DB/서명/주문 호출 없이 공식 Arbitrum 주소 대조만 검증한다.
+ * Canonical GMX SubaccountRouter audit contract.
+ * No network/RPC/DB/signing/order calls are performed.
  */
 import { describe, expect, it } from 'vitest';
+import { GMX_DEPLOYMENT_MANIFEST } from '../lib/gmxDeploymentManifest';
 import {
-  GMX_CANONICAL_SUBACCOUNT_ROUTER_ADDRESS,
-  GMX_DEPLOYMENT_MANIFEST,
+  GMX_CANONICAL_SUBACCOUNT_ROUTER_AUDIT,
   validateCanonicalSubaccountRouterEnv,
-} from '../lib/gmxDeploymentManifest';
+} from '../lib/gmxCanonicalSubaccountRouterAudit';
 
 const OFFICIAL = '0x9c05880A2AaD7530c69e18e342eDC9E06cc757db';
 
-describe('canonical SubaccountRouter manifest validation', () => {
-  it('manifest v3와 전용 pin이 공식 Arbitrum SubaccountRouter를 고정한다', () => {
-    expect(GMX_DEPLOYMENT_MANIFEST.manifestVersion).toBe(3);
+describe('canonical SubaccountRouter audit validation', () => {
+  it('keeps the legacy relay manifest v2 untouched and pins canonical router separately', () => {
+    expect(GMX_DEPLOYMENT_MANIFEST.manifestVersion).toBe(2);
     expect(GMX_DEPLOYMENT_MANIFEST.chainId).toBe(42161);
-    expect(GMX_CANONICAL_SUBACCOUNT_ROUTER_ADDRESS).toBe(OFFICIAL);
+    expect(GMX_CANONICAL_SUBACCOUNT_ROUTER_AUDIT.auditVersion).toBe(1);
+    expect(GMX_CANONICAL_SUBACCOUNT_ROUTER_AUDIT.chainId).toBe(42161);
+    expect(GMX_CANONICAL_SUBACCOUNT_ROUTER_AUDIT.address).toBe(OFFICIAL);
   });
 
-  it('공식 주소는 통과하고 대소문자는 무시한다', () => {
+  it('accepts the official address and ignores address case', () => {
     expect(validateCanonicalSubaccountRouterEnv({
       GMX_SUBACCOUNT_ROUTER_ADDRESS: OFFICIAL,
       GMX_CHAIN_ID: '42161',
@@ -29,7 +31,7 @@ describe('canonical SubaccountRouter manifest validation', () => {
     } as NodeJS.ProcessEnv).ok).toBe(true);
   });
 
-  it('누락·형식 오류·다른 42-byte 주소를 모두 fail-closed한다', () => {
+  it('fails closed for missing, malformed, or different addresses', () => {
     const missing = validateCanonicalSubaccountRouterEnv({} as NodeJS.ProcessEnv);
     expect(missing.ok).toBe(false);
     expect(missing.mismatches.join(' ')).toContain('GMX_SUBACCOUNT_ROUTER_ADDRESS');
@@ -42,10 +44,10 @@ describe('canonical SubaccountRouter manifest validation', () => {
       GMX_SUBACCOUNT_ROUTER_ADDRESS: '0x1111111111111111111111111111111111111111',
     } as NodeJS.ProcessEnv);
     expect(wrong.ok).toBe(false);
-    expect(wrong.mismatches.join(' ')).toContain('manifest v3');
+    expect(wrong.mismatches.join(' ')).toContain('canonical Arbitrum audit v1');
   });
 
-  it('Arbitrum 외 GMX_CHAIN_ID도 fail-closed한다', () => {
+  it('fails closed for a non-Arbitrum configured chain', () => {
     const result = validateCanonicalSubaccountRouterEnv({
       GMX_SUBACCOUNT_ROUTER_ADDRESS: OFFICIAL,
       GMX_CHAIN_ID: '43114',
@@ -54,7 +56,7 @@ describe('canonical SubaccountRouter manifest validation', () => {
     expect(result.mismatches.join(' ')).toContain('GMX_CHAIN_ID');
   });
 
-  it('canonical SubaccountRouter와 Gelato relay router를 혼용하지 않는다', () => {
+  it('does not confuse canonical SubaccountRouter with the Gelato relay router', () => {
     const relayRouter = GMX_DEPLOYMENT_MANIFEST.addresses.subaccountGelatoRelayRouter;
     expect(relayRouter.toLowerCase()).not.toBe(OFFICIAL.toLowerCase());
     expect(validateCanonicalSubaccountRouterEnv({

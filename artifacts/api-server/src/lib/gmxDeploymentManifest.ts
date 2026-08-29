@@ -1,5 +1,5 @@
 /**
- * gmxDeploymentManifest — 감사된 GMX Arbitrum 배포 주소 manifest (v3).
+ * gmxDeploymentManifest — 감사된 GMX Arbitrum 배포 주소 manifest (v2).
  *
  * 목적:
  *  - Production env 주소가 "감사된 공식 주소"와 일치하는지 검증하는 단일 기준.
@@ -28,14 +28,6 @@
  *     deployments repo 존재 ≠ 유효 경로. 유효 router 확정은 (a) API echo
  *     (b) interface/SDK pin (c) 온체인 role 3중 일치로만 한다.
  *
- * v3 추가 감사 근거 (2026-08-29 UTC):
- *  - GMX 공식 Contract addresses 문서의 Arbitrum(42161) SubaccountRouter
- *    = 0x9c05880A2AaD7530c69e18e342eDC9E06cc757db.
- *  - 이 주소는 canonical on-chain subaccount/delegation 경로 전용이며
- *    SubaccountGelatoRelayRouter와 의미를 혼합하지 않는다.
- *  - GMX_SUBACCOUNT_ROUTER_ADDRESS는 자동 보정하지 않고 별도 validator에서
- *    공식 주소와 대조하여 누락/형식 오류/불일치를 fail-closed로 분류한다.
- *
  *  전환 감지·재감사 경보: 공식 interface/SDK가 0x517602…로 전환하면
  *  verifySdkRouterPin이 불일치를 감지해 LIVE preflight를 차단하고 명시적
  *  재감사(ROUTER_REAUDIT_REQUIRED)를 요구한다 — 자동 수용 금지.
@@ -44,26 +36,17 @@
  * "DataStore and RoleStore addresses are permanent").
  */
 
-/**
- * Canonical on-chain subaccount/delegation router.
- * Relay manifest 주소 객체와 별도 상수로 유지해 legacy mock/type shape를 바꾸지 않고
- * SubaccountRouter와 SubaccountGelatoRelayRouter의 의미 혼용을 방지한다.
- */
-export const GMX_CANONICAL_SUBACCOUNT_ROUTER_ADDRESS =
-  '0x9c05880A2AaD7530c69e18e342eDC9E06cc757db' as const;
-
 export const GMX_DEPLOYMENT_MANIFEST = {
-  manifestVersion: 3,
+  manifestVersion: 2,
   chainId: 42161,
-  checkedAt: '2026-08-29',
-  sourceRepo: 'GMX Docs Contract addresses + gmx-io/gmx-interface (c233f850) + @gmx-io/sdk 1.7.0 + GMX API 실측 + 온체인 RoleStore',
-  sourceCommit: 'canonical SubaccountRouter docs checked 2026-08-29; relay source c233f850007c5 (interface master, 2026-08-16)',
-  artifactPath: 'GMX Docs /api/contracts/addresses + sdk/src/configs/contracts.ts [ARBITRUM].SubaccountGelatoRelayRouter',
+  checkedAt: '2026-08-19',
+  sourceRepo: 'gmx-io/gmx-interface (c233f850) + @gmx-io/sdk 1.7.0 + GMX API 실측 + 온체인 RoleStore',
+  sourceCommit: 'c233f850007c5 (interface master, 2026-08-16)',
+  artifactPath: 'sdk/src/configs/contracts.ts [ARBITRUM].SubaccountGelatoRelayRouter',
   docsDiscrepancy:
     '#131 교차감사(2026-08-19)로 해소: docs/deployments의 0x517602…는 배포·권한 부여까지 끝난 ' +
     '신규 router지만 공식 API·interface·SDK 어느 클라이언트도 아직 사용하지 않는다(세대 혼합). ' +
-    '유효 relay 경로는 구 0xfD0596… — API echo·interface c233f850·sdk 1.7.0·온체인 role 일치. ' +
-    'canonical SubaccountRouter는 별도 공식 주소 0x9c0588…이며 두 router 역할을 혼합하지 않는다. ' +
+    '유효 경로는 구 0xfD0596… — API echo·interface c233f850·sdk 1.7.0·온체인 role 일치. ' +
     '공식 클라이언트 전환 확인 전 0x517602… 사용 금지(차단 목록 소속, 재감사 필요).',
   addresses: {
     subaccountGelatoRelayRouter: '0xfD0596f708d9D950E0eF7b5d191e5F8e55b8a67f',
@@ -136,15 +119,8 @@ function checkOne(envKey: string, envValue: string | undefined, expected: string
   }
 }
 
-function checkChain(env: NodeJS.ProcessEnv, out: string[]): void {
-  const chainRaw = (env.GMX_CHAIN_ID ?? '').trim();
-  if (chainRaw !== '' && chainRaw !== String(GMX_DEPLOYMENT_MANIFEST.chainId)) {
-    out.push(`GMX_CHAIN_ID ≠ ${GMX_DEPLOYMENT_MANIFEST.chainId} — manifest 불일치 (fail-closed)`);
-  }
-}
-
 /**
- * Production relay env 주소를 감사된 manifest와 대조한다.
+ * Production env 주소를 감사된 manifest와 대조한다.
  * - env는 계속 필수 (manifest 값 자동 대입 금지 — 이 함수는 검증만 한다)
  * - 불일치·차단·미설정 전부 fail-closed
  * - OrderVault env는 설정된 경우에만 대조 (LIVE relay 필수 3종은 항상 대조)
@@ -158,24 +134,10 @@ export function validateEnvAgainstManifest(env: NodeJS.ProcessEnv): ManifestVali
   if ((env.GMX_ORDER_VAULT_ADDRESS ?? '').trim() !== '') {
     checkOne('GMX_ORDER_VAULT_ADDRESS', env.GMX_ORDER_VAULT_ADDRESS, m.orderVault, mismatches);
   }
-  checkChain(env, mismatches);
-  return { ok: mismatches.length === 0, mismatches };
-}
-
-/**
- * Canonical on-chain subaccount/delegation router 전용 검증.
- * Relay router validator와 분리해 두 주소의 역할 혼용을 방지한다.
- * 값 누락/형식 오류/공식 Arbitrum 주소 불일치/체인 불일치는 모두 fail-closed.
- */
-export function validateCanonicalSubaccountRouterEnv(env: NodeJS.ProcessEnv): ManifestValidationResult {
-  const mismatches: string[] = [];
-  checkOne(
-    'GMX_SUBACCOUNT_ROUTER_ADDRESS',
-    env.GMX_SUBACCOUNT_ROUTER_ADDRESS,
-    GMX_CANONICAL_SUBACCOUNT_ROUTER_ADDRESS,
-    mismatches,
-  );
-  checkChain(env, mismatches);
+  const chainRaw = (env.GMX_CHAIN_ID ?? '').trim();
+  if (chainRaw !== '' && chainRaw !== String(GMX_DEPLOYMENT_MANIFEST.chainId)) {
+    mismatches.push(`GMX_CHAIN_ID ≠ ${GMX_DEPLOYMENT_MANIFEST.chainId} — manifest 불일치 (fail-closed)`);
+  }
   return { ok: mismatches.length === 0, mismatches };
 }
 
