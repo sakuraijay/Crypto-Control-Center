@@ -8,6 +8,7 @@ import {
   deriveDailyTargets, deriveWeeklyMaxLossUsd, deriveTradeRiskUsd,
   isAutoPromotionAllowed,
 } from '../lib/riskPolicy';
+import { assessActiveCapitalSemantics } from '../lib/activeCapitalSemantics';
 import { msUntilNextManilaDay, manilaDayStartIso, manilaWeekStartIso } from '../lib/manilaTime';
 import { getWorkerStatus } from '../workers/aiWorker';
 
@@ -27,6 +28,13 @@ router.get('/risk/policy', (_req, res) => {
     const riskSizingReservePercent = status.lastLimitsUsed?.reserveCashPct
       ?? CAPITAL_PLAN.reserveCapitalPercent;
     const riskSizingReserveUsd = riskSizingCapitalUsd * riskSizingReservePercent / 100;
+    const capitalSemantics = assessActiveCapitalSemantics({
+      runtimeConfiguredCapitalUsd: status.lastLimitsUsed?.tradingCapital,
+      // 지갑 잔액은 이 endpoint의 Risk 상태와 결합하지 않는다. 별도 RPC read-only 원본이 필요하다.
+      observedWalletBalanceUsd: null,
+      currentRiskEquityUsd: status.currentEquityUsd,
+      historicalHardStopTriggerReason: status.riskHistoricalHardStopTriggerReason,
+    });
 
     res.json({
       policy: RISK_POLICY,
@@ -37,6 +45,7 @@ router.get('/risk/policy', (_req, res) => {
         riskSizingReservePercent,
         onchainBalanceUsd: null,
         onchainBalanceAuthoritative: false,
+        semantics: capitalSemantics,
       },
       canary: CANARY_POLICY,
       tierLadder: CAPITAL_TIER_LADDER,
