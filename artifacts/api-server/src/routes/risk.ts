@@ -51,6 +51,8 @@ router.get('/risk/policy', (_req, res) => {
         riskOperatingState:       status.riskOperatingState,
         riskEntryAllowed:         status.riskEntryAllowed,
         riskBlockReasons:         status.riskBlockReasons,
+        currentHardStopPolicyEquityUsd: RISK_POLICY.hardStopEquityUsd,
+        historicalHardStopTriggerReason: status.riskHistoricalHardStopTriggerReason,
         riskDbOk:                 status.riskDbOk,
         dailyEntryCount:          status.riskDailyEntryCount,
         consecutiveLossCount:     status.riskConsecutiveLossCount,
