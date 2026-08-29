@@ -44,6 +44,14 @@
  * "DataStore and RoleStore addresses are permanent").
  */
 
+/**
+ * Canonical on-chain subaccount/delegation router.
+ * Relay manifest 주소 객체와 별도 상수로 유지해 legacy mock/type shape를 바꾸지 않고
+ * SubaccountRouter와 SubaccountGelatoRelayRouter의 의미 혼용을 방지한다.
+ */
+export const GMX_CANONICAL_SUBACCOUNT_ROUTER_ADDRESS =
+  '0x9c05880A2AaD7530c69e18e342eDC9E06cc757db' as const;
+
 export const GMX_DEPLOYMENT_MANIFEST = {
   manifestVersion: 3,
   chainId: 42161,
@@ -58,8 +66,6 @@ export const GMX_DEPLOYMENT_MANIFEST = {
     'canonical SubaccountRouter는 별도 공식 주소 0x9c0588…이며 두 router 역할을 혼합하지 않는다. ' +
     '공식 클라이언트 전환 확인 전 0x517602… 사용 금지(차단 목록 소속, 재감사 필요).',
   addresses: {
-    /** canonical on-chain subaccount/delegation router — GMX official Arbitrum contract-address table */
-    subaccountRouter: '0x9c05880A2AaD7530c69e18e342eDC9E06cc757db',
     subaccountGelatoRelayRouter: '0xfD0596f708d9D950E0eF7b5d191e5F8e55b8a67f',
     dataStore: '0xFD70de6b91282D8017aA4E741e9Ae325CAb992d8',
     eventEmitter: '0xC8ee91A54287DB53897056e12D9819156D3822Fb',
@@ -166,7 +172,7 @@ export function validateCanonicalSubaccountRouterEnv(env: NodeJS.ProcessEnv): Ma
   checkOne(
     'GMX_SUBACCOUNT_ROUTER_ADDRESS',
     env.GMX_SUBACCOUNT_ROUTER_ADDRESS,
-    GMX_DEPLOYMENT_MANIFEST.addresses.subaccountRouter,
+    GMX_CANONICAL_SUBACCOUNT_ROUTER_ADDRESS,
     mismatches,
   );
   checkChain(env, mismatches);

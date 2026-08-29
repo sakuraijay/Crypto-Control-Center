@@ -4,6 +4,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
+  GMX_CANONICAL_SUBACCOUNT_ROUTER_ADDRESS,
   GMX_DEPLOYMENT_MANIFEST,
   validateCanonicalSubaccountRouterEnv,
 } from '../lib/gmxDeploymentManifest';
@@ -11,10 +12,10 @@ import {
 const OFFICIAL = '0x9c05880A2AaD7530c69e18e342eDC9E06cc757db';
 
 describe('canonical SubaccountRouter manifest validation', () => {
-  it('manifest v3가 공식 Arbitrum SubaccountRouter를 고정한다', () => {
+  it('manifest v3와 전용 pin이 공식 Arbitrum SubaccountRouter를 고정한다', () => {
     expect(GMX_DEPLOYMENT_MANIFEST.manifestVersion).toBe(3);
     expect(GMX_DEPLOYMENT_MANIFEST.chainId).toBe(42161);
-    expect(GMX_DEPLOYMENT_MANIFEST.addresses.subaccountRouter).toBe(OFFICIAL);
+    expect(GMX_CANONICAL_SUBACCOUNT_ROUTER_ADDRESS).toBe(OFFICIAL);
   });
 
   it('공식 주소는 통과하고 대소문자는 무시한다', () => {
