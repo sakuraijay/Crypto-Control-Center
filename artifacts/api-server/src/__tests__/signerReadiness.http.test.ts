@@ -152,6 +152,12 @@ describe('authenticated signer readiness snapshot', () => {
       submitFlagEnabled: true,
       liveTestMode: true,
       canonicalSubaccountRouterValid: true,
+      legacySubaccountRouter: {
+        valid: true,
+        requiredForGmxApiV2OrderSubmission: false,
+        purpose: 'LEGACY_WALLET_SUBACCOUNT_MANAGEMENT',
+      },
+      diagnosticWarnings: [],
       signerRecordsPresent: {
         encryptedSigner: true,
         metadata: true,
@@ -184,7 +190,7 @@ describe('authenticated signer readiness snapshot', () => {
     fetchSpy.mockRestore();
   });
 
-  it('reports canonical router mismatch as an explicit fail-closed readiness blocker', async () => {
+  it('reports a legacy router mismatch as diagnostic-only for the GMX API v2 order path', async () => {
     vi.stubEnv('GMX_SUBACCOUNT_ROUTER_ADDRESS', '0x1111111111111111111111111111111111111111');
 
     const result = await request(app)
@@ -193,8 +199,16 @@ describe('authenticated signer readiness snapshot', () => {
 
     expect(result.status).toBe(200);
     expect(result.body.readiness.canonicalSubaccountRouterValid).toBe(false);
+    expect(result.body.readiness.legacySubaccountRouter).toMatchObject({
+      valid: false,
+      requiredForGmxApiV2OrderSubmission: false,
+      purpose: 'LEGACY_WALLET_SUBACCOUNT_MANAGEMENT',
+    });
+    expect(result.body.readiness.diagnosticWarnings)
+      .toContain('LEGACY_SUBACCOUNT_ROUTER_INVALID_OR_UNCONFIGURED');
+    expect(result.body.readiness.blockedReasons)
+      .not.toContain('CANONICAL_SUBACCOUNT_ROUTER_INVALID');
     expect(result.body.readiness.actualSubmitPossible).toBe(false);
-    expect(result.body.readiness.blockedReasons).toContain('CANONICAL_SUBACCOUNT_ROUTER_INVALID');
   });
 
   it('fails closed for absent records and restrictive flag combinations', async () => {
@@ -218,6 +232,10 @@ describe('authenticated signer readiness snapshot', () => {
       submitFlagEnabled: false,
       liveTestMode: false,
       canonicalSubaccountRouterValid: true,
+      legacySubaccountRouter: {
+        valid: true,
+        requiredForGmxApiV2OrderSubmission: false,
+      },
       signerRecordsPresent: {
         encryptedSigner: false,
         metadata: false,
