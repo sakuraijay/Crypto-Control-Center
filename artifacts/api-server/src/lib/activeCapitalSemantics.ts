@@ -13,6 +13,17 @@ export type ActiveCapitalAlignment =
   | 'RUNTIME_ABOVE_APPROVED_STAGE'
   | 'UNAVAILABLE';
 
+/**
+ * 새 HARD_STOP 평가가 어떤 자본 의미를 전제로 가능한지 명시한다.
+ * - 승인 Active 단계와 runtime이 일치할 때만 현재 정책 threshold 평가 가능
+ * - 자본 설정 drift에서는 새 HARD_STOP을 만들지 말고 구성 문제로 fail-closed
+ * - 이미 존재하는 HARD_STOP은 자동 해제하지 않고 별도 운영자 검토 대상으로 보존
+ */
+export type HardStopEvaluationGate =
+  | 'EVALUATE_CURRENT_POLICY'
+  | 'BLOCK_CAPITAL_CONFIGURATION_DRIFT'
+  | 'PRESERVE_EXISTING_HARD_STOP_REVIEW';
+
 export interface ActiveCapitalSemanticsInput {
   runtimeConfiguredCapitalUsd: number | null | undefined;
   observedWalletBalanceUsd: number | null | undefined;
@@ -33,6 +44,11 @@ export interface ActiveCapitalSemanticsDiagnostic {
   walletBalanceTreatedAsActiveCapital: false;
   historicalHardStopReviewRequired: boolean;
   automaticHardStopClearAllowed: false;
+  /** 현재 자본 의미로 새 HARD_STOP threshold 평가가 허용되는지 */
+  newHardStopEvaluationAllowed: boolean;
+  /** 기존 HARD_STOP은 drift 해소와 별개로 보존·검토해야 하는지 */
+  historicalHardStopPreserved: boolean;
+  hardStopEvaluationGate: HardStopEvaluationGate;
   blockers: string[];
 }
 
@@ -77,6 +93,12 @@ export function assessActiveCapitalSemantics(
     blockers.push('HISTORICAL_HARD_STOP_REQUIRES_OPERATOR_REVIEW');
   }
 
+  const hardStopEvaluationGate: HardStopEvaluationGate = historicalHardStopReviewRequired
+    ? 'PRESERVE_EXISTING_HARD_STOP_REVIEW'
+    : alignment === 'ALIGNED'
+      ? 'EVALUATE_CURRENT_POLICY'
+      : 'BLOCK_CAPITAL_CONFIGURATION_DRIFT';
+
   return {
     diagnosticOnly: true,
     plannedSeedCapitalUsd: CAPITAL_PLAN.plannedSeedCapitalUsd,
@@ -90,6 +112,9 @@ export function assessActiveCapitalSemantics(
     walletBalanceTreatedAsActiveCapital: false,
     historicalHardStopReviewRequired,
     automaticHardStopClearAllowed: false,
+    newHardStopEvaluationAllowed: hardStopEvaluationGate === 'EVALUATE_CURRENT_POLICY',
+    historicalHardStopPreserved: historicalHardStopReviewRequired,
+    hardStopEvaluationGate,
     blockers,
   };
 }

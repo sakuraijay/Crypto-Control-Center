@@ -16,6 +16,9 @@ describe('active capital semantics', () => {
     expect(result.plannedSeedCapitalUsd).toBe(10_000);
     expect(result.observedWalletBalanceUsd).toBe(24.5);
     expect(result.walletBalanceTreatedAsActiveCapital).toBe(false);
+    expect(result.hardStopEvaluationGate).toBe('EVALUATE_CURRENT_POLICY');
+    expect(result.newHardStopEvaluationAllowed).toBe(true);
+    expect(result.historicalHardStopPreserved).toBe(false);
     expect(result.blockers).toEqual([]);
   });
 
@@ -35,6 +38,25 @@ describe('active capital semantics', () => {
     ]);
     expect(result.historicalHardStopReviewRequired).toBe(true);
     expect(result.automaticHardStopClearAllowed).toBe(false);
+    expect(result.hardStopEvaluationGate).toBe('PRESERVE_EXISTING_HARD_STOP_REVIEW');
+    expect(result.newHardStopEvaluationAllowed).toBe(false);
+    expect(result.historicalHardStopPreserved).toBe(true);
+  });
+
+  it('blocks a fresh HARD_STOP evaluation when legacy runtime capital is below the approved stage', () => {
+    const result = assessActiveCapitalSemantics({
+      runtimeConfiguredCapitalUsd: 24.5,
+      observedWalletBalanceUsd: 24.5,
+      currentRiskEquityUsd: 24.5,
+      historicalHardStopTriggerReason: null,
+    });
+
+    expect(result.alignment).toBe('RUNTIME_BELOW_APPROVED_STAGE');
+    expect(result.historicalHardStopReviewRequired).toBe(false);
+    expect(result.hardStopEvaluationGate).toBe('BLOCK_CAPITAL_CONFIGURATION_DRIFT');
+    expect(result.newHardStopEvaluationAllowed).toBe(false);
+    expect(result.historicalHardStopPreserved).toBe(false);
+    expect(result.blockers).toEqual(['ACTIVE_CAPITAL_RUNTIME_BELOW_APPROVED_STAGE']);
   });
 
   it('flags values above the approved stage instead of treating them as an automatic promotion', () => {
@@ -46,6 +68,8 @@ describe('active capital semantics', () => {
     });
 
     expect(result.alignment).toBe('RUNTIME_ABOVE_APPROVED_STAGE');
+    expect(result.hardStopEvaluationGate).toBe('BLOCK_CAPITAL_CONFIGURATION_DRIFT');
+    expect(result.newHardStopEvaluationAllowed).toBe(false);
     expect(result.blockers).toContain('ACTIVE_CAPITAL_RUNTIME_ABOVE_APPROVED_STAGE');
   });
 
@@ -61,6 +85,8 @@ describe('active capital semantics', () => {
     expect(result.runtimeConfiguredCapitalUsd).toBeNull();
     expect(result.observedWalletBalanceUsd).toBeNull();
     expect(result.currentRiskEquityUsd).toBeNull();
+    expect(result.hardStopEvaluationGate).toBe('BLOCK_CAPITAL_CONFIGURATION_DRIFT');
+    expect(result.newHardStopEvaluationAllowed).toBe(false);
     expect(result.blockers).toEqual(['ACTIVE_CAPITAL_RUNTIME_UNAVAILABLE']);
   });
 });
