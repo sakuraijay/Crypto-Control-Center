@@ -142,7 +142,7 @@ export function evaluateRiskState(input: RiskEvaluationInput): RiskEvaluationRes
     return blocked('UNRESOLVED');
   }
 
-  // ── 1. HARD STOP — equity ≤ $850, 자동 해제 절대 금지 ───────────────────────
+  // ── 1. HARD STOP — equity ≤ configured policy threshold, 자동 해제 절대 금지 ─
   if (locks.hardStopReason) {
     blockReasons.push(`HARD_STOPPED: ${locks.hardStopReason} — 운영자 명시적 검토 전 영구 차단`);
     return blocked('HARD_STOPPED');
