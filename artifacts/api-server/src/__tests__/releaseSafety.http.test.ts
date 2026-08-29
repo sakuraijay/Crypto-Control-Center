@@ -132,7 +132,23 @@ describe('read-only release attestation routes', () => {
     });
     expect(response.body.database).toMatchObject({ complete: true, blockingIntentCount: 0 });
     expect(response.body.operationalDiagnostics).toMatchObject({
-      schemaVersion: 1,
+      schemaVersion: 2,
+      flags: {
+        liveTestExecutionLocked: {
+          configured: true,
+          buildObserved: true,
+          approvedTarget: false,
+          effective: true,
+          status: 'DRIFT',
+        },
+        delegatedSignerEnabled: {
+          configured: false,
+          buildObserved: false,
+          approvedTarget: true,
+          effective: false,
+          status: 'DRIFT',
+        },
+      },
       provenance: { status: 'MATCH' },
     });
     expect(JSON.stringify(response.body)).not.toMatch(

@@ -9,17 +9,25 @@ export interface ConfiguredEffectiveDiagnostic<T extends boolean | string> {
   driftReason: string | null;
 }
 
+export interface SafetyFlagDiagnostic<T extends boolean | string>
+  extends ConfiguredEffectiveDiagnostic<T> {
+  buildObserved: T | null;
+  approvedTarget: T;
+  buildObservationStatus: DiagnosticStatus;
+  buildObservationReason: string | null;
+}
+
 export interface OperationalDiagnostics {
-  schemaVersion: 1;
+  schemaVersion: 2;
   flags: {
-    engineMode: ConfiguredEffectiveDiagnostic<'PAPER' | 'LIVE'>;
-    autoWorkerLiveEnabled: ConfiguredEffectiveDiagnostic<boolean>;
-    liveTestExecutionLocked: ConfiguredEffectiveDiagnostic<boolean>;
-    delegatedSignerEnabled: ConfiguredEffectiveDiagnostic<boolean>;
-    gmxOrderSubmissionEnabled: ConfiguredEffectiveDiagnostic<boolean>;
-    relaySubmissionEnabled: ConfiguredEffectiveDiagnostic<boolean>;
-    relaySubmitNetworkEnabled: ConfiguredEffectiveDiagnostic<boolean>;
-    relayMode: ConfiguredEffectiveDiagnostic<'DISABLED' | 'DRY_RUN' | 'LIVE'>;
+    engineMode: SafetyFlagDiagnostic<'PAPER' | 'LIVE'>;
+    autoWorkerLiveEnabled: SafetyFlagDiagnostic<boolean>;
+    liveTestExecutionLocked: SafetyFlagDiagnostic<boolean>;
+    delegatedSignerEnabled: SafetyFlagDiagnostic<boolean>;
+    gmxOrderSubmissionEnabled: SafetyFlagDiagnostic<boolean>;
+    relaySubmissionEnabled: SafetyFlagDiagnostic<boolean>;
+    relaySubmitNetworkEnabled: SafetyFlagDiagnostic<boolean>;
+    relayMode: SafetyFlagDiagnostic<'DISABLED' | 'DRY_RUN' | 'LIVE'>;
   };
   provenance: {
     status: DiagnosticStatus;
@@ -30,6 +38,17 @@ export interface OperationalDiagnostics {
     sameProductTree: boolean | null;
   };
 }
+
+export const APPROVED_PRODUCTION_SAFETY_TARGET = {
+  engineMode: 'PAPER',
+  autoWorkerLiveEnabled: false,
+  liveTestExecutionLocked: false,
+  delegatedSignerEnabled: true,
+  gmxOrderSubmissionEnabled: true,
+  relaySubmissionEnabled: false,
+  relaySubmitNetworkEnabled: false,
+  relayMode: 'DISABLED',
+} as const;
 
 interface RuntimeObservation {
   engineMode: 'PAPER' | 'LIVE';
@@ -46,16 +65,35 @@ function bool(raw: string | undefined, defaultValue = false): boolean {
 }
 
 function item<T extends boolean | string>(
-  configured: T | null,
+  buildObserved: T | null,
+  approvedTarget: T,
   effective: T | null,
   driftReason: string,
-): ConfiguredEffectiveDiagnostic<T> {
-  if (configured === null || effective === null) {
-    return { configured, effective, status: 'UNAVAILABLE', driftReason: 'configured 또는 effective 증거 없음' };
-  }
-  return configured === effective
-    ? { configured, effective, status: 'MATCH', driftReason: null }
-    : { configured, effective, status: 'DRIFT', driftReason };
+): SafetyFlagDiagnostic<T> {
+  const runtimeComparison = effective === null
+    ? { status: 'UNAVAILABLE' as const, driftReason: 'approved target 또는 effective runtime 증거 없음' }
+    : approvedTarget === effective
+      ? { status: 'MATCH' as const, driftReason: null }
+      : { status: 'DRIFT' as const, driftReason };
+  const buildComparison = buildObserved === null
+    ? {
+        buildObservationStatus: 'UNAVAILABLE' as const,
+        buildObservationReason: 'build-time 관측 증거 없음',
+      }
+    : buildObserved === approvedTarget
+      ? { buildObservationStatus: 'MATCH' as const, buildObservationReason: null }
+      : {
+          buildObservationStatus: 'DRIFT' as const,
+          buildObservationReason: 'build-time 관측값과 승인된 Production 목표가 다름',
+        };
+  return {
+    configured: buildObserved,
+    buildObserved,
+    approvedTarget,
+    effective,
+    ...runtimeComparison,
+    ...buildComparison,
+  };
 }
 
 export function deriveOperationalDiagnostics(
@@ -63,7 +101,8 @@ export function deriveOperationalDiagnostics(
   runtime: RuntimeObservation,
   identity: ReleaseIdentity | null,
 ): OperationalDiagnostics {
-  const configured = identity?.configuredSafetyFlags;
+  const buildObserved = identity?.configuredSafetyFlags;
+  const approved = APPROVED_PRODUCTION_SAFETY_TARGET;
   const effectiveMode = env.WORKER_ENGINE_MODE === 'LIVE' ? 'LIVE' : 'PAPER';
   const effectiveLock = runtime.liveExecutionLocked;
   const effectiveSigner = bool(env.DELEGATED_SIGNER_ENABLED);
@@ -106,47 +145,55 @@ export function deriveOperationalDiagnostics(
         };
 
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     flags: {
       engineMode: item(
-        configured?.engineMode ?? null,
+        buildObserved?.engineMode ?? null,
+        approved.engineMode,
         runtime.engineMode === effectiveMode ? runtime.engineMode : effectiveMode,
-        'build configured engine mode와 current process mode 불일치',
+        '승인된 Production engine mode와 current process mode 불일치',
       ),
       autoWorkerLiveEnabled: item(
-        configured?.autoWorkerLiveEnabled ?? null,
+        buildObserved?.autoWorkerLiveEnabled ?? null,
+        approved.autoWorkerLiveEnabled,
         bool(env.AUTO_WORKER_LIVE_ENABLED),
-        'build configured AUTO Worker LIVE와 current process flag 불일치',
+        '승인된 Production AUTO Worker LIVE와 current process flag 불일치',
       ),
       liveTestExecutionLocked: item(
-        configured?.liveTestExecutionLocked ?? null,
+        buildObserved?.liveTestExecutionLocked ?? null,
+        approved.liveTestExecutionLocked,
         effectiveLock,
-        'build configured execution lock과 current runtime lock 불일치',
+        '승인된 Production execution lock과 current runtime lock 불일치',
       ),
       delegatedSignerEnabled: item(
-        configured?.delegatedSignerEnabled ?? null,
+        buildObserved?.delegatedSignerEnabled ?? null,
+        approved.delegatedSignerEnabled,
         effectiveSigner,
-        'build configured delegated signer flag와 current process flag 불일치',
+        '승인된 Production delegated signer flag와 current process flag 불일치',
       ),
       gmxOrderSubmissionEnabled: item(
-        configured?.gmxOrderSubmissionEnabled ?? null,
+        buildObserved?.gmxOrderSubmissionEnabled ?? null,
+        approved.gmxOrderSubmissionEnabled,
         effectiveOrderSubmission,
-        'build configured GMX submission flag와 current process flag 불일치',
+        '승인된 Production GMX submission flag와 current process flag 불일치',
       ),
       relaySubmissionEnabled: item(
-        configured?.relaySubmissionEnabled ?? null,
+        buildObserved?.relaySubmissionEnabled ?? null,
+        approved.relaySubmissionEnabled,
         runtime.relayFlags === null ? null : effectiveRelaySubmission,
-        'build configured Relay submission flag와 current process flag 불일치',
+        '승인된 Production Relay submission flag와 current process flag 불일치',
       ),
       relaySubmitNetworkEnabled: item(
-        configured?.relaySubmitNetworkEnabled ?? null,
+        buildObserved?.relaySubmitNetworkEnabled ?? null,
+        approved.relaySubmitNetworkEnabled,
         runtime.relayFlags === null ? null : effectiveRelayNetwork,
-        'build configured Relay network flag와 current process flag 불일치',
+        '승인된 Production Relay network flag와 current process flag 불일치',
       ),
       relayMode: item(
-        configured?.relayMode ?? null,
+        buildObserved?.relayMode ?? null,
+        approved.relayMode,
         runtime.relayFlags === null ? null : effectiveRelayMode,
-        'build configured Relay mode와 current process mode 불일치',
+        '승인된 Production Relay mode와 current process mode 불일치',
       ),
     },
     provenance,

@@ -37,12 +37,17 @@ interface ExecutorStatusView {
 
 type DiagnosticStatus = 'MATCH' | 'DRIFT' | 'UNAVAILABLE';
 interface DiagnosticItemView {
-  configured: boolean | string | null;
+  configured?: boolean | string | null;
+  buildObserved?: boolean | string | null;
+  approvedTarget?: boolean | string;
   effective: boolean | string | null;
   status: DiagnosticStatus;
   driftReason: string | null;
+  buildObservationStatus?: DiagnosticStatus;
+  buildObservationReason?: string | null;
 }
 interface OperationalDiagnosticsView {
+  schemaVersion?: number;
   flags: Record<string, DiagnosticItemView>;
   provenance: {
     status: DiagnosticStatus;
@@ -145,8 +150,13 @@ export function BetaRcStatusCard() {
   const intelStale = intel?.available === true ? intel.stale === true : true;
   const diagnostics = executor?.operationalDiagnostics;
   const diagnosticFlags = diagnostics ? Object.entries(diagnostics.flags) : [];
-  const hasDrift = diagnosticFlags.some(([, value]) => value.status !== 'MATCH')
+  const diagnosticsV2 = diagnostics?.schemaVersion === 2;
+  const unsupportedDiagnostics = diagnostics != null && !diagnosticsV2;
+  const hasDrift = unsupportedDiagnostics
+    || (diagnosticsV2 && diagnosticFlags.some(([, value]) => value.status !== 'MATCH'))
     || diagnostics?.provenance.status !== 'MATCH';
+  const hasBuildDifference = diagnosticsV2
+    && diagnosticFlags.some(([, value]) => value.buildObservationStatus === 'DRIFT');
 
   return (
     <Card className="p-4 flex flex-col gap-3 border border-border" data-testid="beta-rc-status-card">
@@ -161,7 +171,7 @@ export function BetaRcStatusCard() {
           : <Loader2 className="w-3 h-3 animate-spin text-muted-foreground" />}
       </div>
 
-      {/* configured / effective 운영 drift + build provenance */}
+      {/* approved Production target / effective runtime drift + build provenance */}
       <div className={cn(
         'flex flex-col gap-2 rounded border p-3 text-[11px]',
         !diagnostics || hasDrift
@@ -175,9 +185,19 @@ export function BetaRcStatusCard() {
               : hasDrift ? 'DRIFT / UNAVAILABLE (fail-closed)' : 'MATCH'}
           </Chip>
         </div>
+        {hasBuildDifference && (
+          <span className="text-[10px] text-muted-foreground">
+            Build 환경 관측값 차이 있음 (정보) — 운영 Drift 판정에는 사용하지 않습니다.
+          </span>
+        )}
         {!diagnostics ? (
           <span className="text-amber-400">
-            비교 증거 없음 — configured/effective 또는 배포 source 일치를 추정하지 않습니다.
+            비교 증거 없음 — 승인 목표/effective runtime 또는 배포 source 일치를 추정하지 않습니다.
+          </span>
+        ) : unsupportedDiagnostics ? (
+          <span className="text-amber-400">
+            지원되지 않는 운영 진단 schema — build/승인 목표/runtime 분리 증거가 없어
+            운영 Drift를 재판정하지 않습니다 (fail-closed).
           </span>
         ) : (
           <>
@@ -188,8 +208,12 @@ export function BetaRcStatusCard() {
                     {FLAG_LABELS[key] ?? key}
                   </span>
                   <span className="font-mono text-right">
-                    {displayValue(value.configured)} / {displayValue(value.effective)}
+                    {displayValue(value.buildObserved ?? value.configured ?? null)}
+                    {' / '}{displayValue(value.approvedTarget ?? null)}
+                    {' / '}{displayValue(value.effective)}
                     {value.status !== 'MATCH' && ` · ${value.driftReason ?? value.status}`}
+                    {value.buildObservationStatus !== 'MATCH'
+                      && ` · build ${value.buildObservationReason ?? value.buildObservationStatus}`}
                   </span>
                 </Fragment>
               ))}
@@ -204,8 +228,8 @@ export function BetaRcStatusCard() {
               {diagnostics.provenance.driftReason && ` · ${diagnostics.provenance.driftReason}`}
             </div>
             <div className="text-[10px] text-muted-foreground">
-              값 순서: build configured / current process effective / drift reason
-              {' · '}이 항목은 플래그 drift이며 실제 주문 적격성을 의미하지 않습니다.
+              값 순서: build-time 관측 / 승인된 Production 목표 / effective runtime
+              {' · '}운영 Drift는 승인 목표와 runtime만 비교하며 실제 주문 적격성을 의미하지 않습니다.
             </div>
           </>
         )}
