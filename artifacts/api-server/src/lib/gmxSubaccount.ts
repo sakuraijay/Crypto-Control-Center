@@ -3,6 +3,11 @@
  *
  * 이 모듈은 읽기 전용(view call) 및 미서명 트랜잭션 데이터 빌드만 수행합니다.
  * 실제 온체인 전송은 liveTestExecutor.ts 또는 MetaMask(브라우저)가 담당합니다.
+ *
+ * Safety boundary:
+ * - Subaccount authorization/read/unsigned-tx paths must use the separately audited
+ *   canonical Arbitrum One SubaccountRouter only.
+ * - A syntactically valid but different address must never be accepted here.
  */
 
 import { createPublicClient, http, encodeFunctionData } from 'viem';
@@ -11,8 +16,29 @@ import {
   SUBACCOUNT_ROUTER_ABI,
   ERC20_APPROVE_ABI,
   USDC_ADDRESS,
-  getSubaccountRouterAddress,
 } from './gmxContracts';
+import {
+  GMX_CANONICAL_SUBACCOUNT_ROUTER_AUDIT,
+  validateCanonicalSubaccountRouterEnv,
+} from './gmxCanonicalSubaccountRouterAudit';
+
+/**
+ * Execution-boundary router resolver.
+ *
+ * Keep this stricter than the generic gmxContracts getter: readiness and unrelated
+ * startup reads may need to report an invalid configuration without throwing, but
+ * any delegation read or unsigned authorization/revoke transaction built by this
+ * module must be pinned to the audited canonical router.
+ */
+function getCanonicalSubaccountRouterAddress(): `0x${string}` {
+  const validation = validateCanonicalSubaccountRouterEnv(process.env);
+  if (!validation.ok) {
+    throw new Error(
+      '[GMXSubaccount] canonical SubaccountRouter unavailable or mismatched — fail-closed',
+    );
+  }
+  return GMX_CANONICAL_SUBACCOUNT_ROUTER_AUDIT.address as `0x${string}`;
+}
 
 // ── RPC 클라이언트 ─────────────────────────────────────────────────────────────
 function getRpcUrl(): string {
@@ -51,7 +77,7 @@ export interface DelegationStatus {
 
 /**
  * SubaccountRouter.subaccounts() 뷰 호출로 위임 상태를 온체인에서 조회.
- * RPC 실패 시 fail-closed (isAuthorized: false).
+ * RPC 실패 또는 canonical router 검증 실패 시 fail-closed (isAuthorized: false).
  */
 export async function checkDelegationStatus(
   mainAddress: string,
@@ -68,7 +94,7 @@ export async function checkDelegationStatus(
   };
 
   try {
-    const routerAddress = getSubaccountRouterAddress();
+    const routerAddress = getCanonicalSubaccountRouterAddress();
     const client        = getPublicClient();
     const nowUnix       = Math.floor(Date.now() / 1000);
 
@@ -110,11 +136,11 @@ export interface UnsignedTx {
 
 /**
  * MetaMask에서 실행할 USDC approve 트랜잭션 빌드.
- * 메인 지갑이 SubaccountRouter에게 USDC 사용 권한 부여.
+ * 메인 지갑이 canonical SubaccountRouter에게 USDC 사용 권한 부여.
  * amount: USDC wei (6 decimals). 기본값: 15 USDC (하드캡).
  */
 export function buildUsdcApproveTx(amount: bigint = 15_000_000n): UnsignedTx {
-  const routerAddress = getSubaccountRouterAddress();
+  const routerAddress = getCanonicalSubaccountRouterAddress();
   const data = encodeFunctionData({
     abi:          ERC20_APPROVE_ABI,
     functionName: 'approve',
@@ -136,7 +162,7 @@ export function buildAddSubaccountTx(
   maxActions: number = 10,
   validHours: number = 24,
 ): UnsignedTx {
-  const routerAddress = getSubaccountRouterAddress();
+  const routerAddress = getCanonicalSubaccountRouterAddress();
   const expiresAt     = BigInt(Math.floor(Date.now() / 1000) + validHours * 3600);
   const data = encodeFunctionData({
     abi:          SUBACCOUNT_ROUTER_ABI,
@@ -157,7 +183,7 @@ export function buildAddSubaccountTx(
  * 서버 사이너 지갑이 직접 온체인 전송할 수 있음.
  */
 export function buildRemoveSubaccountTx(signerAddress: string): UnsignedTx {
-  const routerAddress = getSubaccountRouterAddress();
+  const routerAddress = getCanonicalSubaccountRouterAddress();
   const data = encodeFunctionData({
     abi:          SUBACCOUNT_ROUTER_ABI,
     functionName: 'removeSubaccount',
@@ -171,7 +197,7 @@ export function buildRemoveSubaccountTx(signerAddress: string): UnsignedTx {
  */
 export async function getUsdcAllowance(mainAddress: string): Promise<bigint> {
   try {
-    const routerAddress = getSubaccountRouterAddress();
+    const routerAddress = getCanonicalSubaccountRouterAddress();
     const client        = getPublicClient();
     const result = await client.readContract({
       address:      USDC_ADDRESS as `0x${string}`,
@@ -188,6 +214,7 @@ export async function getUsdcAllowance(mainAddress: string): Promise<bigint> {
 /**
  * 지정 spender에 대한 USDC allowance 조회 (#124-B canary 카드용).
  * 조회 실패는 null 반환 (0으로 위장 금지 — 표시 fail-closed).
+ * 이 generic helper는 caller가 전달한 spender를 조회하며 authorization builder가 아니다.
  */
 export async function getUsdcAllowanceForSpender(mainAddress: string, spender: string): Promise<bigint | null> {
   try {
@@ -206,12 +233,12 @@ export async function getUsdcAllowanceForSpender(mainAddress: string, spender: s
 
 /**
  * SubaccountRouter 컨트랙트가 올바르게 배포되어 있는지 검증.
- * 알려진 주소로 view 호출을 시도하고 결과 형태를 확인.
+ * canonical 주소로 view 호출을 시도하고 결과 형태를 확인.
  * 서버 시작 시 한 번 호출.
  */
 export async function verifySubaccountRouter(): Promise<{ ok: boolean; error?: string }> {
   try {
-    const routerAddress = getSubaccountRouterAddress();
+    const routerAddress = getCanonicalSubaccountRouterAddress();
     const client        = getPublicClient();
     // 임의 주소로 view 호출 — 응답이 배열이어야 함
     await client.readContract({
