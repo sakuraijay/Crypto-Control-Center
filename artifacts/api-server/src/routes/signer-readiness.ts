@@ -47,6 +47,14 @@ function isExpiredOrMalformed(value: string, nowSeconds: bigint): boolean {
  * This endpoint is intentionally limited to local process flags plus DB SELECTs.
  * It must not decrypt, initialize, restore, or provision a signer; perform RPC or
  * network I/O; invalidate approval sessions; or write to the database.
+ *
+ * Important router distinction (GMX current delegated-trading architecture):
+ * - GMX API v2 / same-chain delegated order submission is bound to the audited
+ *   SubaccountGelatoRelayRouter through prepared EIP-712 typed data and the
+ *   deployment manifest.
+ * - legacy SubaccountRouter remains relevant only to the separately isolated
+ *   wallet-based legacy subaccount management helpers. Its configuration is
+ *   diagnostic here and must not be reported as a GMX API v2 submit blocker.
  */
 router.get('/executor/signer/readiness', requireOperatorAuth, async (_req, res) => {
   try {
@@ -86,7 +94,7 @@ router.get('/executor/signer/readiness', requireOperatorAuth, async (_req, res) 
     const submitFlagEnabled = process.env.GMX_API_ORDER_SUBMISSION_ENABLED === 'true';
     const liveTestMode = isLiveTestMode(strategyConfigs[0]?.limits);
     const runtimeSignerInitialized = isSignerInitialized();
-    const canonicalSubaccountRouter = validateCanonicalSubaccountRouterEnv(process.env);
+    const legacySubaccountRouter = validateCanonicalSubaccountRouterEnv(process.env);
 
     const signerRecordsPresent = {
       encryptedSigner: signerKeys.has('delegatedSignerEncryptedKey'),
@@ -103,13 +111,17 @@ router.get('/executor/signer/readiness', requireOperatorAuth, async (_req, res) 
     if (!delegatedSignerEnabled) blockedReasons.push('DELEGATED_SIGNER_DISABLED');
     if (!submitFlagEnabled) blockedReasons.push('ORDER_SUBMISSION_DISABLED');
     if (!liveTestMode) blockedReasons.push('LIVE_TEST_MODE_DISABLED');
-    if (!canonicalSubaccountRouter.ok) blockedReasons.push('CANONICAL_SUBACCOUNT_ROUTER_INVALID');
     if (!signerRecordsPresent.encryptedSigner) blockedReasons.push('ENCRYPTED_SIGNER_RECORD_MISSING');
     if (!signerRecordsPresent.metadata) blockedReasons.push('SIGNER_METADATA_RECORD_MISSING');
     if (!signerRecordsPresent.publicSigner) blockedReasons.push('PUBLIC_SIGNER_RECORD_MISSING');
     if (!runtimeSignerInitialized) blockedReasons.push('RUNTIME_SIGNER_NOT_INITIALIZED');
     if (staleOwnerSignatureReadySessionCount > 0) {
       blockedReasons.push('STALE_OWNER_SIGNATURE_READY_SESSION_PRESENT');
+    }
+
+    const diagnosticWarnings: string[] = [];
+    if (!legacySubaccountRouter.ok) {
+      diagnosticWarnings.push('LEGACY_SUBACCOUNT_ROUTER_INVALID_OR_UNCONFIGURED');
     }
 
     return res.json({
@@ -120,7 +132,14 @@ router.get('/executor/signer/readiness', requireOperatorAuth, async (_req, res) 
         delegatedSignerEnabled,
         submitFlagEnabled,
         liveTestMode,
-        canonicalSubaccountRouterValid: canonicalSubaccountRouter.ok,
+        /** @deprecated compatibility alias; diagnostic only, not GMX API v2 submit eligibility. */
+        canonicalSubaccountRouterValid: legacySubaccountRouter.ok,
+        legacySubaccountRouter: {
+          valid: legacySubaccountRouter.ok,
+          requiredForGmxApiV2OrderSubmission: false,
+          purpose: 'LEGACY_WALLET_SUBACCOUNT_MANAGEMENT',
+        },
+        diagnosticWarnings,
         signerRecordsPresent,
         runtimeSignerInitialized,
         staleOwnerSignatureReadySessionCount,
