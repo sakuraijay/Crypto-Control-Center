@@ -45,7 +45,13 @@ import {
 } from "../lib/equityBaselines";
 import { RISK_POLICY, deriveDailyTargets, clampDailyTargetUSDT, type DerivedRiskTargets } from "../lib/riskPolicy";
 import { dailyRiskCapital, weeklyRiskCapital, positionSizingCapital } from "../lib/riskCapital";
-import { evaluateRiskState, type RiskEvaluationResult, type RiskOperatingState } from "../lib/riskStateMachine";
+import {
+  evaluateRiskState,
+  type RiskEvaluationInput,
+  type RiskEvaluationResult,
+  type RiskOperatingState,
+} from "../lib/riskStateMachine";
+import { buildActiveCapitalWorkerBinding } from "../lib/activeCapitalSemantics";
 import {
   initialRiskEngineState, rollRiskPeriods, loadRiskEngineState, saveRiskEngineState,
   type PersistedRiskEngineState,
@@ -85,6 +91,23 @@ type DecisionClaimResult =
   | { status: "CLAIMED" }
   | { status: "CONFLICT" }
   | { status: "ERROR" };
+
+export function evaluateWorkerRiskState(
+  input: RiskEvaluationInput,
+  runtimeConfiguredCapitalUsd: number | null | undefined,
+): RiskEvaluationResult {
+  const binding = buildActiveCapitalWorkerBinding({
+    runtimeConfiguredCapitalUsd,
+    observedWalletBalanceUsd: null,
+    currentRiskEquityUsd: input.currentEquityUsd,
+    historicalHardStopTriggerReason: input.locks.hardStopReason,
+  });
+
+  return evaluateRiskState({
+    ...input,
+    ...binding.riskGate,
+  });
+}
 
 /** Collision-free negative PK within the fixed worker symbol/state domain.
  * PostgreSQL serial values are positive, while a completed 15m candle slot and
@@ -1443,7 +1466,7 @@ class WorkerManager {
           ? (hasOpenPositions ? Math.min(dailyRealizedNet, dailyRealizedNet + paperState.totalUnrealizedPnl) : dailyRealizedNet)
           : null;
 
-        riskEval = evaluateRiskState({
+        riskEval = evaluateWorkerRiskState({
           dailyRiskCapitalUsd:  dCap.ok ? dCap.capitalUsd : null,
           weeklyRiskCapitalUsd: wCap.ok ? wCap.capitalUsd : null,
           currentEquityUsd:     Number.isFinite(currentEquity) ? currentEquity : null,
@@ -1459,7 +1482,7 @@ class WorkerManager {
           feeDataOk:            true,  // PAPER: 수수료 0 정의. LIVE 실행 경로는 별도 fee 게이트.
           marketDataFresh:      dataFreshMs < 120_000,
           locks: this.riskState.locks,
-        });
+        }, limits.tradingCapital);
 
         // 평가 결과 영속화 — 저장 실패 시 다음 사이클 fail-closed
         this.riskState = {

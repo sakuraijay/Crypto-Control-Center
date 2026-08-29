@@ -230,7 +230,12 @@ vi.mock('../workers/serverPaperExecutor', () => ({
 }));
 
 // 모킹 이후 실제 모듈 import
-import { buildWorkerDecisionIdentity, workerManager } from '../workers/aiWorker';
+import {
+  buildWorkerDecisionIdentity,
+  evaluateWorkerRiskState,
+  workerManager,
+} from '../workers/aiWorker';
+import { EMPTY_LOCKS, type RiskEvaluationInput } from '../lib/riskStateMachine';
 import { runAiEngine }   from '../workers/stateEngine';
 import { getCachedPrices } from '../routes/gmx';
 import { reconcileLiveSettlements } from '../lib/tradeSettlement';
@@ -396,6 +401,72 @@ describe('upstream price timestamp binding', () => {
     };
     wm.updatePriceBuffers();
     expect(wm.priceAtBySymbol.has('ETH')).toBe(false);
+  });
+});
+
+describe('AI Worker Active Capital Risk binding', () => {
+  const riskInput = (
+    overrides: Partial<RiskEvaluationInput> = {},
+  ): RiskEvaluationInput => ({
+    dailyRiskCapitalUsd: 1000,
+    weeklyRiskCapitalUsd: 1000,
+    currentEquityUsd: 1000,
+    dailyRealizedNetPnlUsd: 0,
+    dailyLossAwareNetPnlUsd: 0,
+    estimatedExitNetPnlUsd: null,
+    weeklyRealizedNetPnlUsd: 0,
+    dailyEntryCount: 0,
+    consecutiveLossCount: 0,
+    openPositionCount: 0,
+    dbOk: true,
+    feeDataOk: true,
+    marketDataFresh: true,
+    locks: { ...EMPTY_LOCKS },
+    ...overrides,
+  });
+
+  it('runtime capital mismatch blocks only new entry without new sticky actions', () => {
+    const result = evaluateWorkerRiskState(
+      riskInput({ currentEquityUsd: 24.5 }),
+      500,
+    );
+
+    expect(result.state).toBe('NORMAL');
+    expect(result.entryAllowed).toBe(false);
+    expect(result.actions).toEqual([]);
+    expect(result.locks.hardStopReason).toBeNull();
+    expect(result.blockReasons[0]).toContain('ACTIVE_CAPITAL_RUNTIME_BELOW_APPROVED_STAGE');
+  });
+
+  it('aligned approved 1000 capital keeps the existing current hard-stop behavior', () => {
+    const result = evaluateWorkerRiskState(
+      riskInput({ currentEquityUsd: 919.99 }),
+      1000,
+    );
+
+    expect(result.state).toBe('HARD_STOPPED');
+    expect(result.entryAllowed).toBe(false);
+    expect(result.actions).toEqual(expect.arrayContaining([
+      'CLOSE_ALL_POSITIONS',
+      'CANCEL_ALL_ORDERS',
+    ]));
+    expect(result.locks.hardStopReason).toContain('hard stop $920');
+  });
+
+  it('preserves an existing historical HARD_STOP across runtime capital drift', () => {
+    const historical = 'historical HARD_STOP — operator review required';
+    const result = evaluateWorkerRiskState(
+      riskInput({
+        currentEquityUsd: 24.5,
+        locks: { ...EMPTY_LOCKS, hardStopReason: historical },
+      }),
+      500,
+    );
+
+    expect(result.state).toBe('HARD_STOPPED');
+    expect(result.entryAllowed).toBe(false);
+    expect(result.actions).toEqual([]);
+    expect(result.locks.hardStopReason).toBe(historical);
   });
 });
 
