@@ -65,6 +65,8 @@ interface RiskPolicyResponse {
     riskOperatingState: string | null;
     riskEntryAllowed: boolean;
     riskBlockReasons: string[];
+    currentHardStopPolicyEquityUsd: number;
+    historicalHardStopTriggerReason: string | null;
     riskDbOk: boolean;
     dailyEntryCount: number | null;
     consecutiveLossCount: number | null;
@@ -163,7 +165,7 @@ export function RiskPolicyCard() {
     ['Defensive Mode (-0.5%)', `-$${d.defensiveModeLossUsd.toFixed(0)} — size 50% · 2x · 잔여 1회`],
     ['일일 손실 한도 (-1%)', `-$${d.dailyMaxLossUsd.toFixed(0)} — 당일 거래 종료`],
     ['주간 손실 한도 (-8%)', `-$${d.weeklyMaxLossUsd.toFixed(0)} — 주간 잠금 (일일 reset 무관)`],
-    ['Hard Stop', `equity ≤ $${p.hardStopEquityUsd} — 자동 해제 없음`],
+    ['현재 Hard Stop 정책 기준', `equity ≤ $${s.currentHardStopPolicyEquityUsd} — 현재 authoritative 기준 · 자동 해제 없음`],
     ['레버리지', `기본 ${p.baseMaxLeverage}x — 조건부 ${p.conditionalMaxLeverage}x ${p.conditional5xEnabled ? '활성' : '비활성'}`],
     ['동시 포지션 / 일일 진입', `${p.maxConcurrentPositions}개 / ${p.maxDailyEntries}회`],
     ['연속 손실 중단', `${p.maxConsecutiveLosses}회`],
@@ -184,6 +186,15 @@ export function RiskPolicyCard() {
       {!s.riskEntryAllowed && s.riskBlockReasons.length > 0 && (
         <div className="text-[10px] rounded border border-amber-500/40 bg-amber-500/8 p-2 text-amber-300">
           진입 차단: {s.riskBlockReasons.join(' · ')}
+        </div>
+      )}
+      {s.historicalHardStopTriggerReason && (
+        <div className="text-[10px] rounded border border-red-500/40 bg-red-500/8 p-2 text-red-300">
+          <span className="font-semibold">과거 HARD_STOP 발동 스냅샷:</span>{' '}
+          {s.historicalHardStopTriggerReason}
+          <span className="block mt-1 text-muted-foreground">
+            상태 발생 당시 기록이며 현재 정책 기준은 아래 별도 행을 따릅니다.
+          </span>
         </div>
       )}
       {!s.riskDbOk && (

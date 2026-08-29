@@ -220,6 +220,8 @@ export interface WorkerStatus {
   riskEntryAllowed: boolean;
   /** 진입 차단 사유 목록 (빈 배열 = 차단 없음) */
   riskBlockReasons: string[];
+  /** HARD_STOP이 발생했을 당시 영속된 trigger 설명. 현재 정책 기준이 아님. */
+  riskHistoricalHardStopTriggerReason: string | null;
   /** RiskEngine DB 영속 정상 여부 — false = fail-closed */
   riskDbOk: boolean;
   /** Manila 거래일 신규 진입 횟수 / 연속 손실 횟수 */
@@ -650,6 +652,7 @@ class WorkerManager {
       riskOperatingState:       this.lastRiskEvaluation?.state ?? null,
       riskEntryAllowed:         this.lastRiskEvaluation?.entryAllowed === true,
       riskBlockReasons:         this.lastRiskEvaluation?.blockReasons ?? [],
+      riskHistoricalHardStopTriggerReason: this.riskState?.locks.hardStopReason ?? null,
       riskDbOk:                 this.riskDbOk,
       riskDailyEntryCount:      this.riskState?.dailyEntryCount ?? null,
       riskConsecutiveLossCount: this.riskState?.consecutiveLossCount ?? null,
