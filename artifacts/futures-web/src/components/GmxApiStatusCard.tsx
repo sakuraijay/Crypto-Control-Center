@@ -148,9 +148,17 @@ export function getGmxApiEvidenceTtlMs(
   const paperCostAgeMs = currentPaperCostAges.length > 0
     ? Math.max(...currentPaperCostAges)
     : 0;
+  const stopEvaluatedAtMs = status.stopCapability?.evaluatedAt
+    ? Date.parse(status.stopCapability.evaluatedAt)
+    : Number.NaN;
+  const stopCapabilityTtlMs = isStopCapabilityDisplayAvailable(status, nowMs)
+    && Number.isFinite(stopEvaluatedAtMs)
+    ? Math.max(0, stopEvaluatedAtMs + maxAgeMs - nowMs)
+    : maxAgeMs;
   return Math.max(0, Math.min(
     maxAgeMs - localAgeMs,
     maxAgeMs - paperCostAgeMs,
+    stopCapabilityTtlMs,
   ));
 }
 

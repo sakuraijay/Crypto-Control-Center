@@ -1,3 +1,5 @@
+// @vitest-environment jsdom
+
 /**
  * 6G-2 §11/§14 — GmxApiStatusCard 렌더·fetch 계약 검증.
  *
@@ -12,6 +14,7 @@
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
@@ -376,7 +379,11 @@ function jsonResponse(status: number, body: unknown): Response {
   } as unknown as Response;
 }
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 
 describe('fetchGmxApiStatus — 오류 구분 (silent null 금지)', () => {
   it('200 → ok + status 파싱', async () => {
@@ -530,6 +537,51 @@ describe('GmxApiStatusCard — fail-closed evidence lifecycle', () => {
   it('PIN generation이 바뀐 뒤 완료된 이전 요청 결과는 적용하지 않는다', () => {
     expect(isCurrentGmxApiRequest(7, 7)).toBe(true);
     expect(isCurrentGmxApiRequest(7, 8)).toBe(false);
+  });
+
+  it('Stop 개별 freshness가 만료되는 즉시 긍정 표시와 snapshot을 폐기한다', async () => {
+    const nowMs = 1_777_000_000_000;
+    vi.useFakeTimers();
+    vi.setSystemTime(nowMs);
+    const liveFreshStatus: GmxApiStatusView = {
+      ...STATUS_FIXTURE,
+      executionEligibleCostMaxAgeMs: 10_000,
+      lastReadinessRefresh: {
+        attempted: true,
+        atMs: nowMs - 9_000,
+        ok: true,
+        basis: 'authenticated-readiness-refresh',
+      },
+      stopCapability: {
+        ...STATUS_FIXTURE.stopCapability!,
+        available: true,
+        reasons: [],
+        paperMode: false,
+        evaluatedAt: new Date(nowMs - 9_000).toISOString(),
+      },
+    };
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      jsonResponse(200, { ok: true, status: liveFreshStatus })));
+
+    render(<GmxApiStatusCard />);
+    fireEvent.change(screen.getByTestId('gmx-api-pin-input'), {
+      target: { value: '123456' },
+    });
+    fireEvent.click(screen.getByTestId('gmx-api-load-button'));
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.getByTestId('gmx-api-rows').textContent)
+      .toContain('가능 · 현재 LIVE · status는 권한 아님');
+
+    act(() => vi.advanceTimersByTime(999));
+    expect(screen.getByTestId('gmx-api-rows')).toBeTruthy();
+
+    act(() => vi.advanceTimersByTime(1));
+    expect(screen.queryByTestId('gmx-api-rows')).toBeNull();
+    expect(screen.getByTestId('gmx-api-message').textContent)
+      .toContain('Readiness 증거 freshness가 만료');
   });
 });
 
