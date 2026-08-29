@@ -16,11 +16,17 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
 import {
+  FAIL_CLOSED_STATUS_MAX_AGE_MS,
   GmxApiStatusCard,
+  getGmxApiEvidenceTtlMs,
+  isPaperCostCapPass,
+  isPaperCostEvidenceCurrent,
+  isStopCapabilityDisplayAvailable,
   PaperCostDetails,
   PaperEconomicsDetails,
   PaperRelayEvidence,
   PaperStopReadinessEvidence,
+  reduceGmxApiCardEvidence,
 } from '../GmxApiStatusCard';
 import {
   fetchGmxApiStatus, postGmxApiReadinessRefresh, classifyGmxApiHttpFailure,
@@ -402,6 +408,116 @@ describe('fetchGmxApiStatus — 오류 구분 (silent null 금지)', () => {
     expect(headers['x-operator-pin']).toBe('123456');
     expect(headers['content-type']).toBe('application/json');
   });
+
+  it('POST refresh 인증 실패도 기존 success snapshot을 폐기하는 state transition으로 연결된다', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(403, { error: 'forbidden' })));
+    const refreshResult = await postGmxApiReadinessRefresh('wrong-pin');
+    expect(refreshResult.kind).toBe('FORBIDDEN');
+
+    const previous = reduceGmxApiCardEvidence(
+      { kind: 'ok', data: STATUS_FIXTURE },
+      1_000,
+    );
+    expect(previous.status?.readyForControlledCanary).toBe(false);
+
+    const invalidated = reduceGmxApiCardEvidence(refreshResult, 2_000);
+    expect(invalidated.status).toBeNull();
+    expect(invalidated.message?.text).toContain('이전 readiness 증거는 폐기');
+  });
+});
+
+describe('GmxApiStatusCard — fail-closed evidence lifecycle', () => {
+  it.each([
+    { kind: 'OPERATOR_AUTH_REQUIRED' as const, message: '401' },
+    { kind: 'FORBIDDEN' as const, message: '403' },
+    { kind: 'SERVICE_UNAVAILABLE' as const, message: '503' },
+    { kind: 'NETWORK' as const, message: 'offline' },
+    { kind: 'SERVER_ERROR' as const, message: '500' },
+    { kind: 'ERROR' as const, message: 'invalid response' },
+  ])('success 뒤 $kind 실패는 이전 PASS성 snapshot을 폐기한다', (failure) => {
+    const success = reduceGmxApiCardEvidence(
+      { kind: 'ok', data: STATUS_FIXTURE },
+      1_000,
+    );
+    expect(success.status).toBe(STATUS_FIXTURE);
+    expect(success.observedAtMs).toBe(1_000);
+
+    const failed = reduceGmxApiCardEvidence(failure, 2_000);
+    expect(failed.status).toBeNull();
+    expect(failed.observedAtMs).toBeNull();
+    expect(failed.message?.text).toContain('이전 readiness 증거는 폐기');
+  });
+
+  it('status TTL은 실행 비용 창·로컬 snapshot age·기존 verified cost age로 fail-closed 제한된다', () => {
+    const view = {
+      ...STATUS_FIXTURE,
+      executionEligibleCostMaxAgeMs: 30_000,
+      paperRuntimeReadiness: {
+        ...STATUS_FIXTURE.paperRuntimeReadiness!,
+        costs: {
+          ...STATUS_FIXTURE.paperRuntimeReadiness!.costs,
+          BTC: { ...STATUS_FIXTURE.paperRuntimeReadiness!.costs.BTC, ageMs: 12_000 },
+          ETH: { ...STATUS_FIXTURE.paperRuntimeReadiness!.costs.ETH, ageMs: 4_000 },
+        },
+      },
+    };
+    expect(getGmxApiEvidenceTtlMs(view, 1_000_000, 1_005_000)).toBe(18_000);
+    expect(getGmxApiEvidenceTtlMs(view, 1_000_000, 1_030_001)).toBe(0);
+    expect(FAIL_CLOSED_STATUS_MAX_AGE_MS).toBe(30_000);
+  });
+
+  it('cost PASS는 $0.40·observational fresh·execution fresh/eligible·withinCap true를 모두 요구한다', () => {
+    const base = {
+      ...STATUS_FIXTURE.paperRuntimeReadiness!.costs.ETH,
+      state: 'verified' as const,
+      fresh: true,
+      observationalFresh: true,
+      capUsd: 0.4,
+      withinCap: true,
+      effectiveRoundTripCostUsd: 0.2,
+      executionSnapshot: {
+        ...STATUS_FIXTURE.paperRuntimeReadiness!.costs.ETH.executionSnapshot,
+        fresh: true,
+        eligible: true,
+      },
+    };
+    expect(isPaperCostEvidenceCurrent(base)).toBe(true);
+    expect(isPaperCostCapPass(base)).toBe(true);
+    for (const invalid of [
+      { ...base, observationalFresh: false },
+      { ...base, capUsd: null },
+      { ...base, withinCap: null },
+      { ...base, executionSnapshot: { ...base.executionSnapshot, fresh: false } },
+      { ...base, executionSnapshot: { ...base.executionSnapshot, eligible: false } },
+    ]) {
+      expect(isPaperCostCapPass(invalid)).toBe(false);
+    }
+  });
+
+  it('Stop 가능 표시는 LIVE·successful refresh·동일 시각대 fresh 평가를 모두 요구한다', () => {
+    const liveFresh = {
+      ...STATUS_FIXTURE,
+      executionEligibleCostMaxAgeMs: 30_000,
+      lastReadinessRefresh: { attempted: true, ok: true, atMs: 100_000, basis: 'verified' },
+      stopCapability: {
+        ...STATUS_FIXTURE.stopCapability!,
+        available: true,
+        paperMode: false,
+        evaluatedAt: new Date(100_001).toISOString(),
+        reasons: [],
+      },
+    };
+    expect(isStopCapabilityDisplayAvailable(liveFresh, 110_000)).toBe(true);
+    expect(isStopCapabilityDisplayAvailable({
+      ...liveFresh,
+      stopCapability: { ...liveFresh.stopCapability, paperMode: true },
+    }, 110_000)).toBe(false);
+    expect(isStopCapabilityDisplayAvailable({
+      ...liveFresh,
+      lastReadinessRefresh: { ...liveFresh.lastReadinessRefresh, ok: false },
+    }, 110_000)).toBe(false);
+    expect(isStopCapabilityDisplayAvailable(liveFresh, 140_002)).toBe(false);
+  });
 });
 
 describe('GmxApiStatusCard — 렌더 계약', () => {
@@ -455,6 +571,11 @@ describe('소스 계약 (§11 규칙)', () => {
 
   it('PIN 저장 없음(localStorage/sessionStorage 0건)·자동 polling 없음(setInterval 0건)', () => {
     expect(cardSrc + libSrc).not.toMatch(/localStorage|sessionStorage|setInterval/);
+  });
+
+  it('PIN 변경은 인증된 이전 status snapshot을 즉시 폐기한다', () => {
+    expect(cardSrc).toContain('onChange={(e) => changePin(e.target.value)}');
+    expect(cardSrc).toContain('운영자 PIN이 변경되어 인증된 이전 readiness 증거를 폐기했습니다');
   });
 
   it('내부 API는 apiUrl 헬퍼만 사용 (origin root /api 규칙)', () => {

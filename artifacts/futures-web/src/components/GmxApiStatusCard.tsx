@@ -10,7 +10,7 @@
  *  - PIN은 요청에만 사용, 저장·전달·표시 금지.
  */
 
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Radio, RefreshCw, Loader2, ShieldAlert, Lock, Ban, CheckCircle2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
@@ -91,10 +91,109 @@ function fmtPct(value: number | null, digits = 3): string {
 }
 
 type PaperReadinessView = NonNullable<GmxApiStatusView['paperRuntimeReadiness']>;
-type PaperCostView = PaperReadinessView['costs']['BTC'];
+export type PaperCostView = PaperReadinessView['costs']['BTC'];
 type PaperEconomicsView = PaperReadinessView['economics']['BTC'];
 type StopReadinessEvidenceView = NonNullable<NonNullable<GmxApiStatusView['stopCapability']>['readinessEvidence']>;
 type PaperRelayEvidenceView = NonNullable<GmxApiStatusView['paperRelayEvidence']>;
+
+export const FAIL_CLOSED_STATUS_MAX_AGE_MS = 30_000;
+
+export interface GmxApiCardEvidenceState {
+  status: GmxApiStatusView | null;
+  observedAtMs: number | null;
+  message: { tone: Tone; text: string } | null;
+}
+
+export function reduceGmxApiCardEvidence(
+  result: GmxApiFetchResult,
+  nowMs: number,
+): GmxApiCardEvidenceState {
+  if (result.kind === 'ok') {
+    return {
+      status: result.data,
+      observedAtMs: nowMs,
+      message: null,
+    };
+  }
+  return {
+    status: null,
+    observedAtMs: null,
+    message: {
+      tone: result.kind === 'OPERATOR_AUTH_REQUIRED' || result.kind === 'FORBIDDEN'
+        ? 'error'
+        : 'warn',
+      text: `${result.message} 이전 readiness 증거는 폐기되었습니다 (fail-closed).`,
+    },
+  };
+}
+
+export function getGmxApiEvidenceTtlMs(
+  status: GmxApiStatusView,
+  observedAtMs: number,
+  nowMs: number,
+): number {
+  const serverMaxAgeMs = status.executionEligibleCostMaxAgeMs;
+  const maxAgeMs = typeof serverMaxAgeMs === 'number'
+    && Number.isFinite(serverMaxAgeMs)
+    && serverMaxAgeMs > 0
+    ? Math.min(serverMaxAgeMs, FAIL_CLOSED_STATUS_MAX_AGE_MS)
+    : FAIL_CLOSED_STATUS_MAX_AGE_MS;
+  const localAgeMs = Math.max(0, nowMs - observedAtMs);
+  const currentPaperCostAges = status.paperRuntimeReadiness
+    ? Object.values(status.paperRuntimeReadiness.costs)
+      .filter((cost) => cost.state === 'verified' && cost.fresh && cost.observationalFresh)
+      .map((cost) => cost.ageMs)
+      .filter((ageMs): ageMs is number => ageMs !== null && Number.isFinite(ageMs))
+    : [];
+  const paperCostAgeMs = currentPaperCostAges.length > 0
+    ? Math.max(...currentPaperCostAges)
+    : 0;
+  return Math.max(0, Math.min(
+    maxAgeMs - localAgeMs,
+    maxAgeMs - paperCostAgeMs,
+  ));
+}
+
+export function isPaperCostEvidenceCurrent(cost: PaperCostView): boolean {
+  return cost.state === 'verified'
+    && cost.fresh
+    && cost.observationalFresh
+    && cost.executionSnapshot.fresh
+    && cost.capUsd === 0.4
+    && cost.withinCap !== null
+    && cost.effectiveRoundTripCostUsd !== null
+    && Number.isFinite(cost.effectiveRoundTripCostUsd);
+}
+
+export function isPaperCostCapPass(cost: PaperCostView): boolean {
+  return isPaperCostEvidenceCurrent(cost)
+    && cost.executionSnapshot.eligible
+    && cost.withinCap === true;
+}
+
+export function isStopCapabilityDisplayAvailable(
+  status: GmxApiStatusView,
+  nowMs: number,
+): boolean {
+  const capability = status.stopCapability;
+  const evaluatedAtMs = capability?.evaluatedAt ? Date.parse(capability.evaluatedAt) : Number.NaN;
+  const refreshAtMs = status.lastReadinessRefresh.atMs;
+  const configuredMaxAgeMs = status.executionEligibleCostMaxAgeMs;
+  const maxAgeMs = typeof configuredMaxAgeMs === 'number'
+    && Number.isFinite(configuredMaxAgeMs)
+    && configuredMaxAgeMs > 0
+    ? Math.min(configuredMaxAgeMs, FAIL_CLOSED_STATUS_MAX_AGE_MS)
+    : FAIL_CLOSED_STATUS_MAX_AGE_MS;
+  const evaluationAgeMs = nowMs - evaluatedAtMs;
+  return capability?.available === true
+    && capability.paperMode === false
+    && status.lastReadinessRefresh.ok
+    && refreshAtMs !== null
+    && Number.isFinite(evaluatedAtMs)
+    && Math.abs(evaluatedAtMs - refreshAtMs) <= 5_000
+    && evaluationAgeMs >= -5_000
+    && evaluationAgeMs <= maxAgeMs;
+}
 
 export function PaperRelayEvidence({ evidence }: { evidence: PaperRelayEvidenceView }) {
   const entries = [...evidence.executionOnly, ...evidence.storedSafety];
@@ -270,15 +369,13 @@ export function PaperCostDetails({
   cost: PaperCostView;
 }) {
   const overCap = cost.withinCap === false;
-  const usable = cost.state === 'verified'
-    && cost.fresh
-    && cost.effectiveRoundTripCostUsd !== null;
+  const evidenceCurrent = isPaperCostEvidenceCurrent(cost);
 
-  if (!usable) {
+  if (!evidenceCurrent) {
     return (
       <>
         <p className="text-[10px] text-amber-300" data-testid={`paper-cost-${symbol.toLowerCase()}-blocked`}>
-          {cost.blockReason ?? cost.failureId ?? `${symbol} 비용 snapshot 사용 불가`}
+          UNAVAILABLE (fail-closed) · {cost.blockReason ?? cost.failureId ?? `${symbol} 비용 snapshot 사용 불가`}
         </p>
         <PaperCostDiagnostics symbol={symbol} cost={cost} />
       </>
@@ -374,18 +471,51 @@ export function PaperEconomicsDetails({
 export function GmxApiStatusCard() {
   const [pin, setPin] = useState('');
   const [status, setStatus] = useState<GmxApiStatusView | null>(null);
+  const [statusObservedAtMs, setStatusObservedAtMs] = useState<number | null>(null);
   const [loading, setLoading] = useState<'idle' | 'status' | 'refresh'>('idle');
   const [message, setMessage] = useState<{ tone: Tone; text: string } | null>(null);
 
   const applyResult = useCallback((r: GmxApiFetchResult) => {
-    if (r.kind === 'ok') {
-      setStatus(r.data);
-      setMessage(null);
-    } else {
-      // 조회 실패 ≠ 미설정 — 기존 스냅샷은 유지하고 실패 사유를 구분 표시
-      setMessage({ tone: r.kind === 'OPERATOR_AUTH_REQUIRED' || r.kind === 'FORBIDDEN' ? 'error' : 'warn', text: r.message });
-    }
+    const next = reduceGmxApiCardEvidence(r, Date.now());
+    setStatus(next.status);
+    setStatusObservedAtMs(next.observedAtMs);
+    setMessage(next.message);
   }, []);
+
+  const changePin = useCallback((nextPin: string) => {
+    setPin(nextPin);
+    if (statusObservedAtMs !== null) {
+      setStatus(null);
+      setStatusObservedAtMs(null);
+      setMessage({
+        tone: 'warn',
+        text: '운영자 PIN이 변경되어 인증된 이전 readiness 증거를 폐기했습니다 (fail-closed).',
+      });
+    }
+  }, [statusObservedAtMs]);
+
+  useEffect(() => {
+    if (!status || statusObservedAtMs === null) return;
+    const ttlMs = getGmxApiEvidenceTtlMs(status, statusObservedAtMs, Date.now());
+    if (ttlMs <= 0) {
+      setStatus(null);
+      setStatusObservedAtMs(null);
+      setMessage({
+        tone: 'warn',
+        text: 'Readiness 증거 freshness가 만료되어 이전 스냅샷을 폐기했습니다 (fail-closed).',
+      });
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setStatus(null);
+      setStatusObservedAtMs(null);
+      setMessage({
+        tone: 'warn',
+        text: 'Readiness 증거 freshness가 만료되어 이전 스냅샷을 폐기했습니다 (fail-closed).',
+      });
+    }, ttlMs);
+    return () => window.clearTimeout(timer);
+  }, [status, statusObservedAtMs]);
 
   const load = useCallback(async () => {
     if (pin.trim().length < 6) {
@@ -409,6 +539,9 @@ export function GmxApiStatusCard() {
 
   const s = status;
   const signerReady = s ? s.signerEnabled && s.signerInitialized : null;
+  const stopCapabilityAvailable = s
+    ? isStopCapabilityDisplayAvailable(s, Date.now())
+    : false;
 
   return (
     <div className="rounded-lg border border-border bg-card p-4 space-y-3" data-testid="gmx-api-status-card">
@@ -426,7 +559,7 @@ export function GmxApiStatusCard() {
             inputMode="numeric"
             autoComplete="off"
             value={pin}
-            onChange={(e) => setPin(e.target.value)}
+            onChange={(e) => changePin(e.target.value)}
             placeholder="운영자 PIN"
             className="w-28 h-7 px-2 rounded border border-border bg-background text-xs"
             data-testid="gmx-api-pin-input"
@@ -527,9 +660,9 @@ export function GmxApiStatusCard() {
           )}
           {/* ── 6H-2B §12 — stop 실행 능력·보호 주문·action 예산 (조회 전용) ── */}
           <Row label="LIVE Stop 실행 능력"
-            tone={s.stopCapability?.available ? 'ok' : 'muted'}
+            tone={stopCapabilityAvailable ? 'ok' : 'muted'}
             value={s.stopCapability
-              ? `${s.stopCapability.available ? '가능' : '불가'} · ${s.stopCapability.paperMode ? '현재 PAPER' : '현재 LIVE'} · status는 권한 아님`
+              ? `${stopCapabilityAvailable ? '가능' : 'UNAVAILABLE (fail-closed)'} · ${s.stopCapability.paperMode ? '현재 PAPER' : '현재 LIVE'} · status는 권한 아님`
               : String(s.stopExecutionAvailable ?? false)} />
           {s.stopCapability && (
             <>
@@ -541,9 +674,13 @@ export function GmxApiStatusCard() {
                 <p className="text-[10px] font-semibold text-muted-foreground">
                   Stop capability 판정 근거 ({s.stopCapability.scope})
                 </p>
-                {s.stopCapability.reasons.length === 0 ? (
+                {stopCapabilityAvailable && s.stopCapability.reasons.length === 0 ? (
                   <p className="text-[10px] text-emerald-300">
                     모든 Stop 실행 전제조건 충족 · 단, 이 읽기 전용 status 자체는 실행 승인이 아닙니다.
+                  </p>
+                ) : s.stopCapability.reasons.length === 0 ? (
+                  <p className="text-[10px] text-amber-300">
+                    Fresh·same-refresh Stop 증거가 없어 UNAVAILABLE (fail-closed)입니다.
                   </p>
                 ) : (
                   s.stopCapability.reasons.map((reason) => (
@@ -676,8 +813,10 @@ export function GmxApiStatusCard() {
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-2">
             {(['BTC', 'ETH'] as const).map((symbol) => {
               const cost = s.paperRuntimeReadiness!.costs[symbol];
-               const economics = s.paperRuntimeReadiness!.economics[symbol];
+              const economics = s.paperRuntimeReadiness!.economics[symbol];
               const overCap = cost.withinCap === false;
+              const evidenceCurrent = isPaperCostEvidenceCurrent(cost);
+              const capPass = isPaperCostCapPass(cost);
               return (
                 <div
                   key={`paper-cost-${symbol}`}
@@ -688,12 +827,14 @@ export function GmxApiStatusCard() {
                     <span className="text-[11px] font-semibold">
                       {symbol} LONG · ${cost.notionalUsd} · {cost.holdingHours}h
                     </span>
-                    <Badge tone={cost.state !== 'verified' ? evidenceTone(cost.state) : overCap ? 'error' : 'ok'}>
-                      {cost.state !== 'verified'
-                        ? evidenceLabel(cost.state)
-                        : cost.withinCap
-                          ? 'WITHIN CAP'
-                          : 'BLOCKED · CAP EXCEEDED'}
+                    <Badge tone={!evidenceCurrent ? 'warn' : overCap ? 'error' : capPass ? 'ok' : 'warn'}>
+                      {!evidenceCurrent
+                        ? 'UNAVAILABLE (fail-closed)'
+                        : overCap
+                          ? 'BLOCKED · CAP EXCEEDED'
+                          : capPass
+                            ? 'WITHIN CAP'
+                            : 'UNAVAILABLE (fail-closed)'}
                     </Badge>
                   </div>
                   <PaperCostDetails symbol={symbol} cost={cost} />

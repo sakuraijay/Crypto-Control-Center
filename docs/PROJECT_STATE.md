@@ -52,6 +52,21 @@
 - `$0.40` cost cap과 Owner Approval, canonical delegation, signer, stop,
   execution gate는 변경하지 않았으며 Production publish/deploy는 별도 범위
 
+### Task #175 — Canary 증거 fail-closed 강화 (완료)
+
+- 인증된 GMX status/readiness 스냅샷은 요청 실패(401/403/503/network/server),
+  PIN 변경, 30초 freshness 만료 시 즉시 폐기하여 이전 PASS성 표시를 남기지 않음
+- PAPER 비용 긍정 표시는 서버 고정 `$0.40` cap, observational freshness,
+  execution snapshot freshness·eligibility, `withinCap=true`가 모두 필요
+- LIVE Stop “가능” 표시는 PAPER가 아니며, 최근 successful readiness refresh와
+  5초 이내로 결속된 fresh capability 평가가 있을 때만 허용
+- 현재 운영 기준은 계속 PAPER, AUTO LIVE off, Relay 제출·네트워크 off이며
+  authorization/action budget·Stop capability 부재와 `HARD_STOPPED`가 Canary 차단 사유
+- 다음 운영 행동은 새 기능 활성화가 아니라 Owner Approval/authorization,
+  action budget, Stop readiness를 각각 명시적으로 충족한 뒤 authenticated refresh로
+  다시 관측하는 것; 이 작업은 실행·인증 경계와 capital 값을 변경하지 않음
+- focused Web 69개, 전체 API 2,095개, 전체 Web 391개 및 TypeScript 검증 통과
+
 ## 테스트 기준
 
 - api-server 318개 + futures-web 53개 = **총 371개** PASS
