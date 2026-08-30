@@ -182,6 +182,30 @@ describe('startup safety barrier', () => {
     expect(startWorker).not.toHaveBeenCalled();
   });
 
+  it('Worker 시작을 기다리는 중 shutdown이 시작되면 Worker를 정리하고 barrier를 열지 않는다', async () => {
+    const worker = deferred();
+    let shuttingDown = false;
+    const startWorker = vi.fn(() => worker.promise);
+    const stopWorker = vi.fn();
+    const barrier = completeStartupSafetyBarrier({
+      loadEmergencyStop: async () => true,
+      reconcileOnRestart: async () => true,
+      shouldRefreshStopCapability: () => false,
+      refreshStopCapability: vi.fn(async () => {}),
+      shouldAbort: () => shuttingDown,
+      startWorker,
+      stopWorker,
+    });
+
+    await vi.waitFor(() => expect(startWorker).toHaveBeenCalledTimes(1));
+    shuttingDown = true;
+    worker.resolve();
+
+    const result = await barrier;
+    expect(result.ready).toBe(false);
+    expect(stopWorker).toHaveBeenCalledTimes(1);
+  });
+
   it('Worker 부분 기동 실패 시 즉시 stop하여 잔존 실행 상태를 정리한다', async () => {
     const stopWorker = vi.fn();
     const error = new Error('worker recovery failed');

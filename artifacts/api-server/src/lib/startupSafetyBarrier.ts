@@ -38,6 +38,9 @@ export async function completeStartupSafetyBarrier(
     }
     workerStartEntered = true;
     await dependencies.startWorker();
+    if (dependencies.shouldAbort()) {
+      throw new Error('Shutdown started during Worker startup');
+    }
     return { ready: true };
   } catch (error) {
     if (workerStartEntered) {

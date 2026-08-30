@@ -5,7 +5,7 @@
  * 부트스트랩 핸들러가 503 JSON을 반환하도록 했다. 이 파일의 내용과 순서는
  * 기존 index.ts 본체와 동일하다: 정적 서빙 부착 → RPC 모니터 →
  * (포트는 이미 열림) → migration → markReady → signer 게이트 → reconciliation
- * → Worker 시작. Worker 시작 순서·migration fail-closed·잠금 로직 불변.
+ * → safety barrier → readiness. Worker 시작 순서·migration fail-closed·잠금 로직 불변.
  */
 import type { Server } from "node:http";
 import app from "./app";
@@ -87,7 +87,8 @@ export function startServer({ httpServer, setDelegate, isShuttingDown }: Startup
   setDelegate(app as unknown as Delegate);
   logger.info("Application loaded — requests delegated to Express (readiness gate active until migrations finish)");
 
-  // Run database migrations, then open the API and start background services.
+  // Run database migrations, then complete the startup safety barrier before
+  // opening the API readiness gate.
   // Each migration file uses IF NOT EXISTS guards — safe to run on every start.
   runMigrations()
     .then(async () => {
@@ -98,8 +99,7 @@ export function startServer({ httpServer, setDelegate, isShuttingDown }: Startup
         return;
       }
 
-      markReady();
-      logger.info("Migrations complete — API ready");
+      logger.info("Migrations complete — startup safety barrier pending");
 
       // 만료 owner-signature 세션은 상태/submit 경계에서 논리적으로 차단한다.
       // Startup과 상태 조회는 세션을 UPDATE하지 않으며 persistent cleanup은
@@ -155,6 +155,9 @@ export function startServer({ httpServer, setDelegate, isShuttingDown }: Startup
           { err: startupSafety.error },
           "Startup safety reconciliation incomplete — Worker startup blocked (fail-closed)",
         );
+      } else {
+        markReady();
+        logger.info("Startup safety barrier complete — API ready");
       }
       // 차단 intent 온체인 재판정 (차단 intent 없으면 no-op — PAPER 무영향)
       startPeriodicIntentReconciliation();

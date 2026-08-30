@@ -143,17 +143,21 @@ describe('startup.ts Worker safety barrier wiring', () => {
     await vi.waitFor(() => expect(mocks.loadEmergencyStopFromDb).toHaveBeenCalledTimes(1));
     expect(mocks.reconcileOnRestart).not.toHaveBeenCalled();
     expect(mocks.workerStart).not.toHaveBeenCalled();
+    expect(mocks.markReady).not.toHaveBeenCalled();
 
     restore.resolve(true);
     await vi.waitFor(() => expect(mocks.reconcileOnRestart).toHaveBeenCalledTimes(1));
     expect(mocks.workerStart).not.toHaveBeenCalled();
+    expect(mocks.markReady).not.toHaveBeenCalled();
 
     reconciliation.resolve(true);
-    await vi.waitFor(() => expect(mocks.workerStart).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(mocks.markReady).toHaveBeenCalledTimes(1));
     expect(mocks.loadEmergencyStopFromDb.mock.invocationCallOrder[0])
       .toBeLessThan(mocks.reconcileOnRestart.mock.invocationCallOrder[0]);
     expect(mocks.reconcileOnRestart.mock.invocationCallOrder[0])
       .toBeLessThan(mocks.workerStart.mock.invocationCallOrder[0]);
+    expect(mocks.workerStart.mock.invocationCallOrder[0])
+      .toBeLessThan(mocks.markReady.mock.invocationCallOrder[0]);
   });
 
   it('손상된 복원 상태가 false를 반환하면 Worker를 시작하지 않는다', async () => {
@@ -166,6 +170,7 @@ describe('startup.ts Worker safety barrier wiring', () => {
     expect(mocks.reconcileOnRestart).not.toHaveBeenCalled();
     expect(mocks.workerStart).not.toHaveBeenCalled();
     expect(mocks.workerStop).not.toHaveBeenCalled();
+    expect(mocks.markReady).not.toHaveBeenCalled();
   });
 
   it('restart reconciliation이 실패하면 Worker를 시작하지 않는다', async () => {
@@ -177,6 +182,7 @@ describe('startup.ts Worker safety barrier wiring', () => {
 
     expect(mocks.workerStart).not.toHaveBeenCalled();
     expect(mocks.workerStop).not.toHaveBeenCalled();
+    expect(mocks.markReady).not.toHaveBeenCalled();
   });
 
   it('migration 이후 shutdown이 시작되면 Worker를 시작하지 않는다', async () => {
@@ -194,5 +200,34 @@ describe('startup.ts Worker safety barrier wiring', () => {
     expect(mocks.reconcileOnRestart).toHaveBeenCalledTimes(1);
     expect(mocks.workerStart).not.toHaveBeenCalled();
     expect(mocks.workerStop).not.toHaveBeenCalled();
+    expect(mocks.markReady).not.toHaveBeenCalled();
+  });
+
+  it('Worker 시작이 실패하면 cleanup 후 readiness를 열지 않는다', async () => {
+    mocks.workerStart.mockRejectedValueOnce(new Error('partial worker startup failed'));
+
+    await startWith();
+    await vi.waitFor(() => expect(mocks.workerStop).toHaveBeenCalledTimes(1));
+
+    expect(mocks.loadEmergencyStopFromDb).toHaveBeenCalledTimes(1);
+    expect(mocks.reconcileOnRestart).toHaveBeenCalledTimes(1);
+    expect(mocks.workerStart).toHaveBeenCalledTimes(1);
+    expect(mocks.markReady).not.toHaveBeenCalled();
+  });
+
+  it('Worker 시작을 기다리는 중 shutdown이 시작되면 cleanup 후 readiness를 열지 않는다', async () => {
+    const worker = deferred<void>();
+    let shuttingDown = false;
+    mocks.workerStart.mockImplementationOnce(() => worker.promise);
+
+    await startWith(() => shuttingDown);
+    await vi.waitFor(() => expect(mocks.workerStart).toHaveBeenCalledTimes(1));
+    expect(mocks.markReady).not.toHaveBeenCalled();
+
+    shuttingDown = true;
+    worker.resolve();
+    await vi.waitFor(() => expect(mocks.workerStop).toHaveBeenCalledTimes(1));
+
+    expect(mocks.markReady).not.toHaveBeenCalled();
   });
 });
