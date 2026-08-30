@@ -47,6 +47,7 @@ import {
   startPaperRuntimeReadinessScheduler,
   stopPaperRuntimeReadinessScheduler,
 } from "./lib/paperRuntimeReadiness";
+import { completeStartupSafetyBarrier } from "./lib/startupSafetyBarrier";
 
 let devWebProxy: DevWebProxyHandle | null = null;
 
@@ -133,21 +134,28 @@ export function startServer({ httpServer, setDelegate, isShuttingDown }: Startup
         logger.info("Delegated signer disabled (DELEGATED_SIGNER_ENABLED != 'true')");
       }
 
-      // Emergency Stop을 먼저 복원한 뒤 보호/intent reconciliation과 stop
-      // capability 평가를 순서대로 수행한다. 초기 상태가 '미평가'로 남거나
-      // DB의 emergency-stop 복원 전에 낙관 평가되는 race를 금지한다.
-      loadEmergencyStopFromDb()
-        .then(() => reconcileOnRestart())
-        .then(async () => {
-          if (process.env.WORKER_ENGINE_MODE !== 'PAPER') {
-            const { refreshStopExecutionCapability } =
-              await import('./workers/liveTestExecutor');
-            await refreshStopExecutionCapability();
-          }
-        })
-        .catch((err: unknown) => {
-          logger.warn({ err }, "Startup safety reconciliation incomplete (fail-closed maintained)");
-        });
+      // Emergency Stop 복원 → restart reconciliation → Stop capability 평가를
+      // Worker 기동 전 barrier로 완료한다. 어느 단계든 실패하면 Worker를
+      // 시작하지 않아 fail-closed 상태를 유지한다.
+      const startupSafety = await completeStartupSafetyBarrier({
+        loadEmergencyStop: loadEmergencyStopFromDb,
+        reconcileOnRestart,
+        shouldRefreshStopCapability: () => process.env.WORKER_ENGINE_MODE !== 'PAPER',
+        refreshStopCapability: async () => {
+          const { refreshStopExecutionCapability } =
+            await import('./workers/liveTestExecutor');
+          await refreshStopExecutionCapability();
+        },
+        shouldAbort: isShuttingDown,
+        startWorker: () => workerManager.start(),
+        stopWorker: () => workerManager.stop(),
+      });
+      if (!startupSafety.ready) {
+        logger.warn(
+          { err: startupSafety.error },
+          "Startup safety reconciliation incomplete — Worker startup blocked (fail-closed)",
+        );
+      }
       // 차단 intent 온체인 재판정 (차단 intent 없으면 no-op — PAPER 무영향)
       startPeriodicIntentReconciliation();
 
@@ -198,9 +206,8 @@ export function startServer({ httpServer, setDelegate, isShuttingDown }: Startup
       // authorization and does not mutate DB/signer/preflight/order state.
       startPaperRuntimeReadinessScheduler();
 
-      // Start the 24/7 AI Worker after migrations complete
-      // so the worker can read/write DB.
-      void workerManager.start();
+      // The 24/7 AI Worker was started inside the safety barrier only after all
+      // required restoration and reconciliation completed successfully.
     })
     .catch((err2) => {
       logger.error({ err: err2 }, "Database migration failed — aborting startup");

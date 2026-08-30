@@ -417,7 +417,7 @@ async function applyIntentResolutionsToAuditLog(resolutions: IntentResolution[])
   else console.error('[LiveTestExecutor] 감사로그 동기화 실패 (차단 유지)');
 }
 
-export async function reconcileOnRestart(): Promise<void> {
+export async function reconcileOnRestart(): Promise<boolean> {
   // 6H-2B — 보호 주문 제출 함수 결선 + startup coverage/재판정 (fail-closed)
   wireProtectionExecution();
   try { await runProtectionPass('startup'); } catch { /* 차단은 capability/게이트가 담당 */ }
@@ -440,7 +440,7 @@ export async function reconcileOnRestart(): Promise<void> {
       // 감사로그를 읽을 수 없으면 상태불명 주문 존재 여부를 알 수 없음 → fail-closed
       _reconciled = false;
       console.error('[LiveTestExecutor] Reconciliation: 감사로그 로드 실패 — 신규 LIVE TEST 주문 차단 (fail-closed)');
-      return;
+      return false;
     }
     const log = loaded.entries;
     const submitted  = log.filter(e => e.status === 'SUBMITTED');
@@ -467,7 +467,7 @@ export async function reconcileOnRestart(): Promise<void> {
         .values({ key: RECONCILED_KEY, value: 'false', updatedAt: now })
         .onConflictDoUpdate({ target: workerStateTable.key, set: { value: 'false', updatedAt: now } });
       console.warn(`[LiveTestExecutor] 상태불명(UNRESOLVED) 주문 ${unresolvedTotal}개 — 신규 LIVE TEST 주문 차단 (fail-closed)`);
-      return;
+      return false;
     }
 
     // durable execution intents 차단 검사 (전환은 함수 서두에서 이미 수행됨)
@@ -480,7 +480,7 @@ export async function reconcileOnRestart(): Promise<void> {
       console.warn(
         '[LiveTestExecutor] 온체인 판정 후에도 미해소 execution intent 잔존 — 신규 LIVE TEST 주문 차단 (fail-closed)',
       );
-      return;
+      return false;
     }
 
     _reconciled = true;
@@ -489,9 +489,11 @@ export async function reconcileOnRestart(): Promise<void> {
       .values({ key: RECONCILED_KEY, value: 'true', updatedAt: now })
       .onConflictDoUpdate({ target: workerStateTable.key, set: { value: 'true', updatedAt: now } });
     console.info('[LiveTestExecutor] Reconciliation 완료 — 상태불명 주문 없음');
+    return true;
   } catch (e) {
     console.error('[LiveTestExecutor] Reconciliation 실패:', e);
     _reconciled = false;
+    return false;
   }
 }
 
@@ -1357,14 +1359,26 @@ export async function setEmergencyStop(reason: string): Promise<void> {
 
 export function isEmergencyStopActive(): boolean { return _emergencyStop; }
 
-export async function loadEmergencyStopFromDb(): Promise<void> {
+export async function loadEmergencyStopFromDb(): Promise<boolean> {
   try {
     const rows = await db.select().from(workerStateTable).where(eq(workerStateTable.key, EMERGENCY_STOP_KEY));
     if (rows.length) {
-      const payload = JSON.parse(rows[0].value) as { active: boolean };
-      _emergencyStop = payload.active === true;
+      const payload: unknown = JSON.parse(rows[0].value);
+      if (
+        payload === null ||
+        typeof payload !== 'object' ||
+        Array.isArray(payload) ||
+        typeof (payload as { active?: unknown }).active !== 'boolean'
+      ) {
+        throw new Error('Invalid emergency-stop payload');
+      }
+      _emergencyStop = (payload as { active: boolean }).active;
     }
-  } catch { /* ignore */ }
+    return true;
+  } catch {
+    _emergencyStop = true;
+    return false;
+  }
 }
 
 // ── 주문 실행 파라미터 ─────────────────────────────────────────────────────────

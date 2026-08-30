@@ -200,6 +200,20 @@ describe('setEmergencyStop', () => {
   });
 });
 
+describe('loadEmergencyStopFromDb', () => {
+  it.each(['{}', 'null', '[]', '{"active":"true"}'])(
+    'parse 가능한 손상 payload %s를 fail-closed로 거부한다',
+    async (value) => {
+      mockWhere.mockResolvedValueOnce([{ value }]);
+      const { loadEmergencyStopFromDb, isEmergencyStopActive } =
+        await import('../workers/liveTestExecutor');
+
+      await expect(loadEmergencyStopFromDb()).resolves.toBe(false);
+      expect(isEmergencyStopActive()).toBe(true);
+    },
+  );
+});
+
 describe('reconcileOnRestart', () => {
   it('재시작 reconciliation이 오류 없이 완료된다', async () => {
     const { reconcileOnRestart } = await import('../workers/liveTestExecutor');
