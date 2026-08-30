@@ -669,6 +669,8 @@ async function buildExecutorActivationInput(args: {
   try { blockingIntentCount = await countBlockingIntentsOrNull(args.selfIntentId ?? null); } catch { blockingIntentCount = null; }
   let revoke = true; // 조회 실패 = revoke 진행 중으로 간주 (차단)
   try { revoke = (await getActiveRevokeSession()) !== null; } catch { revoke = true; }
+  let inFlightReservedActions: number | null = null;
+  try { inFlightReservedActions = await countInFlightReservedActions(); } catch { inFlightReservedActions = null; }
   const fe = getFeeEstimateState();
   const freshLiveFeeQuote = args.manualCanary
     ? getExecutionEligibleCostEvidence(Date.now()).fresh
@@ -683,6 +685,7 @@ async function buildExecutorActivationInput(args: {
     reconciled: _reconciled && getGmxPrepareStartupState().attempted && getGmxPrepareStartupState().ok,
     canonicalAuthorized,
     approvalRemainingOk,
+    inFlightReservedActions,
     blockingIntentCount,
     activeRevokeInProgress: revoke,
     freshLiveFeeQuote,

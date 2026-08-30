@@ -548,6 +548,7 @@ export interface ActivationSourceDeps {
   reconciled: boolean;
   canonicalAuthorized: boolean;
   approvalRemainingOk: boolean;      // remainingActions > 0 && not expired
+  inFlightReservedActions: number | null; // null = DB 조회 실패 → Manual Canary OPEN 차단
   blockingIntentCount: number | null; // null = 조회 실패 → 차단
   activeRevokeInProgress: boolean;
   freshLiveFeeQuote: boolean;
@@ -566,6 +567,7 @@ export function buildActivationInput(d: ActivationSourceDeps): ActivationGateInp
     signerInitialized: isSignerInitialized(),
     // §6 — canonical verified + approval 미만료·잔여 액션 확인까지 묶어서 결속
     canonicalAuthorized: d.canonicalAuthorized && d.approvalRemainingOk,
+    canonicalInFlightReservedActions: d.inFlightReservedActions,
     emergencyStopActive: d.emergencyStopActive,
     dbOk: d.dbOk && d.blockingIntentCount !== null,
     rpcOk: d.rpcOk,

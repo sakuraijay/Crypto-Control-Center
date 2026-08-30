@@ -20,6 +20,7 @@ function allowManualCanaryOpen(): ActivationGateInput {
     manualCanary: true,
     signerInitialized: true,
     canonicalAuthorized: true,
+    canonicalInFlightReservedActions: 0,
     emergencyStopActive: false,
     dbOk: true,
     rpcOk: true,
@@ -35,7 +36,10 @@ function allowManualCanaryOpen(): ActivationGateInput {
   };
 }
 
-function record(atMs: number): void {
+function record(
+  atMs: number,
+  overrides: Partial<Parameters<typeof recordCanonicalSnapshot>[0]> = {},
+): void {
   recordCanonicalSnapshot({
     atMs,
     confirmed: true,
@@ -46,6 +50,7 @@ function record(atMs: number): void {
     integrationDisabled: false,
     expiresAt: String(Math.floor(NOW_MS / 1000) + 3600),
     remaining: '8',
+    ...overrides,
   });
 }
 
@@ -65,7 +70,7 @@ describe('Controlled Canary OPEN activation canonical freshness gate', () => {
     record(NOW_MS - CANONICAL_AUTHORIZATION_FRESHNESS_MS - 1);
     const result = evaluateActivationGate(allowManualCanaryOpen());
     expect(result.networkEligible).toBe(false);
-    expect(result.missing.some((x) => x.includes('canonical readback freshness'))).toBe(true);
+    expect(result.missing.some((x) => x.includes('canonical authorization evidence') && x.includes('stale'))).toBe(true);
   });
 
   it('fails closed when canonical readback is absent or from the future', () => {
@@ -75,6 +80,31 @@ describe('Controlled Canary OPEN activation canonical freshness gate', () => {
     record(NOW_MS + 1);
     const future = evaluateActivationGate(allowManualCanaryOpen());
     expect(future.networkEligible).toBe(false);
+  });
+
+  it.each([
+    ['confirmed=false', { confirmed: false, reason: 'readback unconfirmed' }],
+    ['subaccount listed=false', { isSubaccountListed: false }],
+    ['expiry missing', { expiresAt: null }],
+    ['approval expired', { expiresAt: String(Math.floor(NOW_MS / 1000)) }],
+    ['remaining action budget=0', { remaining: '0' }],
+    ['feature disabled', { featureDisabled: true }],
+    ['integration disabled', { integrationDisabled: true }],
+  ] as const)('fails closed on fresh but invalid canonical evidence: %s', (_label, overrides) => {
+    record(NOW_MS, overrides);
+    const result = evaluateActivationGate(allowManualCanaryOpen());
+    expect(result.networkEligible).toBe(false);
+    expect(result.missing.some((x) => x.includes('canonical authorization evidence 미충족'))).toBe(true);
+  });
+
+  it('fails closed when the in-flight action reservation cannot be read', () => {
+    record(NOW_MS);
+    const result = evaluateActivationGate({
+      ...allowManualCanaryOpen(),
+      canonicalInFlightReservedActions: null,
+    });
+    expect(result.networkEligible).toBe(false);
+    expect(result.missing.some((x) => x.includes('진행 중 예약분 조회 불가'))).toBe(true);
   });
 
   it('does not add the Manual Canary freshness requirement to CLOSE safety actions', () => {

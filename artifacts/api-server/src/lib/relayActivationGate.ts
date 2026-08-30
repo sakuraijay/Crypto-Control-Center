@@ -8,7 +8,7 @@
 
 import { validateEnvAgainstManifest } from './gmxDeploymentManifest';
 import { getCanonicalSnapshot } from './relayActivationStatus';
-import { evaluateCanonicalAuthorizationFreshness } from './canonicalAuthorizationFreshness';
+import { evaluateManualCanaryCanonicalAuthorization } from './manualCanaryCanonicalAuthorization';
 
 export interface ActivationGateInput {
   env: NodeJS.ProcessEnv;
@@ -16,6 +16,8 @@ export interface ActivationGateInput {
   manualCanary?: boolean;           // PAPER/manual-only GMX API v2 경로
   signerInitialized: boolean;
   canonicalAuthorized: boolean;     // AUTHORIZED 또는 유효한 첫-action approval(READY 세션+canonical nonce 일치)
+  /** Manual Canary OPEN의 기존 action-budget 정책에 포함할 DB 파생 예약분. 누락/실패 = 차단. */
+  canonicalInFlightReservedActions?: number | null;
   emergencyStopActive: boolean;
   dbOk: boolean;
   rpcOk: boolean;
@@ -61,14 +63,16 @@ export function evaluateActivationGate(input: ActivationGateInput): ActivationGa
   if (input.currentChainId !== 42161) missing.push(`chainId ${input.currentChainId ?? '미확인'} ≠ 42161`);
   if (!manualPaper && !input.gmxConfigOk) missing.push('GMX public config 미해결');
 
-  // Controlled Canary OPEN은 저장 canonical authorization readback의 freshness까지
-  // 실제 activation gate에서 다시 확인한다. preflight 통과 후 상태가 stale이면 제출 0회.
+  // Controlled Canary OPEN은 caller의 canonicalAuthorized boolean만 신뢰하지 않고,
+  // 저장 canonical readback의 freshness + 실제 authorization 의미 + 기존 action budget을
+  // 최종 activation gate에서 다시 확인한다. 모순/누락이면 prepare·서명·제출 0회.
   if (input.manualCanary === true && input.kind === 'OPEN') {
-    const freshness = evaluateCanonicalAuthorizationFreshness(
+    const canonical = evaluateManualCanaryCanonicalAuthorization(
       getCanonicalSnapshot(),
       input.nowMs ?? Date.now(),
+      input.canonicalInFlightReservedActions ?? null,
     );
-    if (!freshness.ok) missing.push(`canonical readback freshness 미충족: ${freshness.detail}`);
+    if (!canonical.ok) missing.push(`canonical authorization evidence 미충족: ${canonical.detail}`);
   }
 
   // 6C §6 — env 주소가 감사된 manifest와 다르면 LIVE fail-closed (자동 대입 없음)

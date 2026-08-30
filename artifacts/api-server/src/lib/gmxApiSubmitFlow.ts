@@ -126,6 +126,16 @@ export async function runGmxApiSubmitFlow(input: GmxSubmitFlowInput): Promise<Gm
     finalStatus: null, taskRowId: null, gmxRequestId: null, blockReasons,
   };
 
+  // 실제 durable flow의 주문 의미와 activation gate의 의미를 먼저 결속한다.
+  // OPEN을 CLOSE로 위장해 Manual Canary canonical 검증을 우회하는 모순 입력은
+  // durable task 생성·prepare·서명·submit 이전에 fail-closed.
+  if (input.activation.kind !== input.kind) {
+    blockReasons.push(
+      `activation kind ${input.activation.kind} ≠ flow kind ${input.kind} — prepare·서명·제출 0회 (fail-closed)`,
+    );
+    return result;
+  }
+
   // 1. 중앙 게이트 — 미충족이면 durable 기록·prepare 호출 0회 (PAPER/LOCK 포함)
   const gate = evaluateActivationGate(input.activation);
   if (!gate.networkEligible) {
@@ -333,6 +343,12 @@ export async function runGmxApiSubmitFlow(input: GmxSubmitFlowInput): Promise<Gm
   try { regate = await input.reevaluateActivation(); }
   catch {
     await cancelBeforeSubmit('게이트 재평가 실패 — 제출 0회 (fail-closed)');
+    return result;
+  }
+  if (regate.kind !== input.kind) {
+    await cancelBeforeSubmit(
+      `제출 직전 activation kind ${regate.kind} ≠ flow kind ${input.kind} — 제출 0회 (fail-closed)`,
+    );
     return result;
   }
   const gate2 = evaluateActivationGate(regate);

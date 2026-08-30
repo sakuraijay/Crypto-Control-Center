@@ -360,6 +360,7 @@ describe('6단계 §6 — activation 게이트에 read-only 플래그 요구', (
     };
     const input = fullInput(env);
     input.manualCanary = true;
+    input.canonicalInFlightReservedActions = 0;
     input.gmxConfigOk = false;
     input.nowMs = nowMs;
     expect(evaluateActivationGate(input)).toMatchObject({ networkEligible: true, missing: [] });

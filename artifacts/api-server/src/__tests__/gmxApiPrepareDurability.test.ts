@@ -103,6 +103,7 @@ import {
 import { GMX_API_TRANSPORT_GEN, type PreparedOrderView } from '../lib/gmxApiOrders';
 import type { GmxApiTransport } from '../lib/gmxApiTransport';
 import type { ActivationGateInput } from '../lib/relayActivationGate';
+import { __resetReadinessRefreshForTests, recordCanonicalSnapshot } from '../lib/relayActivationStatus';
 
 const MAIN = '0x1111111111111111111111111111111111111111';
 const SUB = '0x2222222222222222222222222222222222222222';
@@ -185,6 +186,7 @@ function flowInput(transport: GmxApiTransport, overrides?: Partial<GmxSubmitFlow
 beforeEach(() => {
   store.tasks = []; store.failInsert = false; store.failUpdate = false; store.failSelect = false;
   __resetGmxPrepareStartupStateForTests();
+  __resetReadinessRefreshForTests();
 });
 afterEach(() => { vi.restoreAllMocks(); });
 
@@ -205,6 +207,75 @@ describe('6G-3 §3 — 외부 prepare 호출 전 영속화', () => {
     expect(r.signCalls).toBe(0);
     expect(r.submitCalls).toBe(0);
     expect(calls.submit).toBe(0);
+  });
+
+  it('caller boolean이 true여도 fresh canonical evidence가 무효면 prepare·서명·submit·transport 0회', async () => {
+    const nowMs = Date.parse('2026-08-30T07:00:00.000Z');
+    recordCanonicalSnapshot({
+      atMs: nowMs,
+      confirmed: true,
+      reason: null,
+      approvalNonce: '7',
+      isSubaccountListed: false,
+      featureDisabled: false,
+      integrationDisabled: false,
+      expiresAt: String(Math.floor(nowMs / 1000) + 3600),
+      remaining: '8',
+    });
+    const { transport, calls } = mockTransport();
+    const prepareSpy = vi.fn(async () => ({ ok: true, data: {}, peerHost: 'x' } as never));
+    const signSpy = vi.fn(async () => ({ ok: true as const, signature: '0xsig-secret' }));
+    const paperEnv = {
+      WORKER_ENGINE_MODE: 'PAPER',
+      AUTO_WORKER_LIVE_ENABLED: 'false',
+      LIVE_TEST_EXECUTION_LOCKED: 'false',
+      DELEGATED_SIGNER_ENABLED: 'true',
+      GMX_API_READONLY_ENABLED: 'true',
+      GMX_API_ORDER_SUBMISSION_ENABLED: 'true',
+    } as NodeJS.ProcessEnv;
+
+    const r = await runGmxApiSubmitFlow(flowInput(transport, {
+      activation: fullActivation({
+        env: paperEnv,
+        manualCanary: true,
+        canonicalAuthorized: true,
+        canonicalInFlightReservedActions: 0,
+        nowMs,
+      }),
+      prepareOrder: prepareSpy,
+      signTypedData: signSpy,
+    }));
+
+    expect(r.blockReasons.some((x) => x.includes('delegated authorization 비활성'))).toBe(true);
+    expect(prepareSpy).not.toHaveBeenCalled();
+    expect(signSpy).not.toHaveBeenCalled();
+    expect(r.prepareCalls).toBe(0);
+    expect(r.signCalls).toBe(0);
+    expect(r.submitCalls).toBe(0);
+    expect(calls.submit).toBe(0);
+    expect(store.tasks).toHaveLength(0);
+  });
+
+  it('실제 OPEN flow를 activation CLOSE로 위장해도 prepare·서명·submit·transport 0회', async () => {
+    const { transport, calls } = mockTransport();
+    const prepareSpy = vi.fn(async () => ({ ok: true, data: {}, peerHost: 'x' } as never));
+    const signSpy = vi.fn(async () => ({ ok: true as const, signature: '0xsig-secret' }));
+
+    const r = await runGmxApiSubmitFlow(flowInput(transport, {
+      kind: 'OPEN',
+      activation: fullActivation({ kind: 'CLOSE' }),
+      prepareOrder: prepareSpy,
+      signTypedData: signSpy,
+    }));
+
+    expect(r.blockReasons.some((x) => x.includes('activation kind CLOSE ≠ flow kind OPEN'))).toBe(true);
+    expect(prepareSpy).not.toHaveBeenCalled();
+    expect(signSpy).not.toHaveBeenCalled();
+    expect(r.prepareCalls).toBe(0);
+    expect(r.signCalls).toBe(0);
+    expect(r.submitCalls).toBe(0);
+    expect(calls.submit).toBe(0);
+    expect(store.tasks).toHaveLength(0);
   });
 
   it('task insert 실패 → prepare·서명·제출 0회', async () => {
