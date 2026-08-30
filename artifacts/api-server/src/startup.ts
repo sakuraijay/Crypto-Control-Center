@@ -134,12 +134,36 @@ export function startServer({ httpServer, setDelegate, isShuttingDown }: Startup
         logger.info("Delegated signer disabled (DELEGATED_SIGNER_ENABLED != 'true')");
       }
 
-      // Emergency Stop 복원 → restart reconciliation → Stop capability 평가를
-      // Worker 기동 전 barrier로 완료한다. 어느 단계든 실패하면 Worker를
-      // 시작하지 않아 fail-closed 상태를 유지한다.
+      // Emergency Stop 복원 → restart/pending execution reconciliation
+      // → Stop capability 평가를 Worker 기동 전 barrier로 완료한다.
+      // 어느 단계든 실패하거나 blocking 상태가 남으면 Worker를 시작하지
+      // 않아 fail-closed 상태를 유지한다.
       const startupSafety = await completeStartupSafetyBarrier({
         loadEmergencyStop: loadEmergencyStopFromDb,
-        reconcileOnRestart,
+        reconcileOnRestart: async () => {
+          if (await reconcileOnRestart() !== true) return false;
+
+          // prepare 단계는 전이 실패/전수 확인 실패를 명시적 ok=false로 반환한다.
+          const prepare = await reconcileGmxPrepareStagesOnStartup();
+          if (prepare.attempted !== true || prepare.ok !== true) return false;
+
+          // GMX API task reconciliation은 오류를 throw하지 않고 summary에 기록하므로
+          // errors=0을 명시적으로 확인해야 한다.
+          const gmxApi = await reconcileGmxApiTasksOnStartup();
+          if (gmxApi.errors !== 0) return false;
+
+          // readonly 경로 비활성/receipt pending/UNRESOLVED/API_PREPARED 등 summary만으로
+          // 완결 여부를 단정할 수 없으므로 durable non-terminal task를 다시 센다.
+          const openRelayTasks = await countOpenRelayTasksOrNull();
+          if (openRelayTasks !== 0) return false;
+
+          const settlements = await reconcileLiveSettlements(
+            createProductionCloseSettlementFetcher(),
+          );
+          return settlements.ok === true
+            && settlements.incomplete === false
+            && settlements.unsettledCount === 0;
+        },
         shouldRefreshStopCapability: () => process.env.WORKER_ENGINE_MODE !== 'PAPER',
         refreshStopCapability: async () => {
           const { refreshStopExecutionCapability } =
@@ -162,22 +186,7 @@ export function startServer({ httpServer, setDelegate, isShuttingDown }: Startup
       // 차단 intent 온체인 재판정 (차단 intent 없으면 no-op — PAPER 무영향)
       startPeriodicIntentReconciliation();
 
-      // 6G-2 §9 — GMX API v2 relay task reconciliation (readonly 플래그 꺼짐 = 외부 호출 0회)
-      // 6G-3 §4 — prepare 단계 durable 상태 reconciliation (GMX POST·서명 0회)
-      reconcileGmxPrepareStagesOnStartup().catch(() => {});
-      reconcileGmxApiTasksOnStartup()
-        .then(() => reconcileLiveSettlements(createProductionCloseSettlementFetcher()))
-        .then((s) => {
-          if (s.unsettledCount !== 0) {
-            logger.info({
-              unsettled: s.unsettledCount,
-              settledNow: s.settledNow,
-              incomplete: s.incomplete,
-              firstReason: s.reasons[0] ?? null,
-            }, "Startup CLOSE settlement reconciliation completed");
-          }
-        })
-        .catch(() => { /* read-only startup reconciliation 실패 — UNSETTLED 유지 */ });
+      // Startup reconciliation은 위 barrier에서 완료됐다. 이후 주기 조회만 시작한다.
       startPeriodicGmxApiReconciliation();
 
       // Relay startup reconciliation (5단계 §8) — migration 이후 순서 고정.

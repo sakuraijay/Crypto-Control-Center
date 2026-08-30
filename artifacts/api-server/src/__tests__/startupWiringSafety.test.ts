@@ -12,6 +12,29 @@ const mocks = vi.hoisted(() => ({
   startPeriodicIntentReconciliation: vi.fn(),
   startPeriodicGmxApiReconciliation: vi.fn(),
   startPaperRuntimeReadinessScheduler: vi.fn(),
+  reconcileGmxPrepareStagesOnStartup: vi.fn<() => Promise<{
+    attempted: boolean;
+    ok: boolean;
+    atMs: number | null;
+    stalePreparedFailed: number;
+    requestedToUnresolved: number;
+    apiPreparedHeld: number;
+  }>>(),
+  reconcileGmxApiTasksOnStartup: vi.fn<() => Promise<{
+    scanned: number;
+    transitioned: number;
+    unresolvedMarked: number;
+    skippedTransient: number;
+    errors: number;
+  }>>(),
+  countOpenRelayTasksOrNull: vi.fn<() => Promise<number | null>>(),
+  reconcileLiveSettlements: vi.fn<() => Promise<{
+    ok: boolean;
+    unsettledCount: number;
+    settledNow: number;
+    incomplete: boolean;
+    reasons: string[];
+  }>>(),
 }));
 
 vi.mock('../app', () => ({ default: vi.fn() }));
@@ -57,23 +80,18 @@ vi.mock('../lib/readiness', () => ({
   markReady: mocks.markReady,
 }));
 vi.mock('../lib/gmxApiStatusReconciler', () => ({
-  reconcileGmxApiTasksOnStartup: vi.fn(async () => {}),
+  reconcileGmxApiTasksOnStartup: mocks.reconcileGmxApiTasksOnStartup,
   startPeriodicGmxApiReconciliation: mocks.startPeriodicGmxApiReconciliation,
   stopPeriodicGmxApiReconciliation: vi.fn(),
 }));
 vi.mock('../lib/tradeSettlement', () => ({
-  reconcileLiveSettlements: vi.fn(async () => ({
-    unsettledCount: 0,
-    settledNow: 0,
-    incomplete: false,
-    reasons: [],
-  })),
+  reconcileLiveSettlements: mocks.reconcileLiveSettlements,
 }));
 vi.mock('../lib/productionCloseSettlementFetcher', () => ({
   createProductionCloseSettlementFetcher: vi.fn(() => vi.fn()),
 }));
 vi.mock('../lib/gmxApiPrepareStartup', () => ({
-  reconcileGmxPrepareStagesOnStartup: vi.fn(async () => {}),
+  reconcileGmxPrepareStagesOnStartup: mocks.reconcileGmxPrepareStagesOnStartup,
 }));
 vi.mock('../lib/relayActivationStatus', () => ({
   runStartupRelayReconciliation: vi.fn(async () => ({ complete: false, reasons: [] })),
@@ -83,7 +101,7 @@ vi.mock('../lib/executionIntents', () => ({
   countBlockingIntentsOrNull: vi.fn(async () => 0),
 }));
 vi.mock('../lib/relayLifecycle', () => ({
-  countOpenRelayTasksOrNull: vi.fn(async () => 0),
+  countOpenRelayTasksOrNull: mocks.countOpenRelayTasksOrNull,
 }));
 vi.mock('../lib/relayNonce', () => ({
   countUnboundNoncesOrNull: vi.fn(async () => 0),
@@ -130,6 +148,29 @@ describe('startup.ts Worker safety barrier wiring', () => {
     mocks.runMigrations.mockResolvedValue();
     mocks.loadEmergencyStopFromDb.mockResolvedValue(true);
     mocks.reconcileOnRestart.mockResolvedValue(true);
+    mocks.reconcileGmxPrepareStagesOnStartup.mockResolvedValue({
+      attempted: true,
+      ok: true,
+      atMs: 1,
+      stalePreparedFailed: 0,
+      requestedToUnresolved: 0,
+      apiPreparedHeld: 0,
+    });
+    mocks.reconcileGmxApiTasksOnStartup.mockResolvedValue({
+      scanned: 0,
+      transitioned: 0,
+      unresolvedMarked: 0,
+      skippedTransient: 0,
+      errors: 0,
+    });
+    mocks.countOpenRelayTasksOrNull.mockResolvedValue(0);
+    mocks.reconcileLiveSettlements.mockResolvedValue({
+      ok: true,
+      unsettledCount: 0,
+      settledNow: 0,
+      incomplete: false,
+      reasons: [],
+    });
     mocks.workerStart.mockResolvedValue();
   });
 
@@ -155,6 +196,14 @@ describe('startup.ts Worker safety barrier wiring', () => {
     expect(mocks.loadEmergencyStopFromDb.mock.invocationCallOrder[0])
       .toBeLessThan(mocks.reconcileOnRestart.mock.invocationCallOrder[0]);
     expect(mocks.reconcileOnRestart.mock.invocationCallOrder[0])
+      .toBeLessThan(mocks.reconcileGmxPrepareStagesOnStartup.mock.invocationCallOrder[0]);
+    expect(mocks.reconcileGmxPrepareStagesOnStartup.mock.invocationCallOrder[0])
+      .toBeLessThan(mocks.reconcileGmxApiTasksOnStartup.mock.invocationCallOrder[0]);
+    expect(mocks.reconcileGmxApiTasksOnStartup.mock.invocationCallOrder[0])
+      .toBeLessThan(mocks.countOpenRelayTasksOrNull.mock.invocationCallOrder[0]);
+    expect(mocks.countOpenRelayTasksOrNull.mock.invocationCallOrder[0])
+      .toBeLessThan(mocks.reconcileLiveSettlements.mock.invocationCallOrder[0]);
+    expect(mocks.reconcileLiveSettlements.mock.invocationCallOrder[0])
       .toBeLessThan(mocks.workerStart.mock.invocationCallOrder[0]);
     expect(mocks.workerStart.mock.invocationCallOrder[0])
       .toBeLessThan(mocks.markReady.mock.invocationCallOrder[0]);
@@ -178,6 +227,136 @@ describe('startup.ts Worker safety barrier wiring', () => {
 
     await startWith();
     await vi.waitFor(() => expect(mocks.reconcileOnRestart).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(mocks.startPeriodicIntentReconciliation).toHaveBeenCalledTimes(1));
+
+    expect(mocks.workerStart).not.toHaveBeenCalled();
+    expect(mocks.workerStop).not.toHaveBeenCalled();
+    expect(mocks.markReady).not.toHaveBeenCalled();
+  });
+
+  it('pending execution reconciliation이 완료될 때까지 Worker와 readiness를 열지 않는다', async () => {
+    const prepare = deferred<{
+      attempted: boolean;
+      ok: boolean;
+      atMs: number | null;
+      stalePreparedFailed: number;
+      requestedToUnresolved: number;
+      apiPreparedHeld: number;
+    }>();
+    const gmxApi = deferred<{
+      scanned: number;
+      transitioned: number;
+      unresolvedMarked: number;
+      skippedTransient: number;
+      errors: number;
+    }>();
+    const openTasks = deferred<number | null>();
+    const settlements = deferred<{
+      ok: boolean;
+      unsettledCount: number;
+      settledNow: number;
+      incomplete: boolean;
+      reasons: string[];
+    }>();
+    mocks.reconcileGmxPrepareStagesOnStartup.mockImplementationOnce(() => prepare.promise);
+    mocks.reconcileGmxApiTasksOnStartup.mockImplementationOnce(() => gmxApi.promise);
+    mocks.countOpenRelayTasksOrNull.mockImplementationOnce(() => openTasks.promise);
+    mocks.reconcileLiveSettlements.mockImplementationOnce(() => settlements.promise);
+
+    await startWith();
+    await vi.waitFor(() => expect(mocks.reconcileGmxPrepareStagesOnStartup).toHaveBeenCalledTimes(1));
+    expect(mocks.reconcileGmxApiTasksOnStartup).not.toHaveBeenCalled();
+    expect(mocks.workerStart).not.toHaveBeenCalled();
+    expect(mocks.markReady).not.toHaveBeenCalled();
+
+    prepare.resolve({
+      attempted: true, ok: true, atMs: 1,
+      stalePreparedFailed: 0, requestedToUnresolved: 0, apiPreparedHeld: 0,
+    });
+    await vi.waitFor(() => expect(mocks.reconcileGmxApiTasksOnStartup).toHaveBeenCalledTimes(1));
+    expect(mocks.countOpenRelayTasksOrNull).not.toHaveBeenCalled();
+    expect(mocks.workerStart).not.toHaveBeenCalled();
+
+    gmxApi.resolve({
+      scanned: 1, transitioned: 1, unresolvedMarked: 0, skippedTransient: 0, errors: 0,
+    });
+    await vi.waitFor(() => expect(mocks.countOpenRelayTasksOrNull).toHaveBeenCalledTimes(1));
+    expect(mocks.reconcileLiveSettlements).not.toHaveBeenCalled();
+    expect(mocks.workerStart).not.toHaveBeenCalled();
+
+    openTasks.resolve(0);
+    await vi.waitFor(() => expect(mocks.reconcileLiveSettlements).toHaveBeenCalledTimes(1));
+    expect(mocks.workerStart).not.toHaveBeenCalled();
+    expect(mocks.markReady).not.toHaveBeenCalled();
+
+    settlements.resolve({
+      ok: true, unsettledCount: 0, settledNow: 0, incomplete: false, reasons: [],
+    });
+    await vi.waitFor(() => expect(mocks.markReady).toHaveBeenCalledTimes(1));
+    expect(mocks.workerStart).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['prepare-stage 실패', () => {
+      mocks.reconcileGmxPrepareStagesOnStartup.mockResolvedValueOnce({
+        attempted: true, ok: false, atMs: 1,
+        stalePreparedFailed: 0, requestedToUnresolved: 0, apiPreparedHeld: 0,
+      });
+    }],
+    ['prepare-stage 미수행', () => {
+      mocks.reconcileGmxPrepareStagesOnStartup.mockResolvedValueOnce({
+        attempted: false, ok: true, atMs: null,
+        stalePreparedFailed: 0, requestedToUnresolved: 0, apiPreparedHeld: 0,
+      });
+    }],
+    ['GMX API reconciliation 오류', () => {
+      mocks.reconcileGmxApiTasksOnStartup.mockResolvedValueOnce({
+        scanned: 1, transitioned: 0, unresolvedMarked: 0, skippedTransient: 0, errors: 1,
+      });
+    }],
+    ['non-terminal task 잔존', () => {
+      mocks.countOpenRelayTasksOrNull.mockResolvedValueOnce(1);
+    }],
+    ['non-terminal task 조회 실패', () => {
+      mocks.countOpenRelayTasksOrNull.mockResolvedValueOnce(null);
+    }],
+    ['CLOSE settlement 불완전', () => {
+      mocks.reconcileLiveSettlements.mockResolvedValueOnce({
+        ok: false, unsettledCount: 1, settledNow: 0, incomplete: true,
+        reasons: ['LIVE_SETTLEMENT_INCOMPLETE'],
+      });
+    }],
+  ] as const)('%s이면 Worker와 readiness를 fail-closed로 유지한다', async (_label, arrange) => {
+    arrange();
+
+    await startWith();
+    await vi.waitFor(() => expect(mocks.startPeriodicIntentReconciliation).toHaveBeenCalledTimes(1));
+
+    expect(mocks.workerStart).not.toHaveBeenCalled();
+    expect(mocks.workerStop).not.toHaveBeenCalled();
+    expect(mocks.markReady).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['prepare-stage throw', () => {
+      mocks.reconcileGmxPrepareStagesOnStartup.mockRejectedValueOnce(new Error('prepare failed'));
+    }],
+    ['GMX API reconciliation throw', () => {
+      mocks.reconcileGmxApiTasksOnStartup.mockRejectedValueOnce(new Error('GMX API failed'));
+    }],
+    ['non-terminal task 조회 throw', () => {
+      mocks.countOpenRelayTasksOrNull.mockRejectedValueOnce(new Error('task count failed'));
+    }],
+    ['CLOSE settlement throw', () => {
+      mocks.reconcileLiveSettlements.mockRejectedValueOnce(new Error('settlement failed'));
+    }],
+  ] as const)('%s이면 예외를 barrier 밖으로 유출하지 않고 fail-closed로 유지한다', async (
+    _label,
+    arrange,
+  ) => {
+    arrange();
+
+    await startWith();
     await vi.waitFor(() => expect(mocks.startPeriodicIntentReconciliation).toHaveBeenCalledTimes(1));
 
     expect(mocks.workerStart).not.toHaveBeenCalled();
