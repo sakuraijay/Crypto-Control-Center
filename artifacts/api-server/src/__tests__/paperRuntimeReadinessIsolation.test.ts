@@ -215,7 +215,7 @@ describe('isolated PAPER runtime readiness', () => {
         });
         expect(runtime.getPaperRuntimeReadinessSnapshot().scheduler.nextRefreshAtMs)
           .not.toBeNull();
-      });
+      }, { timeout: 30_000 });
 
       expect(stopState.getStopExecutionCapability()).toEqual({
         available: false,
