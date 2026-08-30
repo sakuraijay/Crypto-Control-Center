@@ -7,6 +7,8 @@
  */
 
 import { validateEnvAgainstManifest } from './gmxDeploymentManifest';
+import { getCanonicalSnapshot } from './relayActivationStatus';
+import { evaluateCanonicalAuthorizationFreshness } from './canonicalAuthorizationFreshness';
 
 export interface ActivationGateInput {
   env: NodeJS.ProcessEnv;
@@ -26,6 +28,8 @@ export interface ActivationGateInput {
   /** 6C §7 — 저장된 배포 코드 존재 검증 스냅샷이 ok인가 (읽기 전용 refresh로만 갱신) */
   deploymentVerified: boolean;
   kind: 'OPEN' | 'CLOSE' | 'REVOKE';
+  /** 테스트/결정적 검증용. 생략 시 현재 시각 사용. */
+  nowMs?: number;
 }
 
 export interface ActivationGateResult {
@@ -56,6 +60,17 @@ export function evaluateActivationGate(input: ActivationGateInput): ActivationGa
   if (!input.freshLiveFeeQuote) missing.push('fresh live fee quote 없음 (mock 불인정)');
   if (input.currentChainId !== 42161) missing.push(`chainId ${input.currentChainId ?? '미확인'} ≠ 42161`);
   if (!manualPaper && !input.gmxConfigOk) missing.push('GMX public config 미해결');
+
+  // Controlled Canary OPEN은 저장 canonical authorization readback의 freshness까지
+  // 실제 activation gate에서 다시 확인한다. preflight 통과 후 상태가 stale이면 제출 0회.
+  if (input.manualCanary === true && input.kind === 'OPEN') {
+    const freshness = evaluateCanonicalAuthorizationFreshness(
+      getCanonicalSnapshot(),
+      input.nowMs ?? Date.now(),
+    );
+    if (!freshness.ok) missing.push(`canonical readback freshness 미충족: ${freshness.detail}`);
+  }
+
   // 6C §6 — env 주소가 감사된 manifest와 다르면 LIVE fail-closed (자동 대입 없음)
   if (!manualPaper) {
     const manifest = validateEnvAgainstManifest(env);

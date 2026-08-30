@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { requiredActionsBeforeOpen } from '../lib/actionBudget';
+import { CANONICAL_AUTHORIZATION_FRESHNESS_MS } from '../lib/canonicalAuthorizationFreshness';
 import { evaluateManualCanaryCanonicalAuthorization } from '../lib/manualCanaryCanonicalAuthorization';
 import type { CanonicalSnapshot } from '../lib/relayActivationStatus';
 
@@ -29,6 +30,32 @@ describe('Manual Canary canonical authorization preflight', () => {
       NOW_MS,
       0,
     )).toMatchObject({ ok: false });
+  });
+
+  it('fails closed when canonical readback timestamp is stale, future, missing-like, or invalid', () => {
+    const invalidTimestamps = [
+      NOW_MS - CANONICAL_AUTHORIZATION_FRESHNESS_MS - 1,
+      NOW_MS + 1,
+      Number.NaN,
+      0,
+    ];
+    for (const atMs of invalidTimestamps) {
+      const result = evaluateManualCanaryCanonicalAuthorization(
+        snapshot({ atMs }),
+        NOW_MS,
+        0,
+      );
+      expect(result.ok).toBe(false);
+    }
+  });
+
+  it('accepts canonical readback at the exact freshness boundary', () => {
+    const result = evaluateManualCanaryCanonicalAuthorization(
+      snapshot({ atMs: NOW_MS - CANONICAL_AUTHORIZATION_FRESHNESS_MS }),
+      NOW_MS,
+      0,
+    );
+    expect(result.ok).toBe(true);
   });
 
   it('fails closed when the canonical subaccount is not currently authorized', () => {

@@ -1,4 +1,5 @@
 import { evaluateActionBudget } from './actionBudget';
+import { evaluateCanonicalAuthorizationFreshness } from './canonicalAuthorizationFreshness';
 import type { CanonicalSnapshot } from './relayActivationStatus';
 import type { CheckOutcome } from './manualCanary';
 
@@ -11,6 +12,10 @@ export function evaluateManualCanaryCanonicalAuthorization(
   nowMs: number,
   inFlightReservedActions: number | null,
 ): CheckOutcome {
+  const freshness = evaluateCanonicalAuthorizationFreshness(snapshot, nowMs);
+  if (!freshness.ok) {
+    return { ok: false, detail: freshness.detail };
+  }
   if (!snapshot) {
     return { ok: false, detail: 'canonical API v2 readback 없음 — readiness refresh 필요 (fail-closed)' };
   }
@@ -51,6 +56,6 @@ export function evaluateManualCanaryCanonicalAuthorization(
 
   return {
     ok: true,
-    detail: `canonical API v2 authorization 활성·OPEN 안전 action budget 충족 (remaining ${budget.remainingActions}, required ${budget.requiredActions})`,
+    detail: `canonical API v2 authorization 활성·OPEN 안전 action budget 충족 (remaining ${budget.remainingActions}, required ${budget.requiredActions}; readback age ${freshness.ageMs}ms)`,
   };
 }
