@@ -48,7 +48,7 @@ vi.mock('@workspace/db', () => {
   function chain(exec: (op: { where?: unknown; values?: unknown; set?: unknown }) => unknown) {
     const op: { where?: unknown; values?: unknown; set?: unknown } = {};
     const c: Record<string, unknown> = {};
-    for (const m of ['from', 'limit', 'offset', 'orderBy', 'onConflictDoNothing', 'onConflictDoUpdate', 'returning']) c[m] = () => c;
+    for (const m of ['from', 'limit', 'offset', 'orderBy', 'onConflictDoNothing', 'onConflictDoUpdate', 'returning', 'for']) c[m] = () => c;
     c['where'] = (arg: unknown) => { op.where = arg; return c; };
     c['values'] = (arg: unknown) => { op.values = arg; return c; };
     c['set'] = (arg: unknown) => { op.set = arg; return c; };
@@ -56,12 +56,14 @@ vi.mock('@workspace/db', () => {
       (resolve, reject) => Promise.resolve().then(() => exec(op)).then(resolve, reject);
     return c;
   }
-  return { db: {
+  const database: Record<string, unknown> = {
     select: vi.fn(() => chain((op) => globalThis.__e2eExec('select', op))),
     insert: vi.fn(() => chain((op) => globalThis.__e2eExec('insert', op))),
     update: vi.fn(() => chain((op) => globalThis.__e2eExec('update', op))),
     delete: vi.fn(() => chain((op) => globalThis.__e2eExec('delete', op))),
-  }, tradesTable, workerStateTable };
+  };
+  database['transaction'] = vi.fn(async (fn: (tx: unknown) => unknown) => fn(database));
+  return { db: database, tradesTable, workerStateTable };
 });
 
 declare global {

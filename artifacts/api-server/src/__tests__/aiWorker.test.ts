@@ -214,6 +214,7 @@ vi.mock('../workers/serverPaperExecutor', () => ({
   reduceServerPaper70: vi.fn(async () => ({ ok: false, reason: 'TEST_BLOCKED' })),
   requestServerPaperCloseAll: vi.fn(async () => ({ persisted: false })),
   loadPendingCloseFromDb: vi.fn(async () => undefined),
+  loadSubmittedReduce70FromDb: vi.fn(async () => undefined),
   manageServerPaperTick: vi.fn(async () => undefined),
   loadServerOpenRows: vi.fn(async () => []),
   reconcileStartupCloseIntent: vi.fn(async () => undefined),

@@ -744,6 +744,56 @@ const MIGRATIONS: { name: string; sql: string }[] = [
         WHERE risk_profile_snapshot IS NOT NULL;
     `,
   },
+  {
+    name: "0032_server_paper_reduce70_exact_once",
+    sql: `
+      -- OPEN 행당 REDUCE70 CLOSE 1회. worker_state claim과 함께 동시 요청 및
+      -- 재시작 복구가 동일 CLOSE 증거를 재사용하도록 DB가 최종 강제한다.
+      -- 과거 중복은 삭제하지 않는다. 결정적 첫 행만 canonical REDUCE70으로
+      -- 유지하고 나머지는 명시적 UNRESOLVED로 보존·감사하여 자동 회계에서 제외한다.
+      WITH ranked AS (
+        SELECT id, closes_trade_id,
+          row_number() OVER (
+            PARTITION BY closes_trade_id
+            ORDER BY timestamp ASC, id ASC
+          ) AS rn
+        FROM trades
+        WHERE closes_trade_id IS NOT NULL AND close_kind = 'REDUCE70'
+      ),
+      duplicates AS (
+        SELECT id, closes_trade_id FROM ranked WHERE rn > 1
+      )
+      INSERT INTO worker_state (key, value, updated_at)
+      SELECT
+        'serverPaperReduce70:migration-duplicate:' || id,
+        jsonb_build_object(
+          'status', 'MIGRATION_DUPLICATE_UNRESOLVED',
+          'tradeId', id,
+          'openTradeId', closes_trade_id
+        )::text,
+        now()
+      FROM duplicates
+      ON CONFLICT (key) DO UPDATE
+        SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at;
+
+      WITH ranked AS (
+        SELECT id,
+          row_number() OVER (
+            PARTITION BY closes_trade_id
+            ORDER BY timestamp ASC, id ASC
+          ) AS rn
+        FROM trades
+        WHERE closes_trade_id IS NOT NULL AND close_kind = 'REDUCE70'
+      )
+      UPDATE trades
+      SET close_kind = 'REDUCE70_DUPLICATE_UNRESOLVED'
+      WHERE id IN (SELECT id FROM ranked WHERE rn > 1);
+
+      CREATE UNIQUE INDEX IF NOT EXISTS trades_reduce70_close_uq
+        ON trades (closes_trade_id)
+        WHERE closes_trade_id IS NOT NULL AND close_kind = 'REDUCE70';
+    `,
+  },
   // Add future migrations here in chronological order.
 ];
 

@@ -13,7 +13,7 @@ vi.mock('@workspace/db', () => {
   function chain(getResult: () => unknown) {
     const c: Record<string, unknown> = {};
     for (const m of ['from', 'where', 'limit', 'offset', 'orderBy', 'set', 'values',
-      'onConflictDoNothing', 'onConflictDoUpdate', 'returning']) {
+      'onConflictDoNothing', 'onConflictDoUpdate', 'returning', 'for']) {
       c[m] = () => c;
     }
     (c as { then(r: (v: unknown) => unknown): Promise<unknown> }).then =
@@ -26,6 +26,7 @@ vi.mock('@workspace/db', () => {
       insert: vi.fn(() => chain(() => [{ id: 'x' }])),
       update: vi.fn(() => chain(() => [])),
       delete: vi.fn(() => chain(() => 0)),
+      transaction: vi.fn(),
     },
     tradesTable: {
       id: 'id', symbol: 'symbol', side: 'side', action: 'action', size: 'size',
@@ -49,9 +50,10 @@ vi.mock('../lib/paperCostCache', () => ({
 
 import { db } from '@workspace/db';
 import { getPaperCostBinding } from '../lib/paperCostCache';
+import { buildProfitProtectKey, manilaDayKey } from '../lib/profitProtection';
 import {
   openServerPaperPosition, closeServerPaperPosition, reduceServerPaper70,
-  requestServerPaperCloseAll, loadPendingCloseFromDb, manageServerPaperTick,
+  requestServerPaperCloseAll, loadPendingCloseFromDb, loadSubmittedReduce70FromDb, manageServerPaperTick,
   reconcileStartupCloseIntent,
   getServerPaperStatus, __resetServerPaperStateForTests,
   MAX_ENTRY_PRICE_AGE_MS, MAX_MANAGE_PRICE_AGE_MS, PENDING_CLOSE_KEY,
@@ -60,7 +62,7 @@ import {
 function makeChain(getResult: () => unknown) {
   const c: Record<string, unknown> = {};
   for (const m of ['from', 'where', 'limit', 'offset', 'orderBy', 'set', 'values',
-    'onConflictDoNothing', 'onConflictDoUpdate', 'returning']) {
+    'onConflictDoNothing', 'onConflictDoUpdate', 'returning', 'for']) {
     c[m] = () => c;
   }
   (c as { then(r: (v: unknown) => unknown): Promise<unknown> }).then =
@@ -121,8 +123,9 @@ beforeEach(() => {
   vi.mocked(getPaperCostBinding).mockReturnValue(FRESH_BINDING as ReturnType<typeof getPaperCostBinding>);
   vi.mocked(db.select).mockImplementation(() => makeChain(() => []) as never);
   vi.mocked(db.insert).mockImplementation(() => makeChain(() => [{ id: 'ins' }]) as never);
-  vi.mocked(db.update).mockImplementation(() => makeChain(() => []) as never);
+  vi.mocked(db.update).mockImplementation(() => makeChain(() => [{ id: 'updated' }]) as never);
   vi.mocked(db.delete).mockImplementation(() => makeChain(() => 0) as never);
+  vi.mocked(db.transaction).mockImplementation(async (fn) => fn(db as never));
 });
 
 // ── OPEN — 정상 경로 ──────────────────────────────────────────────────────────
@@ -319,6 +322,68 @@ describe('closeServerPaperPosition', () => {
     expect(db.update).toHaveBeenCalledTimes(1);
   });
 
+  it('FULL onConflictDoNothing 0행 → 기존 유일 CLOSE 증거를 재사용해 OPEN을 repair한다', async () => {
+    const existingFull = {
+      ...serverOpenRow(),
+      id: 'full-existing',
+      action: 'CLOSE',
+      size: '300',
+      sizeInUsd: '300',
+      closesTradeId: 'open-1',
+      closeKind: 'FULL',
+      closeTime: Date.now() - 1,
+    };
+    let selectCall = 0;
+    vi.mocked(db.select).mockImplementation(() => makeChain(() => {
+      selectCall += 1;
+      return selectCall === 1 ? [serverOpenRow()] : [existingFull];
+    }) as never);
+    vi.mocked(db.insert).mockImplementation(() => makeChain(() => []) as never);
+    vi.mocked(db.update).mockImplementation(() => makeChain(() => [{ id: 'open-1' }]) as never);
+    const r = await closeServerPaperPosition({
+      openTradeId: 'open-1', reason: 'STOP_LOSS', kind: 'FULL',
+      quote: { priceUsd: 49_000, ageMs: 1_000 },
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.closeTradeId).toBe('full-existing');
+    expect(db.insert).toHaveBeenCalledTimes(1);
+    expect(db.update).toHaveBeenCalledTimes(1);
+  });
+
+  it('FULL OPEN update 0행 + 여전히 active → transaction 실패·unresolved', async () => {
+    let selectCall = 0;
+    vi.mocked(db.select).mockImplementation(() => makeChain(() => {
+      selectCall += 1;
+      return [serverOpenRow()];
+    }) as never);
+    vi.mocked(db.update).mockImplementation(() => makeChain(() => []) as never);
+    const r = await closeServerPaperPosition({
+      openTradeId: 'open-1', reason: 'STOP_LOSS', kind: 'FULL',
+      quote: { priceUsd: 49_000, ageMs: 1_000 },
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain('조건부 갱신 0건');
+    expect(selectCall).toBe(2); // locked OPEN + zero-row 증거 재조회
+    expect(getServerPaperStatus().unresolved).toContain('조건부 갱신 0건');
+  });
+
+  it('FULL CLOSE insert 직후 lifecycle stop → rollback 결과, OPEN update 금지', async () => {
+    let checks = 0;
+    const shouldContinue = () => {
+      checks += 1;
+      return checks <= 3;
+    };
+    vi.mocked(db.select).mockImplementation(() => makeChain(() => [serverOpenRow()]) as never);
+    const r = await closeServerPaperPosition({
+      openTradeId: 'open-1', reason: 'STOP_LOSS', kind: 'FULL',
+      quote: { priceUsd: 49_000, ageMs: 1_000 },
+    }, shouldContinue);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain('rolled back');
+    expect(db.insert).toHaveBeenCalledTimes(1);
+    expect(db.update).not.toHaveBeenCalled();
+  });
+
   it('비용 필드 결손 OPEN 행 → 청산은 진행하되 net=null (0 대체 금지)', async () => {
     vi.mocked(db.select).mockImplementation(() =>
       makeChain(() => [serverOpenRow({ estEntryCostUsd: null, costSource: null })]) as never);
@@ -329,13 +394,34 @@ describe('closeServerPaperPosition', () => {
     expect(r.ok).toBe(true);
     if (r.ok) expect(r.netPnlEstimatedUsd).toBeNull();
   });
+
+  it('FULL CLOSE도 transaction 내부에서 OPEN 행 FOR UPDATE 잠금을 획득한다', async () => {
+    const forUpdate = vi.fn();
+    vi.mocked(db.select).mockImplementation(() => {
+      const c = makeChain(() => [serverOpenRow()]) as Record<string, unknown>;
+      c.for = (mode: string) => {
+        forUpdate(mode);
+        return c;
+      };
+      return c as never;
+    });
+    vi.mocked(db.update).mockImplementation(() => makeChain(() => [{ id: 'open-1' }]) as never);
+    const r = await closeServerPaperPosition({
+      openTradeId: 'open-1', reason: 'STOP_LOSS', kind: 'FULL',
+      quote: { priceUsd: 49_000, ageMs: 1_000 },
+    });
+    expect(r.ok).toBe(true);
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(forUpdate).toHaveBeenCalledWith('update');
+  });
 });
 
 // ── REDUCE70 — durable 1회 예약 ───────────────────────────────────────────────
 
 describe('reduceServerPaper70', () => {
   it('기존 예약 기록 존재 → 상태 불문 재실행 금지', async () => {
-    // worker_state 조회가 기존 CONFIRMED 기록 반환
+    // atomic claim conflict 뒤 worker_state 조회가 기존 CONFIRMED 기록 반환
+    vi.mocked(db.insert).mockImplementation(() => makeChain(() => []) as never);
     let selectCall = 0;
     vi.mocked(db.select).mockImplementation(() => makeChain(() => {
       selectCall += 1;
@@ -352,16 +438,309 @@ describe('reduceServerPaper70', () => {
     });
     expect(r.ok).toBe(false);
     expect(selectCall).toBeGreaterThan(0);
-    expect(db.insert).not.toHaveBeenCalled(); // 거래 행 미생성
+    expect(db.insert).toHaveBeenCalledTimes(1); // worker_state claim만 시도
+    expect(db.transaction).not.toHaveBeenCalled(); // 거래 transaction 미시작
   });
 
   it('예약 조회 실패 → fail-closed 보류', async () => {
+    vi.mocked(db.insert).mockImplementation(() => makeChain(() => []) as never);
     vi.mocked(db.select).mockImplementation(() => makeChain(() => { throw new Error('db down'); }) as never);
     const r = await reduceServerPaper70({
       openRow: serverOpenRow() as never, quote: { priceUsd: 51_000, ageMs: 1_000 },
     });
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toContain('fail-closed');
+  });
+
+  function arrangeAtomicReduce(options: {
+    openUpdate?: 'success' | 'zero' | 'throw';
+    refreshedOpen?: Record<string, unknown> | null;
+    finalReservationWrite?: 'success' | 'throw';
+    existingClose?: Record<string, unknown> | null;
+  } = {}) {
+    let insertCall = 0;
+    let selectCall = 0;
+    let updateCall = 0;
+    const close = options.existingClose ?? null;
+    vi.mocked(db.insert).mockImplementation(() => {
+      insertCall += 1;
+      if (insertCall === 1) return makeChain(() => [{ key: 'claimed' }]) as never;
+      return makeChain(() => close ? [] : [{ id: 'close-1' }]) as never;
+    });
+    vi.mocked(db.select).mockImplementation(() => makeChain(() => {
+      selectCall += 1;
+      if (selectCall === 1) return [serverOpenRow()];
+      if (selectCall === 2) return close ? [close] : [];
+      if (selectCall === 3 && options.openUpdate === 'zero') {
+        return options.refreshedOpen ? [options.refreshedOpen] : [];
+      }
+      return [{ key: 'reservation', value: JSON.stringify({
+        idempotencyKey: 'k', positionKey: 'BTC:LONG:open-1', dayKey: 'd',
+        reduceSizeUsd: 0, fullClose: false, status: 'SUBMITTED',
+        orderKey: null, createdAt: '', updatedAt: '',
+      }) }];
+    }) as never);
+    vi.mocked(db.update).mockImplementation(() => {
+      updateCall += 1;
+      if (updateCall === 1) {
+        if (options.openUpdate === 'throw') return makeChain(() => { throw new Error('OPEN update failed'); }) as never;
+        if (options.openUpdate === 'zero') return makeChain(() => []) as never;
+        return makeChain(() => [{ id: 'open-1' }]) as never;
+      }
+      if (options.finalReservationWrite === 'throw') {
+        return makeChain(() => { throw new Error('reservation final write failed'); }) as never;
+      }
+      return makeChain(() => [{ key: 'reservation' }]) as never;
+    });
+    return { getInsertCalls: () => insertCall, getUpdateCalls: () => updateCall };
+  }
+
+  it('정상 REDUCE70은 CLOSE·OPEN 축소·CONFIRMED를 한 transaction에서 완료한다', async () => {
+    const calls = arrangeAtomicReduce();
+    const r = await reduceServerPaper70({
+      openRow: serverOpenRow() as never,
+      quote: { priceUsd: 51_000, ageMs: 1_000 },
+      nowMs: Date.UTC(2026, 7, 31),
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.closedSizeUsd).toBeCloseTo(210, 6);
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(calls.getInsertCalls()).toBe(2); // reservation claim + CLOSE
+    expect(calls.getUpdateCalls()).toBe(2); // OPEN + reservation CONFIRMED
+  });
+
+  it('CLOSE 생성 뒤 OPEN update 예외 → atomic 실패, SUBMITTED 복구 대기 + 신규 OPEN 차단', async () => {
+    arrangeAtomicReduce({ openUpdate: 'throw' });
+    const r = await reduceServerPaper70({
+      openRow: serverOpenRow() as never,
+      quote: { priceUsd: 51_000, ageMs: 1_000 },
+    });
+    expect(r.ok).toBe(false);
+    expect(getServerPaperStatus().unresolved).toContain('SUBMITTED 유지');
+    expect((await openServerPaperPosition({ ...BASE_OPEN })).ok).toBe(false);
+  });
+
+  it('OPEN update 0건이고 잔여 30% 증거도 없으면 fail-closed', async () => {
+    arrangeAtomicReduce({ openUpdate: 'zero', refreshedOpen: serverOpenRow({ sizeInUsd: '300' }) });
+    const r = await reduceServerPaper70({
+      openRow: serverOpenRow() as never,
+      quote: { priceUsd: 51_000, ageMs: 1_000 },
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain('0건');
+    expect(getServerPaperStatus().unresolved).toContain('0건');
+  });
+
+  it('OPEN update 0건이어도 동시 transaction이 이미 정확히 30%로 축소했으면 성공', async () => {
+    arrangeAtomicReduce({ openUpdate: 'zero', refreshedOpen: serverOpenRow({ sizeInUsd: '90', size: '90' }) });
+    const r = await reduceServerPaper70({
+      openRow: serverOpenRow() as never,
+      quote: { priceUsd: 51_000, ageMs: 1_000 },
+    });
+    expect(r.ok).toBe(true);
+  });
+
+  it('최종 reservation write 실패 → transaction 실패, SUBMITTED 유지로 재시도 가능', async () => {
+    arrangeAtomicReduce({ finalReservationWrite: 'throw' });
+    const r = await reduceServerPaper70({
+      openRow: serverOpenRow() as never,
+      quote: { priceUsd: 51_000, ageMs: 1_000 },
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain('reservation final write failed');
+    expect(getServerPaperStatus().unresolved).toContain('SUBMITTED 유지');
+  });
+
+  it('동시 동일 REDUCE70은 in-process singleflight로 두 번째 transaction/CLOSE를 차단한다', async () => {
+    let release!: () => void;
+    const wait = new Promise<void>(resolve => { release = resolve; });
+    arrangeAtomicReduce();
+    vi.mocked(db.transaction).mockImplementationOnce(async (fn) => {
+      await wait;
+      return fn(db as never);
+    });
+    const first = reduceServerPaper70({
+      openRow: serverOpenRow() as never,
+      quote: { priceUsd: 51_000, ageMs: 1_000 },
+    });
+    const second = await reduceServerPaper70({
+      openRow: serverOpenRow() as never,
+      quote: { priceUsd: 51_000, ageMs: 1_000 },
+    });
+    expect(second.ok).toBe(false);
+    if (!second.ok) expect(second.reason).toContain('중복 실행 차단');
+    release();
+    expect((await first).ok).toBe(true);
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+  });
+
+  it('재시작 SUBMITTED + 기존 CLOSE를 다음 PAPER 틱에서 정확히 한 번 복구한다', async () => {
+    const nowMs = Date.UTC(2026, 7, 31, 1);
+    const dayKey = manilaDayKey(new Date(nowMs));
+    const idemKey = buildProfitProtectKey(dayKey, 'BTC:LONG:open-1');
+    const submitted = {
+      idempotencyKey: idemKey,
+      positionKey: 'BTC:LONG:open-1',
+      dayKey,
+      reduceSizeUsd: 0,
+      fullClose: false,
+      status: 'SUBMITTED',
+      orderKey: null,
+      createdAt: '2026-08-31T00:00:00.000Z',
+      updatedAt: '2026-08-31T00:00:00.000Z',
+    };
+    const existingClose = {
+      ...serverOpenRow(),
+      id: 'close-existing',
+      action: 'CLOSE',
+      size: '210',
+      sizeInUsd: '210',
+      pnl: '4.2',
+      netPnlEstimatedUsd: '3.06',
+      closesTradeId: 'open-1',
+      closeKind: 'REDUCE70',
+      closeTime: Date.UTC(2026, 7, 31),
+    };
+    const originalOpen = serverOpenRow();
+    const reducedOpen = serverOpenRow({ size: '90', sizeInUsd: '90' });
+    let selectCall = 0;
+    let insertCall = 0;
+    let updateCall = 0;
+    let openUpdateSet: Record<string, unknown> | null = null;
+
+    vi.mocked(db.select).mockImplementation(() => makeChain(() => {
+      selectCall += 1;
+      if (selectCall === 1 || selectCall === 6) {
+        return [{ key: `serverPaperReduce70:${idemKey}`, value: JSON.stringify(submitted) }];
+      }
+      if (selectCall === 2 || selectCall === 3) return [originalOpen];
+      if (selectCall === 4 || selectCall === 5) return [existingClose];
+      return [reducedOpen];
+    }) as never);
+    vi.mocked(db.insert).mockImplementation(() => {
+      insertCall += 1;
+      return makeChain(() => []) as never; // reservation conflict / CLOSE unique conflict
+    });
+    vi.mocked(db.update).mockImplementation(() => {
+      updateCall += 1;
+      const c = makeChain(() => updateCall === 1 ? [{ id: 'open-1' }] : [{ key: 'reservation' }]) as Record<string, unknown>;
+      if (updateCall === 1) {
+        c.set = (value: Record<string, unknown>) => {
+          openUpdateSet = value;
+          return c;
+        };
+      }
+      return c as never;
+    });
+
+    await loadSubmittedReduce70FromDb();
+    expect(getServerPaperStatus().unresolved).toContain('복구 대기');
+    // Recovery is intentionally after the next Manila-day boundary. It must
+    // finalize the loaded stateKey, not claim a new current-day reservation.
+    await manageServerPaperTick(() => ({ priceUsd: 51_000, ageMs: 1_000 }), nowMs + 86_400_000);
+
+    expect(selectCall).toBeGreaterThanOrEqual(7);
+    expect(insertCall).toBeGreaterThanOrEqual(1);
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(insertCall).toBe(1); // 기존 CLOSE unique conflict, 새 CLOSE 0건
+    expect(updateCall).toBe(2); // OPEN 30% repair + reservation CONFIRMED
+    expect(openUpdateSet).toMatchObject({ size: '90', sizeInUsd: '90' });
+    expect(getServerPaperStatus().unresolved).toBeNull();
+
+    await manageServerPaperTick(() => ({ priceUsd: 51_000, ageMs: 1_000 }), Date.UTC(2026, 7, 31, 1, 1));
+    expect(db.transaction).toHaveBeenCalledTimes(1); // 두 번째 70% 축소 없음
+    expect(insertCall).toBe(1); // 중복 CLOSE 없음
+  });
+
+  it('재시작 SUBMITTED payload/key identity 불일치는 복구하지 않고 fail-closed', async () => {
+    const bad = {
+      idempotencyKey: 'risk:profit-protect:2026-08-31:BTC:LONG:other-open',
+      positionKey: 'BTC:LONG:open-1',
+      dayKey: '2026-08-31',
+      reduceSizeUsd: 0, fullClose: false, status: 'SUBMITTED',
+      orderKey: null, createdAt: '', updatedAt: '',
+    };
+    vi.mocked(db.select).mockImplementation(() => makeChain(() => [{
+      key: 'serverPaperReduce70:risk:profit-protect:2026-08-31:BTC:LONG:open-1',
+      value: JSON.stringify(bad),
+    }]) as never);
+    await loadSubmittedReduce70FromDb();
+    expect(getServerPaperStatus().unresolved).toContain('identity 손상');
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  it('self-consistent SUBMITTED라도 OPEN symbol/side identity가 다르면 틱 복구 금지', async () => {
+    const nowMs = Date.UTC(2026, 7, 31);
+    const dayKey = manilaDayKey(new Date(nowMs));
+    const positionKey = 'ETH:LONG:open-1';
+    const idemKey = buildProfitProtectKey(dayKey, positionKey);
+    const rec = {
+      idempotencyKey: idemKey, positionKey, dayKey,
+      reduceSizeUsd: 0, fullClose: false, status: 'SUBMITTED',
+      orderKey: null, createdAt: '', updatedAt: '',
+    };
+    let selectCall = 0;
+    vi.mocked(db.select).mockImplementation(() => makeChain(() => {
+      selectCall += 1;
+      if (selectCall === 1) {
+        return [{ key: `serverPaperReduce70:${idemKey}`, value: JSON.stringify(rec) }];
+      }
+      return [serverOpenRow({ symbol: 'BTC' })];
+    }) as never);
+    await loadSubmittedReduce70FromDb();
+    await manageServerPaperTick(() => ({ priceUsd: 51_000, ageMs: 1_000 }), nowMs);
+    expect(getServerPaperStatus().unresolved).toContain('OPEN identity 불일치');
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(db.insert).not.toHaveBeenCalled();
+  });
+
+  it('SUBMITTED 중 FULL이 먼저 완료되면 유일한 FULL 증거로 terminal 확정한다', async () => {
+    const nowMs = Date.UTC(2026, 7, 31);
+    const dayKey = manilaDayKey(new Date(nowMs));
+    const idemKey = buildProfitProtectKey(dayKey, 'BTC:LONG:open-1');
+    const submitted = {
+      idempotencyKey: idemKey,
+      positionKey: 'BTC:LONG:open-1',
+      dayKey,
+      reduceSizeUsd: 0, fullClose: false, status: 'SUBMITTED',
+      orderKey: null, createdAt: '', updatedAt: '',
+    };
+    const fullClose = {
+      ...serverOpenRow(),
+      id: 'full-close-1',
+      action: 'CLOSE',
+      size: '300',
+      sizeInUsd: '300',
+      pnl: '6',
+      netPnlEstimatedUsd: '4.38',
+      closesTradeId: 'open-1',
+      closeKind: 'FULL',
+      closeTime: nowMs - 1,
+    };
+    let selectCall = 0;
+    vi.mocked(db.insert).mockImplementation(() => makeChain(() => []) as never);
+    vi.mocked(db.select).mockImplementation(() => makeChain(() => {
+      selectCall += 1;
+      if (selectCall === 1 || selectCall === 4) {
+        return [{ key: `serverPaperReduce70:${idemKey}`, value: JSON.stringify(submitted) }];
+      }
+      if (selectCall === 2) return [serverOpenRow({ closeTime: nowMs - 1 })];
+      return [fullClose];
+    }) as never);
+    vi.mocked(db.update).mockImplementation(() => makeChain(() => [{ key: 'reservation' }]) as never);
+
+    const r = await reduceServerPaper70({
+      openRow: serverOpenRow() as never,
+      quote: { priceUsd: 51_000, ageMs: 1_000 },
+      nowMs,
+    });
+    expect(r).toMatchObject({ ok: true });
+    if (r.ok) {
+      expect(r.closeTradeId).toBe('full-close-1');
+      expect(r.closedSizeUsd).toBe(300);
+    }
+    expect(db.insert).toHaveBeenCalledTimes(1); // reservation claim 확인뿐, 새 CLOSE 없음
+    expect(db.update).toHaveBeenCalledTimes(1); // reservation CONFIRMED만
   });
 });
 

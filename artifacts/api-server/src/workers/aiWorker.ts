@@ -68,7 +68,7 @@ import {
 } from "../intel/strategyShadowLifecycleRuntimeV2";
 import {
   openServerPaperPosition, closeServerPaperPosition, reduceServerPaper70,
-  requestServerPaperCloseAll, loadPendingCloseFromDb, manageServerPaperTick,
+  requestServerPaperCloseAll, loadPendingCloseFromDb, loadSubmittedReduce70FromDb, manageServerPaperTick,
   loadServerOpenRows, getServerPaperStatus, MAX_MANAGE_PRICE_AGE_MS,
   reconcileStartupCloseIntent,
   type ServerPaperExecStatus, type PriceQuote,
@@ -479,6 +479,8 @@ class WorkerManager {
     // 재시작 복구: 권위 상태는 전부 DB — pendingClose 로드 후 틱이 open 행 재발견
     if (process.env.WORKER_ENGINE_MODE !== 'LIVE') {
       await loadPendingCloseFromDb(() => this.isCurrentGeneration(generation));
+      if (!this.isCurrentGeneration(generation)) return;
+      await loadSubmittedReduce70FromDb(() => this.isCurrentGeneration(generation));
       if (!this.isCurrentGeneration(generation)) return;
       // write-failure → crash 복구: 마지막 영속 결정이 flat 지시 + 서버 미청산 존재 시
       // close-all 재수립 (판정 실패 = fail-closed unresolved, 틱 재시도)

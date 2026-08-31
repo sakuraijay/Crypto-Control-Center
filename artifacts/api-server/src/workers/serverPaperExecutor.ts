@@ -22,7 +22,7 @@
  */
 
 import { db, tradesTable, workerStateTable } from "@workspace/db";
-import { and, eq } from "drizzle-orm";
+import { and, eq, like } from "drizzle-orm";
 import { getPaperCostBinding } from "../lib/paperCostCache";
 import { accrueHoldingCostsFromEntryRates, computePaperNetPnl } from "../lib/holdingCosts";
 import { computeStopTrigger } from "../lib/stopLossPlan";
@@ -31,6 +31,8 @@ import { RISK_POLICY } from "../lib/riskPolicy";
 import { isAppliedRiskProfileSnapshot } from "../lib/riskProfiles";
 
 const fin = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+type PaperDb = Pick<typeof db, "select" | "insert" | "update" | "delete">;
+const LIFECYCLE_ROLLBACK = "SERVER_PAPER_LIFECYCLE_ROLLBACK";
 
 // ── 상수 ──────────────────────────────────────────────────────────────────────
 
@@ -131,6 +133,8 @@ const state: ServerPaperExecStatus = {
 
 /** 관리 틱 singleflight */
 let tickInFlight = false;
+const reduce70InFlight = new Set<string>();
+const submittedReduce70 = new Map<string, ProfitProtectRecord>();
 
 export function getServerPaperStatus(): ServerPaperExecStatus {
   return { ...state, openPositions: [...state.openPositions] };
@@ -146,6 +150,8 @@ export function __resetServerPaperStateForTests(): void {
   state.lastCloseAction = null;
   state.unresolved = null;
   tickInFlight = false;
+  reduce70InFlight.clear();
+  submittedReduce70.clear();
   pendingClosePersistFailed = false;
   pendingCloseLoadFailed = false;
   startupReconcileFailed = false;
@@ -157,9 +163,10 @@ export function __resetServerPaperStateForTests(): void {
 async function readWorkerState(
   key: string,
   shouldContinue: () => boolean = () => true,
+  database: PaperDb = db,
 ): Promise<string | null> {
   if (!shouldContinue()) throw new Error("lifecycle stopped");
-  const rows = await db.select().from(workerStateTable).where(eq(workerStateTable.key, key));
+  const rows = await database.select().from(workerStateTable).where(eq(workerStateTable.key, key));
   if (!shouldContinue()) throw new Error("lifecycle stopped");
   return rows[0]?.value ?? null;
 }
@@ -168,15 +175,16 @@ async function writeWorkerState(
   key: string,
   value: string,
   shouldContinue: () => boolean = () => true,
+  database: PaperDb = db,
 ): Promise<void> {
   if (!shouldContinue()) throw new Error("lifecycle stopped");
   const now = new Date();
-  const rows = await db.select().from(workerStateTable).where(eq(workerStateTable.key, key));
+  const rows = await database.select().from(workerStateTable).where(eq(workerStateTable.key, key));
   if (!shouldContinue()) throw new Error("lifecycle stopped");
   if (rows.length > 0) {
-    await db.update(workerStateTable).set({ value, updatedAt: now }).where(eq(workerStateTable.key, key));
+    await database.update(workerStateTable).set({ value, updatedAt: now }).where(eq(workerStateTable.key, key));
   } else {
-    await db.insert(workerStateTable).values({ key, value, updatedAt: now });
+    await database.insert(workerStateTable).values({ key, value, updatedAt: now });
   }
   if (!shouldContinue()) throw new Error("lifecycle stopped");
 }
@@ -389,9 +397,10 @@ export async function openServerPaperPosition(
  * FULL: CLOSE 행 선삽입(UNIQUE claim) → OPEN 행 close_time 조건부 UPDATE(repair 겸용).
  * REDUCE70: 호출 측에서 worker_state 예약 확보 후 호출 (reduceServerPaper70 사용 권장).
  */
-export async function closeServerPaperPosition(
+async function closeServerPaperPositionInDb(
   args: ServerPaperCloseArgs,
-  shouldContinue: () => boolean = () => true,
+  shouldContinue: () => boolean,
+  database: PaperDb,
 ): Promise<ServerPaperCloseResult> {
   const nowMs = args.nowMs ?? Date.now();
   const record = (kind: string, reason: string, ok: boolean, detail: string | null) => {
@@ -404,7 +413,9 @@ export async function closeServerPaperPosition(
 
   // OPEN 행 로드
   if (!shouldContinue()) return stopped();
-  const rows = await db.select().from(tradesTable).where(eq(tradesTable.id, args.openTradeId));
+  const rows = await database.select().from(tradesTable)
+    .where(eq(tradesTable.id, args.openTradeId))
+    .for("update");
   if (!shouldContinue()) return stopped();
   const openRow = rows[0];
   if (!openRow) { record(args.kind, args.reason, false, "OPEN 행 없음"); return { ok: false, reason: "OPEN 행 없음" }; }
@@ -435,10 +446,34 @@ export async function closeServerPaperPosition(
   const isLong = openRow.side !== "SHORT";
   const dir = isLong ? 1 : -1;
 
+  // REDUCE70 repair evidence. A durable CLOSE may exist while an older process
+  // failed before shrinking OPEN or before finalizing its reservation.
+  let existingReduceClose: TradeRow | null = null;
+  let existingFullClose: TradeRow | null = null;
+  if (args.kind === "REDUCE70") {
+    const closeRows = await database.select().from(tradesTable).where(and(
+      eq(tradesTable.closesTradeId, openRow.id),
+      eq(tradesTable.closeKind, "REDUCE70"),
+    ));
+    existingReduceClose = closeRows[0] ?? null;
+  }
+
   // 청산 크기 결정
   let closedSize = openSize;
   let remaining = 0;
-  if (args.kind === "REDUCE70") {
+  if (existingReduceClose) {
+    closedSize = parseFloat(existingReduceClose.sizeInUsd ?? existingReduceClose.size ?? "0");
+    remaining = closedSize * 3 / 7;
+    const original = closedSize + remaining;
+    const tolerance = 0.0001;
+    if (!fin(closedSize) || closedSize <= 0
+      || (Math.abs(openSize - original) > tolerance && Math.abs(openSize - remaining) > tolerance)) {
+      const reason = "REDUCE70 durable 증거 불일치 — 수동 조사 전 fail-closed";
+      record(args.kind, args.reason, false, reason);
+      state.unresolved = reason;
+      return { ok: false, reason };
+    }
+  } else if (args.kind === "REDUCE70") {
     const plan = computeReduction({ openSizeUsd: openSize, minPositionNotionalUsd: GMX_MIN_POSITION_NOTIONAL_USD });
     if (!plan.ok) { record(args.kind, args.reason, false, plan.reason); return { ok: false, reason: plan.reason }; }
     if (plan.fullClose) { closedSize = openSize; remaining = 0; }
@@ -447,11 +482,17 @@ export async function closeServerPaperPosition(
   const effectiveKind: "FULL" | "REDUCE70" = args.kind === "REDUCE70" && remaining > 0 ? "REDUCE70" : "FULL";
 
   // gross PnL (청산분)
-  const grossPnl = ((q.priceUsd - entry) / entry) * closedSize * dir;
+  const accountingOpenSize = existingReduceClose ? closedSize + remaining : openSize;
+  const recoveredGross = existingReduceClose ? parseFloat(existingReduceClose.pnl ?? "") : NaN;
+  const grossPnl = fin(recoveredGross)
+    ? recoveredGross
+    : ((q.priceUsd - entry) / entry) * closedSize * dir;
 
   // ── 비용 정산 (실패 시 net=null — 0 대체 금지, 청산 자체는 진행) ───────────
-  const fraction = closedSize / openSize;
-  let netEst: number | null = null;
+  const fraction = closedSize / accountingOpenSize;
+  let netEst: number | null = existingReduceClose?.netPnlEstimatedUsd != null
+    ? parseFloat(existingReduceClose.netPnlEstimatedUsd)
+    : null;
   let holdingUsd: number | null = null;
   const entryCostFull = openRow.estEntryCostUsd != null ? parseFloat(openRow.estEntryCostUsd) : NaN;
   const exitCostFull = openRow.estExitCostUsd != null ? parseFloat(openRow.estExitCostUsd) : NaN;
@@ -478,8 +519,8 @@ export async function closeServerPaperPosition(
   const closeId = crypto.randomUUID();
   try {
     // 1) CLOSE 행 선삽입 — FULL은 closes_trade_id UNIQUE가 중복 청산을 차단
-    if (!shouldContinue()) return stopped();
-    const inserted = await db.insert(tradesTable).values({
+    if (!shouldContinue()) throw new Error(LIFECYCLE_ROLLBACK);
+    const inserted = await database.insert(tradesTable).values({
       id: closeId,
       symbol: openRow.symbol,
       side: openRow.side,
@@ -508,16 +549,49 @@ export async function closeServerPaperPosition(
       closeKind: effectiveKind,
       closeReason: args.reason,
       riskProfileSnapshot: openRow.riskProfileSnapshot,
-    }).onConflictDoNothing({ target: tradesTable.id }).returning({ id: tradesTable.id });
+    }).onConflictDoNothing().returning({ id: tradesTable.id });
     if (!shouldContinue()) return stopped();
-    void inserted;
+    if (inserted.length === 0 && args.kind === "REDUCE70") {
+      const claimed = await database.select().from(tradesTable).where(and(
+        eq(tradesTable.closesTradeId, openRow.id),
+        eq(tradesTable.closeKind, "REDUCE70"),
+      ));
+      if (!claimed[0]) {
+        const reason = "REDUCE70 CLOSE claim 충돌 증거 조회 실패 — fail-closed";
+        state.unresolved = reason;
+        return { ok: false, reason };
+      }
+      existingReduceClose = claimed[0];
+    } else if (inserted.length === 0) {
+      const claimed = await database.select().from(tradesTable).where(and(
+        eq(tradesTable.closesTradeId, openRow.id),
+        eq(tradesTable.closeKind, "FULL"),
+      ));
+      if (claimed.length !== 1) {
+        const reason = "FULL CLOSE claim 충돌 증거가 유일하지 않음 — fail-closed";
+        state.unresolved = reason;
+        return { ok: false, reason };
+      }
+      existingFullClose = claimed[0];
+    }
   } catch (err) {
+    if ((err as Error).message === LIFECYCLE_ROLLBACK) throw err;
     if (!shouldContinue()) return stopped();
     const msg = (err as Error).message ?? String(err);
     if (!/unique|duplicate/i.test(msg)) {
       record(effectiveKind, args.reason, false, `CLOSE 저장 실패: ${msg}`);
       return { ok: false, reason: `CLOSE 저장 실패 — 청산 미기록: ${msg}` };
     }
+    const claimed = await database.select().from(tradesTable).where(and(
+      eq(tradesTable.closesTradeId, openRow.id),
+      eq(tradesTable.closeKind, "FULL"),
+    ));
+    if (claimed.length !== 1) {
+      const reason = "FULL CLOSE unique 충돌 증거가 유일하지 않음 — fail-closed";
+      state.unresolved = reason;
+      return { ok: false, reason };
+    }
+    existingFullClose = claimed[0];
     // FULL UNIQUE conflict → 이전 시도가 CLOSE 행을 이미 삽입 — repair 경로로 진행
     console.warn(`[ServerPaper] CLOSE claim conflict (open=${openRow.id}) — repair 경로 진행`);
   }
@@ -525,29 +599,228 @@ export async function closeServerPaperPosition(
   // 2) OPEN 행 확정 (조건부 UPDATE — 여기 실패해도 다음 틱 repair)
   if (!shouldContinue()) return stopped();
   if (effectiveKind === "FULL") {
-    await db.update(tradesTable)
+    if (existingFullClose) {
+      const evidenceSize = parseFloat(existingFullClose.sizeInUsd ?? existingFullClose.size ?? "0");
+      if (!fin(evidenceSize) || evidenceSize <= 0 || Math.abs(evidenceSize - openSize) > 0.0001) {
+        const reason = "FULL CLOSE durable 크기 증거 불일치 — 수동 조사 전 fail-closed";
+        state.unresolved = reason;
+        return { ok: false, reason };
+      }
+    }
+    const updated = await database.update(tradesTable)
       .set({ closeTime: nowMs })
-      .where(and(eq(tradesTable.id, openRow.id), eq(tradesTable.closeTime, 0)));
+      .where(and(eq(tradesTable.id, openRow.id), eq(tradesTable.closeTime, 0)))
+      .returning({ id: tradesTable.id });
+    if (updated.length === 0) {
+      const refreshed = await database.select().from(tradesTable).where(eq(tradesTable.id, openRow.id));
+      if (!refreshed[0] || refreshed[0].closeTime === 0) {
+        const reason = "FULL OPEN 조건부 갱신 0건 — durable 상태 불명, fail-closed";
+        state.unresolved = reason;
+        return { ok: false, reason };
+      }
+    }
   } else {
     // REDUCE70: 잔여 size로 축소 + 잔여 비율만큼 비용 결속도 축소 (이후 FULL 정산 정합)
     const remainFraction = remaining / openSize;
-    await db.update(tradesTable)
+    if (existingReduceClose && Math.abs(openSize - remaining) <= 0.0001) {
+      // Accounting was already completed; only reservation finalization remains.
+    } else {
+      const updated = await database.update(tradesTable)
       .set({
         sizeInUsd: String(remaining),
         size: String(remaining),
         estEntryCostUsd: fin(entryCostFull) ? String(entryCostFull * remainFraction) : openRow.estEntryCostUsd,
         estExitCostUsd: fin(exitCostFull) ? String(exitCostFull * remainFraction) : openRow.estExitCostUsd,
       })
-      .where(and(eq(tradesTable.id, openRow.id), eq(tradesTable.sizeInUsd, openRow.sizeInUsd ?? ""), eq(tradesTable.closeTime, 0)));
+      .where(and(eq(tradesTable.id, openRow.id), eq(tradesTable.sizeInUsd, openRow.sizeInUsd ?? ""), eq(tradesTable.closeTime, 0)))
+      .returning({ id: tradesTable.id });
+      if (updated.length === 0) {
+        const refreshed = await database.select().from(tradesTable).where(eq(tradesTable.id, openRow.id));
+        const refreshedSize = parseFloat(refreshed[0]?.sizeInUsd ?? refreshed[0]?.size ?? "0");
+        if (!refreshed[0] || refreshed[0].closeTime !== 0 || Math.abs(refreshedSize - remaining) > 0.0001) {
+          const reason = "REDUCE70 OPEN 조건부 갱신 0건 — durable 상태 불명, fail-closed";
+          state.unresolved = reason;
+          record(effectiveKind, args.reason, false, reason);
+          return { ok: false, reason };
+        }
+      }
+    }
   }
-  if (!shouldContinue()) return stopped();
+  if (!shouldContinue()) throw new Error(LIFECYCLE_ROLLBACK);
 
   record(effectiveKind, args.reason, true, `closed $${closedSize.toFixed(2)} gross=${grossPnl.toFixed(2)} net=${netEst != null ? netEst.toFixed(2) : "불명"}`);
   console.info(`[ServerPaper] CLOSE(${effectiveKind}) ${openRow.symbol} $${closedSize.toFixed(2)} @${q.priceUsd} reason=${args.reason} gross=$${grossPnl.toFixed(2)} net=${netEst != null ? `$${netEst.toFixed(2)}` : "불명(비용 계산 실패)"}`);
-  return { ok: true, closeTradeId: closeId, closedSizeUsd: closedSize, grossPnlUsd: grossPnl, netPnlEstimatedUsd: netEst };
+  return {
+    ok: true,
+    closeTradeId: existingReduceClose?.id ?? existingFullClose?.id ?? closeId,
+    closedSizeUsd: closedSize,
+    grossPnlUsd: grossPnl,
+    netPnlEstimatedUsd: netEst,
+  };
+}
+
+/** Every FULL/REDUCE70 close owns the OPEN row lock for its complete accounting
+ * transition. This serializes cross-kind closes while still allowing a later
+ * legitimate FULL close of the 30% remainder. */
+export async function closeServerPaperPosition(
+  args: ServerPaperCloseArgs,
+  shouldContinue: () => boolean = () => true,
+): Promise<ServerPaperCloseResult> {
+  try {
+    return await db.transaction(async (tx) => {
+      const result = await closeServerPaperPositionInDb(args, shouldContinue, tx);
+      if (!result.ok && result.reason.includes("lifecycle stopped")) {
+        throw new Error(LIFECYCLE_ROLLBACK);
+      }
+      return result;
+    });
+  } catch (err) {
+    if ((err as Error).message === LIFECYCLE_ROLLBACK) {
+      return { ok: false, reason: "lifecycle stopped — CLOSE rolled back" };
+    }
+    throw err;
+  }
 }
 
 // ── REDUCE70 (durable 1회 예약) ───────────────────────────────────────────────
+
+function validReduce70Reservation(
+  stateKey: string,
+  rec: ProfitProtectRecord,
+  expectedPositionKey?: string,
+): boolean {
+  return rec.status === "SUBMITTED"
+    && typeof rec.dayKey === "string"
+    && rec.dayKey.length > 0
+    && typeof rec.positionKey === "string"
+    && rec.positionKey.split(":").length === 3
+    && (!expectedPositionKey || rec.positionKey === expectedPositionKey)
+    && rec.idempotencyKey === buildProfitProtectKey(rec.dayKey, rec.positionKey)
+    && stateKey === `${REDUCE70_KEY_PREFIX}${rec.idempotencyKey}`;
+}
+
+async function reduceServerPaper70Internal(args: {
+  openRow: TradeRow;
+  quote: PriceQuote | null;
+  nowMs?: number;
+  shouldContinue?: () => boolean;
+}, resume?: { stateKey: string; record: ProfitProtectRecord }): Promise<ServerPaperCloseResult> {
+  const shouldContinue = args.shouldContinue ?? (() => true);
+  const stopped = (): ServerPaperCloseResult =>
+    ({ ok: false, reason: "lifecycle stopped — REDUCE70 no-op" });
+  if (!shouldContinue()) return stopped();
+  const nowMs = args.nowMs ?? Date.now();
+  const positionKey = `${args.openRow.symbol}:${args.openRow.side}:${args.openRow.id}`;
+  const dayKey = resume?.record.dayKey ?? manilaDayKey(new Date(nowMs));
+  const idemKey = resume?.record.idempotencyKey ?? buildProfitProtectKey(dayKey, positionKey);
+  const stateKey = resume?.stateKey ?? `${REDUCE70_KEY_PREFIX}${idemKey}`;
+  if (reduce70InFlight.has(stateKey)) {
+    return { ok: false, reason: "REDUCE70 동일 요청 처리 중 — 중복 실행 차단" };
+  }
+  reduce70InFlight.add(stateKey);
+
+  let rec: ProfitProtectRecord = resume?.record ?? {
+    idempotencyKey: idemKey, positionKey, dayKey,
+    reduceSizeUsd: 0, fullClose: false, status: "SUBMITTED", orderKey: null,
+    createdAt: new Date(nowMs).toISOString(), updatedAt: new Date(nowMs).toISOString(),
+  };
+
+  try {
+    if (resume) {
+      if (!validReduce70Reservation(stateKey, rec, positionKey)) {
+        const reason = "REDUCE70 resume reservation identity 불일치 — 수동 조사 전 fail-closed";
+        state.unresolved = reason;
+        return { ok: false, reason };
+      }
+    } else {
+      // Atomic first-writer claim. Concurrent callers/processes cannot both create a reservation.
+      const inserted = await db.insert(workerStateTable).values({
+        key: stateKey,
+        value: JSON.stringify(rec),
+        updatedAt: new Date(nowMs),
+      }).onConflictDoNothing({ target: workerStateTable.key }).returning({ key: workerStateTable.key });
+      if (!shouldContinue()) return stopped();
+      const claimed = inserted.length === 1;
+      if (!claimed) {
+      let existing: ProfitProtectRecord | null;
+      try {
+        const raw = await readWorkerState(stateKey, shouldContinue);
+        existing = raw ? JSON.parse(raw) as ProfitProtectRecord : null;
+      } catch {
+        return { ok: false, reason: "REDUCE70 예약 조회 실패 — fail-closed, 축소 보류" };
+      }
+      if (!existing) return { ok: false, reason: "REDUCE70 claim 충돌 후 예약 증거 없음 — fail-closed" };
+      if (existing.status !== "SUBMITTED") {
+        const gate = canExecuteReduction(existing);
+        return { ok: false, reason: gate.ok ? "REDUCE70 기존 terminal 예약 — 재실행 금지" : gate.reason };
+      }
+      if (!validReduce70Reservation(stateKey, existing, positionKey)) {
+        const reason = "REDUCE70 reservation identity 불일치 — 수동 조사 전 fail-closed";
+        state.unresolved = reason;
+        return { ok: false, reason };
+      }
+      rec = existing;
+      submittedReduce70.set(stateKey, existing);
+      }
+    }
+
+    try {
+      const result = await db.transaction(async (tx) => {
+      let result = await closeServerPaperPositionInDb({
+        openTradeId: args.openRow.id, reason: "PROFIT_PROTECT_REDUCE70", kind: "REDUCE70", quote: args.quote, nowMs,
+      }, shouldContinue, tx);
+      if (!result.ok && result.alreadyClosed) {
+        const fullRows = await tx.select().from(tradesTable).where(and(
+          eq(tradesTable.closesTradeId, args.openRow.id),
+          eq(tradesTable.closeKind, "FULL"),
+        ));
+        if (fullRows.length !== 1) {
+          throw new Error("REDUCE70 SUBMITTED의 FULL 종료 증거가 유일하지 않음 — fail-closed");
+        }
+        const full = fullRows[0];
+        const closedSize = parseFloat(full.sizeInUsd ?? full.size ?? "0");
+        const grossPnl = parseFloat(full.pnl ?? "");
+        if (!fin(closedSize) || closedSize <= 0 || !fin(grossPnl)) {
+          throw new Error("REDUCE70 SUBMITTED의 FULL 종료 증거가 손상됨 — fail-closed");
+        }
+        result = {
+          ok: true,
+          closeTradeId: full.id,
+          closedSizeUsd: closedSize,
+          grossPnlUsd: grossPnl,
+          netPnlEstimatedUsd: full.netPnlEstimatedUsd != null
+            ? parseFloat(full.netPnlEstimatedUsd)
+            : null,
+        };
+        rec.fullClose = true;
+      }
+      if (!result.ok) throw new Error(result.reason);
+      rec.status = "CONFIRMED";
+      rec.reduceSizeUsd = result.closedSizeUsd;
+      rec.updatedAt = new Date().toISOString();
+      await writeWorkerState(stateKey, JSON.stringify(rec), shouldContinue, tx);
+      return result;
+      });
+      submittedReduce70.delete(stateKey);
+      if (state.unresolved?.includes("REDUCE70")) state.unresolved = null;
+      return result;
+    } catch (err) {
+      if (!shouldContinue()) return stopped();
+      submittedReduce70.set(stateKey, rec);
+      const reason = `REDUCE70 atomic 처리 실패 — SUBMITTED 유지, 다음 틱 복구: ${(err as Error).message}`;
+      state.unresolved = reason;
+      console.error(`[ServerPaper] ${reason}`);
+      return { ok: false, reason };
+    }
+  } catch {
+    if (!shouldContinue()) return stopped();
+    const reason = "REDUCE70 예약 claim 실패 — fail-closed, 축소 보류";
+    state.unresolved = reason;
+    return { ok: false, reason };
+  } finally {
+    reduce70InFlight.delete(stateKey);
+  }
+}
 
 export async function reduceServerPaper70(args: {
   openRow: TradeRow;
@@ -555,57 +828,42 @@ export async function reduceServerPaper70(args: {
   nowMs?: number;
   shouldContinue?: () => boolean;
 }): Promise<ServerPaperCloseResult> {
-  const shouldContinue = args.shouldContinue ?? (() => true);
-  const stopped = (): ServerPaperCloseResult =>
-    ({ ok: false, reason: "lifecycle stopped — REDUCE70 no-op" });
-  if (!shouldContinue()) return stopped();
-  const nowMs = args.nowMs ?? Date.now();
-  const dayKey = manilaDayKey(new Date(nowMs));
-  const positionKey = `${args.openRow.symbol}:${args.openRow.side}:${args.openRow.id}`;
-  const idemKey = buildProfitProtectKey(dayKey, positionKey);
-  const stateKey = `${REDUCE70_KEY_PREFIX}${idemKey}`;
+  return reduceServerPaper70Internal(args);
+}
 
-  // durable 예약 확인 — 기록이 있으면 상태 불문 재실행 금지
-  let existing: ProfitProtectRecord | null = null;
+/** Restart recovery discovery. It performs no accounting write; the next PAPER
+ * management tick supplies a fresh quote and completes each exact-once transaction. */
+export async function loadSubmittedReduce70FromDb(
+  shouldContinue: () => boolean = () => true,
+): Promise<void> {
+  if (!shouldContinue()) return;
   try {
-    const raw = await readWorkerState(stateKey, shouldContinue);
-    if (!shouldContinue()) return stopped();
-    existing = raw ? JSON.parse(raw) as ProfitProtectRecord : null;
-  } catch {
-    if (!shouldContinue()) return stopped();
-    return { ok: false, reason: "REDUCE70 예약 조회 실패 — fail-closed, 축소 보류" };
-  }
-  const gate = canExecuteReduction(existing);
-  if (!gate.ok) return { ok: false, reason: gate.reason };
-
-  // 예약 선기록 (SUBMITTED) — 실행 전 durable
-  const rec: ProfitProtectRecord = {
-    idempotencyKey: idemKey, positionKey, dayKey,
-    reduceSizeUsd: 0, fullClose: false, status: "SUBMITTED", orderKey: null,
-    createdAt: new Date(nowMs).toISOString(), updatedAt: new Date(nowMs).toISOString(),
-  };
-  try {
-    await writeWorkerState(stateKey, JSON.stringify(rec), shouldContinue);
-    if (!shouldContinue()) return stopped();
-  } catch {
-    if (!shouldContinue()) return stopped();
-    return { ok: false, reason: "REDUCE70 예약 기록 실패 — fail-closed, 축소 보류" };
-  }
-
-  const result = await closeServerPaperPosition({
-    openTradeId: args.openRow.id, reason: "PROFIT_PROTECT_REDUCE70", kind: "REDUCE70", quote: args.quote, nowMs,
-  }, shouldContinue);
-  if (!shouldContinue()) return stopped();
-  rec.status = result.ok ? "CONFIRMED" : "FAILED";
-  rec.reduceSizeUsd = result.ok ? result.closedSizeUsd : 0;
-  rec.updatedAt = new Date().toISOString();
-  try { await writeWorkerState(stateKey, JSON.stringify(rec), shouldContinue); }
-  catch {
-    if (shouldContinue()) {
-      console.error("[ServerPaper] REDUCE70 예약 상태 갱신 실패 — 기록은 SUBMITTED 유지 (재실행 차단됨)");
+    const rows = await db.select().from(workerStateTable)
+      .where(like(workerStateTable.key, `${REDUCE70_KEY_PREFIX}%`));
+    if (!shouldContinue()) return;
+    submittedReduce70.clear();
+    for (const row of rows) {
+      const parsed = JSON.parse(row.value) as ProfitProtectRecord;
+      if ((parsed.status as string) === "MIGRATION_DUPLICATE_UNRESOLVED") {
+        state.unresolved = "REDUCE70 historical duplicate 증거 존재 — 수동 조사 전 fail-closed";
+        return;
+      }
+      if (parsed.status !== "SUBMITTED") continue;
+      if (!validReduce70Reservation(row.key, parsed)) {
+        state.unresolved = "REDUCE70 reservation identity 손상 — 수동 조사 전 fail-closed";
+        return;
+      }
+      submittedReduce70.set(row.key, parsed);
     }
+    if (submittedReduce70.size > 0) {
+      state.unresolved = "REDUCE70 SUBMITTED 복구 대기 — 신규 진입 차단";
+    } else if (state.unresolved?.includes("REDUCE70 SUBMITTED 복구")) {
+      state.unresolved = null;
+    }
+  } catch (err) {
+    state.unresolved = "REDUCE70 reservation 로드 실패 — durable 상태 불명, 신규 진입 차단";
+    console.error("[ServerPaper] REDUCE70 restart recovery 로드 실패:", (err as Error).message);
   }
-  return result;
 }
 
 // ── CASH/CLOSE_ALL 요청 (영속 — 재시작 후에도 완료까지 재시도) ────────────────
@@ -717,6 +975,35 @@ export async function manageServerPaperTick(
     if (!shouldContinue()) return;
     state.lastTickAt = new Date(nowMs).toISOString();
     state.lastTickStale = false;
+
+    // Restart/partial-write recovery runs before ordinary SL/TP management.
+    for (const [stateKey, rec] of [...submittedReduce70]) {
+      if (!shouldContinue()) return;
+      const openTradeId = rec.positionKey.split(":").at(-1);
+      if (!openTradeId) {
+        state.unresolved = "REDUCE70 SUBMITTED positionKey 손상 — 수동 조사 전 fail-closed";
+        return;
+      }
+      const rows = await db.select().from(tradesTable).where(eq(tradesTable.id, openTradeId));
+      const openRow = rows[0];
+      if (!openRow) {
+        state.unresolved = "REDUCE70 SUBMITTED OPEN 증거 없음 — 수동 조사 전 fail-closed";
+        return;
+      }
+      const expectedIdentity = `${openRow.symbol}:${openRow.side}:${openRow.id}`;
+      if (expectedIdentity !== rec.positionKey) {
+        state.unresolved = "REDUCE70 SUBMITTED OPEN identity 불일치 — 수동 조사 전 fail-closed";
+        return;
+      }
+      const recovered = await reduceServerPaper70Internal({
+        openRow,
+        quote: getQuote(openRow.symbol),
+        nowMs,
+        shouldContinue,
+      }, { stateKey, record: rec });
+      if (!recovered.ok) return;
+      submittedReduce70.delete(stateKey);
+    }
 
     // startup read 실패분 재시도 — durable 상태 불명 동안 unresolved 유지
     if (pendingCloseLoadFailed) {
