@@ -24,7 +24,10 @@ import {
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { useGmxAccount, type GmxOnchainPosition } from '@/lib/context/GmxAccountContext';
-import { summarizeGmxRisk } from '@/lib/gmxPositionMetrics';
+import {
+  isGmxRiskEvidenceAvailable,
+  summarizeGmxRisk,
+} from '@/lib/gmxPositionMetrics';
 import { cn } from '@/lib/utils';
 import { formatDistanceToNow, format } from 'date-fns';
 import { ko } from 'date-fns/locale';
@@ -59,8 +62,15 @@ function elapsedColor(ms: number): string {
 
 // ── Position row ──────────────────────────────────────────────────────────────
 
-function PositionRow({ pos }: { pos: GmxOnchainPosition }) {
+function PositionRow({
+  pos,
+  riskEvidenceAvailable,
+}: {
+  pos: GmxOnchainPosition;
+  riskEvidenceAvailable: boolean;
+}) {
   const isLong   = pos.direction === 'LONG';
+  const showNearLiquidation = riskEvidenceAvailable && pos.nearLiquidation;
   const pnlColor = pos.realisedPnlUsd >= 0
     ? 'text-[var(--color-long)]'
     : 'text-[var(--color-short)]';
@@ -126,7 +136,7 @@ function PositionRow({ pos }: { pos: GmxOnchainPosition }) {
         <div>
           <div className={cn(
             'font-mono',
-            pos.nearLiquidation
+            showNearLiquidation
               ? 'text-[var(--color-short)] font-bold animate-pulse'
               : pos.liquidationPrice != null
                 ? 'text-[var(--color-short)] font-semibold'
@@ -212,6 +222,13 @@ export function GmxOnchainCard() {
 
   /** Elapsed since last success — drives real-time coloring */
   const elapsedMs = gmx.lastSuccessUpdated ? now - gmx.lastSuccessUpdated.getTime() : null;
+  const riskEvidenceAvailable = isGmxRiskEvidenceAvailable({
+    status: gmx.status,
+    error: gmx.error,
+    lastSuccessUpdatedMs: gmx.lastSuccessUpdated?.getTime() ?? null,
+    nowMs: now,
+  });
+  const hasOpenPositions = riskEvidenceAvailable && gmx.positions.length > 0;
 
   const handleRefresh = useCallback(() => {
     gmx.refresh();
@@ -310,7 +327,7 @@ export function GmxOnchainCard() {
                   ? format(gmx.lastSuccessUpdated, 'HH:mm:ss')
                   : '—'}
               />
-              {gmx.positions.length > 0 && (
+              {hasOpenPositions && (
                 <DiagBadge
                   icon={Zap}
                   label="총 노출"
@@ -401,8 +418,8 @@ export function GmxOnchainCard() {
               )}
 
               {/* ── 리스크 요약 행 (totalExposure · avgLeverage · nearestLiq) ── */}
-              {/* 데이터가 없는 필드는 N/A 표시 — 절대 추정값 사용 안 함 */}
-              {gmx.positions.length > 0 && (() => {
+              {/* stale/error/unknown에서는 보존 캐시를 요약하지 않고 명시적으로 fail-closed */}
+              {(() => {
                 const {
                   averageLeverage,
                   validLeverageCount,
@@ -411,46 +428,74 @@ export function GmxOnchainCard() {
                   totalExposureUsd: totalExp,
                 } = riskSummary;
                 return (
-                  <div className="grid grid-cols-3 gap-2 mb-3">
+                  <div
+                    className="grid grid-cols-3 gap-2 mb-3"
+                    data-testid="gmx-risk-summary"
+                    data-risk-state={
+                      !riskEvidenceAvailable
+                        ? 'unavailable'
+                        : gmx.positions.length === 0
+                          ? 'empty'
+                          : 'available'
+                    }
+                  >
                     {/* 총 익스포저 */}
                     <div className="flex flex-col gap-0.5 px-2.5 py-2 rounded-lg border border-border bg-card/60">
                       <span className="text-[9px] font-semibold text-muted-foreground uppercase tracking-wider">총 익스포저</span>
-                      <span className="font-mono text-xs font-bold text-foreground">
-                        ${totalExp.toLocaleString('en-US', { maximumFractionDigits: 0 })}
+                      <span className="font-mono text-xs font-bold text-foreground" data-testid="gmx-risk-exposure">
+                        {!riskEvidenceAvailable
+                          ? 'Unavailable'
+                          : gmx.positions.length === 0
+                            ? 'N/A'
+                            : `$${totalExp.toLocaleString('en-US', { maximumFractionDigits: 0 })}`}
                       </span>
+                      {!riskEvidenceAvailable && <span className="text-[9px] text-[var(--color-short)]">FAIL-CLOSED</span>}
+                      {riskEvidenceAvailable && gmx.positions.length === 0 && (
+                        <span className="text-[9px] text-muted-foreground">열린 포지션 없음</span>
+                      )}
                     </div>
                     {/* 평균 레버리지 */}
                     <div className="flex flex-col gap-0.5 px-2.5 py-2 rounded-lg border border-border bg-card/60">
                       <span className="text-[9px] font-semibold text-muted-foreground uppercase tracking-wider">평균 레버리지</span>
-                      {averageLeverage != null ? (
+                      {!riskEvidenceAvailable ? (
                         <>
-                          <span className="font-mono text-xs font-bold text-foreground">{averageLeverage.toFixed(1)}×</span>
+                          <span className="font-mono text-xs text-muted-foreground" data-testid="gmx-risk-leverage">Unavailable</span>
+                          <span className="text-[9px] text-[var(--color-short)]">FAIL-CLOSED</span>
+                        </>
+                      ) : averageLeverage != null ? (
+                        <>
+                          <span className="font-mono text-xs font-bold text-foreground" data-testid="gmx-risk-leverage">{averageLeverage.toFixed(1)}×</span>
                           {validLeverageCount < gmx.positions.length && (
                             <span className="text-[9px] text-muted-foreground">{validLeverageCount}/{gmx.positions.length}개 유효</span>
                           )}
                         </>
                       ) : (
-                        <span className="font-mono text-xs text-muted-foreground">N/A</span>
+                        <span className="font-mono text-xs text-muted-foreground" data-testid="gmx-risk-leverage">N/A</span>
                       )}
                     </div>
                     {/* 최근접 청산거리 */}
                     <div className={`flex flex-col gap-0.5 px-2.5 py-2 rounded-lg border bg-card/60 ${
-                      nearestLiquidationGapFraction !== null && nearestLiquidationGapFraction <= 0.05
+                      riskEvidenceAvailable && nearestLiquidationGapFraction !== null && nearestLiquidationGapFraction <= 0.05
                         ? 'border-[var(--color-short)]/40 bg-[var(--color-short)]/5'
                         : 'border-border'
                     }`}>
                       <span className="text-[9px] font-semibold text-muted-foreground uppercase tracking-wider">최근접 청산거리</span>
-                      {nearestLiquidationGapFraction != null ? (
+                      {!riskEvidenceAvailable ? (
+                        <>
+                          <span className="font-mono text-xs text-muted-foreground" data-testid="gmx-risk-liquidation">Unavailable</span>
+                          <span className="text-[9px] text-[var(--color-short)]">FAIL-CLOSED</span>
+                        </>
+                      ) : nearestLiquidationGapFraction != null ? (
                         <>
                           <span className={`font-mono text-xs font-bold ${
                             nearestLiquidationGapFraction <= 0.05 ? 'text-[var(--color-short)]' : 'text-foreground'
-                          }`}>
+                          }`} data-testid="gmx-risk-liquidation">
                             {(nearestLiquidationGapFraction * 100).toFixed(1)}%
                           </span>
                           <span className="text-[9px] text-muted-foreground truncate">{nearestLiquidationLabel}</span>
                         </>
                       ) : (
-                        <span className="font-mono text-xs text-muted-foreground">N/A</span>
+                        <span className="font-mono text-xs text-muted-foreground" data-testid="gmx-risk-liquidation">N/A</span>
                       )}
                     </div>
                   </div>
@@ -458,7 +503,7 @@ export function GmxOnchainCard() {
               })()}
 
               {/* ── 청산가 위험 근접 경고 배너 ── */}
-              {gmx.positions.some(p => p.nearLiquidation) && (
+              {riskEvidenceAvailable && gmx.positions.some(p => p.nearLiquidation) && (
                 <div className="flex items-start gap-2.5 px-3 py-2.5 rounded-lg border border-[var(--color-short)]/40 bg-[var(--color-short)]/8 text-[11px] text-[var(--color-short)] mb-2">
                   <ShieldAlert className="w-4 h-4 shrink-0 mt-0.5 animate-pulse" />
                   <div>
@@ -478,13 +523,13 @@ export function GmxOnchainCard() {
               {gmx.positions.length > 0 && (
                 <div className="divide-y divide-border/60">
                   {gmx.positions.map(p => (
-                    <PositionRow key={p.id} pos={p} />
+                    <PositionRow key={p.id} pos={p} riskEvidenceAvailable={riskEvidenceAvailable} />
                   ))}
                 </div>
               )}
 
               {/* No positions (after successful load) */}
-              {gmx.status === 'ok' && gmx.positions.length === 0 && (
+              {riskEvidenceAvailable && gmx.positions.length === 0 && (
                 <div className="flex items-center justify-center py-5 text-muted-foreground text-xs gap-2">
                   <CheckCircle2 className="w-4 h-4 text-muted-foreground/50" />
                   GMX에 열린 포지션 없음

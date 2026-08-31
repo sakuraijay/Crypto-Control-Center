@@ -2,12 +2,48 @@ import { describe, expect, it } from 'vitest';
 
 import {
   computeUnrealizedPnlUsd,
+  GMX_RISK_STALE_MS,
+  isGmxRiskEvidenceAvailable,
   isNearLiquidation,
   summarizeGmxRisk,
   type GmxRiskMetricPosition,
 } from '../gmxPositionMetrics';
 
 const oneToken = '1000000000000000000';
+
+describe('isGmxRiskEvidenceAvailable', () => {
+  const nowMs = 1_000_000;
+
+  it('accepts only a fresh successful snapshot without an error', () => {
+    expect(isGmxRiskEvidenceAvailable({
+      status: 'ok',
+      error: null,
+      lastSuccessUpdatedMs: nowMs - GMX_RISK_STALE_MS + 1,
+      nowMs,
+    })).toBe(true);
+  });
+
+  it('fails closed at the stale boundary and for retained-cache errors or unknown timestamps', () => {
+    expect(isGmxRiskEvidenceAvailable({
+      status: 'ok',
+      error: null,
+      lastSuccessUpdatedMs: nowMs - GMX_RISK_STALE_MS,
+      nowMs,
+    })).toBe(false);
+    expect(isGmxRiskEvidenceAvailable({
+      status: 'ok',
+      error: 'latest fetch failed',
+      lastSuccessUpdatedMs: nowMs - 1_000,
+      nowMs,
+    })).toBe(false);
+    expect(isGmxRiskEvidenceAvailable({
+      status: 'unavailable',
+      error: 'RPC unavailable',
+      lastSuccessUpdatedMs: null,
+      nowMs,
+    })).toBe(false);
+  });
+});
 
 describe('computeUnrealizedPnlUsd', () => {
   it('marks LONG and SHORT positions in opposite directions', () => {

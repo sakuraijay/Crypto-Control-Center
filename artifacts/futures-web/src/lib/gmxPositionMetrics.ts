@@ -15,6 +15,25 @@ export interface GmxRiskSummary {
   nearestLiquidationLabel: string | null;
 }
 
+export const GMX_RISK_STALE_MS = 120_000;
+
+export function isGmxRiskEvidenceAvailable(input: {
+  status: 'idle' | 'loading' | 'ok' | 'error' | 'unavailable';
+  error: string | null;
+  lastSuccessUpdatedMs: number | null;
+  nowMs: number;
+}): boolean {
+  if (
+    input.status !== 'ok'
+    || input.error !== null
+    || input.lastSuccessUpdatedMs === null
+  ) {
+    return false;
+  }
+  const ageMs = input.nowMs - input.lastSuccessUpdatedMs;
+  return Number.isFinite(ageMs) && ageMs >= 0 && ageMs < GMX_RISK_STALE_MS;
+}
+
 export function computeUnrealizedPnlUsd(input: {
   sizeUsd: number;
   sizeInTokens: string | null | undefined;
