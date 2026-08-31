@@ -1001,6 +1001,201 @@ describe('reduceServerPaper70', () => {
   });
 
   it.each([
+    { openState: 'original', openSize: '100.01', field: 'action', value: 'OPEN' },
+    { openState: 'original', openSize: '100.01', field: 'symbol', value: 'ETH' },
+    { openState: 'original', openSize: '100.01', field: 'side', value: 'SHORT' },
+    { openState: 'original', openSize: '100.01', field: 'managedBy', value: 'CLIENT' },
+    { openState: 'original', openSize: '100.01', field: 'pnl', value: 'NaN' },
+    { openState: 'original', openSize: '100.01', field: 'netPnlEstimatedUsd', value: 'NaN' },
+    { openState: 'already-reduced', openSize: '30.01', field: 'action', value: 'OPEN' },
+    { openState: 'already-reduced', openSize: '30.01', field: 'symbol', value: 'ETH' },
+    { openState: 'already-reduced', openSize: '30.01', field: 'side', value: 'SHORT' },
+    { openState: 'already-reduced', openSize: '30.01', field: 'managedBy', value: 'CLIENT' },
+    { openState: 'already-reduced', openSize: '30.01', field: 'pnl', value: 'NaN' },
+    { openState: 'already-reduced', openSize: '30.01', field: 'netPnlEstimatedUsd', value: 'NaN' },
+  ])('$openState OPEN 복구는 REDUCE70 증거의 잘못된 $field를 거부한다', async ({ openSize, field, value }) => {
+    const nowMs = Date.UTC(2026, 7, 31);
+    const dayKey = manilaDayKey(new Date(nowMs));
+    const idemKey = buildProfitProtectKey(dayKey, 'BTC:LONG:open-1');
+    const submitted = {
+      idempotencyKey: idemKey,
+      positionKey: 'BTC:LONG:open-1',
+      dayKey,
+      originalSizeUsd: 100.01,
+      reduceSizeUsd: 70,
+      remainingSizeUsd: 30.01,
+      fullClose: false,
+      status: 'SUBMITTED',
+      orderKey: null,
+      createdAt: '2026-08-31T00:00:00.000Z',
+      updatedAt: '2026-08-31T00:00:00.000Z',
+    };
+    const lockedOpen = serverOpenRow({ size: openSize, sizeInUsd: openSize, closeTime: 0 });
+    const corruptReduce = {
+      ...serverOpenRow(),
+      id: 'reduce-close-corrupt',
+      action: 'CLOSE',
+      size: '70',
+      sizeInUsd: '70',
+      pnl: '1.1',
+      netPnlEstimatedUsd: '0.5',
+      closesTradeId: 'open-1',
+      closeKind: 'REDUCE70',
+      closeTime: nowMs - 1,
+      [field]: value,
+    };
+    let selectCall = 0;
+    vi.mocked(db.insert).mockImplementation(() => makeChain(() => []) as never);
+    vi.mocked(db.select).mockImplementation(() => makeChain(() => {
+      selectCall += 1;
+      if (selectCall === 1) {
+        return [{ key: `serverPaperReduce70:${idemKey}`, value: JSON.stringify(submitted) }];
+      }
+      if (selectCall === 2) return [lockedOpen];
+      return [corruptReduce];
+    }) as never);
+
+    const r = await reduceServerPaper70({
+      openRow: lockedOpen as never,
+      quote: { priceUsd: 51_000, ageMs: 1_000 },
+      nowMs,
+    });
+
+    expect(r.ok).toBe(false);
+    expect(getServerPaperStatus().unresolved).toContain('identity/PnL 손상');
+    expect(db.insert).toHaveBeenCalledTimes(1); // reservation claim 확인뿐
+    expect(db.update).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { openState: 'original', openSize: '100.01', expectedUpdates: 2 },
+    { openState: 'already-reduced', openSize: '30.01', expectedUpdates: 1 },
+  ])('$openState OPEN onConflict 복구는 REDUCE70 persisted gross/net을 그대로 재사용한다', async ({
+    openSize,
+    expectedUpdates,
+  }) => {
+    const nowMs = Date.UTC(2026, 7, 31);
+    const dayKey = manilaDayKey(new Date(nowMs));
+    const idemKey = buildProfitProtectKey(dayKey, 'BTC:LONG:open-1');
+    const submitted = {
+      idempotencyKey: idemKey,
+      positionKey: 'BTC:LONG:open-1',
+      dayKey,
+      originalSizeUsd: 100.01,
+      reduceSizeUsd: 70,
+      remainingSizeUsd: 30.01,
+      fullClose: false,
+      status: 'SUBMITTED',
+      orderKey: null,
+      createdAt: new Date(nowMs).toISOString(),
+      updatedAt: new Date(nowMs).toISOString(),
+    };
+    const lockedOpen = serverOpenRow({ size: openSize, sizeInUsd: openSize, closeTime: 0 });
+    const durableReduce = {
+      ...serverOpenRow(),
+      id: 'reduce-close-existing',
+      action: 'CLOSE',
+      size: '70',
+      sizeInUsd: '70',
+      pnl: '123.45',
+      netPnlEstimatedUsd: '-7.89',
+      closesTradeId: 'open-1',
+      closeKind: 'REDUCE70',
+      closeTime: nowMs - 1,
+    };
+    let selectCall = 0;
+    vi.mocked(db.insert).mockImplementation(() => makeChain(() => []) as never);
+    vi.mocked(db.select).mockImplementation(() => makeChain(() => {
+      selectCall += 1;
+      if (selectCall === 1 || selectCall === 5) {
+        return [{ key: `serverPaperReduce70:${idemKey}`, value: JSON.stringify(submitted) }];
+      }
+      if (selectCall === 2) return [lockedOpen];
+      return [durableReduce];
+    }) as never);
+    vi.mocked(db.update).mockImplementation(() => makeChain(() => [{ id: 'updated' }]) as never);
+
+    const r = await reduceServerPaper70({
+      openRow: lockedOpen as never,
+      quote: { priceUsd: 51_000, ageMs: 1_000 },
+      nowMs,
+    });
+
+    expect(r).toMatchObject({
+      ok: true,
+      closeTradeId: 'reduce-close-existing',
+      grossPnlUsd: 123.45,
+      netPnlEstimatedUsd: -7.89,
+      originalSizeUsd: 100.01,
+      remainingSizeUsd: 30.01,
+    });
+    expect(db.update).toHaveBeenCalledTimes(expectedUpdates);
+  });
+
+  it('REDUCE70 unique-exception fallback도 persisted gross/net 증거를 재사용한다', async () => {
+    const nowMs = Date.UTC(2026, 7, 31);
+    const dayKey = manilaDayKey(new Date(nowMs));
+    const idemKey = buildProfitProtectKey(dayKey, 'BTC:LONG:open-1');
+    const submitted = {
+      idempotencyKey: idemKey,
+      positionKey: 'BTC:LONG:open-1',
+      dayKey,
+      originalSizeUsd: 100.01,
+      reduceSizeUsd: 70,
+      remainingSizeUsd: 30.01,
+      fullClose: false,
+      status: 'SUBMITTED',
+      orderKey: null,
+      createdAt: new Date(nowMs).toISOString(),
+      updatedAt: new Date(nowMs).toISOString(),
+    };
+    const lockedOpen = serverOpenRow({ size: '100.01', sizeInUsd: '100.01', closeTime: 0 });
+    const durableReduce = {
+      ...serverOpenRow(),
+      id: 'reduce-close-unique',
+      action: 'CLOSE',
+      size: '70',
+      sizeInUsd: '70',
+      pnl: '222.22',
+      netPnlEstimatedUsd: '-8.88',
+      closesTradeId: 'open-1',
+      closeKind: 'REDUCE70',
+      closeTime: nowMs - 1,
+    };
+    let insertCall = 0;
+    let selectCall = 0;
+    vi.mocked(db.insert).mockImplementation(() => {
+      insertCall += 1;
+      if (insertCall === 1) return makeChain(() => [{ key: `serverPaperReduce70:${idemKey}` }]) as never;
+      return makeChain(() => {
+        throw new Error('duplicate key value violates unique constraint "trades_reduce70_close_uq"');
+      }) as never;
+    });
+    vi.mocked(db.select).mockImplementation(() => makeChain(() => {
+      selectCall += 1;
+      if (selectCall === 1) return [lockedOpen];
+      if (selectCall === 2) return [];
+      if (selectCall === 3) return [durableReduce];
+      return [{ key: `serverPaperReduce70:${idemKey}`, value: JSON.stringify(submitted) }];
+    }) as never);
+    vi.mocked(db.update).mockImplementation(() => makeChain(() => [{ id: 'updated' }]) as never);
+
+    const r = await reduceServerPaper70({
+      openRow: lockedOpen as never,
+      quote: { priceUsd: 51_000, ageMs: 1_000 },
+      nowMs,
+    });
+
+    expect(r).toMatchObject({
+      ok: true,
+      closeTradeId: 'reduce-close-unique',
+      grossPnlUsd: 222.22,
+      netPnlEstimatedUsd: -8.88,
+    });
+    expect(insertCall).toBe(2);
+  });
+
+  it.each([
     { label: '크기 불일치', fullSize: '4.99', netPnl: '-0.2' },
     { label: '비정상 net PnL', fullSize: '5', netPnl: 'NaN' },
   ])('이미 닫힌 OPEN의 FULL 증거 $label는 reservation을 확정하지 않는다', async ({ fullSize, netPnl }) => {

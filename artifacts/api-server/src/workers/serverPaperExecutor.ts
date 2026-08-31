@@ -448,6 +448,28 @@ async function closeServerPaperPositionInDb(
     record(args.kind, args.reason, true, "이미 청산됨 (no-op)");
     return { ok: false, reason: "이미 청산됨", alreadyClosed: true };
   }
+  const durableCloseEvidence = (
+    row: TradeRow,
+    kind: "FULL" | "REDUCE70",
+    expectedSize?: number,
+  ): { size: number; gross: number; net: number | null } | null => {
+    const size = parseFloat(row.sizeInUsd ?? row.size ?? "");
+    const gross = parseFloat(row.pnl ?? "");
+    const net = row.netPnlEstimatedUsd != null ? parseFloat(row.netPnlEstimatedUsd) : null;
+    if (row.action !== "CLOSE"
+      || row.closeKind !== kind
+      || row.closesTradeId !== openRow.id
+      || row.symbol !== openRow.symbol
+      || row.side !== openRow.side
+      || row.managedBy !== "SERVER"
+      || !fin(size) || size <= 0
+      || (expectedSize !== undefined && (!fin(expectedSize) || Math.abs(size - expectedSize) > 0.0001))
+      || !fin(gross)
+      || (net != null && !fin(net))) {
+      return null;
+    }
+    return { size, gross, net };
+  };
 
   // 시세 신선도 — stale이면 청산 보류 (합성 가격 정산 금지, 다음 틱 재시도)
   const q = args.quote;
@@ -479,6 +501,11 @@ async function closeServerPaperPositionInDb(
       eq(tradesTable.closesTradeId, openRow.id),
       eq(tradesTable.closeKind, "REDUCE70"),
     ));
+    if (closeRows.length > 1 || (closeRows[0] && !durableCloseEvidence(closeRows[0], "REDUCE70"))) {
+      const reason = "REDUCE70 durable 증거 identity/PnL 손상 — 수동 조사 전 fail-closed";
+      state.unresolved = reason;
+      return { ok: false, reason };
+    }
     existingReduceClose = closeRows[0] ?? null;
   }
 
@@ -624,7 +651,7 @@ async function closeServerPaperPositionInDb(
         eq(tradesTable.closesTradeId, openRow.id),
         eq(tradesTable.closeKind, "REDUCE70"),
       ));
-      if (!claimed[0]) {
+      if (claimed.length !== 1) {
         const reason = "REDUCE70 CLOSE claim 충돌 증거 조회 실패 — fail-closed";
         state.unresolved = reason;
         return { ok: false, reason };
@@ -652,15 +679,16 @@ async function closeServerPaperPositionInDb(
     }
     const claimed = await database.select().from(tradesTable).where(and(
       eq(tradesTable.closesTradeId, openRow.id),
-      eq(tradesTable.closeKind, "FULL"),
+      eq(tradesTable.closeKind, effectiveKind),
     ));
     if (claimed.length !== 1) {
-      const reason = "FULL CLOSE unique 충돌 증거가 유일하지 않음 — fail-closed";
+      const reason = `${effectiveKind} CLOSE unique 충돌 증거가 유일하지 않음 — fail-closed`;
       state.unresolved = reason;
       return { ok: false, reason };
     }
-    existingFullClose = claimed[0];
-    // FULL UNIQUE conflict → 이전 시도가 CLOSE 행을 이미 삽입 — repair 경로로 진행
+    if (effectiveKind === "REDUCE70") existingReduceClose = claimed[0];
+    else existingFullClose = claimed[0];
+    // UNIQUE conflict → 이전 시도가 CLOSE 행을 이미 삽입 — repair 경로로 진행
     console.warn(`[ServerPaper] CLOSE claim conflict (open=${openRow.id}) — repair 경로 진행`);
   }
 
@@ -668,23 +696,14 @@ async function closeServerPaperPositionInDb(
   if (!shouldContinue()) return stopped();
   if (effectiveKind === "FULL") {
     if (existingFullClose) {
-      const evidenceSize = parseFloat(existingFullClose.sizeInUsd ?? existingFullClose.size ?? "0");
-      const evidenceGross = parseFloat(existingFullClose.pnl ?? "");
-      const evidenceNet = existingFullClose.netPnlEstimatedUsd != null
-        ? parseFloat(existingFullClose.netPnlEstimatedUsd)
-        : null;
-      if (!fin(evidenceSize) || evidenceSize <= 0 || Math.abs(evidenceSize - openSize) > 0.0001
-        || !fin(evidenceGross) || (evidenceNet != null && !fin(evidenceNet))
-        || existingFullClose.action !== "CLOSE"
-        || existingFullClose.symbol !== openRow.symbol
-        || existingFullClose.side !== openRow.side
-        || existingFullClose.managedBy !== "SERVER") {
+      const evidence = durableCloseEvidence(existingFullClose, "FULL", openSize);
+      if (!evidence) {
         const reason = "FULL CLOSE durable 크기 증거 불일치 — 수동 조사 전 fail-closed";
         state.unresolved = reason;
         return { ok: false, reason };
       }
-      grossPnl = evidenceGross;
-      netEst = evidenceNet;
+      grossPnl = evidence.gross;
+      netEst = evidence.net;
     }
     const updated = await database.update(tradesTable)
       .set({ closeTime: nowMs })
@@ -701,6 +720,16 @@ async function closeServerPaperPositionInDb(
   } else {
     // REDUCE70: 잔여 size로 축소 + 잔여 비율만큼 비용 결속도 축소 (이후 FULL 정산 정합)
     const remainFraction = remaining / accountingOpenSize;
+    if (existingReduceClose) {
+      const evidence = durableCloseEvidence(existingReduceClose, "REDUCE70", closedSize);
+      if (!evidence) {
+        const reason = "REDUCE70 CLOSE durable identity/PnL 증거 불일치 — 수동 조사 전 fail-closed";
+        state.unresolved = reason;
+        return { ok: false, reason };
+      }
+      grossPnl = evidence.gross;
+      netEst = evidence.net;
+    }
     if (existingReduceClose && Math.abs(openSize - remaining) <= 0.0001) {
       // Accounting was already completed; only reservation finalization remains.
     } else {
