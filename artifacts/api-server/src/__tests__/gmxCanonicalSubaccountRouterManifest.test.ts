@@ -3,6 +3,7 @@
  * No network/RPC/DB/signing/order calls are performed.
  */
 import { describe, expect, it } from 'vitest';
+import { createRequire } from 'node:module';
 import { GMX_DEPLOYMENT_MANIFEST } from '../lib/gmxDeploymentManifest';
 import {
   GMX_CANONICAL_SUBACCOUNT_ROUTER_AUDIT,
@@ -18,6 +19,18 @@ describe('canonical SubaccountRouter audit validation', () => {
     expect(GMX_CANONICAL_SUBACCOUNT_ROUTER_AUDIT.auditVersion).toBe(1);
     expect(GMX_CANONICAL_SUBACCOUNT_ROUTER_AUDIT.chainId).toBe(42161);
     expect(GMX_CANONICAL_SUBACCOUNT_ROUTER_AUDIT.address).toBe(OFFICIAL);
+  });
+
+  it('binds both distinct Arbitrum routers to the installed SDK registry', () => {
+    const require = createRequire(import.meta.url);
+    const contracts = require('@gmx-io/sdk/configs/contracts') as {
+      getContract(chainId: number, name: string): string;
+    };
+    expect(contracts.getContract(42161, 'SubaccountRouter')).toBe(OFFICIAL);
+    expect(contracts.getContract(42161, 'SubaccountGelatoRelayRouter'))
+      .toBe(GMX_DEPLOYMENT_MANIFEST.addresses.subaccountGelatoRelayRouter);
+    expect(contracts.getContract(42161, 'SubaccountRouter').toLowerCase())
+      .not.toBe(contracts.getContract(42161, 'SubaccountGelatoRelayRouter').toLowerCase());
   });
 
   it('accepts the official address and ignores address case', () => {

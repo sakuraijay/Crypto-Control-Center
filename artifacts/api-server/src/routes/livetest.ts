@@ -456,12 +456,20 @@ router.get('/executor/livetest/status', async (req, res) => {
           checkDelegationStatus(mainAddress, signerAddress),
           getSignerEthBalance(rpcUrl),
         ]);
-        usdcAllowance = (await getUsdcAllowance(mainAddress)).toString();
+        // API v2 Canary의 실제 spender는 SDK-pinned SyntheticsRouter다.
+        // legacy direct SubaccountRouter allowance를 현재 readiness에 섞지 않는다.
+        const sdkRouter = resolveSdkSyntheticsRouter();
+        if (sdkRouter) {
+          const allowance = await getUsdcAllowanceForSpender(mainAddress, sdkRouter);
+          if (allowance !== null) usdcAllowance = allowance.toString();
+        }
         if (delegation) timeRemaining = delegationTimeRemainingSeconds(delegation);
       } catch { /* non-fatal */ }
     }
 
-    const subaccountRouterConfigured = Boolean(process.env.GMX_SUBACCOUNT_ROUTER_ADDRESS?.trim());
+    // API v2 readiness는 DataStore + SubaccountGelatoRelayRouter 계약을 사용한다.
+    // legacy GMX_SUBACCOUNT_ROUTER_ADDRESS 존재 여부를 현재 실행 적격성으로 표시하지 않는다.
+    const subaccountRouterConfigured = resolveGmxLiveRelayConfig().ok;
     const orderVaultConfigured       = Boolean(process.env.GMX_ORDER_VAULT_ADDRESS?.trim());
 
     return res.json({
@@ -479,6 +487,7 @@ router.get('/executor/livetest/status', async (req, res) => {
       usdcAllowanceWei:      usdcAllowance,
       usdcApproved:          BigInt(usdcAllowance) >= 15_000_000n, // ≥ 15 USDC
       delegation,
+      delegationSource:      'GMX_API_V2_DATA_STORE',
       delegationTimeRemainingSeconds: timeRemaining,
       subaccountRouterConfigured,
       orderVaultConfigured,

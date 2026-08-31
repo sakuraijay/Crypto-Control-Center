@@ -1,5 +1,5 @@
 /**
- * GMX V2 SubaccountRouter — 온체인 상태 조회 및 MetaMask 트랜잭션 빌더
+ * GMX V2 delegated authorization 조회 및 legacy MetaMask 트랜잭션 빌더
  *
  * 이 모듈은 읽기 전용(view call) 및 미서명 트랜잭션 데이터 빌드만 수행합니다.
  * 실제 온체인 전송은 liveTestExecutor.ts 또는 MetaMask(브라우저)가 담당합니다.
@@ -21,6 +21,10 @@ import {
   GMX_CANONICAL_SUBACCOUNT_ROUTER_AUDIT,
   validateCanonicalSubaccountRouterEnv,
 } from './gmxCanonicalSubaccountRouterAudit';
+import { createCanonicalDataStoreClient } from './gmxCanonicalClient';
+import { readSubaccountAuthorization, type DataStoreClient } from './gmxDataStore';
+import { resolveGmxLiveRelayConfig } from './gmxLiveConfig';
+import { validateEnvAgainstManifest } from './gmxDeploymentManifest';
 
 /**
  * Execution-boundary router resolver.
@@ -54,7 +58,7 @@ function getPublicClient() {
   });
 }
 
-// ── 위임 상태 조회 ─────────────────────────────────────────────────────────────
+// ── API v2 canonical 위임 상태 조회 ────────────────────────────────────────────
 
 export interface DelegationStatus {
   /** 서브계정이 온체인에서 승인되어 있는지 여부 */
@@ -75,9 +79,21 @@ export interface DelegationStatus {
   queryError?:        string;
 }
 
+let apiV2DelegationClientFactory: () => DataStoreClient = createCanonicalDataStoreClient;
+
+export function __setApiV2DelegationClientFactoryForTests(
+  factory: (() => DataStoreClient) | null,
+): void {
+  apiV2DelegationClientFactory = factory ?? createCanonicalDataStoreClient;
+}
+
 /**
- * SubaccountRouter.subaccounts() 뷰 호출로 위임 상태를 온체인에서 조회.
- * RPC 실패 또는 canonical router 검증 실패 시 fail-closed (isAuthorized: false).
+ * GMX API v2의 canonical DataStore + SubaccountGelatoRelayRouter 계약으로
+ * delegated authorization을 조회한다.
+ *
+ * 중요: SubaccountRouter.subaccounts()는 legacy direct-router 세대의 상태다.
+ * API v2 submit path가 그 값을 요구하면 올바른 Owner Approval도 거부하므로,
+ * 이 readback은 반드시 API v2 manifest와 DataStore 키 계약만 사용한다.
  */
 export async function checkDelegationStatus(
   mainAddress: string,
@@ -94,22 +110,42 @@ export async function checkDelegationStatus(
   };
 
   try {
-    const routerAddress = getCanonicalSubaccountRouterAddress();
-    const client        = getPublicClient();
-    const nowUnix       = Math.floor(Date.now() / 1000);
+    const relay = resolveGmxLiveRelayConfig();
+    if (!relay.ok || !relay.config) {
+      return {
+        ...base,
+        queryError: '[GMXSubaccount] GMX API v2 relay config unavailable — fail-closed',
+      };
+    }
 
-    const result = await client.readContract({
-      address:      routerAddress,
-      abi:          SUBACCOUNT_ROUTER_ABI,
-      functionName: 'subaccounts',
-      args:         [mainAddress as `0x${string}`, signerAddress as `0x${string}`],
+    const manifest = validateEnvAgainstManifest(process.env);
+    if (!manifest.ok) {
+      return {
+        ...base,
+        queryError: '[GMXSubaccount] GMX API v2 relay manifest mismatch — fail-closed',
+      };
+    }
+
+    const result = await readSubaccountAuthorization({
+      client: apiV2DelegationClientFactory(),
+      dataStore: relay.config.dataStore as `0x${string}`,
+      relayRouter: relay.config.subaccountGelatoRelayRouter as `0x${string}`,
+      account: mainAddress as `0x${string}`,
+      subaccount: signerAddress as `0x${string}`,
     });
+    if (!result.ok) return { ...base, queryError: result.reason };
 
-    // result = [remainingActions, expiresAt]
-    const remaining  = Number((result as [bigint, bigint])[0]);
-    const expiresAt  = Number((result as [bigint, bigint])[1]);
-    const isExpired  = expiresAt > 0 && expiresAt < nowUnix;
-    const isAuth     = remaining > 0 && !isExpired;
+    const onchain = result.data;
+    const remaining = Number(onchain.remaining);
+    const expiresAt = Number(onchain.expiresAt);
+    const nowUnix = Number(onchain.blockTimestamp ?? BigInt(Math.floor(Date.now() / 1000)));
+    const isExpired = expiresAt <= nowUnix;
+    const isAuth =
+      onchain.isSubaccountListed
+      && !onchain.featureDisabled
+      && !onchain.integrationDisabled
+      && remaining > 0
+      && !isExpired;
 
     return {
       ...base,
@@ -120,13 +156,17 @@ export async function checkDelegationStatus(
       queryOk:          true,
     };
   } catch (err: unknown) {
-    const msg = (err as Error).message ?? 'Unknown RPC error';
+    const msg = err instanceof Error && err.message.startsWith('[GMXSubaccount]')
+      ? err.message
+      : '[GMXSubaccount] GMX API v2 canonical readback unavailable — fail-closed';
     console.error('[GMXSubaccount] checkDelegationStatus 실패:', msg);
     return { ...base, queryError: msg };
   }
 }
 
-// ── MetaMask 트랜잭션 빌더 (실제 전송은 사용자가 MetaMask로 수행) ────────────────
+// ── Legacy direct-router MetaMask 트랜잭션 빌더 ─────────────────────────────────
+// API v2 Owner Approval과 혼용 금지. 기존 명시적 operator 경로 호환을 위해
+// 남겨 두되, audited legacy env가 없으면 계속 fail-closed한다.
 
 export interface UnsignedTx {
   to:    string;
