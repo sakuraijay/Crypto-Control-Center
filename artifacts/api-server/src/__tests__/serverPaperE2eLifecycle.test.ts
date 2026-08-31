@@ -20,6 +20,7 @@ interface Store {
   workerState: Map<string, string>;
 }
 const store: Store = { trades: [], workerState: new Map() };
+let forceOpenUpdateZero = false;
 
 /** where 인자(드리즐 SQL 객체)를 순환 안전하게 평탄화해 포함된 문자열 수집 */
 function flatStrings(x: unknown, out: string[] = [], seen = new Set<unknown>()): string[] {
@@ -62,13 +63,25 @@ vi.mock('@workspace/db', () => {
     update: vi.fn(() => chain((op) => globalThis.__e2eExec('update', op))),
     delete: vi.fn(() => chain((op) => globalThis.__e2eExec('delete', op))),
   };
-  database['transaction'] = vi.fn(async (fn: (tx: unknown) => unknown) => fn(database));
+  database['transaction'] = vi.fn(async (fn: (tx: unknown) => unknown) => {
+    const snapshot = globalThis.__e2eSnapshot();
+    try {
+      return await fn(database);
+    } catch (err) {
+      globalThis.__e2eRestore(snapshot);
+      throw err;
+    }
+  });
   return { db: database, tradesTable, workerStateTable };
 });
 
 declare global {
   // eslint-disable-next-line no-var
   var __e2eExec: (kind: string, op: { where?: unknown; values?: unknown; set?: unknown }) => unknown;
+  // eslint-disable-next-line no-var
+  var __e2eSnapshot: () => unknown;
+  // eslint-disable-next-line no-var
+  var __e2eRestore: (snapshot: unknown) => void;
 }
 
 const WS_KEYS = ['serverPaperPendingClose', 'pendingClose'];
@@ -122,6 +135,10 @@ globalThis.__e2eExec = (kind, op) => {
   if (kind === 'update') {
     const target = store.trades.find((r) => strs.includes(r['id'] as string));
     if (target) {
+      if (forceOpenUpdateZero && target['action'] === 'OPEN'
+        && Object.hasOwn(op.set as object, 'closeTime')) {
+        return [];
+      }
       // 조건부 UPDATE: closeTime=0 조건 존중 (이미 닫힌 행 재청산 금지)
       if (strs.includes('closeTime') && target['closeTime'] !== 0) return [];
       Object.assign(target, op.set as Record<string, unknown>);
@@ -129,6 +146,17 @@ globalThis.__e2eExec = (kind, op) => {
     return [];
   }
   return [];
+};
+
+globalThis.__e2eSnapshot = () => ({
+  trades: structuredClone(store.trades),
+  workerState: new Map(store.workerState),
+});
+
+globalThis.__e2eRestore = (snapshot) => {
+  const saved = snapshot as Store;
+  store.trades = saved.trades;
+  store.workerState = saved.workerState;
 };
 
 vi.mock('../lib/paperCostCache', () => ({ getPaperCostBinding: vi.fn(() => null) }));
@@ -181,6 +209,7 @@ beforeEach(() => {
   __resetServerPaperStateForTests();
   store.trades = [];
   store.workerState.clear();
+  forceOpenUpdateZero = false;
   vi.mocked(getPaperCostBinding).mockReturnValue(BINDING as ReturnType<typeof getPaperCostBinding>);
 });
 
@@ -213,6 +242,18 @@ describe('E2E §1 — OPEN → SL 터치 → net settlement → 중복 0건', ()
     await manageServerPaperTick(quoteFn(49_400), T0 + H + 10_000);
     await manageServerPaperTick(quoteFn(49_400), T0 + H + 20_000);
     expect(closeRows()).toHaveLength(1);
+  });
+
+  it('CLOSE insert 후 OPEN 조건부 갱신 실패는 transaction 전체를 rollback한다', async () => {
+    await openBtcLong();
+    const open = store.trades[0]!;
+    forceOpenUpdateZero = true;
+
+    await manageServerPaperTick(quoteFn(49_400), T0 + H);
+
+    expect(closeRows()).toHaveLength(0);
+    expect(open['closeTime']).toBe(0);
+    expect(getServerPaperStatus().unresolved).toContain('조건부 갱신 0건');
   });
 });
 

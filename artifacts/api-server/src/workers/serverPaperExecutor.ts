@@ -100,6 +100,14 @@ export type ServerPaperCloseResult =
   }
   | { ok: false; reason: string; alreadyClosed?: boolean };
 
+type FailedServerPaperCloseResult = Extract<ServerPaperCloseResult, { ok: false }>;
+
+class CloseTransactionAbort extends Error {
+  constructor(readonly result: FailedServerPaperCloseResult) {
+    super(result.reason);
+  }
+}
+
 interface ReducePlanEvidence {
   originalSizeUsd: number;
   reduceSizeUsd: number;
@@ -544,7 +552,7 @@ async function closeServerPaperPositionInDb(
 
   // gross PnL (청산분)
   const recoveredGross = existingReduceClose ? parseFloat(existingReduceClose.pnl ?? "") : NaN;
-  const grossPnl = fin(recoveredGross)
+  let grossPnl = fin(recoveredGross)
     ? recoveredGross
     : ((q.priceUsd - entry) / entry) * closedSize * dir;
 
@@ -611,7 +619,7 @@ async function closeServerPaperPositionInDb(
       riskProfileSnapshot: openRow.riskProfileSnapshot,
     }).onConflictDoNothing().returning({ id: tradesTable.id });
     if (!shouldContinue()) return stopped();
-    if (inserted.length === 0 && args.kind === "REDUCE70") {
+    if (inserted.length === 0 && effectiveKind === "REDUCE70") {
       const claimed = await database.select().from(tradesTable).where(and(
         eq(tradesTable.closesTradeId, openRow.id),
         eq(tradesTable.closeKind, "REDUCE70"),
@@ -661,11 +669,22 @@ async function closeServerPaperPositionInDb(
   if (effectiveKind === "FULL") {
     if (existingFullClose) {
       const evidenceSize = parseFloat(existingFullClose.sizeInUsd ?? existingFullClose.size ?? "0");
-      if (!fin(evidenceSize) || evidenceSize <= 0 || Math.abs(evidenceSize - openSize) > 0.0001) {
+      const evidenceGross = parseFloat(existingFullClose.pnl ?? "");
+      const evidenceNet = existingFullClose.netPnlEstimatedUsd != null
+        ? parseFloat(existingFullClose.netPnlEstimatedUsd)
+        : null;
+      if (!fin(evidenceSize) || evidenceSize <= 0 || Math.abs(evidenceSize - openSize) > 0.0001
+        || !fin(evidenceGross) || (evidenceNet != null && !fin(evidenceNet))
+        || existingFullClose.action !== "CLOSE"
+        || existingFullClose.symbol !== openRow.symbol
+        || existingFullClose.side !== openRow.side
+        || existingFullClose.managedBy !== "SERVER") {
         const reason = "FULL CLOSE durable 크기 증거 불일치 — 수동 조사 전 fail-closed";
         state.unresolved = reason;
         return { ok: false, reason };
       }
+      grossPnl = evidenceGross;
+      netEst = evidenceNet;
     }
     const updated = await database.update(tradesTable)
       .set({ closeTime: nowMs })
@@ -731,12 +750,17 @@ export async function closeServerPaperPosition(
   try {
     return await db.transaction(async (tx) => {
       const result = await closeServerPaperPositionInDb(args, shouldContinue, tx);
-      if (!result.ok && result.reason.includes("lifecycle stopped")) {
-        throw new Error(LIFECYCLE_ROLLBACK);
+      if (!result.ok) {
+        throw new CloseTransactionAbort(result);
       }
       return result;
     });
   } catch (err) {
+    if (err instanceof CloseTransactionAbort) {
+      return err.result.reason.includes("lifecycle stopped")
+        ? { ok: false, reason: "lifecycle stopped — CLOSE rolled back" }
+        : err.result;
+    }
     if ((err as Error).message === LIFECYCLE_ROLLBACK) {
       return { ok: false, reason: "lifecycle stopped — CLOSE rolled back" };
     }
@@ -885,7 +909,16 @@ async function reduceServerPaper70Internal(args: {
         const full = fullRows[0];
         const closedSize = parseFloat(full.sizeInUsd ?? full.size ?? "0");
         const grossPnl = parseFloat(full.pnl ?? "");
-        if (!fin(closedSize) || closedSize <= 0 || !fin(grossPnl)) {
+        const netPnl = full.netPnlEstimatedUsd != null
+          ? parseFloat(full.netPnlEstimatedUsd)
+          : null;
+        const expectedFullSize = expectedReduction?.originalSizeUsd ?? requestedOpenSize;
+        if (!fin(closedSize) || closedSize <= 0
+          || !fin(expectedFullSize) || Math.abs(closedSize - expectedFullSize) > 0.0001
+          || !fin(grossPnl) || (netPnl != null && !fin(netPnl))
+          || full.symbol !== args.openRow.symbol
+          || full.side !== args.openRow.side
+          || full.managedBy !== "SERVER") {
           throw new Error("REDUCE70 SUBMITTED의 FULL 종료 증거가 손상됨 — fail-closed");
         }
         result = {
@@ -893,9 +926,7 @@ async function reduceServerPaper70Internal(args: {
           closeTradeId: full.id,
           closedSizeUsd: closedSize,
           grossPnlUsd: grossPnl,
-          netPnlEstimatedUsd: full.netPnlEstimatedUsd != null
-            ? parseFloat(full.netPnlEstimatedUsd)
-            : null,
+          netPnlEstimatedUsd: netPnl,
           originalSizeUsd: closedSize,
           remainingSizeUsd: 0,
         };
@@ -906,6 +937,7 @@ async function reduceServerPaper70Internal(args: {
       rec.reduceSizeUsd = result.closedSizeUsd;
       rec.originalSizeUsd = result.originalSizeUsd ?? rec.originalSizeUsd;
       rec.remainingSizeUsd = result.remainingSizeUsd ?? rec.remainingSizeUsd;
+      rec.fullClose = result.remainingSizeUsd === 0;
       rec.updatedAt = new Date().toISOString();
       await writeWorkerState(stateKey, JSON.stringify(rec), shouldContinue, tx);
       return result;
