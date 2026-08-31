@@ -1,6 +1,19 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { completeStartupSafetyBarrier } from '../lib/startupSafetyBarrier';
 
+const unexpectedDbAccess = vi.hoisted(() => vi.fn(() => {
+  throw new Error('cold-start environment default test must not access DB');
+}));
+
+vi.mock('@workspace/db', () => ({
+  db: {
+    select: unexpectedDbAccess,
+    insert: unexpectedDbAccess,
+    update: unexpectedDbAccess,
+  },
+  workerStateTable: { key: 'key', value: 'value', updatedAt: 'updatedAt' },
+}));
+
 function deferred(): {
   promise: Promise<void>;
   resolve: () => void;
@@ -252,6 +265,7 @@ describe('cold-start fail-closed environment defaults', () => {
     expect(process.env.WORKER_ENGINE_MODE === 'LIVE' ? 'LIVE' : 'PAPER').toBe('PAPER');
     expect(process.env.AUTO_WORKER_LIVE_ENABLED === 'true').toBe(false);
     expect(isDelegatedSignerEnabled()).toBe(false);
+    expect(unexpectedDbAccess).not.toHaveBeenCalled();
     expect(isLiveTestExecutionLocked()).toBe(true);
     expect(relayFlags.relaySubmissionEnabled).toBe(false);
     expect(relayFlags.relaySubmitNetworkEnabled).toBe(false);

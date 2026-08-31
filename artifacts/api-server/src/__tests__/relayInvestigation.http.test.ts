@@ -6,8 +6,8 @@ const dbState = vi.hoisted(() => ({
   updateCount: 1,
 }));
 
-vi.mock('@workspace/db', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@workspace/db')>();
+vi.mock('@workspace/db', async () => {
+  const schema = await import('@workspace/db/schema');
   function chain(result: () => unknown) {
     const c: Record<string, unknown> = {};
     for (const method of ['from', 'where', 'limit', 'orderBy', 'set', 'returning']) {
@@ -18,7 +18,7 @@ vi.mock('@workspace/db', async (importOriginal) => {
     return c;
   }
   return {
-    ...actual,
+    ...schema,
     db: {
       select: () => chain(() => dbState.row ? [dbState.row] : []),
       update: () => chain(() => Array.from(
