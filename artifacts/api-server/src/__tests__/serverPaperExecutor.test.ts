@@ -461,10 +461,18 @@ describe('reduceServerPaper70', () => {
     let insertCall = 0;
     let selectCall = 0;
     let updateCall = 0;
+    let reservationClaim: Record<string, unknown> | null = null;
     const close = options.existingClose ?? null;
     vi.mocked(db.insert).mockImplementation(() => {
       insertCall += 1;
-      if (insertCall === 1) return makeChain(() => [{ key: 'claimed' }]) as never;
+      if (insertCall === 1) {
+        const c = makeChain(() => [{ key: 'claimed' }]) as Record<string, unknown>;
+        c.values = (value: Record<string, unknown>) => {
+          reservationClaim = value;
+          return c;
+        };
+        return c as never;
+      }
       return makeChain(() => close ? [] : [{ id: 'close-1' }]) as never;
     });
     vi.mocked(db.select).mockImplementation(() => makeChain(() => {
@@ -492,7 +500,11 @@ describe('reduceServerPaper70', () => {
       }
       return makeChain(() => [{ key: 'reservation' }]) as never;
     });
-    return { getInsertCalls: () => insertCall, getUpdateCalls: () => updateCall };
+    return {
+      getInsertCalls: () => insertCall,
+      getUpdateCalls: () => updateCall,
+      getReservationClaim: () => reservationClaim,
+    };
   }
 
   it('정상 REDUCE70은 CLOSE·OPEN 축소·CONFIRMED를 한 transaction에서 완료한다', async () => {
@@ -507,6 +519,14 @@ describe('reduceServerPaper70', () => {
     expect(db.transaction).toHaveBeenCalledTimes(1);
     expect(calls.getInsertCalls()).toBe(2); // reservation claim + CLOSE
     expect(calls.getUpdateCalls()).toBe(2); // OPEN + reservation CONFIRMED
+    const claim = calls.getReservationClaim();
+    expect(JSON.parse(String(claim?.['value']))).toMatchObject({
+      originalSizeUsd: 300,
+      reduceSizeUsd: 210,
+      remainingSizeUsd: 90,
+      fullClose: false,
+      status: 'SUBMITTED',
+    });
   });
 
   it('CLOSE 생성 뒤 OPEN update 예외 → atomic 실패, SUBMITTED 복구 대기 + 신규 OPEN 차단', async () => {
@@ -593,16 +613,16 @@ describe('reduceServerPaper70', () => {
       ...serverOpenRow(),
       id: 'close-existing',
       action: 'CLOSE',
-      size: '210',
-      sizeInUsd: '210',
-      pnl: '4.2',
+      size: '70',
+      sizeInUsd: '70',
+      pnl: '1.4',
       netPnlEstimatedUsd: '3.06',
       closesTradeId: 'open-1',
       closeKind: 'REDUCE70',
       closeTime: Date.UTC(2026, 7, 31),
     };
-    const originalOpen = serverOpenRow();
-    const reducedOpen = serverOpenRow({ size: '90', sizeInUsd: '90' });
+    const originalOpen = serverOpenRow({ size: '100.01', sizeInUsd: '100.01' });
+    const reducedOpen = serverOpenRow({ size: '30.01', sizeInUsd: '30.01' });
     let selectCall = 0;
     let insertCall = 0;
     let updateCall = 0;
@@ -644,12 +664,81 @@ describe('reduceServerPaper70', () => {
     expect(db.transaction).toHaveBeenCalledTimes(1);
     expect(insertCall).toBe(1); // 기존 CLOSE unique conflict, 새 CLOSE 0건
     expect(updateCall).toBe(2); // OPEN 30% repair + reservation CONFIRMED
-    expect(openUpdateSet).toMatchObject({ size: '90', sizeInUsd: '90' });
+    expect(openUpdateSet).toMatchObject({ size: '30.01', sizeInUsd: '30.01' });
     expect(getServerPaperStatus().unresolved).toBeNull();
 
     await manageServerPaperTick(() => ({ priceUsd: 51_000, ageMs: 1_000 }), Date.UTC(2026, 7, 31, 1, 1));
     expect(db.transaction).toHaveBeenCalledTimes(1); // 두 번째 70% 축소 없음
     expect(insertCall).toBe(1); // 중복 CLOSE 없음
+  });
+
+  it('legacy SUBMITTED의 OPEN이 이미 $30.01로 축소됐어도 $70.00 CLOSE를 재사용해 예약만 확정한다', async () => {
+    const nowMs = Date.UTC(2026, 7, 31, 1);
+    const dayKey = manilaDayKey(new Date(nowMs));
+    const idemKey = buildProfitProtectKey(dayKey, 'BTC:LONG:open-1');
+    const submitted = {
+      idempotencyKey: idemKey,
+      positionKey: 'BTC:LONG:open-1',
+      dayKey,
+      reduceSizeUsd: 0,
+      fullClose: false,
+      status: 'SUBMITTED',
+      orderKey: null,
+      createdAt: '2026-08-31T00:00:00.000Z',
+      updatedAt: '2026-08-31T00:00:00.000Z',
+    };
+    const reducedOpen = serverOpenRow({ size: '30.01', sizeInUsd: '30.01' });
+    const existingClose = {
+      ...serverOpenRow(),
+      id: 'close-existing',
+      action: 'CLOSE',
+      size: '70',
+      sizeInUsd: '70',
+      pnl: '1.4',
+      netPnlEstimatedUsd: '1.1',
+      closesTradeId: 'open-1',
+      closeKind: 'REDUCE70',
+      closeTime: nowMs,
+    };
+    let selectCall = 0;
+    let updateCall = 0;
+    let finalized: Record<string, unknown> | null = null;
+    vi.mocked(db.select).mockImplementation(() => makeChain(() => {
+      selectCall += 1;
+      if (selectCall === 1) {
+        return [{ key: `serverPaperReduce70:${idemKey}`, value: JSON.stringify(submitted) }];
+      }
+      if (selectCall === 2 || selectCall === 3) return [reducedOpen];
+      if (selectCall === 4 || selectCall === 5) return [existingClose];
+      if (selectCall === 6) {
+        return [{ key: `serverPaperReduce70:${idemKey}`, value: JSON.stringify(submitted) }];
+      }
+      return [];
+    }) as never);
+    vi.mocked(db.insert).mockImplementation(() => makeChain(() => []) as never);
+    vi.mocked(db.update).mockImplementation(() => {
+      updateCall += 1;
+      const c = makeChain(() => [{ key: 'reservation' }]) as Record<string, unknown>;
+      c.set = (value: Record<string, unknown>) => {
+        finalized = value;
+        return c;
+      };
+      return c as never;
+    });
+
+    await loadSubmittedReduce70FromDb();
+    await manageServerPaperTick(() => ({ priceUsd: 51_000, ageMs: 1_000 }), nowMs);
+
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(updateCall).toBe(1); // OPEN은 이미 30.01 — reservation만 CONFIRMED
+    const record = JSON.parse(String(finalized?.['value']));
+    expect(record).toMatchObject({
+      status: 'CONFIRMED',
+      originalSizeUsd: 100.01,
+      reduceSizeUsd: 70,
+      remainingSizeUsd: 30.01,
+    });
+    expect(getServerPaperStatus().unresolved).toBeNull();
   });
 
   it('재시작 SUBMITTED payload/key identity 불일치는 복구하지 않고 fail-closed', async () => {

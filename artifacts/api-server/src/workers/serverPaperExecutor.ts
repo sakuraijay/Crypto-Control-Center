@@ -89,8 +89,23 @@ export interface ServerPaperCloseArgs {
 }
 
 export type ServerPaperCloseResult =
-  | { ok: true; closeTradeId: string; closedSizeUsd: number; grossPnlUsd: number; netPnlEstimatedUsd: number | null }
+  | {
+    ok: true;
+    closeTradeId: string;
+    closedSizeUsd: number;
+    grossPnlUsd: number;
+    netPnlEstimatedUsd: number | null;
+    originalSizeUsd?: number;
+    remainingSizeUsd?: number;
+  }
   | { ok: false; reason: string; alreadyClosed?: boolean };
+
+interface ReducePlanEvidence {
+  originalSizeUsd: number;
+  reduceSizeUsd: number;
+  remainingSizeUsd: number;
+  fullClose: boolean;
+}
 
 export interface ServerPaperOpenPositionView {
   tradeId: string;
@@ -401,6 +416,7 @@ async function closeServerPaperPositionInDb(
   args: ServerPaperCloseArgs,
   shouldContinue: () => boolean,
   database: PaperDb,
+  expectedReduction?: ReducePlanEvidence | null,
 ): Promise<ServerPaperCloseResult> {
   const nowMs = args.nowMs ?? Date.now();
   const record = (kind: string, reason: string, ok: boolean, detail: string | null) => {
@@ -461,28 +477,72 @@ async function closeServerPaperPositionInDb(
   // 청산 크기 결정
   let closedSize = openSize;
   let remaining = 0;
+  let accountingOpenSize = openSize;
   if (existingReduceClose) {
     closedSize = parseFloat(existingReduceClose.sizeInUsd ?? existingReduceClose.size ?? "0");
-    remaining = closedSize * 3 / 7;
-    const original = closedSize + remaining;
     const tolerance = 0.0001;
+    let recoveredPlan: ReducePlanEvidence | null = null;
+    if (expectedReduction) {
+      recoveredPlan = expectedReduction;
+    } else {
+      // Legacy SUBMITTED records did not persist the plan. The locked OPEN can
+      // be either the original state (CLOSE inserted, OPEN not yet reduced) or
+      // the already-reduced remainder. Recompute both candidates with the same
+      // cent-flooring contract; never infer an exact 70:30 ratio.
+      const candidates = [openSize, Number((openSize + closedSize).toFixed(8))];
+      for (const originalSizeUsd of candidates) {
+        const plan = computeReduction({
+          openSizeUsd: originalSizeUsd,
+          minPositionNotionalUsd: GMX_MIN_POSITION_NOTIONAL_USD,
+        });
+        if (plan.ok
+          && !plan.fullClose
+          && Math.abs(plan.reduceSizeUsd - closedSize) <= tolerance
+          && (Math.abs(openSize - originalSizeUsd) <= tolerance
+            || Math.abs(openSize - plan.remainingSizeUsd) <= tolerance)) {
+          recoveredPlan = {
+            originalSizeUsd,
+            reduceSizeUsd: plan.reduceSizeUsd,
+            remainingSizeUsd: plan.remainingSizeUsd,
+            fullClose: false,
+          };
+          break;
+        }
+      }
+    }
     if (!fin(closedSize) || closedSize <= 0
-      || (Math.abs(openSize - original) > tolerance && Math.abs(openSize - remaining) > tolerance)) {
+      || !recoveredPlan
+      || recoveredPlan.fullClose
+      || Math.abs(recoveredPlan.reduceSizeUsd - closedSize) > tolerance
+      || (Math.abs(openSize - recoveredPlan.originalSizeUsd) > tolerance
+        && Math.abs(openSize - recoveredPlan.remainingSizeUsd) > tolerance)) {
       const reason = "REDUCE70 durable 증거 불일치 — 수동 조사 전 fail-closed";
       record(args.kind, args.reason, false, reason);
       state.unresolved = reason;
       return { ok: false, reason };
     }
+    accountingOpenSize = recoveredPlan.originalSizeUsd;
+    remaining = recoveredPlan.remainingSizeUsd;
   } else if (args.kind === "REDUCE70") {
-    const plan = computeReduction({ openSizeUsd: openSize, minPositionNotionalUsd: GMX_MIN_POSITION_NOTIONAL_USD });
-    if (!plan.ok) { record(args.kind, args.reason, false, plan.reason); return { ok: false, reason: plan.reason }; }
+    if (expectedReduction && Math.abs(openSize - expectedReduction.originalSizeUsd) > 0.0001) {
+      const reason = "REDUCE70 저장 계획과 잠긴 OPEN 크기 불일치 — fail-closed";
+      state.unresolved = reason;
+      return { ok: false, reason };
+    }
+    const plan = expectedReduction ?? computeReduction({
+      openSizeUsd: openSize,
+      minPositionNotionalUsd: GMX_MIN_POSITION_NOTIONAL_USD,
+    });
+    if ("ok" in plan && !plan.ok) {
+      record(args.kind, args.reason, false, plan.reason);
+      return { ok: false, reason: plan.reason };
+    }
     if (plan.fullClose) { closedSize = openSize; remaining = 0; }
     else { closedSize = plan.reduceSizeUsd; remaining = plan.remainingSizeUsd; }
   }
   const effectiveKind: "FULL" | "REDUCE70" = args.kind === "REDUCE70" && remaining > 0 ? "REDUCE70" : "FULL";
 
   // gross PnL (청산분)
-  const accountingOpenSize = existingReduceClose ? closedSize + remaining : openSize;
   const recoveredGross = existingReduceClose ? parseFloat(existingReduceClose.pnl ?? "") : NaN;
   const grossPnl = fin(recoveredGross)
     ? recoveredGross
@@ -621,7 +681,7 @@ async function closeServerPaperPositionInDb(
     }
   } else {
     // REDUCE70: 잔여 size로 축소 + 잔여 비율만큼 비용 결속도 축소 (이후 FULL 정산 정합)
-    const remainFraction = remaining / openSize;
+    const remainFraction = remaining / accountingOpenSize;
     if (existingReduceClose && Math.abs(openSize - remaining) <= 0.0001) {
       // Accounting was already completed; only reservation finalization remains.
     } else {
@@ -656,6 +716,8 @@ async function closeServerPaperPositionInDb(
     closedSizeUsd: closedSize,
     grossPnlUsd: grossPnl,
     netPnlEstimatedUsd: netEst,
+    originalSizeUsd: accountingOpenSize,
+    remainingSizeUsd: remaining,
   };
 }
 
@@ -684,6 +746,32 @@ export async function closeServerPaperPosition(
 
 // ── REDUCE70 (durable 1회 예약) ───────────────────────────────────────────────
 
+function storedReducePlan(rec: ProfitProtectRecord): ReducePlanEvidence | null | undefined {
+  const hasStoredPlan = rec.originalSizeUsd !== undefined || rec.remainingSizeUsd !== undefined;
+  if (!hasStoredPlan) return null;
+  if (!fin(rec.originalSizeUsd) || rec.originalSizeUsd <= 0
+    || !fin(rec.reduceSizeUsd) || rec.reduceSizeUsd <= 0
+    || !fin(rec.remainingSizeUsd) || rec.remainingSizeUsd < 0) {
+    return undefined;
+  }
+  const plan = computeReduction({
+    openSizeUsd: rec.originalSizeUsd,
+    minPositionNotionalUsd: GMX_MIN_POSITION_NOTIONAL_USD,
+  });
+  if (!plan.ok
+    || plan.fullClose !== rec.fullClose
+    || Math.abs(plan.reduceSizeUsd - rec.reduceSizeUsd) > 0.0001
+    || Math.abs(plan.remainingSizeUsd - rec.remainingSizeUsd) > 0.0001) {
+    return undefined;
+  }
+  return {
+    originalSizeUsd: rec.originalSizeUsd,
+    reduceSizeUsd: rec.reduceSizeUsd,
+    remainingSizeUsd: rec.remainingSizeUsd,
+    fullClose: rec.fullClose,
+  };
+}
+
 function validReduce70Reservation(
   stateKey: string,
   rec: ProfitProtectRecord,
@@ -696,7 +784,8 @@ function validReduce70Reservation(
     && rec.positionKey.split(":").length === 3
     && (!expectedPositionKey || rec.positionKey === expectedPositionKey)
     && rec.idempotencyKey === buildProfitProtectKey(rec.dayKey, rec.positionKey)
-    && stateKey === `${REDUCE70_KEY_PREFIX}${rec.idempotencyKey}`;
+    && stateKey === `${REDUCE70_KEY_PREFIX}${rec.idempotencyKey}`
+    && storedReducePlan(rec) !== undefined;
 }
 
 async function reduceServerPaper70Internal(args: {
@@ -714,6 +803,14 @@ async function reduceServerPaper70Internal(args: {
   const dayKey = resume?.record.dayKey ?? manilaDayKey(new Date(nowMs));
   const idemKey = resume?.record.idempotencyKey ?? buildProfitProtectKey(dayKey, positionKey);
   const stateKey = resume?.stateKey ?? `${REDUCE70_KEY_PREFIX}${idemKey}`;
+  const requestedOpenSize = parseFloat(args.openRow.sizeInUsd ?? args.openRow.size ?? "0");
+  const initialPlan = resume ? null : computeReduction({
+    openSizeUsd: requestedOpenSize,
+    minPositionNotionalUsd: GMX_MIN_POSITION_NOTIONAL_USD,
+  });
+  if (initialPlan && !initialPlan.ok) {
+    return { ok: false, reason: initialPlan.reason };
+  }
   if (reduce70InFlight.has(stateKey)) {
     return { ok: false, reason: "REDUCE70 동일 요청 처리 중 — 중복 실행 차단" };
   }
@@ -721,7 +818,11 @@ async function reduceServerPaper70Internal(args: {
 
   let rec: ProfitProtectRecord = resume?.record ?? {
     idempotencyKey: idemKey, positionKey, dayKey,
-    reduceSizeUsd: 0, fullClose: false, status: "SUBMITTED", orderKey: null,
+    originalSizeUsd: requestedOpenSize,
+    reduceSizeUsd: initialPlan && initialPlan.ok ? initialPlan.reduceSizeUsd : 0,
+    remainingSizeUsd: initialPlan && initialPlan.ok ? initialPlan.remainingSizeUsd : 0,
+    fullClose: initialPlan && initialPlan.ok ? initialPlan.fullClose : false,
+    status: "SUBMITTED", orderKey: null,
     createdAt: new Date(nowMs).toISOString(), updatedAt: new Date(nowMs).toISOString(),
   };
 
@@ -765,10 +866,14 @@ async function reduceServerPaper70Internal(args: {
     }
 
     try {
+      const expectedReduction = storedReducePlan(rec);
+      if (expectedReduction === undefined) {
+        throw new Error("REDUCE70 저장 계획 손상 — fail-closed");
+      }
       const result = await db.transaction(async (tx) => {
       let result = await closeServerPaperPositionInDb({
         openTradeId: args.openRow.id, reason: "PROFIT_PROTECT_REDUCE70", kind: "REDUCE70", quote: args.quote, nowMs,
-      }, shouldContinue, tx);
+      }, shouldContinue, tx, expectedReduction);
       if (!result.ok && result.alreadyClosed) {
         const fullRows = await tx.select().from(tradesTable).where(and(
           eq(tradesTable.closesTradeId, args.openRow.id),
@@ -791,12 +896,16 @@ async function reduceServerPaper70Internal(args: {
           netPnlEstimatedUsd: full.netPnlEstimatedUsd != null
             ? parseFloat(full.netPnlEstimatedUsd)
             : null,
+          originalSizeUsd: closedSize,
+          remainingSizeUsd: 0,
         };
         rec.fullClose = true;
       }
       if (!result.ok) throw new Error(result.reason);
       rec.status = "CONFIRMED";
       rec.reduceSizeUsd = result.closedSizeUsd;
+      rec.originalSizeUsd = result.originalSizeUsd ?? rec.originalSizeUsd;
+      rec.remainingSizeUsd = result.remainingSizeUsd ?? rec.remainingSizeUsd;
       rec.updatedAt = new Date().toISOString();
       await writeWorkerState(stateKey, JSON.stringify(rec), shouldContinue, tx);
       return result;
