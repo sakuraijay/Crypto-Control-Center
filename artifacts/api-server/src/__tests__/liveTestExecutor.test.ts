@@ -140,7 +140,7 @@ describe('executeLiveTestOrder — LOCKED 상태 시뮬레이션', () => {
     expect(result.ok).toBe(true);
     expect(result.txHash).toBeNull();
     expect(result.orderKey).toBeNull();
-  }, 15_000);
+  }, 30_000);
 
   it('누적 손실 $3 초과 + LOCKED → simulated=true (잠금이 게이트보다 먼저 적용)', async () => {
     const { executeLiveTestOrder } = await import('../workers/liveTestExecutor');

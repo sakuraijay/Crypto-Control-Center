@@ -15,7 +15,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray, lte, or } from 'drizzle-orm';
 import { db, relayTasksTable, type RelayTaskRow } from '@workspace/db';
 
 export const RELAY_TASK_STATUS = {
@@ -53,6 +53,9 @@ export const RECOVERY_STATUSES: readonly RelayTaskStatus[] = [
   RELAY_TASK_STATUS.ORDER_CREATED,
   RELAY_TASK_STATUS.UNRESOLVED,
 ];
+
+/** SUBMITTING은 전송 직후 정상 상태일 수 있으므로 이 시간이 지난 행만 운영자 조사 대상으로 노출한다. */
+export const RELAY_SUBMITTING_STALE_MS = 60_000;
 
 /** 허용 전이 테이블 — 명시되지 않은 전이는 전부 거부 */
 const ALLOWED_TRANSITIONS: Record<string, readonly RelayTaskStatus[]> = {
@@ -216,6 +219,13 @@ export async function getRelayTaskById(taskId: string): Promise<RelayTaskRow | n
   }
 }
 
+/** 조사 endpoint용 strict 조회 — DB 오류를 "task 없음"으로 위장하지 않는다. */
+export async function getRelayTaskByIdOrThrow(taskId: string): Promise<RelayTaskRow | null> {
+  const rows = await db.select().from(relayTasksTable)
+    .where(eq(relayTasksTable.id, taskId)).limit(1);
+  return rows[0] ?? null;
+}
+
 /** UNRESOLVED task 목록 (조사 UI용) */
 export async function listUnresolvedTasks(limit = 50): Promise<RelayTaskRow[]> {
   try {
@@ -227,6 +237,36 @@ export async function listUnresolvedTasks(limit = 50): Promise<RelayTaskRow[]> {
   } catch {
     return [];
   }
+}
+
+export function isRelayTaskInvestigationEligible(
+  row: Pick<RelayTaskRow, 'status' | 'updatedAt'>,
+  nowMs = Date.now(),
+): boolean {
+  if (row.status === RELAY_TASK_STATUS.UNRESOLVED) return true;
+  if (row.status !== RELAY_TASK_STATUS.SUBMITTING) return false;
+  return Math.max(0, nowMs - row.updatedAt.getTime()) >= RELAY_SUBMITTING_STALE_MS;
+}
+
+/**
+ * 운영자 조사 endpoint 전용 목록.
+ * DB 오류를 전파하고, fresh SUBMITTING은 정상 in-flight일 수 있으므로 제외한다.
+ */
+export async function listInvestigationTasksOrThrow(
+  limit = 50,
+  nowMs = Date.now(),
+): Promise<RelayTaskRow[]> {
+  const staleBefore = new Date(nowMs - RELAY_SUBMITTING_STALE_MS);
+  const rows = await db.select().from(relayTasksTable)
+    .where(or(
+      eq(relayTasksTable.status, RELAY_TASK_STATUS.UNRESOLVED),
+      and(
+        eq(relayTasksTable.status, RELAY_TASK_STATUS.SUBMITTING),
+        lte(relayTasksTable.updatedAt, staleBefore),
+      ),
+    ))
+    .orderBy(desc(relayTasksTable.createdAt)).limit(limit);
+  return rows.filter((row) => isRelayTaskInvestigationEligible(row, nowMs)).slice(0, limit);
 }
 
 /**

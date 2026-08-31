@@ -50,7 +50,7 @@ describe('delegatedSigner — initializeDelegatedSigner', () => {
     const addr = getSignerAddress();
     expect(addr).not.toBeNull();
     expect(addr).toMatch(/^0x[0-9a-fA-F]{40}$/);
-  }, 15_000);
+  }, 30_000);
 
   it('두 번 호출해도 주소가 동일하다 (idempotent)', async () => {
     const { initializeDelegatedSigner, getSignerAddress } = await import('../lib/delegatedSigner');

@@ -23,6 +23,7 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 const dbState = vi.hoisted(() => ({
   rows: [] as Record<string, unknown>[],
   selectFail: false,
+  updateCount: 1,
 }));
 vi.mock('@workspace/db', () => {
   const limit = vi.fn(async () => {
@@ -34,7 +35,16 @@ vi.mock('@workspace/db', () => {
   return {
     db: {
       select: vi.fn(() => ({ from })),
-      update: vi.fn(() => ({ set: vi.fn(() => ({ where: vi.fn(async () => []) })) })),
+      update: vi.fn(() => ({
+        set: vi.fn(() => ({
+          where: vi.fn(() => ({
+            returning: vi.fn(async () => Array.from(
+              { length: dbState.updateCount },
+              () => ({ id: 't1' }),
+            )),
+          })),
+        })),
+      })),
     },
     relayTasksTable: {},
   };
@@ -74,7 +84,7 @@ vi.mock('../lib/intentReconciler', () => ({
 }));
 
 import {
-  reconcileGmxApiTasks, fetchGmxApiOrderStatus, setConfirmedOpenHandoff,
+  reconcileGmxApiTasks, reconcileOneGmxApiTask, fetchGmxApiOrderStatus, setConfirmedOpenHandoff,
 } from '../lib/gmxApiStatusReconciler';
 import type { GmxApiTransport } from '../lib/gmxApiTransport';
 
@@ -127,6 +137,7 @@ const deps = (transport: GmxApiTransport, onchain: unknown = null) =>
 beforeEach(() => {
   dbState.rows = [];
   dbState.selectFail = false;
+  dbState.updateCount = 1;
   transitionSpy.mockClear();
   transitionSpy.mockResolvedValue({ ok: true } as never);
   resolveIntentSpy.mockClear();
@@ -136,6 +147,38 @@ beforeEach(() => {
 });
 
 describe('reconcileGmxApiTasks — 게이트/스캔', () => {
+  it('단일 GMX_API_V2 조사만 수행하고 legacy/unknown task는 미접촉한다', async () => {
+    const t = makeTransport(() => ({ status: 'relay_pending', requestId: 'req-1' }));
+    const current = await reconcileOneGmxApiTask(row() as never, deps(t));
+    expect(current.scanned).toBe(1);
+    expect(t.calls).toEqual([{ path: '/orders/txns/status', body: { requestId: 'req-1' } }]);
+
+    const legacy = await reconcileOneGmxApiTask(
+      row({ transportGen: 'legacy-digital' }) as never,
+      deps(t),
+    );
+    expect(legacy.scanned).toBe(0);
+    expect(t.calls).toHaveLength(1);
+  });
+
+  it('단일 GMX_API_V2 조사에서 readonly 비활성은 외부 호출·전이 0회다', async () => {
+    const t = makeTransport(() => ({}), { readonlyEnabled: false });
+    const summary = await reconcileOneGmxApiTask(
+      row({ status: 'UNRESOLVED' }) as never,
+      deps(t),
+    );
+    expect(summary).toMatchObject({ scanned: 0, skippedTransient: 1, errors: 0 });
+    expect(t.calls).toHaveLength(0);
+    expect(transitionSpy).not.toHaveBeenCalled();
+  });
+
+  it('단일 GMX_API_V2 evidence UPDATE 0행은 errors=1로 fail-closed다', async () => {
+    dbState.updateCount = 0;
+    const t = makeTransport(() => ({ status: 'relay_pending', requestId: 'req-1' }));
+    const summary = await reconcileOneGmxApiTask(row() as never, deps(t));
+    expect(summary).toMatchObject({ scanned: 1, errors: 1 });
+  });
+
   it('readonly 플래그 꺼짐 → 외부 호출 0회, 전이 0회', async () => {
     dbState.rows = [row()];
     const t = makeTransport(() => ({}), { readonlyEnabled: false });

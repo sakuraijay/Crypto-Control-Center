@@ -144,6 +144,17 @@ export function classifyRelayHttpFailure(status: number): { kind: RelayFetchFail
   return { kind: 'ERROR', message: `상태 조회 실패 (HTTP ${status})` };
 }
 
+function classifyInvestigationHttpFailure(status: number): { kind: RelayFetchFailureKind; message: string } {
+  if (status === 401 || status === 403) return classifyRelayHttpFailure(status);
+  if (status === 503) {
+    return {
+      kind: 'UNVERIFIED',
+      message: '조사 데이터 저장소 또는 RPC 확인 불가 (HTTP 503) — 상태 미확인/유지 (fail-closed)',
+    };
+  }
+  return { kind: 'ERROR', message: `Relay 조사 요청 실패 (HTTP ${status})` };
+}
+
 export async function fetchActivationStatus(pin: string): Promise<RelayFetchResult<ActivationStatusResponse>> {
   try {
     const res = await fetch(apiUrl('executor/relay/activation'), {
@@ -382,16 +393,31 @@ export interface UnresolvedTaskView {
   resolutionBasis: string | null;
   createdAt: string;
   updatedAt: string;
-  links: { arbiscanTx: string | null; gelatoTask: string | null };
+  transportGen: string | null;
+  ageMs: number;
+  staleSubmitting: boolean;
+  links: { arbiscanTx: string | null };
   blocking: boolean;
 }
+
+export interface UnresolvedRecheckView {
+  ok: true;
+  rechecked: boolean;
+  reason: string | null;
+  verdictBasis: string | null;
+  task: UnresolvedTaskView | null;
+}
+
+export type UnresolvedRecheckResult =
+  | { kind: 'ok'; data: UnresolvedRecheckView }
+  | { kind: RelayFetchFailureKind; message: string };
 
 export async function fetchUnresolvedTasks(pin: string): Promise<RelayFetchResult<UnresolvedTaskView[]>> {
   try {
     const res = await fetch(apiUrl('executor/relay/unresolved'), {
       headers: { 'x-operator-pin': pin },
     });
-    if (!res.ok) return classifyRelayHttpFailure(res.status);
+    if (!res.ok) return classifyInvestigationHttpFailure(res.status);
     const body = await readApiJson(res);
     const json = body.kind === 'json' ? (body.json as { ok?: boolean; tasks?: UnresolvedTaskView[] }) : null;
     if (!json?.ok) return { kind: 'ERROR', message: '상태 응답 형식 오류' };
@@ -404,19 +430,36 @@ export async function fetchUnresolvedTasks(pin: string): Promise<RelayFetchResul
 /** 증거 재수집만 — 강제 terminal·재제출·삭제는 서버에 존재하지 않는다 */
 export async function postUnresolvedRecheck(params: {
   pin: string; taskId: string;
-}): Promise<{ ok: boolean; rechecked?: boolean; reason?: string; error?: string }> {
+}): Promise<UnresolvedRecheckResult> {
   try {
     const res = await postApiJson('executor/relay/unresolved/recheck', {
       headers: { 'x-operator-pin': params.pin },
       body: { taskId: params.taskId },
     });
+    if (!res.ok && (res.status === 401 || res.status === 403 || res.status === 503)) {
+      return classifyInvestigationHttpFailure(res.status);
+    }
     const body = await readApiJson(res);
-    if (body.kind === 'route_mismatch') return { ok: false, error: API_ROUTE_MISMATCH_MESSAGE };
-    const json = body.kind === 'json' ? (body.json as { ok?: boolean; error?: string; [k: string]: unknown }) : null;
-    if (!res.ok || !json?.ok) return { ok: false, error: json?.error ?? `재조회 실패 (HTTP ${res.status})` };
-    return { ok: true, rechecked: json.rechecked === true, reason: json.reason as string | undefined };
-  } catch (e: unknown) {
-    return { ok: false, error: (e as Error).message || '네트워크 오류' };
+    if (body.kind === 'route_mismatch') return { kind: 'ERROR', message: API_ROUTE_MISMATCH_MESSAGE };
+    const json = body.kind === 'json' ? (body.json as {
+      ok?: boolean; error?: string; rechecked?: boolean; reason?: string;
+      verdictBasis?: string; task?: UnresolvedTaskView | null;
+    }) : null;
+    if (!res.ok || !json?.ok) {
+      return { kind: 'ERROR', message: json?.error ?? `재조회 실패 (HTTP ${res.status})` };
+    }
+    return {
+      kind: 'ok',
+      data: {
+        ok: true,
+        rechecked: json.rechecked === true,
+        reason: json.reason ?? null,
+        verdictBasis: json.verdictBasis ?? null,
+        task: json.task ?? null,
+      },
+    };
+  } catch {
+    return { kind: 'UNVERIFIED', message: '네트워크/RPC 오류 — 증거 미확인, 상태 유지 (fail-closed)' };
   }
 }
 
