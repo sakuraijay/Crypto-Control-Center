@@ -94,6 +94,7 @@ export function buildDefaultCanaryDeps(): ManualCanaryDeps {
       return checkManualCanaryOwnerApproval(
         nowMs,
         process.env.GMX_WALLET_ADDRESS ?? null,
+        getCanonicalSnapshot(),
       );
     },
 

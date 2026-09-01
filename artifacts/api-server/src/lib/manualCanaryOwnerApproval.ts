@@ -1,6 +1,8 @@
 import { getAddress } from 'viem';
 import type { CheckOutcome } from './manualCanary';
 import { EXPECTED_CANARY_SIGNER } from './canaryAllowanceInfo';
+import { evaluateCanonicalAuthorizationFreshness } from './canonicalAuthorizationFreshness';
+import type { CanonicalSnapshot } from './relayActivationStatus';
 
 type StoredSignerResult =
   | { ok: true; address: string }
@@ -19,6 +21,7 @@ export interface ManualCanaryOwnerApprovalDeps {
     expectedOwner: `0x${string}` | null;
     expectedSubaccount: `0x${string}`;
     canonicalNonce: bigint | null;
+    persistInvalidation?: boolean;
   }): Promise<OwnerApprovalSession | null>;
 }
 
@@ -42,9 +45,29 @@ async function loadDefaultDeps(): Promise<ManualCanaryOwnerApprovalDeps> {
 export async function checkManualCanaryOwnerApproval(
   nowMs: number,
   ownerAddress: string | null,
+  canonicalSnapshot: CanonicalSnapshot | null,
   injectedDeps?: ManualCanaryOwnerApprovalDeps,
 ): Promise<CheckOutcome> {
   try {
+    if (!ownerAddress) {
+      return outcome(false, 'GMX_WALLET_ADDRESS 미설정 — Owner Approval owner 결속 불가');
+    }
+    const canonicalFreshness = evaluateCanonicalAuthorizationFreshness(
+      canonicalSnapshot,
+      nowMs,
+    );
+    if (!canonicalFreshness.ok) {
+      return outcome(false, `Owner Approval canonical binding 불가 — ${canonicalFreshness.detail}`);
+    }
+    if (!canonicalSnapshot?.confirmed) {
+      return outcome(false, 'canonical readback 미확인 — Owner Approval 재사용 금지');
+    }
+    const nonceText = canonicalSnapshot.approvalNonce;
+    if (typeof nonceText !== 'string' || !/^(0|[1-9]\d*)$/.test(nonceText)) {
+      return outcome(false, 'canonical approval nonce 누락/비정상 — Owner Approval 재사용 금지');
+    }
+    const canonicalNonce = BigInt(nonceText);
+
     // Keep DB-backed signer/session modules out of import-only and injected-deps
     // paths so isolated CI tests do not require DATABASE_URL.
     const deps = injectedDeps ?? await loadDefaultDeps();
@@ -57,11 +80,20 @@ export async function checkManualCanaryOwnerApproval(
     }
 
     const session = await deps.getReadySession({
-      expectedOwner: ownerAddress ? getAddress(ownerAddress) : null,
+      expectedOwner: getAddress(ownerAddress),
       expectedSubaccount: storedAddress,
-      canonicalNonce: null,
+      canonicalNonce,
+      persistInvalidation: false,
     });
-    if (!session) return outcome(false, 'READY Owner Approval 없음 — 새 Prepare+MetaMask 서명 필요');
+    if (!session) {
+      return outcome(
+        false,
+        `현재 canonical nonce ${nonceText}에 결속된 fresh READY Owner Approval 없음 — restart/session/nonce 변화 후 과거 서명 재사용 금지`,
+      );
+    }
+    if (session.approvalNonce !== nonceText) {
+      return outcome(false, `READY session nonce ${session.approvalNonce} ≠ canonical ${nonceText} — 과거 서명 재사용 금지`);
+    }
     if (session.maxAllowedCount !== '8') return outcome(false, `maxAllowedCount ${session.maxAllowedCount} ≠ 8`);
     const deadlineMs = Number(session.deadline) * 1000;
     if (!Number.isFinite(deadlineMs) || deadlineMs <= nowMs) {
@@ -71,7 +103,10 @@ export async function checkManualCanaryOwnerApproval(
     if (!Number.isFinite(expiresMs) || expiresMs <= nowMs) {
       return outcome(false, 'Owner Approval expiresAt 경과 — 새 Prepare+서명 필요');
     }
-    return outcome(true, `READY 세션 유효 (nonce ${session.approvalNonce}, deadline까지 ${Math.floor((deadlineMs - nowMs) / 1000)}s)`);
+    return outcome(
+      true,
+      `fresh canonical-bound READY 세션 유효 (nonce ${session.approvalNonce}, readback age ${canonicalFreshness.ageMs}ms, deadline까지 ${Math.floor((deadlineMs - nowMs) / 1000)}s)`,
+    );
   } catch {
     return outcome(false, 'Owner Approval 조회 실패 (fail-closed)');
   }
