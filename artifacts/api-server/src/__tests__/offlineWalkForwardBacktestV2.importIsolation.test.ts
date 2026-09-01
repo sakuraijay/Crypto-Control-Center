@@ -32,7 +32,7 @@ describe('offline walk-forward backtest import isolation', () => {
       import('../routes/offline-backtest'),
     ]);
     expect(core.runOfflineWalkForwardBacktest).toBeTypeOf('function');
-    expect(core.OFFLINE_WALK_FORWARD_SCHEMA_VERSION).toBe('offline-walk-forward/v1');
+    expect(core.OFFLINE_WALK_FORWARD_SCHEMA_VERSION).toBe('offline-walk-forward/v2');
     expect(replay.replayOfflineDecision).toBeTypeOf('function');
     expect(builder.buildOfflineBtcReport).toBeTypeOf('function');
     expect(route.default).toBeDefined();

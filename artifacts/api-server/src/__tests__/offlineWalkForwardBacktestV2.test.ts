@@ -93,6 +93,72 @@ function runExitScenario(args: {
 }
 
 describe('offline BTC walk-forward/OOS backtest v2', () => {
+  it('동일한 의미의 입력과 effective config는 key 순서와 기본값 표기 방식에 무관하게 같은 fingerprint를 만든다', () => {
+    const firstDecision = decision(5);
+    const reorderedCost = (
+      Object.fromEntries(Object.entries(firstDecision.costEvidence!).reverse())
+    ) as unknown as NonNullable<OfflineDecision['costEvidence']>;
+    const first = run({ decisions: [firstDecision, decision(9)] });
+    const reordered = run({
+      decisions: [{ ...firstDecision, costEvidence: reorderedCost }, decision(9)],
+      config: { ...config, thresholds: [...config.thresholds] },
+    });
+    expect(first.replayFingerprint).toMatch(/^[a-f0-9]{64}$/);
+    expect(reordered.replayFingerprint).toBe(first.replayFingerprint);
+  });
+
+  it.each([
+    {
+      name: 'candle',
+      overrides: () => {
+        const series = candles();
+        series[0] = { ...series[0], c: 100.25, h: 103.25 };
+        return { candles15m: series };
+      },
+    },
+    {
+      name: 'decision',
+      overrides: () => ({ decisions: [decision(5, { confidence: 74 }), decision(9)] }),
+    },
+    {
+      name: 'cost evidence',
+      overrides: () => ({
+        decisions: [decision(5, {
+          costEvidence: { ...decision(5).costEvidence!, feeBpsPerSide: 1.25 },
+        }), decision(9)],
+      }),
+    },
+    {
+      name: 'config',
+      overrides: () => ({ config: { ...config, initialCapitalUsd: 1_001 } }),
+    },
+  ])('$name의 의미 있는 값이 바뀌면 fingerprint가 바뀐다', scenario => {
+    expect(run(scenario.overrides()).replayFingerprint).not.toBe(run().replayFingerprint);
+  });
+
+  it('입력과 config를 mutate하지 않고 fingerprint를 계산한다', () => {
+    const series = candles();
+    const decisions = [decision(5), decision(9)];
+    const suppliedConfig = { ...config, thresholds: [...config.thresholds] };
+    const before = JSON.stringify({ series, decisions, suppliedConfig });
+    run({ candles15m: series, decisions, config: suppliedConfig });
+    expect(JSON.stringify({ series, decisions, suppliedConfig })).toBe(before);
+  });
+
+  it('UNAVAILABLE 결과도 invalid 입력을 구분하는 재현 가능한 fingerprint를 남긴다', () => {
+    const nanSeries = candles();
+    nanSeries[3] = { ...nanSeries[3], c: Number.NaN };
+    const infinitySeries = candles();
+    infinitySeries[3] = { ...infinitySeries[3], c: Infinity };
+    const first = run({ candles15m: nanSeries });
+    const replay = run({ candles15m: nanSeries });
+    const differentInvalidInput = run({ candles15m: infinitySeries });
+    expect(first.status).toBe('UNAVAILABLE');
+    expect(first.replayFingerprint).toMatch(/^[a-f0-9]{64}$/);
+    expect(replay.replayFingerprint).toBe(first.replayFingerprint);
+    expect(differentInvalidInput.replayFingerprint).not.toBe(first.replayFingerprint);
+  });
+
   it('고정된 다섯 confidence threshold를 동일 fold 경계로 비교한다', () => {
     const result = run();
     expect(result.status).toBe('OK');

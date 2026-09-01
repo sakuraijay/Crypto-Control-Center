@@ -4,11 +4,12 @@
  * Boundary: immutable historical inputs in, serializable research report out.
  * This module has no DB, network, worker, signer, relay, execution, or order imports.
  */
+import { createHash } from 'node:crypto';
 import type { MarketRegime, RegimeState } from './regimeEngineV2';
 import type { StrategyDirection, StrategyId } from './strategySignalV2';
 import type { Candle } from './types';
 
-export const OFFLINE_WALK_FORWARD_SCHEMA_VERSION = 'offline-walk-forward/v1' as const;
+export const OFFLINE_WALK_FORWARD_SCHEMA_VERSION = 'offline-walk-forward/v2' as const;
 export const OFFLINE_CONFIDENCE_THRESHOLDS = [60, 65, 70, 75, 80] as const;
 const FIFTEEN_MINUTES_MS = 15 * 60 * 1_000;
 const ONE_HOUR_MS = 60 * 60 * 1_000;
@@ -165,6 +166,7 @@ export interface OfflineThresholdResult {
 
 export interface OfflineWalkForwardReport {
   schemaVersion: typeof OFFLINE_WALK_FORWARD_SCHEMA_VERSION;
+  replayFingerprint: string;
   status: OfflineReportStatus;
   symbol: 'BTC';
   source: string;
@@ -194,6 +196,48 @@ export interface OfflineWalkForwardInput {
 
 const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
 const round = (value: number): number => Number(value.toPrecision(12));
+function canonicalize(value: unknown): unknown {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
+  if (typeof value === 'number') {
+    if (Number.isNaN(value)) return { $number: 'NaN' };
+    if (value === Infinity) return { $number: 'Infinity' };
+    if (value === -Infinity) return { $number: '-Infinity' };
+    return Object.is(value, -0) ? 0 : value;
+  }
+  if (Array.isArray(value)) return value.map(item => canonicalize(item));
+  if (typeof value === 'object') {
+    return Object.fromEntries(Object.keys(value as Record<string, unknown>)
+      .filter(key => (value as Record<string, unknown>)[key] !== undefined)
+      .sort()
+      .map(key => [key, canonicalize((value as Record<string, unknown>)[key])]));
+  }
+  return { $type: typeof value, $value: String(value) };
+}
+
+function replayFingerprint(input: OfflineWalkForwardInput, config: OfflineWalkForwardConfig): string {
+  const envelope = canonicalize({
+    schemaVersion: OFFLINE_WALK_FORWARD_SCHEMA_VERSION,
+    symbol: input.symbol,
+    source: input.source,
+    generatedAtMs: input.generatedAtMs,
+    candles15m: input.candles15m,
+    decisions: input.decisions,
+    config: {
+      initialCapitalUsd: config.initialCapitalUsd,
+      positionSizePct: config.positionSizePct,
+      trainBars: config.trainBars,
+      oosBars: config.oosBars,
+      stepBars: config.stepBars,
+      purgeBars: config.purgeBars,
+      minimumFolds: config.minimumFolds,
+      maximumHoldingBars: config.maximumHoldingBars,
+      thresholds: config.thresholds,
+    },
+    maxFolds: input.maxFolds ?? null,
+  });
+  return createHash('sha256').update(JSON.stringify(envelope)).digest('hex');
+}
+
 const zeroCosts = (): OfflineCostTotals => ({
   feesUsd: 0, slippageUsd: 0, fundingUsd: 0, borrowingUsd: 0, impactUsd: 0, totalUsd: 0,
 });
@@ -532,6 +576,7 @@ export function runOfflineWalkForwardBacktest(input: OfflineWalkForwardInput): O
   const issues = validateInputs(input, config);
   const base: Omit<OfflineWalkForwardReport, 'status' | 'issues' | 'thresholds'> = {
     schemaVersion: OFFLINE_WALK_FORWARD_SCHEMA_VERSION,
+    replayFingerprint: replayFingerprint(input, config),
     symbol: 'BTC', source: input.source, generatedAtMs: input.generatedAtMs, config,
     input: {
       candleCount: input.candles15m.length,
