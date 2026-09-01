@@ -195,9 +195,10 @@ export interface LiveCostFetchers {
 }
 
 export interface ExecutionEligibleCostEvidence {
-  market: string;
-  isLong: boolean;
-  observedAtMs: number;
+  readonly market: string;
+  readonly isLong: boolean;
+  readonly observedAtMs: number;
+  readonly effectiveRoundTripCostUsd: number;
 }
 
 let executionEligibleEvidence: ExecutionEligibleCostEvidence | null = null;
@@ -209,11 +210,12 @@ export function recordExecutionEligibleCostEvidence(
 ): boolean {
   const valid = validateExecutionEligibleSnapshot(snap, expected, nowMs);
   if (!valid.ok) return false;
-  executionEligibleEvidence = {
+  executionEligibleEvidence = Object.freeze({
     market: snap.market,
     isLong: snap.isLong,
     observedAtMs: Date.parse(snap.apiTimestamp as string),
-  };
+    effectiveRoundTripCostUsd: valid.effectiveRoundTripCostUsd,
+  });
   return true;
 }
 
@@ -224,7 +226,9 @@ export function getExecutionEligibleCostEvidence(nowMs: number = Date.now()): {
   return {
     fresh: executionEligibleEvidence !== null
       && nowMs - executionEligibleEvidence.observedAtMs <= EXECUTION_ELIGIBLE_MAX_AGE_MS,
-    evidence: executionEligibleEvidence,
+    evidence: executionEligibleEvidence === null
+      ? null
+      : { ...executionEligibleEvidence },
   };
 }
 
