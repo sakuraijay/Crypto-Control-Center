@@ -334,6 +334,65 @@ describe('offline BTC walk-forward/OOS backtest v2', () => {
     expect(run()).toEqual(run());
   });
 
+  it('train decision은 aggregate OOS에 누출되지 않는다', () => {
+    const trainOnly = decision(2);
+    const result = run({ decisions: [trainOnly, decision(5), decision(9)] });
+    const threshold = result.thresholds.find(row => row.threshold === 60)!;
+    expect(threshold.folds[0].is.trades.map(trade => trade.decisionId)).toContain(trainOnly.decisionId);
+    expect(threshold.aggregateOos.trades.map(trade => trade.decisionId)).not.toContain(trainOnly.decisionId);
+  });
+
+  it('fold별 purge decision과 OOS 시작 직전 signal은 해당 fold의 IS/OOS 모두에서 제외한다', () => {
+    const purgeSignal = decision(4);
+    const result = run({ decisions: [purgeSignal, decision(5), decision(9)] });
+    const firstFold = result.thresholds.find(row => row.threshold === 60)!.folds[0];
+    expect(firstFold.trainEndTime).toBe(BASE + 4 * STEP);
+    expect(firstFold.oosStartTime).toBe(BASE + 5 * STEP);
+    expect(firstFold.is.trades.map(trade => trade.decisionId)).not.toContain(purgeSignal.decisionId);
+    expect(firstFold.oos.trades.map(trade => trade.decisionId)).not.toContain(purgeSignal.decisionId);
+  });
+
+  it('OOS 종료 직전 signal은 next-bar entry가 fold 밖이면 체결하지 않는다', () => {
+    const boundarySignal = decision(8);
+    const result = run({ decisions: [decision(5), boundarySignal, decision(9)] });
+    const firstFold = result.thresholds.find(row => row.threshold === 60)!.folds[0].oos;
+    expect(firstFold.trades.map(trade => trade.decisionId)).not.toContain(boundarySignal.decisionId);
+    expect(firstFold.blocked.NEXT_BAR_UNAVAILABLE).toBe(1);
+  });
+
+  it('인접 fold의 OOS trade membership은 중복되지 않고 threshold가 달라도 경계는 불변이다', () => {
+    const result = run();
+    const expectedBoundaries = result.thresholds[0].folds.map(fold => [
+      fold.trainStartTime, fold.trainEndTime, fold.oosStartTime, fold.oosEndTime,
+    ]);
+    for (const threshold of result.thresholds) {
+      expect(threshold.folds.map(fold => [
+        fold.trainStartTime, fold.trainEndTime, fold.oosStartTime, fold.oosEndTime,
+      ])).toEqual(expectedBoundaries);
+      const memberships = threshold.folds.map(fold => fold.oos.trades.map(trade => trade.decisionId));
+      const flattened = memberships.flat();
+      expect(new Set(flattened).size).toBe(flattened.length);
+    }
+    const threshold60 = result.thresholds.find(row => row.threshold === 60)!;
+    expect(threshold60.folds[0].oos.trades.map(trade => trade.decisionId)).toEqual(['BTC:OOS:5']);
+    expect(threshold60.folds[1].oos.trades.map(trade => trade.decisionId)).toEqual(['BTC:OOS:9']);
+  });
+
+  it('동일 입력은 fold별 trade membership과 replay fingerprint를 결정적으로 재현한다', () => {
+    const first = run();
+    const replay = run();
+    const membership = (result: ReturnType<typeof run>) => result.thresholds.map(threshold => ({
+      threshold: threshold.threshold,
+      folds: threshold.folds.map(fold => ({
+        fold: fold.fold,
+        is: fold.is.trades.map(trade => trade.decisionId),
+        oos: fold.oos.trades.map(trade => trade.decisionId),
+      })),
+    }));
+    expect(membership(replay)).toEqual(membership(first));
+    expect(replay.replayFingerprint).toBe(first.replayFingerprint);
+  });
+
   it('stale snapshot과 holding interval의 cost gap을 fail-closed 처리한다', () => {
     const stale = decision(5, { costEvidence: { ...decision(5).costEvidence!, observedAtMs: BASE - 10 * 60 * 60 * 1_000 } });
     expect(run({ decisions: [stale, decision(9)] }).thresholds[0].aggregateOos.blocked.COST_UNAVAILABLE).toBe(1);
