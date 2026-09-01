@@ -429,6 +429,14 @@ function simulateWindow(args: {
     let exitReason: OfflineExitReason = 'TIME';
     for (let index = entryIndex; index <= maximumExitIndex; index += 1) {
       const candle = candles[index];
+      const stopGap = side === 'LONG' ? candle.o <= stop : candle.o >= stop;
+      const targetGap = side === 'LONG' ? candle.o >= target : candle.o <= target;
+      if (stopGap) {
+        exitIndex = index; exitPrice = candle.o; exitReason = 'STOP'; break;
+      }
+      if (targetGap) {
+        exitIndex = index; exitPrice = target; exitReason = 'TARGET'; break;
+      }
       const stopHit = side === 'LONG' ? candle.l <= stop : candle.h >= stop;
       const targetHit = side === 'LONG' ? candle.h >= target : candle.l <= target;
       if (stopHit && targetHit) {

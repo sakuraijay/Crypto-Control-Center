@@ -72,6 +72,26 @@ function run(overrides: Partial<Parameters<typeof runOfflineWalkForwardBacktest>
   });
 }
 
+function runExitScenario(args: {
+  direction: 'LONG' | 'SHORT';
+  stop: number;
+  target: number;
+  exitCandle: Candle;
+}) {
+  const series = candles();
+  series[6] = { ...series[6], h: 100.5, l: 99.5 };
+  series[7] = args.exitCandle;
+  const result = run({
+    candles15m: series,
+    decisions: [decision(5, {
+      direction: args.direction,
+      structuralStop: args.stop,
+      targetPrice: args.target,
+    })],
+  });
+  return result.thresholds[0].aggregateOos.trades[0];
+}
+
 describe('offline BTC walk-forward/OOS backtest v2', () => {
   it('고정된 다섯 confidence threshold를 동일 fold 경계로 비교한다', () => {
     const result = run();
@@ -98,6 +118,95 @@ describe('offline BTC walk-forward/OOS backtest v2', () => {
     expect(trade.exitReason).toBe('AMBIGUOUS_STOP_FIRST');
     expect(trade.exitPrice).toBe(99);
     expect(trade.netPnlUsd).toBeLessThan(trade.grossPnlUsd);
+  });
+
+  it.each([
+    {
+      name: 'LONG stop gap-down',
+      direction: 'LONG' as const,
+      stop: 99,
+      target: 101,
+      exitCandle: { t: BASE + 7 * STEP, o: 95, h: 96, l: 94, c: 95, v: 17 },
+      expectedPrice: 95,
+    },
+    {
+      name: 'SHORT stop gap-up',
+      direction: 'SHORT' as const,
+      stop: 101,
+      target: 99,
+      exitCandle: { t: BASE + 7 * STEP, o: 105, h: 106, l: 104, c: 105, v: 17 },
+      expectedPrice: 105,
+    },
+  ])('$name은 이미 stop을 넘은 candle open의 더 불리한 가격으로 체결한다', scenario => {
+    const trade = runExitScenario(scenario);
+    expect(trade.exitReason).toBe('STOP');
+    expect(trade.exitPrice).toBe(scenario.expectedPrice);
+  });
+
+  it.each([
+    {
+      name: 'LONG target gap-up',
+      direction: 'LONG' as const,
+      stop: 99,
+      target: 101,
+      exitCandle: { t: BASE + 7 * STEP, o: 105, h: 106, l: 104, c: 105, v: 17 },
+    },
+    {
+      name: 'SHORT target gap-down',
+      direction: 'SHORT' as const,
+      stop: 101,
+      target: 99,
+      exitCandle: { t: BASE + 7 * STEP, o: 95, h: 96, l: 94, c: 95, v: 17 },
+    },
+  ])('$name은 target을 넘은 open의 추가 이익을 합성하지 않는다', scenario => {
+    const trade = runExitScenario(scenario);
+    expect(trade.exitReason).toBe('TARGET');
+    expect(trade.exitPrice).toBe(scenario.target);
+  });
+
+  it.each([
+    {
+      name: '일반 LONG intrabar stop',
+      direction: 'LONG' as const,
+      stop: 99,
+      target: 101,
+      exitCandle: { t: BASE + 7 * STEP, o: 100, h: 100.5, l: 98.5, c: 99.5, v: 17 },
+      expectedReason: 'STOP',
+      expectedPrice: 99,
+    },
+    {
+      name: '일반 SHORT intrabar target',
+      direction: 'SHORT' as const,
+      stop: 101,
+      target: 99,
+      exitCandle: { t: BASE + 7 * STEP, o: 100, h: 100.5, l: 98.5, c: 99.5, v: 17 },
+      expectedReason: 'TARGET',
+      expectedPrice: 99,
+    },
+  ])('$name은 기존 경계 가격 체결을 유지한다', scenario => {
+    const trade = runExitScenario(scenario);
+    expect(trade.exitReason).toBe(scenario.expectedReason);
+    expect(trade.exitPrice).toBe(scenario.expectedPrice);
+  });
+
+  it('open gap fill도 비용 차감과 offline-only 결정론을 유지한다', () => {
+    const scenario = {
+      direction: 'LONG' as const,
+      stop: 99,
+      target: 101,
+      exitCandle: { t: BASE + 7 * STEP, o: 95, h: 96, l: 94, c: 95, v: 17 },
+    };
+    const first = runExitScenario(scenario);
+    const second = runExitScenario(scenario);
+    const pieces = first.costs.feesUsd + first.costs.slippageUsd + first.costs.fundingUsd
+      + first.costs.borrowingUsd + first.costs.impactUsd;
+    expect(first).toEqual(second);
+    expect(first.costs.totalUsd).toBeCloseTo(pieces, 10);
+    expect(first.netPnlUsd).toBeCloseTo(first.grossPnlUsd - first.costs.totalUsd, 10);
+
+    const result = run();
+    expect(result.autoPromotionAllowed).toBe(false);
+    expect(result.liveExecutionAuthorized).toBe(false);
   });
 
   it('비용을 gross와 분리하고 fee/slippage/funding/borrowing/impact 합계를 보존한다', () => {
