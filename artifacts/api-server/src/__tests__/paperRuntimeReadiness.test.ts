@@ -11,6 +11,7 @@ import {
   clearPaperEconomicEdgeEvidence,
   getPaperEconomicEdgeEvidenceSnapshot,
   getPaperRuntimeReadinessSnapshot,
+  PAPER_READINESS_REFRESH_INTERVAL_MS,
   PAPER_DEPLOYMENT_EVIDENCE_MAX_AGE_MS,
   runPaperRuntimeReadinessCycle,
   setPaperEconomicEdgeEvidenceFromIntelCycle,
@@ -39,21 +40,26 @@ const ENV = {
   GMX_RELAY_READONLY_NETWORK_ENABLED: 'true',
 } as NodeJS.ProcessEnv;
 
-function costSnapshot(symbol: 'BTC' | 'ETH'): CostSnapshot {
+function costSnapshot(
+  symbol: 'BTC' | 'ETH',
+  effectiveRoundTripCostUsd = 0.453012,
+): CostSnapshot {
   const observedAtMs = NOW - 4_000;
+  const nonExecutionCostUsd = 0.012 + 0.000461 + 0.000363 + 0.012;
+  const executionFeeUsd = effectiveRoundTripCostUsd - nonExecutionCostUsd;
   return {
     market: MARKET_BY_SYMBOL_SERVER.get(symbol)!.marketToken,
     isLong: true,
     orderType: 'MarketIncrease',
     notionalUsd: 20,
     positionFeeUsd: 0.012,
-    executionFeeUsd: 0.428188,
+    executionFeeUsd,
     estimatedPriceImpactUsd: 0,
     fundingFeeUsd: 0.000461,
     borrowingFeeUsd: 0.000363,
     estimatedExitFeeUsd: 0.012,
     estimatedExitPriceImpactUsd: 0,
-    totalEstimatedRoundTripCostUsd: 0.453012,
+    totalEstimatedRoundTripCostUsd: effectiveRoundTripCostUsd,
     source: 'GMX_API',
     blockNumber: null,
     apiTimestamp: new Date(observedAtMs).toISOString(),
@@ -68,14 +74,15 @@ function canaryResult(options: {
   btcSource?: string;
   omitEthDecimals?: boolean;
   costFailures?: ReadonlyArray<'BTC' | 'ETH'>;
+  roundTripCostUsd?: number;
 } = {}) {
   const costResult = (symbol: 'BTC' | 'ETH') => {
     if (!options.costFailures?.includes(symbol)) {
       return {
         ok: true as const,
         reason: null,
-        snapshot: costSnapshot(symbol),
-        roundTripCostUsd: 0.453012,
+        snapshot: costSnapshot(symbol, options.roundTripCostUsd),
+        roundTripCostUsd: options.roundTripCostUsd ?? 0.453012,
       };
     }
     const failedPrerequisite = {
@@ -285,6 +292,39 @@ describe('PAPER runtime readiness cycle', () => {
     expect(status.blockerIds).toContain('btc_cost_cap');
 
     // Diagnostic cache must never create execution-eligible authorization.
+    expect(getExecutionEligibleCostEvidence(NOW)).toEqual({
+      fresh: false,
+      evidence: null,
+    });
+  });
+
+  it('immutable $0.40 exact cap은 fresh BTC/ETH readiness evidence로 허용한다', async () => {
+    const status = await runPaperRuntimeReadinessCycle({
+      deps: depsFrom(canaryResult({ roundTripCostUsd: 0.4 })),
+      forceDeployment: true,
+    });
+
+    for (const symbol of ['BTC', 'ETH'] as const) {
+      expect(status.costs[symbol]).toMatchObject({
+        state: 'verified',
+        observationalFresh: true,
+        direction: 'LONG',
+        notionalUsd: 20,
+        holdingHours: 1,
+        capUsd: 0.4,
+        effectiveRoundTripCostUsd: 0.4,
+        capExcessUsd: 0,
+        withinCap: true,
+        executionSnapshot: {
+          fresh: true,
+          eligible: true,
+          authorized: false,
+          failureId: null,
+        },
+      });
+    }
+    expect(status.blockerIds).not.toContain('btc_cost_cap');
+    expect(status.blockerIds).not.toContain('eth_cost_cap');
     expect(getExecutionEligibleCostEvidence(NOW)).toEqual({
       fresh: false,
       evidence: null,
@@ -708,6 +748,44 @@ describe('PAPER runtime readiness cycle', () => {
     }
   });
 
+  it('새 collection의 partial 실패는 이전 성공 snapshot을 fresh로 재사용하지 않는다', async () => {
+    await runPaperRuntimeReadinessCycle({
+      deps: depsFrom(canaryResult({ roundTripCostUsd: 0.4 })),
+      forceDeployment: true,
+    });
+
+    const failed = await runPaperRuntimeReadinessCycle({
+      deps: depsFrom(canaryResult({
+        costFailures: ['ETH'],
+        roundTripCostUsd: 0.4,
+      })),
+      forceDeployment: true,
+    });
+
+    expect(failed.costs.BTC).toMatchObject({
+      state: 'verified',
+      effectiveRoundTripCostUsd: 0.4,
+      withinCap: true,
+    });
+    expect(failed.costs.ETH).toMatchObject({
+      state: 'failed',
+      fresh: false,
+      capUsd: null,
+      effectiveRoundTripCostUsd: null,
+      withinCap: null,
+      executionSnapshot: {
+        fresh: false,
+        eligible: false,
+        authorized: false,
+      },
+    });
+    expect(failed.blockerIds).toContain('eth_cost_snapshot');
+    expect(getExecutionEligibleCostEvidence(NOW)).toEqual({
+      fresh: false,
+      evidence: null,
+    });
+  });
+
   it('corrupt 진단 입력은 allowlist 밖 값을 폐기하고 금액/cap을 fail-closed로 유지한다', async () => {
     const result = canaryResult({ costFailures: ['BTC'] });
     const btc = result.costs.BTC;
@@ -876,6 +954,43 @@ describe('PAPER runtime readiness cycle', () => {
     });
     stopPaperRuntimeReadinessScheduler();
     expect(maxActiveReads).toBe(1);
+  });
+
+  it('완료 시점부터 최소 60초 뒤에만 다음 scheduled collection을 시작한다', async () => {
+    vi.useFakeTimers();
+    const deps = depsFrom(canaryResult({ roundTripCostUsd: 0.4 }));
+    deps.nowMs = () => Date.now();
+    vi.setSystemTime(NOW);
+    try {
+      startPaperRuntimeReadinessScheduler({ deps, forceDeployment: true });
+      await vi.waitFor(() => expect(deps.refreshCanary).toHaveBeenCalledTimes(1));
+      await vi.waitFor(() => expect(
+        getPaperRuntimeReadinessSnapshot(NOW, ENV).scheduler.inFlight,
+      ).toBe(false));
+
+      expect(PAPER_READINESS_REFRESH_INTERVAL_MS).toBe(60_000);
+      const completed = getPaperRuntimeReadinessSnapshot(
+        Date.now(),
+        ENV,
+      ).scheduler;
+      expect(completed.nextRefreshAtMs! - completed.lastCompletedAtMs!).toBe(
+        PAPER_READINESS_REFRESH_INTERVAL_MS,
+      );
+      const remainingMs = completed.nextRefreshAtMs! - Date.now();
+      expect(remainingMs).toBeGreaterThan(0);
+      await vi.advanceTimersByTimeAsync(remainingMs - 1);
+      expect(deps.refreshCanary).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(1);
+      await vi.waitFor(() => expect(deps.refreshCanary).toHaveBeenCalledTimes(2));
+      expect(getExecutionEligibleCostEvidence(NOW)).toEqual({
+        fresh: false,
+        evidence: null,
+      });
+    } finally {
+      stopPaperRuntimeReadinessScheduler();
+      vi.useRealTimers();
+    }
   });
 
   it('동시 explicit refresh 호출은 하나의 active cycle에 합류한다', async () => {

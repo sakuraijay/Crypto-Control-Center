@@ -27,6 +27,7 @@ import {
   exploreBoundedCanaryEconomics,
   type BoundedCanaryEconomicResult,
 } from './boundedCanaryEconomics';
+import { MANUAL_CANARY_CAPS } from './manualCanaryCaps';
 
 export const MANUAL_CANARY_READONLY_SYMBOLS = ['BTC', 'ETH'] as const;
 export type ManualCanaryReadonlySymbol = (typeof MANUAL_CANARY_READONLY_SYMBOLS)[number];
@@ -67,6 +68,7 @@ let injectedCostFetcher: ((args: {
   notionalUsd: number;
 }) => Promise<FetchedCostFields>) | null = null;
 let injectedReadonlyReaders: Partial<ManualCanaryReadonlyReaders> | null = null;
+let activeReadonlyEvidencePromise: Promise<ManualCanaryReadonlyEvidence> | null = null;
 
 export function __setManualCanaryCostFetcherForTests(
   fetcher: typeof injectedCostFetcher,
@@ -236,7 +238,7 @@ export async function fetchManualCanaryReadonlyCost(args: {
   };
 }
 
-export async function refreshManualCanaryReadonlyEvidence(
+async function collectManualCanaryReadonlyEvidence(
 ): Promise<ManualCanaryReadonlyEvidence> {
   const decimals: ManualCanaryReadonlyEvidence['decimals'] = {};
   const costs: ManualCanaryReadonlyEvidence['costs'] = {};
@@ -253,7 +255,7 @@ export async function refreshManualCanaryReadonlyEvidence(
     const cost = await costReader({
       symbol,
       isLong: true,
-      notionalUsd: 20,
+      notionalUsd: MANUAL_CANARY_CAPS.maxNotionalUsd,
     });
     costs[symbol] = cost.ok
       ? {
@@ -272,12 +274,12 @@ export async function refreshManualCanaryReadonlyEvidence(
       };
     const market = MARKET_BY_SYMBOL_SERVER.get(symbol);
     const seedQuotes = new Map<number, import('./boundedCanaryEconomics').BoundedCanaryQuoteResult>();
-    if (cost.ok) seedQuotes.set(20, {
+    if (cost.ok) seedQuotes.set(MANUAL_CANARY_CAPS.maxNotionalUsd, {
       ok: true,
       snapshot: cost.snapshot,
       diagnostics: cost.diagnostics,
     });
-    else seedQuotes.set(20, {
+    else seedQuotes.set(MANUAL_CANARY_CAPS.maxNotionalUsd, {
       ok: false,
       reason: cost.reason,
       diagnostics: cost.diagnostics,
@@ -308,14 +310,14 @@ export async function refreshManualCanaryReadonlyEvidence(
         symbol,
         boundary: 'READ_ONLY_OBSERVED_GRID_NOT_EXECUTION_AUTHORIZATION',
         constraints: {
-          maxNotionalUsd: 20,
-          maxCollateralUsd: 10,
-          maxLeverage: 2,
-          maxRoundTripCostUsd: 0.4,
+          maxNotionalUsd: MANUAL_CANARY_CAPS.maxNotionalUsd,
+          maxCollateralUsd: MANUAL_CANARY_CAPS.maxCollateralUsd,
+          maxLeverage: MANUAL_CANARY_CAPS.maxLeverage,
+          maxRoundTripCostUsd: MANUAL_CANARY_CAPS.maxRoundTripCostUsd,
         },
         search: {
           minNotionalUsd: 2,
-          maxNotionalUsd: 20,
+          maxNotionalUsd: MANUAL_CANARY_CAPS.maxNotionalUsd,
           stepUsd: 2,
           quoteLimit: 10,
           testedQuoteCount: 0,
@@ -334,4 +336,24 @@ export async function refreshManualCanaryReadonlyEvidence(
       };
   }
   return { decimals, costs, boundedEconomics };
+}
+
+/**
+ * Canonical BTC/ETH read-only collector flight.
+ *
+ * Scheduler, HTTP refresh, and direct PAPER readiness callers all reuse this
+ * promise so no second collector can overlap the active external-read pass.
+ */
+export function refreshManualCanaryReadonlyEvidence(
+): Promise<ManualCanaryReadonlyEvidence> {
+  if (activeReadonlyEvidencePromise) return activeReadonlyEvidencePromise;
+
+  const collectionPromise = collectManualCanaryReadonlyEvidence();
+  activeReadonlyEvidencePromise = collectionPromise;
+  void collectionPromise.finally(() => {
+    if (activeReadonlyEvidencePromise === collectionPromise) {
+      activeReadonlyEvidencePromise = null;
+    }
+  }).catch(() => undefined);
+  return collectionPromise;
 }

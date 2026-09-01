@@ -115,11 +115,11 @@ function completePaperView(): PaperRuntimeReadinessView {
     scheduler: {
       running: true,
       inFlight: false,
-      intervalMs: 45_000,
+      intervalMs: 60_000,
       lastAttemptAtMs: NOW,
       lastCompletedAtMs: NOW,
       lastSuccessAtMs: NOW,
-      nextRefreshAtMs: NOW + 45_000,
+      nextRefreshAtMs: NOW + 60_000,
       lastFailureId: null,
     },
     decimals: {

@@ -722,7 +722,7 @@ describe('POST /api/executor/gmx-api/readiness/refresh', () => {
           failureId: 'PAPER_READINESS_PEER_FAILED',
         });
 
-      await vi.advanceTimersByTimeAsync(45_000);
+      await vi.advanceTimersByTimeAsync(60_000);
       await vi.waitFor(() => {
         expect(getJson).toHaveBeenCalledTimes(2);
         expect(__getGmxApiReadinessCoordinatorStateForTests().active).toBe(false);
@@ -1027,6 +1027,95 @@ describe('POST /api/executor/gmx-api/readiness/refresh', () => {
     expect(calls.every((call) =>
       call.method === 'GET' && call.path === '/markets/tickers')).toBe(true);
     expect(dbWriteCalls).toEqual([]);
+  });
+
+  it('scheduler coordinator와 direct PAPER cycle이 canonical collector 한 flight를 공유한다', async () => {
+    const { t, calls } = makeSpyTransport(true);
+    coordinatorTransport = t;
+    let releaseCollector: (() => void) | null = null;
+    const collectorGate = new Promise<void>((resolve) => {
+      releaseCollector = resolve;
+    });
+    let activeCollectorReads = 0;
+    let maxActiveCollectorReads = 0;
+    const evidenceReads: string[] = [];
+    __setManualCanaryReadonlyReadersForTests({
+      resolveDecimals: async (symbol) => {
+        activeCollectorReads += 1;
+        maxActiveCollectorReads = Math.max(
+          maxActiveCollectorReads,
+          activeCollectorReads,
+        );
+        evidenceReads.push(`decimals:${symbol}`);
+        if (symbol === 'BTC') await collectorGate;
+        activeCollectorReads -= 1;
+        return { ok: true, detail: `${symbol} decimals` };
+      },
+      fetchCost: async ({ symbol }) => {
+        activeCollectorReads += 1;
+        maxActiveCollectorReads = Math.max(
+          maxActiveCollectorReads,
+          activeCollectorReads,
+        );
+        evidenceReads.push(`cost:${symbol}`);
+        activeCollectorReads -= 1;
+        return { ok: false, reason: `${symbol} cost unavailable` };
+      },
+    });
+    refreshCanarySpy.mockImplementation(
+      refreshManualCanaryReadonlyEvidence,
+    );
+    installCoordinatorDeps();
+
+    try {
+      startPaperRuntimeReadinessScheduler();
+      await vi.waitFor(() => expect(evidenceReads).toEqual(['decimals:BTC']));
+
+      const directCycle = runPaperRuntimeReadinessCycle({
+        deps: {
+          env: coordinatorEnv,
+          refreshCanary: refreshManualCanaryReadonlyEvidence,
+          createReadonlyClient: () => ({
+            ok: false,
+            reason: 'injected no-network deployment client',
+          }),
+        },
+        forceDeployment: true,
+      });
+      await Promise.resolve();
+
+      expect(evidenceReads).toEqual(['decimals:BTC']);
+      expect(maxActiveCollectorReads).toBe(1);
+      releaseCollector!();
+      await directCycle;
+      await vi.waitFor(() => expect(
+        __getGmxApiReadinessCoordinatorStateForTests(),
+      ).toEqual({ active: false, joinCount: 0 }));
+
+      expect(evidenceReads).toEqual([
+        'decimals:BTC',
+        'cost:BTC',
+        'cost:BTC',
+        'decimals:ETH',
+        'cost:ETH',
+        'cost:ETH',
+      ]);
+      expect(maxActiveCollectorReads).toBe(1);
+      expect(refreshCanarySpy).toHaveBeenCalledTimes(1);
+      expect(runPaperCycleSpy).toHaveBeenCalledTimes(1);
+      expect(calls).toEqual([
+        { method: 'GET', path: '/markets/tickers' },
+        { method: 'GET', path: '/markets/tickers' },
+      ]);
+      expect(calls.some((call) =>
+        call.method === 'POST'
+        || /rpc|prepare|sign|submit|relay|order/i.test(call.path))).toBe(false);
+      expect(dbWriteCalls).toEqual([]);
+    } finally {
+      const release = releaseCollector as unknown as (() => void) | null;
+      release?.();
+      stopPaperRuntimeReadinessScheduler();
+    }
   });
 
   it('production scheduler-first 경로는 첫 peer read 전에 generation을 게시하고 HTTP가 같은 flight에 합류한다', async () => {
