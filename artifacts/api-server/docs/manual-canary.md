@@ -86,6 +86,18 @@ GMX_API_ORDER_SUBMISSION_ENABLED=false 유지. 실제 canary는 별도 운영자
 
 - `GET /api/executor/gmx-api/status`는 process-memory snapshot만 표시하며 외부
   호출, DB 상태 전이, signer 접근, 서명, prepare/submit을 수행하지 않는다.
+- 이 endpoint와 `POST /api/executor/gmx-api/readiness/refresh`는 모두 기존
+  operator 인증 경계 안에 있다. 인증되지 않은 자동 감사는 이 경계를 우회하지
+  않으며, 공개 `GET /api/executor/livetest/status`를 Canary 비용·Stop capability의
+  authoritative evidence로 해석하지 않는다.
+- 따라서 인증되지 않은 감사에서 fresh BTC/ETH cost-cap evidence가 보이지 않는
+  것은 GMX/RPC 조회 실패 판정이 아니라 `AUTHENTICATED_EVIDENCE_NOT_OBSERVED`다.
+  Stop capability도 같은 이유로 공개 status만으로 PASS를 주장할 수 없다.
+- 인증된 read-only snapshot의 상태 코드는 다음처럼 해석한다.
+  `NOT_EVALUATED`는 현재 process/generation에서 아직 평가 시도가 없었음을,
+  `MISSING`/`UNAVAILABLE`은 필요한 관측값이 없음을, `STALE`은 freshness window를
+  벗어났음을, `FAILED`는 새니타이즈된 조회 실패가 기록됐음을 뜻한다. 어느
+  상태도 PASS로 승격하거나 과거 snapshot을 fresh evidence로 재사용하지 않는다.
 - `paperRuntimeReadiness.boundary`는 항상
   `READ_ONLY_NOT_EXECUTION_AUTHORIZATION`이다. Deployment/RPC/decimals/cost가
   모두 verified여도 `readyForControlledCanary`나 Stop 실행 권한을 만들지 않는다.
