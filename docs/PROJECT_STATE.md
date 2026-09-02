@@ -11,7 +11,7 @@
 - 외부 고객용 SaaS가 **아님**
 - Arbitrage SaaS 프로젝트 B와 **완전히 분리** — 관련 코드 추가 금지
 - **외부 VPS 사용 안 함** — Replit Reserved VM에서 24시간 운영
-- **데스크톱 웹 우선**, 모바일(`artifacts/futures-terminal`) 개발 보류
+- **데스크톱 웹 전용**, 기존 모바일 아티팩트는 삭제되어 재도입하지 않음
 
 ## 코드 기준 소스
 

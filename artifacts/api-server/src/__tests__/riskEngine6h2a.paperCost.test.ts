@@ -272,12 +272,4 @@ describe('§11-21~24 구조적 금지 검증', () => {
     expect(out.trim()).toBe('');
   });
 
-  it('24. 모바일(futures-terminal) 미접촉 — api-server 코드가 모바일을 참조하지 않음', () => {
-    let out = '';
-    try {
-      out = execFileSync('grep', ['-rl', 'futures-terminal', path.resolve(__dirname, '..'), '--include=*.ts'], { encoding: 'utf8' });
-    } catch { out = ''; }
-    const offenders = out.split('\n').filter(Boolean).filter(f => !f.includes('__tests__'));
-    expect(offenders).toEqual([]);
-  });
 });

@@ -53,7 +53,6 @@ const PRODUCT_RELEASE_PATHS = [
   "lib",
   "artifacts/api-server",
   "artifacts/futures-web",
-  "artifacts/futures-terminal",
 ];
 
 function git(args) {

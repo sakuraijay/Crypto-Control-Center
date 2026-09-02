@@ -46,7 +46,7 @@ const positionsSrc = read('pages/positions.tsx');
 // ── 1. mockData import 완전 제거 ──────────────────────────────────────────────
 
 describe('mockData import 제거', () => {
-  it('futures-web 어떤 소스도 futures-terminal mockData를 import하지 않는다', () => {
+  it('futures-web 어떤 소스도 삭제된 mockData를 import하지 않는다', () => {
     for (const file of allSourceFiles()) {
       const src = readFileSync(file, 'utf-8');
       expect(src, `mockData import found in ${file}`).not.toMatch(/from\s+['"][^'"]*mockData['"]/);
