@@ -17,7 +17,7 @@
  *  - recordCostEvidenceForExecution (must NOT be called in preflight path)
  *  - intentStatus (relay task)
  *  - initialStopStatus (protection)
- *  - casState for daily budget (intent/funds — only preflight CAS allowed in preflight)
+ *  - GET status/preflight never call casState; POST preflight may CAS only its token
  *
  * HTTP auth failure coverage: requireOperatorAuth 401 on missing/wrong PIN.
  *
@@ -965,6 +965,7 @@ describe('#142 production preflight wiring — signer and cost immutability', ()
 
 describe('#142 Canary Launch Contract — HTTP auth failure coverage', () => {
   const app = express();
+  app.use(express.json());
   app.use('/api', canaryRouter);
 
   it.each([
@@ -1024,6 +1025,110 @@ describe('#142 Canary Launch Contract — HTTP auth failure coverage', () => {
     expect(forbidden.closePosition).not.toHaveBeenCalled();
     expect(forbidden.runEmergencyClose).not.toHaveBeenCalled();
     expect(forbidden.recordCostEvidenceForExecution).not.toHaveBeenCalled();
+  });
+
+  it('authenticated GET preflight is report-only and leaves DB state unchanged even when all checks pass', async () => {
+    vi.stubEnv('OPERATOR_MASTER_PIN', 'canary-test-pin-142');
+    const casState = vi.fn(async () => {
+      throw new Error('GET preflight must never persist');
+    });
+    const randomId = vi.fn(() => 'must-not-be-issued-by-get');
+    const { deps, state, forbidden } = makeContractDeps({ casState, randomId });
+    state.set('manualCanaryPreflight', '{"sentinel":"unchanged"}');
+    state.set('manualCanaryDaily', JSON.stringify({
+      dayKey: DAY,
+      opens: 0,
+      openIntentId: null,
+      closeIntentId: null,
+      emergencyCloseUsed: false,
+      openedAt: null,
+      open: null,
+      launchReservation: null,
+    }));
+    const before = [...state.entries()];
+    __setCanaryDepsForTests(deps);
+
+    const res = await request(app)
+      .get('/api/executor/canary/preflight?symbol=BTC&direction=LONG')
+      .set('x-operator-pin', 'canary-test-pin-142');
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.preflightId).toBeNull();
+    expect([...state.entries()]).toEqual(before);
+    expect(casState).not.toHaveBeenCalled();
+    expect(randomId).not.toHaveBeenCalled();
+    expect(forbidden.executeOrder).not.toHaveBeenCalled();
+    expect(forbidden.closePosition).not.toHaveBeenCalled();
+    expect(forbidden.runEmergencyClose).not.toHaveBeenCalled();
+    expect(forbidden.recordCostEvidenceForExecution).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['stale READY session', FAIL('READY Owner Approval 만료 — 과거 서명 재사용 금지'), OK],
+    ['canonical nonce changed after restart', FAIL('현재 canonical nonce 8에 결속된 fresh READY 없음'), OK],
+    ['canonical binding failed', FAIL('canonical readback stale — Owner Approval 재사용 금지'), FAIL('canonical authorization 미성립')],
+  ])('GET status/preflight report %s as blockers with DB state unchanged', async (_label, ownerApproval, canonicalAuthorization) => {
+    vi.stubEnv('OPERATOR_MASTER_PIN', 'canary-test-pin-142');
+    const casState = vi.fn(async () => {
+      throw new Error('GET route must never persist');
+    });
+    const { deps, state, forbidden } = makeContractDeps({
+      ownerApproval: async () => ownerApproval,
+      canonicalAuthorization: async () => canonicalAuthorization,
+      casState,
+    });
+    state.set('manualCanaryPreflight', '{"sentinel":"unchanged"}');
+    const before = [...state.entries()];
+    __setCanaryDepsForTests(deps);
+
+    const preflight = await request(app)
+      .get('/api/executor/canary/preflight?symbol=BTC&direction=LONG')
+      .set('x-operator-pin', 'canary-test-pin-142');
+    const status = await request(app)
+      .get('/api/executor/canary/status')
+      .set('x-operator-pin', 'canary-test-pin-142');
+
+    expect(preflight.status).toBe(200);
+    expect(preflight.body.ok).toBe(false);
+    expect(preflight.body.preflightId).toBeNull();
+    expect(preflight.body.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'owner_approval', ok: false }),
+    ]));
+    expect(status.status).toBe(200);
+    expect(status.body.blockers).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        blocking: true,
+        failedCheckIds: expect.arrayContaining(['owner_approval']),
+      }),
+    ]));
+    expect([...state.entries()]).toEqual(before);
+    expect(casState).not.toHaveBeenCalled();
+    expect(forbidden.executeOrder).not.toHaveBeenCalled();
+    expect(forbidden.closePosition).not.toHaveBeenCalled();
+    expect(forbidden.runEmergencyClose).not.toHaveBeenCalled();
+    expect(forbidden.recordCostEvidenceForExecution).not.toHaveBeenCalled();
+  });
+
+  it('authenticated POST preflight preserves durable token issuance for the execute boundary', async () => {
+    vi.stubEnv('OPERATOR_MASTER_PIN', 'canary-test-pin-142');
+    const { deps, state } = makeContractDeps();
+    __setCanaryDepsForTests(deps);
+
+    const res = await request(app)
+      .post('/api/executor/canary/preflight')
+      .set('x-operator-pin', 'canary-test-pin-142')
+      .send({ symbol: 'BTC', direction: 'LONG' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.preflightId).toBeTruthy();
+    expect(JSON.parse(state.get('manualCanaryPreflight')!)).toMatchObject({
+      id: res.body.preflightId,
+      symbol: 'BTC',
+      direction: 'LONG',
+      ok: true,
+    });
   });
 
   it('narrow dependency type has no execution capabilities', () => {

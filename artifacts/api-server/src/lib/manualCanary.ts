@@ -6,7 +6,8 @@
  *
  * 원칙 (docs/manual-canary.md):
  *  - 하드캡은 서버에서 강제하며 요청 입력으로 확대 불가 (초과=거부, clamp 없음 — 명시 거부).
- *  - preflight는 read-only (주문·서명·키 복호화·설정 변경 0회).
+ *  - GET preflight/status는 DB write까지 포함해 엄격한 read-only.
+ *    durable preflightId 발급은 명시적 POST preflight에서만 수행.
  *  - 실행은 2단계: preflightId(120s TTL) + confirm 문구 + 실행 직전 전 조건 재평가.
  *  - 일일 1회 예산은 durable CAS claim을 제출 **이전**에 수행 (fail-closed).
  *  - deterministic decisionId → 기존 execution_intents PK/unique로 중복 제출 구조 차단.
@@ -15,8 +16,9 @@
  *
  * #142 — ManualCanaryPreflightDeps: preflight/evaluate 경로에는 실행 능력이
  *  구조적으로 없다 (executeOrder·closePosition·runEmergencyClose 등 완전 부재).
- *  PREFLIGHT_OPERATION_ALLOWLIST: 동결 allowlist — readonly check 와 preflight-token
- *  CAS만 포함. GITHUB_CI는 빌드에 결속된 PR-head SHA의 공개 Actions 결과를
+ *  PREFLIGHT_OPERATION_ALLOWLIST: 동결 allowlist — POST preflight의 readonly
+ *  check와 preflight-token CAS만 포함. GET preflight는 ManualCanaryCheckDeps로
+ *  CAS/random capability 자체가 없다. GITHUB_CI는 빌드에 결속된 PR-head SHA의 공개 Actions 결과를
  *  자격증명 없이 제한 시간 내 재검증하며, 불명/실패는 UNATTESTED fail-closed.
  */
 import { db, workerStateTable } from '@workspace/db';
@@ -138,7 +140,8 @@ export interface PreflightItem { id: string; label: string; ok: boolean; detail:
 export interface PreflightResult {
   ok: boolean;
   atMs: number;
-  preflightId: string | null; // ok=true일 때만 발급
+  /** GET inspection은 항상 null, POST issuance가 성공한 경우에만 non-null */
+  preflightId: string | null;
   items: PreflightItem[];
   /** 실행 시 드리프트 검증용 — preflight 시점 가격 */
   priceUsd: number | null;
@@ -478,11 +481,13 @@ async function evaluateAllChecks(
 }
 
 /**
- * #142: runCanaryPreflight는 ManualCanaryPreflightDeps만 사용.
- * 실행 능력(executeOrder 등)은 구조적으로 접근 불가.
+ * GET /preflight 전용 inspection. Check dependency만 사용하므로 DB mutation,
+ * random token 발급, 실행 능력에 구조적으로 접근할 수 없다.
  */
-export async function runCanaryPreflight(
-  deps: ManualCanaryPreflightDeps, symbolRaw: unknown, directionRaw: unknown,
+export async function inspectCanaryPreflight(
+  deps: ManualCanaryCheckDeps,
+  symbolRaw: unknown,
+  directionRaw: unknown,
 ): Promise<PreflightResult> {
   const atMs = (await runAllowedPreflightOperation('readonly', 'clock', () => deps.now())).getTime();
   const req = validateCanaryRequest(symbolRaw, directionRaw);
@@ -491,29 +496,58 @@ export async function runCanaryPreflight(
   }
   const { items, priceUsd } = await evaluateAllChecks(deps, req.symbol, req.direction);
   const ok = items.every(i => i.ok);
-  let preflightId: string | null = null;
-  if (ok) {
-    preflightId = await runAllowedPreflightOperation(
-      'readonly', 'random_id', () => deps.randomId(),
-    );
-    const stored: StoredPreflight = { id: preflightId, atMs, ok, symbol: req.symbol, direction: req.direction, priceUsd };
-    const prev = await runAllowedPreflightOperation(
-      'readonly', 'preflight_token_read', () => deps.loadState(STATE_KEY_PREFLIGHT),
-    );
-    const casOk = await runAllowedPreflightOperation(
-      'cas_preflight_token',
-      STATE_KEY_PREFLIGHT,
-      () => deps.casState(STATE_KEY_PREFLIGHT, prev, JSON.stringify(stored)),
-    );
-    if (!casOk) {
-      // durable 저장 미확정 = 유효 preflightId 발급 금지 (best-effort 전환 금지)
-      return {
-        ok: false, atMs, preflightId: null, priceUsd,
-        items: [...items, { id: 'persist', label: 'preflight durable 저장', ok: false, detail: 'CAS 경합/실패 — preflight 재수행 필요 (fail-closed)' }],
-      };
-    }
+  return { ok, atMs, preflightId: null, items, priceUsd };
+}
+
+/**
+ * POST /preflight 전용 durable token 발급. 검사 로직은 GET inspection과
+ * 동일하며, 모든 검사가 통과한 경우에만 기존 CAS token을 발급한다.
+ */
+export async function runCanaryPreflight(
+  deps: ManualCanaryPreflightDeps,
+  symbolRaw: unknown,
+  directionRaw: unknown,
+): Promise<PreflightResult> {
+  const inspected = await inspectCanaryPreflight(deps, symbolRaw, directionRaw);
+  if (!inspected.ok) return inspected;
+
+  const preflightId = await runAllowedPreflightOperation(
+    'readonly', 'random_id', () => deps.randomId(),
+  );
+  const req = validateCanaryRequest(symbolRaw, directionRaw);
+  if (!req.ok) return inspected;
+  const stored: StoredPreflight = {
+    id: preflightId,
+    atMs: inspected.atMs,
+    ok: true,
+    symbol: req.symbol,
+    direction: req.direction,
+    priceUsd: inspected.priceUsd,
+  };
+  const prev = await runAllowedPreflightOperation(
+    'readonly', 'preflight_token_read', () => deps.loadState(STATE_KEY_PREFLIGHT),
+  );
+  const casOk = await runAllowedPreflightOperation(
+    'cas_preflight_token',
+    STATE_KEY_PREFLIGHT,
+    () => deps.casState(STATE_KEY_PREFLIGHT, prev, JSON.stringify(stored)),
+  );
+  if (!casOk) {
+    return {
+      ...inspected,
+      ok: false,
+      items: [
+        ...inspected.items,
+        {
+          id: 'persist',
+          label: 'preflight durable 저장',
+          ok: false,
+          detail: 'CAS 경합/실패 — preflight 재수행 필요 (fail-closed)',
+        },
+      ],
+    };
   }
-  return { ok, atMs, preflightId, items, priceUsd };
+  return { ...inspected, preflightId };
 }
 
 // ── Daily durable claim ──────────────────────────────────────────────────────

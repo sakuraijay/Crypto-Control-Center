@@ -109,8 +109,10 @@ export async function fetchCanaryPreflight(
   pin: string, symbol: string, direction: string,
 ): Promise<CanaryFetchResult<CanaryPreflightResponse>> {
   try {
-    const res = await fetch(apiUrlWithQuery('/executor/canary/preflight', { symbol, direction }), {
-      headers: { 'x-operator-pin': pin },
+    const res = await fetch(apiUrl('/executor/canary/preflight'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-operator-pin': pin },
+      body: JSON.stringify({ symbol, direction }),
     });
     return await parse<CanaryPreflightResponse>(res);
   } catch { return { kind: 'error', message: '네트워크 오류' }; }

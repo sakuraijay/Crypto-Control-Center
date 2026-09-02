@@ -2,7 +2,8 @@
  * #135 — Manual Controlled Canary 라우트 (운영자 인증 필수).
  *
  *  GET  /executor/canary/status     — 단계별 상태 (read-only)
- *  GET  /executor/canary/preflight  — 1단계: read-only 전 항목 점검 (?symbol=&direction=)
+ *  GET  /executor/canary/preflight  — read-only 전 항목 점검 (?symbol=&direction=)
+ *  POST /executor/canary/preflight  — 1단계: durable preflightId 발급
  *  POST /executor/canary/execute    — 2단계: preflightId+confirm 결속, 서버 전 조건 재평가 후 단일 OPEN
  *  POST /executor/canary/close      — stop ACTIVE 증거 후 일반 close / mode:"emergency"
  *
@@ -13,7 +14,7 @@ import { Router, type IRouter } from 'express';
 import { requireOperatorAuth } from '../lib/operatorAuthGuard';
 import { sanitizeRpcError } from '../lib/rpcErrorSanitize';
 import {
-  runCanaryPreflight, executeManualCanaryOpen, executeManualCanaryClose,
+  inspectCanaryPreflight, runCanaryPreflight, executeManualCanaryOpen, executeManualCanaryClose,
   getCanaryStatus, MANUAL_CANARY_CAPS, type ManualCanaryDeps,
 } from '../lib/manualCanary';
 import { buildDefaultCanaryDeps } from '../lib/manualCanaryDeps';
@@ -43,7 +44,17 @@ router.get('/executor/canary/status', requireOperatorAuth, async (_req, res) => 
 
 router.get('/executor/canary/preflight', requireOperatorAuth, async (req, res) => {
   try {
-    const result = await runCanaryPreflight(deps(), req.query.symbol, req.query.direction);
+    const result = await inspectCanaryPreflight(deps(), req.query.symbol, req.query.direction);
+    return res.json({ caps: MANUAL_CANARY_CAPS, ...result });
+  } catch (e: unknown) {
+    return res.status(500).json({ ok: false, error: sanitizeRpcError(e) });
+  }
+});
+
+router.post('/executor/canary/preflight', requireOperatorAuth, async (req, res) => {
+  try {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const result = await runCanaryPreflight(deps(), body.symbol, body.direction);
     return res.json({ caps: MANUAL_CANARY_CAPS, ...result });
   } catch (e: unknown) {
     return res.status(500).json({ ok: false, error: sanitizeRpcError(e) });
