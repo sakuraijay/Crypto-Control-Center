@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { apiUrl } from '@/lib/apiUrl';
-import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
+import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from '@/lib/recharts-compat';
 import { AlertCircle, CheckCircle2, ShieldAlert } from 'lucide-react';
 
 export interface OfflineCostTotals {
@@ -439,11 +439,11 @@ export function OfflineBtcReportView() {
                           <stop offset="95%" stopColor="#10b981" stopOpacity={0.0} />
                         </linearGradient>
                       </defs>
-                      <XAxis dataKey="time" tickFormatter={(v) => new Date(v).toISOString().slice(5,10)} tick={{ fontSize: 10, fill: 'hsl(var(--muted-foreground))' }} tickLine={false} axisLine={false} minTickGap={30} />
-                      <YAxis domain={['auto', 'auto']} tickFormatter={v => `$${(v/1000).toFixed(1)}k`} tick={{ fontSize: 10, fill: 'hsl(var(--muted-foreground))' }} tickLine={false} axisLine={false} width={48} />
+                      <XAxis dataKey="time" tickFormatter={(v: number | string) => new Date(v).toISOString().slice(5,10)} tick={{ fontSize: 10, fill: 'hsl(var(--muted-foreground))' }} tickLine={false} axisLine={false} minTickGap={30} />
+                      <YAxis domain={['auto', 'auto']} tickFormatter={(v: number) => `$${(v/1000).toFixed(1)}k`} tick={{ fontSize: 10, fill: 'hsl(var(--muted-foreground))' }} tickLine={false} axisLine={false} width={48} />
                       <Tooltip
                         contentStyle={{ background: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', borderRadius: 6, fontSize: 11, boxShadow: 'var(--shadow-md)' }}
-                        labelFormatter={v => fmtDate(Number(v))}
+                        labelFormatter={(v: number | string) => fmtDate(Number(v))}
                         formatter={(v: number) => [<span className="font-mono font-medium">{fmtUSD(v)}</span>, 'Equity']}
                       />
                       <Area type="monotone" dataKey="equityUsd" stroke="#10b981" strokeWidth={1.5} fill="url(#oosEquity)" dot={false} activeDot={{ r: 4, fill: '#10b981', stroke: 'hsl(var(--card))', strokeWidth: 2 }} />

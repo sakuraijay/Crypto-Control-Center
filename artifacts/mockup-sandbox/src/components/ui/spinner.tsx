@@ -2,7 +2,9 @@ import { Loader2Icon, type LucideProps } from "lucide-react"
 
 import { cn } from "@/lib/utils"
 
-function Spinner({ className, ...props }: LucideProps) {
+type SpinnerProps = LucideProps & { className?: string }
+
+function Spinner({ className, ...props }: SpinnerProps) {
   return (
     <Loader2Icon
       role="status"

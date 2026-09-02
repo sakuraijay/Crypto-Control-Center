@@ -2,7 +2,7 @@ import { useState, useCallback } from 'react';
 import { useStrategyContext } from '@/lib/context/StrategyContext';
 import { runBacktest, parseGmxCandles, webIndicatorsToBacktestConfig, type BacktestResult, type BacktestTrade } from '@/lib/backtest/engine';
 import { OfflineBtcReportView } from '@/components/backtest/OfflineBtcReportView';
-import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
+import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from '@/lib/recharts-compat';
 import { TrendingUp, TrendingDown, Activity, Target, BarChart2, Zap } from 'lucide-react';
 
 const SYMBOLS = ['BTC','ETH','SOL','ARB','LINK','AVAX','DOGE','BNB','XRP','DOT'];
@@ -306,10 +306,10 @@ export default function BacktestPage() {
                   </linearGradient>
                 </defs>
                 <XAxis dataKey="time" tickFormatter={fmtTime} tick={{ fontSize: 11, fill: 'hsl(var(--muted-foreground))' }} tickLine={false} axisLine={false} />
-                <YAxis tickFormatter={v => `$${(v/1000).toFixed(1)}k`} tick={{ fontSize: 11, fill: 'hsl(var(--muted-foreground))' }} tickLine={false} axisLine={false} width={56} />
+                <YAxis tickFormatter={(v: number) => `$${(v/1000).toFixed(1)}k`} tick={{ fontSize: 11, fill: 'hsl(var(--muted-foreground))' }} tickLine={false} axisLine={false} width={56} />
                 <Tooltip
                   contentStyle={{ background: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', borderRadius: 6, fontSize: 12 }}
-                  labelFormatter={v => fmtTime(Number(v))}
+                  labelFormatter={(v: number | string) => fmtTime(Number(v))}
                   formatter={(v: number) => [`$${v.toLocaleString('en', { maximumFractionDigits: 2 })}`, 'Equity']}
                 />
                 <ReferenceLine y={capital} stroke="hsl(var(--muted-foreground))" strokeDasharray="3 3" strokeWidth={1} />
