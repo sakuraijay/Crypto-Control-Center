@@ -78,9 +78,33 @@ PIN·서명·암호문·개인키·RPC URL은 응답/로그/DB 평문에 절대 
 
 ## 실제 실행 전 필요한 것 (이 작업에서는 변경하지 않음)
 
-Production은 PAPER + LIVE_TEST_EXECUTION_LOCKED=true +
-GMX_API_ORDER_SUBMISSION_ENABLED=false 유지. 실제 canary는 별도 운영자 승인 후
-플래그 순서(readiness refresh 포함)를 따라야 한다.
+현재 승인된 Production effective 목표는 다음과 같다.
+
+- `WORKER_ENGINE_MODE=PAPER`
+- `AUTO_WORKER_LIVE_ENABLED=false`
+- `DELEGATED_SIGNER_ENABLED=true`
+- `GMX_API_ORDER_SUBMISSION_ENABLED=true`
+- `LIVE_TEST_EXECUTION_LOCKED=false`
+- `GMX_RELAY_SUBMISSION_ENABLED=false`
+- `GMX_RELAY_NETWORK_ENABLED=false`
+- `GMX_RELAY_MODE=DISABLED`
+
+`DELEGATED_SIGNER_ENABLED=true`, `GMX_API_ORDER_SUBMISSION_ENABLED=true`,
+`LIVE_TEST_EXECUTION_LOCKED=false`는 signer와 주문 API의 lower-layer capability를
+관측·검증할 수 있도록 준비한 상태일 뿐, 실제 execution authorization이나 주문
+제출 승인이 아니다.
+
+실제 주문 제출은 PAPER 모드와 AUTO LIVE 차단을 우회할 수 없으며, Relay
+submission/network가 모두 비활성화된 동안에는 구조적으로 차단된다. 이후에도
+fresh Owner Approval, canonical subaccount listed/authorized 상태와 action budget,
+Stop capability, fresh cost-cap, RiskEngine 허용, Controlled Canary readiness,
+운영자 명시 승인을 각각 통과해야 한다. 하나라도 충족하지 않으면 fail-closed로
+실행 권한은 부여되지 않는다.
+
+따라서 위 capability flag만으로 signer 사용, subaccount authorization, Relay
+submit, 실제 주문, 자금 이동 또는 Active Capital 승격이 자동 수행되지 않는다.
+실제 canary는 별도 운영자 승인 후 readiness refresh를 포함한 정해진 gate 순서를
+따라야 한다.
 
 ## PAPER readiness와 Stop capability 진단
 
