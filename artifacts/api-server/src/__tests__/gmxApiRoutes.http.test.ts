@@ -52,7 +52,9 @@ vi.mock('@workspace/db', () => {
 });
 
 import app from '../app';
-import { __setGmxApiRouteTransportForTests } from '../routes/gmxapi';
+import {
+  __setGmxApiRouteTransportForTests, __setPaperEpochActivatorForTests,
+} from '../routes/gmxapi';
 import { getExecutionEligibleCostEvidence } from '../lib/costSnapshot';
 import type { GmxApiTransport } from '../lib/gmxApiTransport';
 import {
@@ -171,6 +173,7 @@ beforeEach(() => {
 afterEach(() => {
   stopPaperRuntimeReadinessScheduler();
   __setGmxApiRouteTransportForTests(null);
+  __setPaperEpochActivatorForTests(null);
   __resetGmxApiReadinessCoordinatorForTests();
   __resetPaperRuntimeReadinessForTests();
   __resetPaperStopReadinessEvidenceForTests();
@@ -299,6 +302,11 @@ describe('GET /api/executor/gmx-api/status', () => {
         unchanged: true,
       },
     });
+    expect(s).toHaveProperty('activePaperEpoch');
+    expect(s.paperEpochPreflight.proposedNewEpoch).toMatchObject({
+      applied: false,
+      persistenceId: null,
+    });
     expect(s.paperRelayEvidence.executionOnly).toEqual(expect.arrayContaining([
       expect.objectContaining({
         id: 'canonicalAuthorization',
@@ -371,6 +379,41 @@ describe('GET /api/executor/gmx-api/status', () => {
       paperRelayEvidence: res.body.status.paperRelayEvidence,
     });
     expect(paperRelayView).not.toMatch(/signedPayload|rpcUrl|payload|0x[a-f0-9]{40,}/i);
+  });
+});
+
+describe('POST /api/executor/gmx-api/paper-epoch/activate', () => {
+  const body = { approved: true, activeCapitalUsd: 1000, idempotencyKey: 'paper-epoch-http-1' };
+
+  it('requires an operator PIN before validating or activating', async () => {
+    const activate = vi.fn();
+    __setPaperEpochActivatorForTests(activate);
+    const res = await request(app).post('/api/executor/gmx-api/paper-epoch/activate').send(body);
+    expect(res.status).toBe(401);
+    expect(activate).not.toHaveBeenCalled();
+  });
+
+  it('rejects an invalid activation body', async () => {
+    const activate = vi.fn();
+    __setPaperEpochActivatorForTests(activate);
+    const res = await request(app).post('/api/executor/gmx-api/paper-epoch/activate')
+      .set('x-operator-pin', PIN).send({ ...body, activeCapitalUsd: 999 });
+    expect(res.status).toBe(400);
+    expect(activate).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['APPLIED', { status: 'APPLIED', epochId: 'paper-1' }, 200],
+    ['BLOCKED', { status: 'BLOCKED', blockers: ['OPEN_NON_ZERO'] }, 409],
+    ['BUSY', { status: 'BUSY', retryable: true }, 409],
+  ] as const)('maps mocked %s activation result', async (_name, result, expectedStatus) => {
+    const activate = vi.fn(async () => result as never);
+    __setPaperEpochActivatorForTests(activate);
+    const res = await request(app).post('/api/executor/gmx-api/paper-epoch/activate')
+      .set('x-operator-pin', PIN).send(body);
+    expect(res.status).toBe(expectedStatus);
+    expect(res.body).toMatchObject(result);
+    expect(activate).toHaveBeenCalledWith(body.idempotencyKey);
   });
 });
 

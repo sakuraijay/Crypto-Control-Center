@@ -54,7 +54,7 @@ import {
 import { buildActiveCapitalWorkerBinding } from "../lib/activeCapitalSemantics";
 import {
   initialRiskEngineState, rollRiskPeriods, loadRiskEngineState, saveRiskEngineState,
-  type PersistedRiskEngineState,
+  RISK_ENGINE_STATE_KEY, type PersistedRiskEngineState,
 } from "../lib/riskEngineState";
 import { manilaDayStartIso, manilaWeekStartIso, msUntilNextManilaDay } from "../lib/manilaTime";
 import { runIntelServiceCycle, runStrategyShadowWorkerReadOnly, stopIntelService, resumeIntelService } from "../intel/intelService";
@@ -77,6 +77,12 @@ import {
   applyRiskProfileToLimits,
   promoteRiskProfileAtSafeBoundary,
 } from "../lib/riskProfiles";
+import { isPaperEpochActivationHeld } from '../lib/paperEpochActivationLock';
+import {
+  PAPER_EPOCH_ACTIVE_KEY,
+  parseActivePaperEpoch,
+  verifyActivePaperEpochSnapshot,
+} from '../lib/paperEpochState';
 
 const WORKER_DECISION_EPOCH_MS = Date.UTC(2020, 0, 1);
 const WORKER_DECISION_CANDLE_MS = 15 * 60_000;
@@ -247,6 +253,8 @@ export interface WorkerStatus {
   riskHistoricalHardStopTriggerReason: string | null;
   /** RiskEngine DB 영속 정상 여부 — false = fail-closed */
   riskDbOk: boolean;
+  /** Active PAPER epoch pointer was readable and valid. */
+  paperEpochStateOk: boolean;
   /** Manila 거래일 신규 진입 횟수 / 연속 손실 횟수 */
   riskDailyEntryCount: number | null;
   riskConsecutiveLossCount: number | null;
@@ -315,6 +323,7 @@ class WorkerManager {
   private lifecycleGeneration = 0;
   /** true일 때 사이클 실행 중 — 중복 실행 방지용 atomic lock */
   private isRunning = false;
+  private serverPaperTickInFlight = false;
 
   /** 완료된 총 사이클 수 */
   private cycleCount = 0;
@@ -413,6 +422,9 @@ class WorkerManager {
   // ── RiskEngine 상태 (6H-1 — Manila 기준, worker_state 영속) ─────────────────
   /** 영속 RiskEngine 상태. null = 미수립/로드 실패 → 신규 진입 차단 */
   private riskState: PersistedRiskEngineState | null = null;
+  /** New PAPER epochs exclude historical closed-trade PnL, but never open positions. */
+  private activePaperEpochStartMs: number | null = null;
+  private paperEpochStateOk = true;
   /** 마지막 RiskEngine 로드/저장 성공 여부 — false면 fail-closed */
   private riskDbOk = false;
   /** 마지막 사이클 RiskEngine 평가 결과 (상태 노출용) */
@@ -447,6 +459,8 @@ class WorkerManager {
 
     // DB에서 Daily/Weekly equity 기준점 복구 (재시작 후 기간 PnL 연속성 유지)
     await this.loadBaselinesFromDb();
+    if (!this.isCurrentGeneration(generation)) return;
+    await this.loadActivePaperEpochFromDb();
     if (!this.isCurrentGeneration(generation)) return;
 
     // 기존 ai_decisions.fullJson만 read하여 SHADOW lifecycle 연속성을 복원한다.
@@ -495,15 +509,20 @@ class WorkerManager {
       );
       if (!this.isCurrentGeneration(generation)) return;
       this.serverPaperTimer = setInterval(() => {
-        if (!this.isCurrentGeneration(generation)) return;
+        if (!this.isCurrentGeneration(generation)
+          || isPaperEpochActivationHeld()
+          || this.serverPaperTickInFlight) return;
         // 신선한 시세가 전혀 없으면 어떤 관리 판정도 불가 (stale 스킵과 동일) — DB 접근 생략
         if (this.priceBuffer.size === 0) return;
         if (this.lastPriceAt === 0 || Date.now() - this.lastPriceAt > MAX_MANAGE_PRICE_AGE_MS) return;
+        this.serverPaperTickInFlight = true;
         void manageServerPaperTick(
           (sym) => this.serverPaperQuote(sym),
           Date.now(),
           () => this.isCurrentGeneration(generation),
-        );
+        ).finally(() => {
+          this.serverPaperTickInFlight = false;
+        });
       }, 15_000);
     }
 
@@ -621,7 +640,7 @@ class WorkerManager {
       decision.riskApproved === true &&
       (decision.executionType === 'perp_long_open' || decision.executionType === 'perp_short_open');
     if (!isEntry || !decision.primarySymbol || decision.sizeUsd == null || decision.leverage == null) return;
-    if (riskEval?.entryAllowed !== true) return; // RiskEngine 최종 허용 재확인
+    if (!this.paperEpochStateOk || riskEval?.entryAllowed !== true) return; // epoch pointer + RiskEngine final check
 
     const result = await openServerPaperPosition(
       {
@@ -674,11 +693,12 @@ class WorkerManager {
       currentEquityUsd:     this.lastCurrentEquityUsd,
       periodPnlUpdatedAt:   this.periodPnlUpdatedAt,
       // ── RiskEngine (6H-1) ─────────────────────────────────────────────────
-      riskOperatingState:       this.lastRiskEvaluation?.state ?? null,
-      riskEntryAllowed:         this.lastRiskEvaluation?.entryAllowed === true,
+      riskOperatingState:       this.lastRiskEvaluation?.state ?? this.riskState?.riskOperatingState ?? null,
+      riskEntryAllowed:         this.paperEpochStateOk && this.lastRiskEvaluation?.entryAllowed === true,
       riskBlockReasons:         this.lastRiskEvaluation?.blockReasons ?? [],
       riskHistoricalHardStopTriggerReason: this.riskState?.locks.hardStopReason ?? null,
       riskDbOk:                 this.riskDbOk,
+      paperEpochStateOk:        this.paperEpochStateOk,
       riskDailyEntryCount:      this.riskState?.dailyEntryCount ?? null,
       riskConsecutiveLossCount: this.riskState?.consecutiveLossCount ?? null,
       riskDayPeriodStart:       this.riskState?.dayPeriodStart ?? null,
@@ -694,6 +714,42 @@ class WorkerManager {
       settlementReconcile:   this.lastSettlementReconcile,
       serverPaperExec:       process.env.WORKER_ENGINE_MODE !== 'LIVE' ? getServerPaperStatus() : null,
     };
+  }
+
+  applyPaperEpochInMemory(
+    epochId: string,
+    now: Date,
+    startedAtMs: number,
+    daily: EquityBaseline,
+    weekly: EquityBaseline,
+    limits: Record<string, unknown>,
+    riskState: PersistedRiskEngineState,
+    equityHwm: number,
+    resetPeriodValues: boolean,
+  ): void {
+    this.equityHighWaterMark = equityHwm;
+    this.dailyBaseline = daily;
+    this.weeklyBaseline = weekly;
+    if (resetPeriodValues) {
+      this.lastCurrentEquityUsd = 1000;
+      this.lastDailyPnlUsd = 0;
+      this.lastWeeklyPnlUsd = 0;
+      this.lastDailyRealizedUsd = 0;
+      this.lastWeeklyRealizedUsd = 0;
+      this.periodPnlUpdatedAt = now.toISOString();
+    } else {
+      this.clearPeriodPnl();
+    }
+    this.lastLimitsUsed = { ...DEFAULT_LIMITS, ...limits, tradingCapital: 1000 } as RiskLimits;
+    this.riskState = riskState;
+    this.riskDbOk = true;
+    this.paperEpochStateOk = true;
+    this.lastRiskEvaluation = null;
+    this.activePaperEpochStartMs = startedAtMs;
+  }
+
+  isCycleInProgress(): boolean {
+    return this.isRunning || this.serverPaperTickInFlight;
   }
 
   // ── Equity HWM persistence ───────────────────────────────────────────────────
@@ -716,6 +772,43 @@ class WorkerManager {
       if (this.weeklyBaseline) console.info(`[AIWorker] Weekly 기준점 복구: ${this.weeklyBaseline.periodStart} $${this.weeklyBaseline.equity.toFixed(2)}`);
     } catch (err) {
       console.warn('[AIWorker] 기간 PnL 기준점 로드 실패 (기준점 미수립 → N/A 유지):', (err as Error).message);
+    }
+  }
+
+  private async loadActivePaperEpochFromDb(): Promise<void> {
+    try {
+      const stateRows = await db.select().from(workerStateTable);
+      const activeRow = stateRows.find(row => row.key === PAPER_EPOCH_ACTIVE_KEY);
+      if (!activeRow) {
+        this.activePaperEpochStartMs = null;
+        this.paperEpochStateOk = true;
+        return;
+      }
+      const nowMs = Date.now();
+      const parsed = parseActivePaperEpoch(activeRow.value, nowMs);
+      if (!parsed.ok) throw new Error(parsed.reason);
+      const configRows = await db.select({ limits: strategyConfigTable.limits })
+        .from(strategyConfigTable).limit(1);
+      if (configRows.length !== 1) throw new Error('ACTIVE_EPOCH_CONFIG_UNAVAILABLE');
+      const state = new Map(stateRows.map(row => [row.key, row.value]));
+      const verified = verifyActivePaperEpochSnapshot({
+        activeRaw: activeRow.value,
+        auditRaw: state.get(parsed.value.auditKey) ?? null,
+        equityHwmRaw: state.get('equityHwm') ?? null,
+        limits: configRows[0].limits,
+        dailyRaw: state.get(BASELINE_DAILY_KEY) ?? null,
+        weeklyRaw: state.get(BASELINE_WEEKLY_KEY) ?? null,
+        riskRaw: state.get(RISK_ENGINE_STATE_KEY) ?? null,
+        nowMs,
+      });
+      if (!verified.ok) throw new Error(verified.reason);
+      this.activePaperEpochStartMs = verified.value.activeEpoch.startedAtMs;
+      this.paperEpochStateOk = true;
+    } catch {
+      // A corrupt cutoff must not silently include history in a newly activated epoch.
+      this.activePaperEpochStartMs = Number.MAX_SAFE_INTEGER;
+      this.paperEpochStateOk = false;
+      this.riskDbOk = false;
     }
   }
 
@@ -796,10 +889,7 @@ class WorkerManager {
     }
   }
 
-  /**
-   * 현재 equity HWM을 DB에 저장합니다 (fire-and-forget).
-   * 사이클 지연을 최소화하기 위해 await 없이 호출합니다.
-   */
+  /** 현재 equity HWM을 DB에 저장합니다. 호출 cycle이 완료 전까지 await합니다. */
   private async saveHwmToDb(hwm: number): Promise<void> {
     try {
       await db
@@ -1160,8 +1250,10 @@ class WorkerManager {
         .orderBy(desc(tradesTable.timestamp));
 
       // CLOSE 거래에서 실현 PnL 계산
-      const closeTrades = allTrades.filter(
-        t => t.action === 'CLOSE' || t.action === 'CLOSE_ALL',
+      const allCloseTrades = allTrades.filter(t => t.action === 'CLOSE' || t.action === 'CLOSE_ALL');
+      const closeTrades = allCloseTrades.filter(t =>
+        this.activePaperEpochStartMs === null
+          || new Date(t.timestamp as string | Date).getTime() >= this.activePaperEpochStartMs,
       );
 
       // Manila 거래일/거래주 시작 (6H-1 §11 — RiskEngine 전용, UTC 기준점과 별도)
@@ -1205,7 +1297,7 @@ class WorkerManager {
 
       // LIVE TEST 누적 손실: test_mode=true CLOSE 거래 중 pnl < 0인 것의 절댓값 합계.
       // DB에서 매 사이클 재계산하므로 서버 재시작 후에도 자동 복원됩니다.
-      const liveTestAccumLossUsd = closeTrades
+      const liveTestAccumLossUsd = allCloseTrades
         .filter(t => t.testMode === true && parseFloat(t.pnl ?? '0') < 0)
         .reduce((sum, t) => sum + Math.abs(parseFloat(t.pnl ?? '0')), 0);
 
@@ -1221,7 +1313,9 @@ class WorkerManager {
       const openTrades = allTrades.filter(
         t => t.action === 'OPEN' && (!t.closeTime || t.closeTime === 0),
       );
-      const allOpenActions = allTrades.filter(t => t.action === 'OPEN');
+      const allOpenActions = allTrades.filter(t => t.action === 'OPEN'
+        && (this.activePaperEpochStartMs === null
+          || new Date(t.timestamp as string | Date).getTime() >= this.activePaperEpochStartMs));
 
       const tradesInLastHour = allOpenActions.filter(t => {
         const ts = new Date(t.timestamp as string | Date).getTime();
@@ -1307,6 +1401,12 @@ class WorkerManager {
   /** 60초 AI 사이클 — setTimeout 루프 (완료 후 다음 예약). */
   private async runCycle(capturedGeneration = this.lifecycleGeneration): Promise<void> {
     if (!this.isCurrentGeneration(capturedGeneration)) return;
+    if (isPaperEpochActivationHeld()) {
+      this.cycleTimer = setTimeout(() => {
+        if (this.isCurrentGeneration(capturedGeneration)) void this.runCycle(capturedGeneration);
+      }, CYCLE_INTERVAL_MS);
+      return;
+    }
 
     // Atomic lock: 이전 사이클이 아직 실행 중이면 건너뜀
     if (this.isRunning) {
@@ -1422,7 +1522,8 @@ class WorkerManager {
       // DB에 저장해 서버 재시작 후에도 maxDrawdown 강제가 연속성을 갖도록 함.
       if (this.equityHighWaterMark === null || currentEquity > this.equityHighWaterMark) {
         this.equityHighWaterMark = currentEquity;
-        void this.saveHwmToDb(currentEquity); // fire-and-forget: 사이클 지연 최소화
+        await this.saveHwmToDb(currentEquity);
+        if (!this.isCurrentGeneration(capturedGeneration)) return;
       }
 
       // HWM 대비 드로다운 % (HWM > 0이고 현재 equity < HWM일 때만 의미 있음)
@@ -2385,3 +2486,29 @@ export const workerManager = new WorkerManager();
 export function getWorkerStatus(): WorkerStatus {
   return workerManager.getStatus();
 }
+
+/** Activation-only deterministic memory handoff; performs no I/O. */
+export function applyPaperEpochInMemory(
+  epochId: string,
+  now: Date,
+  startedAtMs: number,
+  daily: EquityBaseline,
+  weekly: EquityBaseline,
+  limits: Record<string, unknown>,
+  riskState: PersistedRiskEngineState,
+  equityHwm: number,
+  resetPeriodValues: boolean,
+): void {
+  workerManager.applyPaperEpochInMemory(
+    epochId,
+    now,
+    startedAtMs,
+    daily,
+    weekly,
+    limits,
+    riskState,
+    equityHwm,
+    resetPeriodValues,
+  );
+}
+export function isWorkerCycleInProgress(): boolean { return workerManager.isCycleInProgress(); }

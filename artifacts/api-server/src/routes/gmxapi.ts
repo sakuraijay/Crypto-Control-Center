@@ -13,7 +13,14 @@
 import { Router } from 'express';
 import type { Address } from 'viem';
 import { and, desc, eq, inArray, or } from 'drizzle-orm';
-import { db, liveApprovalsTable, relayTasksTable, tradesTable } from '@workspace/db';
+import {
+  db,
+  liveApprovalsTable,
+  relayTasksTable,
+  strategyConfigTable,
+  tradesTable,
+  workerStateTable,
+} from '@workspace/db';
 import { requireOperatorAuth } from '../lib/operatorAuthGuard';
 import { createGmxApiTransport, GMX_API_PEERS, type GmxApiTransport } from '../lib/gmxApiTransport';
 import { GMX_API_TRANSPORT_GEN } from '../lib/gmxApiOrders';
@@ -72,6 +79,17 @@ import { EXPECTED_CANARY_SIGNER } from '../lib/canaryAllowanceInfo';
 import { deriveOperationalDiagnostics } from '../lib/operationalDiagnostics';
 import { getReleaseIdentity } from '../lib/releaseIdentity';
 import { buildPaperEpochPreflight } from '../lib/paperEpochPreflight';
+import { BASELINE_DAILY_KEY, BASELINE_WEEKLY_KEY } from '../lib/equityBaselines';
+import { RISK_ENGINE_STATE_KEY } from '../lib/riskEngineState';
+import {
+  activatePaperEpoch, PAPER_EPOCH_ACTIVE_KEY, validatePaperEpochActivationBody,
+  type PaperEpochActivationResult,
+} from '../lib/paperEpochActivation';
+import {
+  parseActivePaperEpoch,
+  verifyActivePaperEpochSnapshot,
+  type ActivePaperEpochV1,
+} from '../lib/paperEpochState';
 
 const router = Router();
 
@@ -79,6 +97,13 @@ const router = Router();
 let injectedTransport: GmxApiTransport | null = null;
 export function __setGmxApiRouteTransportForTests(t: GmxApiTransport | null): void {
   injectedTransport = t;
+}
+let paperEpochActivator: (idempotencyKey: string) => Promise<PaperEpochActivationResult> = activatePaperEpoch;
+/** Test-only route seam: authorization/body validation remain inside the route. */
+export function __setPaperEpochActivatorForTests(
+  activator: ((idempotencyKey: string) => Promise<PaperEpochActivationResult>) | null,
+): void {
+  paperEpochActivator = activator ?? activatePaperEpoch;
 }
 function transport(): GmxApiTransport {
   return injectedTransport ?? createGmxApiTransport(process.env);
@@ -410,6 +435,69 @@ async function buildGmxApiStatusSnapshot() {
     liveExecutionLocked: liveLocked,
     relayFlags,
   }, getReleaseIdentity());
+  let activePaperEpoch:
+    | {
+      state: 'ACTIVE';
+      value: ActivePaperEpochV1;
+      audit: { state: 'VERIFIED'; idempotencyKey: string };
+    }
+    | { state: 'ABSENT'; value: null; reason: 'NO_ACTIVE_EPOCH' }
+    | { state: 'CORRUPT' | 'UNAVAILABLE'; value: null; reason: string; failClosed: true };
+  try {
+    const stateRows = await db.select().from(workerStateTable);
+    const activeRow = stateRows.find(row => row.key === PAPER_EPOCH_ACTIVE_KEY);
+    if (activeRow) {
+      const parsed = parseActivePaperEpoch(activeRow.value, nowMs);
+      if (!parsed.ok) {
+        activePaperEpoch = {
+          state: 'CORRUPT',
+          value: null,
+          reason: parsed.reason,
+          failClosed: true,
+        };
+      } else {
+        const configRows = await db.select({ limits: strategyConfigTable.limits })
+          .from(strategyConfigTable).limit(1);
+        const state = new Map(stateRows.map(row => [row.key, row.value]));
+        const verified = configRows.length === 1
+          ? verifyActivePaperEpochSnapshot({
+            activeRaw: activeRow.value,
+            auditRaw: state.get(parsed.value.auditKey) ?? null,
+            equityHwmRaw: state.get('equityHwm') ?? null,
+            limits: configRows[0].limits,
+            dailyRaw: state.get(BASELINE_DAILY_KEY) ?? null,
+            weeklyRaw: state.get(BASELINE_WEEKLY_KEY) ?? null,
+            riskRaw: state.get(RISK_ENGINE_STATE_KEY) ?? null,
+            nowMs,
+          })
+          : { ok: false as const, reason: 'ACTIVE_EPOCH_CONFIG_UNAVAILABLE' };
+        activePaperEpoch = verified.ok
+          ? {
+            state: 'ACTIVE',
+            value: verified.value.activeEpoch,
+            audit: {
+              state: 'VERIFIED',
+              idempotencyKey: verified.value.audit.idempotencyKey,
+            },
+          }
+          : {
+            state: 'CORRUPT',
+            value: null,
+            reason: verified.reason,
+            failClosed: true,
+          };
+      }
+    } else {
+      activePaperEpoch = { state: 'ABSENT', value: null, reason: 'NO_ACTIVE_EPOCH' };
+    }
+  } catch {
+    activePaperEpoch = {
+      state: 'UNAVAILABLE',
+      value: null,
+      reason: 'ACTIVE_EPOCH_READ_FAILED',
+      failClosed: true,
+    };
+  }
   const paperEpochPreflight = buildPaperEpochPreflight({
     observedAtMs: nowMs,
     counts: {
@@ -480,6 +568,7 @@ async function buildGmxApiStatusSnapshot() {
     paperRuntimeReadiness,
     paperRelayEvidence,
     paperEpochPreflight,
+    activePaperEpoch,
     lastReadinessRefresh: {
       attempted: lastRefresh.attempted, atMs: lastRefresh.atMs,
       ok: lastRefresh.ok, basis: lastRefresh.basis,
@@ -577,6 +666,16 @@ router.get('/executor/gmx-api/status', requireOperatorAuth, async (_req, res) =>
   } catch (e: unknown) {
     return res.status(500).json({ ok: false, error: sanitizeRpcError(e) });
   }
+});
+
+// Explicit, authenticated and deliberately non-executing PAPER state activation.
+router.post('/executor/gmx-api/paper-epoch/activate', requireOperatorAuth, async (req, res) => {
+  const invalid = validatePaperEpochActivationBody(req.body);
+  if (invalid) return res.status(400).json({ ok: false, error: invalid });
+  const result = await paperEpochActivator((req.body as { idempotencyKey: string }).idempotencyKey);
+  if (result.status === 'BUSY') return res.status(409).json({ ok: false, ...result });
+  if (result.status === 'BLOCKED') return res.status(409).json({ ok: false, ...result });
+  return res.status(200).json({ ok: true, ...result });
 });
 
 // POST /executor/gmx-api/readiness/refresh — readonly 조회만.

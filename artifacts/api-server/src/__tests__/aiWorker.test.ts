@@ -236,6 +236,10 @@ import {
   evaluateWorkerRiskState,
   workerManager,
 } from '../workers/aiWorker';
+import {
+  releasePaperEpochActivationLock,
+  tryAcquirePaperEpochActivationLock,
+} from '../lib/paperEpochActivationLock';
 import { EMPTY_LOCKS, type RiskEvaluationInput } from '../lib/riskStateMachine';
 import { runAiEngine }   from '../workers/stateEngine';
 import { getCachedPrices } from '../routes/gmx';
@@ -324,6 +328,8 @@ function resetWorker() {
   wm.lastPriceAt             = 0;
   wm.strategyLifecycleSnapshot = null;
   wm.strategyLifecycleRestoreBlocked = true;
+  wm.activePaperEpochStartMs = null;
+  wm.paperEpochStateOk = true;
   (wm.priceAtBySymbol as Map<string, number>).clear();
   (wm.lastTickUpdatedAtBySymbol as Map<string, number>).clear();
 
@@ -357,6 +363,9 @@ function resetWorker() {
   _dbInsertTables.length = 0;
   _dbUpdateTables.length = 0;
   _dbValuesInputs.length = 0;
+  _dbSelectImpl = () => [];
+  _dbInsertImpl = () => undefined;
+  _dbUpdateImpl = () => 0;
   vi.mocked(db.insert).mockClear();
   vi.mocked(db.update).mockClear();
   vi.mocked(db.delete).mockClear();
@@ -513,11 +522,12 @@ function makeOpenTrade(ageMs: number): unknown[] {
 //   start()    → (1) loadPendingApprovals (liveApprovalsTable)
 //              → (2) loadHwmFromDb        (workerStateTable)
 //              → (3) loadBaselinesFromDb  (workerStateTable — 기간 PnL 기준점)
-//              → (4) loadStrategyLifecycleSnapshotFromDb (aiDecisionsTable)
-//              → (5) loadRiskEngineState  (workerStateTable — 미수립)
-//   runCycle() → (6) loadPendingApprovals again (liveApprovalsTable)
-//              → (7) strategyConfigTable
-//              → (8) tradesTable (consecutiveLosses + cooldown 계산)
+//              → (4) loadActivePaperEpochFromDb (workerStateTable — legacy pointer 없음)
+//              → (5) loadStrategyLifecycleSnapshotFromDb (aiDecisionsTable)
+//              → (6) loadRiskEngineState  (workerStateTable — 미수립)
+//   runCycle() → (7) loadPendingApprovals again (liveApprovalsTable)
+//              → (8) strategyConfigTable
+//              → (9) tradesTable (consecutiveLosses + cooldown 계산)
 // insert/update 호출은 별도 mock (_dbInsertImpl, _dbUpdateImpl)
 
 function setupDbSequence(opts: {
@@ -541,11 +551,12 @@ function setupDbSequence(opts: {
     if (selectCallN === 1) return pending;   // start(): loadPendingApprovals
     if (selectCallN === 2) return hwm;       // start(): loadHwmFromDb
     if (selectCallN === 3) return [];        // start(): loadBaselinesFromDb (기준점 없음)
-    if (selectCallN === 4) return lifecycle; // start(): latest lifecycle decision (없으면 legacy baseline)
-    if (selectCallN === 5) return [];        // start(): loadRiskEngineState (6H-1 — 미수립)
-    if (selectCallN === 6) return pending;   // runCycle(): loadPendingApprovals again
-    if (selectCallN === 7) return strategy;  // runCycle(): strategyConfigTable
-    if (selectCallN === 8) return trades;    // runCycle(): tradesTable (consecutiveLosses)
+    if (selectCallN === 4) return [];        // start(): active PAPER epoch pointer 없음 (legacy mode)
+    if (selectCallN === 5) return lifecycle; // start(): latest lifecycle decision (없으면 legacy baseline)
+    if (selectCallN === 6) return [];        // start(): loadRiskEngineState (6H-1 — 미수립)
+    if (selectCallN === 7) return pending;   // runCycle(): loadPendingApprovals again
+    if (selectCallN === 8) return strategy;  // runCycle(): strategyConfigTable
+    if (selectCallN === 9) return trades;    // runCycle(): tradesTable (consecutiveLosses)
     return [];
   };
 
@@ -554,6 +565,119 @@ function setupDbSequence(opts: {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+
+describe('PAPER epoch accounting boundary', () => {
+  beforeEach(() => { resetWorker(); });
+  afterEach(() => {
+    releasePaperEpochActivationLock();
+    resetWorker();
+    vi.useRealTimers();
+  });
+
+  it('excludes historical PAPER activity but retains global positions and LIVE TEST losses', async () => {
+    vi.useFakeTimers({ now: 1_800_000_000_000 });
+    try {
+      const cutoff = Date.now() - 10 * 60_000;
+      _dbSelectImpl = () => [
+        { action: 'OPEN', pnl: 0, timestamp: new Date(cutoff + 2), closeTime: 0, testMode: false,
+          sizeInUsd: 100, price: 50_000, symbol: 'ETH', side: 'LONG', leverage: 1, collateralUsd: 100 },
+        { action: 'CLOSE', pnl: 5, timestamp: new Date(cutoff + 1), testMode: false, settlementStatus: 'SETTLED' },
+        // Older PAPER CLOSE/OPEN must not affect the newly activated epoch.
+        { action: 'OPEN', pnl: 0, timestamp: new Date(cutoff - 1), closeTime: 0, testMode: false,
+          sizeInUsd: 100, price: 50_000, symbol: 'BTC', side: 'LONG', leverage: 1, collateralUsd: 100 },
+        { action: 'CLOSE', pnl: -40, timestamp: new Date(cutoff - 1), testMode: false, settlementStatus: 'SETTLED' },
+        // LIVE TEST loss remains an all-time safety input even when historical.
+        { action: 'CLOSE', pnl: -7, timestamp: new Date(cutoff - 2), testMode: true, settlementStatus: 'SETTLED' },
+      ];
+      const wm = workerManager as unknown as {
+        activePaperEpochStartMs: number | null;
+        loadPaperState(): Promise<{
+          totalRealizedPnlAllTime: number; consecutiveLosses: number;
+          positions: unknown[]; tradesInLastHour: number; entriesManilaDay: number;
+          lastOpenTradeTimestampMs: number | null; liveTestAccumLossUsd: number;
+        }>;
+      };
+      wm.activePaperEpochStartMs = cutoff;
+      const state = await wm.loadPaperState();
+      // Only active-epoch PAPER PnL contributes to equity; LIVE TEST stays separate.
+      expect(state.totalRealizedPnlAllTime).toBe(5);
+      expect(state.consecutiveLosses).toBe(0);
+      expect(state.liveTestAccumLossUsd).toBe(7);
+      // Existing open positions are operationally global, never reset away.
+      expect(state.positions).toHaveLength(2);
+      expect(state.tradesInLastHour).toBe(1);
+      expect(state.entriesManilaDay).toBe(1);
+      expect(state.lastOpenTradeTimestampMs).toBe(cutoff + 2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('defers exactly one scheduler retry while activation holds the process lock', async () => {
+    vi.useFakeTimers({ now: 1_800_000_000_000 });
+    const wm = workerManager as unknown as {
+      active: boolean;
+      lifecycleGeneration: number;
+      runCycle(generation: number): Promise<void>;
+    };
+    wm.active = true;
+    wm.lifecycleGeneration = 41;
+    expect(tryAcquirePaperEpochActivationLock()).toBe(true);
+
+    await wm.runCycle(41);
+
+    expect(workerManager.getStatus().cycleCount).toBe(0);
+    expect(workerManager.getStatus().schedulerHeartbeatAt).toBeNull();
+    expect(vi.getTimerCount()).toBe(1);
+  });
+
+  it('marks a corrupt epoch pointer unhealthy and vetoes PAPER entry', async () => {
+    _dbSelectImpl = () => [{
+      key: 'paperEpochActiveV1',
+      value: JSON.stringify({
+        epochId: 'paper-corrupt',
+        startedAt: '2026-09-03T19:00:00.000Z',
+        startedAtMs: 1,
+        activeCapitalUsd: 1000,
+      }),
+    }];
+    const wm = workerManager as unknown as {
+      active: boolean;
+      lifecycleGeneration: number;
+      loadActivePaperEpochFromDb(): Promise<void>;
+      runServerPaperExecution(
+        decision: unknown,
+        paperState: unknown,
+        riskEvaluation: unknown,
+        cycleNumber: number,
+        generation: number,
+      ): Promise<void>;
+    };
+    await wm.loadActivePaperEpochFromDb();
+    expect(workerManager.getStatus().paperEpochStateOk).toBe(false);
+
+    wm.active = true;
+    wm.lifecycleGeneration = 42;
+    await wm.runServerPaperExecution({
+      id: 'blocked-entry',
+      operatingState: 'LONG',
+      riskApproved: true,
+      executionType: 'perp_long_open',
+      primarySymbol: 'BTC',
+      sizeUsd: 100,
+      leverage: 2,
+      riskProfile: { derivedLimits: { maxConcurrentPositions: 1 } },
+    }, {
+      positions: [],
+      entriesManilaDay: 0,
+    }, {
+      entryAllowed: true,
+      actions: [],
+    }, 1, 42);
+
+    expect(openServerPaperPosition).not.toHaveBeenCalled();
+  });
+});
 
 describe('Worker 초기 상태', () => {
   beforeEach(() => { resetWorker(); });
@@ -1049,6 +1173,43 @@ describe('completed-candle decision replay idempotency', () => {
 describe('crash-restart — HWM DB 복원', () => {
   beforeEach(() => { resetWorker(); });
   afterEach(() => { workerManager.stop(); vi.useRealTimers(); });
+
+  it('keeps the cycle busy until the HWM durable write completes', async () => {
+    vi.useFakeTimers({ now: 1_800_000_000_000 });
+    let selectCall = 0;
+    _dbSelectImpl = () => {
+      selectCall += 1;
+      if (selectCall === 1) return [];
+      if (selectCall === 2) return defaultStrategyRow;
+      if (selectCall === 3) return noTradesResult;
+      return [];
+    };
+    let releaseHwm!: (value: unknown) => void;
+    const pendingHwm = new Promise<unknown>((resolve) => { releaseHwm = resolve; });
+    let insertCall = 0;
+    _dbInsertImpl = () => {
+      insertCall += 1;
+      return insertCall === 1 ? pendingHwm : [{ id: 'test-decision-1' }];
+    };
+    vi.mocked(runAiEngine).mockReturnValue(
+      CASH_DECISION as unknown as ReturnType<typeof runAiEngine>,
+    );
+    const wm = workerManager as unknown as {
+      active: boolean;
+      runCycle(): Promise<void>;
+      isCycleInProgress(): boolean;
+    };
+    wm.active = true;
+
+    const cycle = wm.runCycle();
+    for (let i = 0; i < 20 && insertCall === 0; i += 1) await Promise.resolve();
+
+    expect(insertCall).toBe(1);
+    expect(wm.isCycleInProgress()).toBe(true);
+    releaseHwm([]);
+    await cycle;
+    expect(wm.isCycleInProgress()).toBe(false);
+  });
 
   it('start() 시 DB에서 equityHwm을 로드한다 (15000)', async () => {
     setupDbSequence({ hwmValue: '15000' });
