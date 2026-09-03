@@ -110,6 +110,29 @@ describe('buildPaperEpochPreflight', () => {
     expect(view.current.activeTradingCapitalUsd).toBe(24.5);
   });
 
+  it.each([1_000, 2_500, 5_000, 10_000])(
+    '계획 단계 %i USDC는 반복 조회만으로 current capital이나 reserve를 승격하지 않는다',
+    (plannedStage) => {
+      const source = input();
+      const walletBalanceUsd = 10_000;
+      const before = structuredClone(source);
+
+      const first = buildPaperEpochPreflight(source);
+      const second = buildPaperEpochPreflight(source);
+
+      expect(first.planned.seedCapitalUsd).toBe(walletBalanceUsd);
+      expect(first.planned.activeCapitalStagesUsd).toContain(plannedStage);
+      expect(first.planned.separation).toBe('PLANNED_SEED_IS_NOT_ACTIVE_OR_RESERVE_CAPITAL');
+      expect(first.current.activeTradingCapitalUsd).toBe(24.5);
+      expect(first.current.reserveCashPct).toBe(20);
+      expect(first.proposedNewEpoch.applied).toBe(false);
+      expect(first.proposedNewEpoch.persistenceId).toBeNull();
+      expect(second).toEqual(first);
+      expect(source).toEqual(before);
+      expect(source.current).not.toHaveProperty('walletBalanceUsd');
+    },
+  );
+
   it('non-zero/null 선행조건과 PAPER/Relay 경계 drift를 fail-closed 처리한다', () => {
     const source = input();
     source.counts.pendingCloseCount = 1;

@@ -78,9 +78,9 @@ describe('operational build/approved/effective diagnostics', () => {
     expect(productionSection).toContain('DELEGATED_SIGNER_ENABLED = "true"');
     expect(productionSection).toContain('GMX_API_ORDER_SUBMISSION_ENABLED = "true"');
     expect(productionSection).toContain('LIVE_TEST_EXECUTION_LOCKED = "false"');
-    expect(productionSection).not.toMatch(
-      /GMX_RELAY_(?:SUBMISSION|NETWORK)_ENABLED|GMX_RELAY_MODE/,
-    );
+    expect(productionSection).toContain('GMX_RELAY_SUBMISSION_ENABLED = "false"');
+    expect(productionSection).toContain('GMX_RELAY_NETWORK_ENABLED = "false"');
+    expect(productionSection).toContain('GMX_RELAY_MODE = "DISABLED"');
     expect(APPROVED_PRODUCTION_SAFETY_TARGET.engineMode).toBe('PAPER');
     expect(APPROVED_PRODUCTION_SAFETY_TARGET.autoWorkerLiveEnabled).toBe(false);
     expect(APPROVED_PRODUCTION_SAFETY_TARGET.relaySubmissionEnabled).toBe(false);
