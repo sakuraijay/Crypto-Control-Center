@@ -276,6 +276,29 @@ describe('GET /api/executor/gmx-api/status', () => {
       executionAuthorized: false,
       fresh: true,
     });
+    expect(s.paperEpochPreflight).toMatchObject({
+      scope: 'PAPER_EPOCH_READINESS_PREFLIGHT',
+      boundary: 'READ_ONLY_CALCULATION_NOT_STATE_CHANGE',
+      executionAuthorized: false,
+      stateChangePerformed: false,
+      planned: {
+        seedCapitalUsd: 10_000,
+        activeCapitalStagesUsd: [1_000, 2_500, 5_000, 10_000],
+        separation: 'PLANNED_SEED_IS_NOT_ACTIVE_OR_RESERVE_CAPITAL',
+      },
+      proposedNewEpoch: {
+        activeTradingCapitalUsd: 1_000,
+        equityHwmUsd: 1_000,
+        dailyRiskBaselineUsd: 1_000,
+        weeklyRiskBaselineUsd: 1_000,
+        applied: false,
+        persistenceId: null,
+      },
+      preservedExecutionGates: {
+        readyForControlledCanary: false,
+        unchanged: true,
+      },
+    });
     expect(s.paperRelayEvidence.executionOnly).toEqual(expect.arrayContaining([
       expect.objectContaining({
         id: 'canonicalAuthorization',
@@ -329,6 +352,7 @@ describe('GET /api/executor/gmx-api/status', () => {
     expect(res.status).toBe(200);
     expect(calls).toEqual([]);
     expect(dbWriteCalls).toEqual([]);
+    expect(res.body.status.paperEpochPreflight.stateChangePerformed).toBe(false);
     expect(getExecutionEligibleCostEvidence(Date.now())).toEqual(before);
     expect(before).toEqual({ fresh: false, evidence: null });
   });

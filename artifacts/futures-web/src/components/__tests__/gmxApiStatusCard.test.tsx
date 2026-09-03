@@ -29,6 +29,7 @@ import {
   PaperCostDetails,
   PaperEconomicsDetails,
   PaperRelayEvidence,
+  PaperEpochPreflight,
   PaperStopReadinessEvidence,
   reduceGmxApiCardEvidence,
 } from '../GmxApiStatusCard';
@@ -113,6 +114,72 @@ const STATUS_FIXTURE: GmxApiStatusView = {
         ageMs: 0,
         failureId: null,
       },
+    ],
+  },
+  paperEpochPreflight: {
+    scope: 'PAPER_EPOCH_READINESS_PREFLIGHT',
+    boundary: 'READ_ONLY_CALCULATION_NOT_STATE_CHANGE',
+    executionAuthorized: false,
+    stateChangePerformed: false,
+    observedAtMs: 1_777_000_000_000,
+    readyForPaperEpochProposal: false,
+    blockerIds: ['CURRENT_ACTIVE_TRADING_CAPITAL_USD_UNAVAILABLE'],
+    counts: {
+      openPositionCount: 0,
+      pendingApprovalCount: 0,
+      pendingCloseCount: 0,
+      blockingIntentCount: 0,
+      blockingProtectionCount: 0,
+      paperExecutorUnresolvedCount: 0,
+      unresolvedRelayTaskCount: 0,
+      unsettledTradeCount: 0,
+      openRelayTaskCount: 0,
+    },
+    current: {
+      activeTradingCapitalUsd: 24.5,
+      equityHwmUsd: 1_000,
+      dailyRiskBaselineUsd: 24.5,
+      weeklyRiskBaselineUsd: 24.5,
+      currentEquityUsd: 24.5,
+      reserveCashPct: 20,
+      riskOperatingState: 'HARD_STOPPED',
+      riskEntryAllowed: false,
+    },
+    planned: {
+      seedCapitalUsd: 10_000,
+      activeCapitalStagesUsd: [1_000, 2_500, 5_000, 10_000],
+      separation: 'PLANNED_SEED_IS_NOT_ACTIVE_OR_RESERVE_CAPITAL',
+    },
+    proposedNewEpoch: {
+      activeTradingCapitalUsd: 1_000,
+      equityHwmUsd: 1_000,
+      dailyRiskBaselineUsd: 1_000,
+      weeklyRiskBaselineUsd: 1_000,
+      applied: false,
+      persistenceId: null,
+    },
+    boundaries: {
+      engineMode: 'PAPER',
+      autoWorkerLiveEnabled: false,
+      liveTestExecutionLocked: false,
+      delegatedSignerEnabled: true,
+      gmxOrderSubmissionEnabled: true,
+      relaySubmissionEnabled: false,
+      relaySubmitNetworkEnabled: false,
+      relayMode: 'DISABLED',
+    },
+    preservedExecutionGates: {
+      readyForControlledCanary: false,
+      stopExecutionAvailable: false,
+      hardStopReason: 'historical PAPER hard stop',
+      riskOperatingState: 'HARD_STOPPED',
+      riskEntryAllowed: false,
+      unchanged: true,
+    },
+    notices: [
+      '계산 전용 — epoch, DB, HWM, Active Trading Capital, Risk baseline을 변경하지 않습니다.',
+      'Planned Seed는 Active Capital 또는 Reserve Capital이 아닙니다.',
+      '제안값은 Canary, LIVE, cost, Stop, HARD_STOP gate를 대체하거나 완화하지 않습니다.',
     ],
   },
   approvalSessionReady: false,
@@ -611,6 +678,22 @@ describe('PAPER Relay Evidence 렌더 계약', () => {
     expect(html).toContain('ACTION_BUDGET_NOT_EVALUATED_IN_PAPER');
     expect(html).toContain('저장 안전 결함 없음');
     expect(html).not.toMatch(/remainingActions|expiresAt|signature|rpcUrl/i);
+  });
+});
+
+describe('PAPER Epoch readiness/preflight 렌더 계약', () => {
+  it('현재·계획·제안값을 분리하고 계산 전용 경계를 표시한다', () => {
+    const html = renderToStaticMarkup(<PaperEpochPreflight view={STATUS_FIXTURE.paperEpochPreflight!} />);
+    expect(html).toContain('PAPER Epoch Readiness / Preflight');
+    expect(html).toContain('Active Trading Capital');
+    expect(html).toContain('Planned Seed');
+    expect(html).toContain('$1,000 → $2,500 → $5,000 → $10,000');
+    expect(html).toContain('Proposed New Epoch');
+    expect(html).toContain('APPLIED false');
+    expect(html).toContain('READ_ONLY_CALCULATION_NOT_STATE_CHANGE');
+    expect(html).toContain('HARD_STOPPED');
+    expect(html).toContain('unchanged');
+    expect(html).not.toMatch(/적용 실행|epoch 생성 버튼|reset 실행/i);
   });
 });
 

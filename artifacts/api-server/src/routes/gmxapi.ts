@@ -13,7 +13,7 @@
 import { Router } from 'express';
 import type { Address } from 'viem';
 import { and, desc, eq, inArray, or } from 'drizzle-orm';
-import { db, relayTasksTable, tradesTable } from '@workspace/db';
+import { db, liveApprovalsTable, relayTasksTable, tradesTable } from '@workspace/db';
 import { requireOperatorAuth } from '../lib/operatorAuthGuard';
 import { createGmxApiTransport, GMX_API_PEERS, type GmxApiTransport } from '../lib/gmxApiTransport';
 import { GMX_API_TRANSPORT_GEN } from '../lib/gmxApiOrders';
@@ -25,6 +25,7 @@ import {
   getDeploymentVerificationState,
   getFeeEstimateState,
   getReadinessRefreshState,
+  deriveRelayEnvFlags,
 } from '../lib/relayActivationStatus';
 import { getActiveRevokeSessionReadResult } from '../lib/revokeSession';
 import { resolveGmxLiveRelayConfig } from '../lib/gmxLiveConfig';
@@ -52,7 +53,8 @@ import { EXECUTION_ELIGIBLE_MAX_AGE_MS, getExecutionEligibleCostEvidence } from 
 import { listUncovered } from '../lib/stopLossPlan';
 import { loadStopCoverage } from '../workers/liveTestExecutor';
 import { getWorkerStatus } from '../workers/aiWorker';
-import { GMX_DEPLOYMENT_MANIFEST } from '../lib/gmxDeploymentManifest';
+import { getServerPaperStatus } from '../workers/serverPaperExecutor';
+import { GMX_DEPLOYMENT_MANIFEST, validateEnvAgainstManifest } from '../lib/gmxDeploymentManifest';
 import { getActiveReadySession } from '../lib/ownerApprovalSession';
 import { getGmxPrepareStartupState } from '../lib/gmxApiPrepareStartup';
 import { sanitizeRpcError } from '../lib/rpcErrorSanitize';
@@ -67,6 +69,9 @@ import {
 } from '../lib/controlledCanaryReadiness';
 import { evaluateManualCanaryCanonicalAuthorization } from '../lib/manualCanaryCanonicalAuthorization';
 import { EXPECTED_CANARY_SIGNER } from '../lib/canaryAllowanceInfo';
+import { deriveOperationalDiagnostics } from '../lib/operationalDiagnostics';
+import { getReleaseIdentity } from '../lib/releaseIdentity';
+import { buildPaperEpochPreflight } from '../lib/paperEpochPreflight';
 
 const router = Router();
 
@@ -84,6 +89,8 @@ async function buildGmxApiStatusSnapshot() {
   const env = process.env;
   const nowMs = Date.now();
   const paperMode = env.WORKER_ENGINE_MODE === 'PAPER';
+  const workerStatus = getWorkerStatus();
+  const serverPaperStatus = getServerPaperStatus();
   const snap = paperMode ? null : getCanonicalSnapshot();
   const canonicalAuthorized = !!snap && snap.confirmed && snap.isSubaccountListed === true;
   let approvalRemainingOk = false;
@@ -170,6 +177,13 @@ async function buildGmxApiStatusSnapshot() {
   } catch { gmxTaskCounts = null; recentGmxTasks = null; prepareStageCounts = null; oldestBlockingTaskAt = null; }
 
   const unresolvedCount = await countUnresolvedTasksOrNull();
+  let pendingApprovalCount: number | null = null;
+  try {
+    const pendingRows = await db.select({ id: liveApprovalsTable.id })
+      .from(liveApprovalsTable)
+      .where(eq(liveApprovalsTable.status, 'PENDING'));
+    pendingApprovalCount = pendingRows.length;
+  } catch { pendingApprovalCount = null; }
 
   const fe = getFeeEstimateState();
   const dv = getDeploymentVerificationState();
@@ -223,7 +237,7 @@ async function buildGmxApiStatusSnapshot() {
   } catch { uncoveredStopCount = null; }
   if ((uncoveredStopCount ?? 1) > 0) blockedReasons.push(`STOP_UNCOVERED ${uncoveredStopCount ?? '조회 실패'}건 — stop 미확보 포지션 존재/조회 실패`);
   // LIVE 정산 능력 (§5) — reconciliation 미완료/미실행 = 부적격
-  const settlementReconcile = getWorkerStatus().settlementReconcile;
+  const settlementReconcile = workerStatus.settlementReconcile;
   const settlementComplete = settlementReconcile !== null && !settlementReconcile.incomplete;
   if (!settlementComplete) {
     blockedReasons.push(`LIVE_SETTLEMENT_INCOMPLETE — ${settlementReconcile?.reasons[0] ?? '정산 reconciliation 미실행'}`);
@@ -387,6 +401,45 @@ async function buildGmxApiStatusSnapshot() {
       },
     })
     : null;
+  let relayFlags: ReturnType<typeof deriveRelayEnvFlags> | null = null;
+  try {
+    relayFlags = deriveRelayEnvFlags(env, validateEnvAgainstManifest(env).ok);
+  } catch { relayFlags = null; }
+  const operationalDiagnostics = deriveOperationalDiagnostics(env, {
+    engineMode: paperMode ? 'PAPER' : 'LIVE',
+    liveExecutionLocked: liveLocked,
+    relayFlags,
+  }, getReleaseIdentity());
+  const paperEpochPreflight = buildPaperEpochPreflight({
+    observedAtMs: nowMs,
+    counts: {
+      openPositionCount: paperMode ? serverPaperStatus.openPositions.length : null,
+      pendingApprovalCount,
+      pendingCloseCount: paperMode ? (serverPaperStatus.pendingClose === null ? 0 : 1) : null,
+      blockingIntentCount: blockingIntents,
+      blockingProtectionCount,
+      paperExecutorUnresolvedCount: paperMode ? (serverPaperStatus.unresolved === null ? 0 : 1) : null,
+      unresolvedRelayTaskCount: unresolvedCount,
+      unsettledTradeCount: unsettledLiveTradeCount,
+      openRelayTaskCount: openRelayTasks,
+    },
+    current: {
+      activeTradingCapitalUsd: workerStatus.lastLimitsUsed?.tradingCapital ?? null,
+      equityHwmUsd: workerStatus.equityHwm,
+      dailyRiskBaselineUsd: workerStatus.dailyBaseline?.equity ?? null,
+      weeklyRiskBaselineUsd: workerStatus.weeklyBaseline?.equity ?? null,
+      currentEquityUsd: workerStatus.currentEquityUsd,
+      reserveCashPct: workerStatus.lastLimitsUsed?.reserveCashPct ?? null,
+      riskOperatingState: workerStatus.riskOperatingState,
+      riskEntryAllowed: workerStatus.riskEntryAllowed,
+    },
+    operationalDiagnostics,
+    gates: {
+      readyForControlledCanary,
+      stopExecutionAvailable,
+      hardStopReason: workerStatus.riskHistoricalHardStopTriggerReason,
+    },
+  });
 
   return {
     transportGen: GMX_API_TRANSPORT_GEN,
@@ -426,6 +479,7 @@ async function buildGmxApiStatusSnapshot() {
     executionEligibleCostEvidence: executionCostEvidence,
     paperRuntimeReadiness,
     paperRelayEvidence,
+    paperEpochPreflight,
     lastReadinessRefresh: {
       attempted: lastRefresh.attempted, atMs: lastRefresh.atMs,
       ok: lastRefresh.ok, basis: lastRefresh.basis,

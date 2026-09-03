@@ -53,6 +53,68 @@ export interface GmxApiStatusView {
       failureId: string | null;
     }>;
   } | null;
+  paperEpochPreflight?: {
+    scope: 'PAPER_EPOCH_READINESS_PREFLIGHT';
+    boundary: 'READ_ONLY_CALCULATION_NOT_STATE_CHANGE';
+    executionAuthorized: false;
+    stateChangePerformed: false;
+    observedAtMs: number;
+    readyForPaperEpochProposal: boolean;
+    blockerIds: string[];
+    counts: {
+      openPositionCount: number | null;
+      pendingApprovalCount: number | null;
+      pendingCloseCount: number | null;
+      blockingIntentCount: number | null;
+      blockingProtectionCount: number | null;
+      paperExecutorUnresolvedCount: number | null;
+      unresolvedRelayTaskCount: number | null;
+      unsettledTradeCount: number | null;
+      openRelayTaskCount: number | null;
+    };
+    current: {
+      activeTradingCapitalUsd: number | null;
+      equityHwmUsd: number | null;
+      dailyRiskBaselineUsd: number | null;
+      weeklyRiskBaselineUsd: number | null;
+      currentEquityUsd: number | null;
+      reserveCashPct: number | null;
+      riskOperatingState: string | null;
+      riskEntryAllowed: boolean;
+    };
+    planned: {
+      seedCapitalUsd: 10_000;
+      activeCapitalStagesUsd: readonly [1_000, 2_500, 5_000, 10_000];
+      separation: 'PLANNED_SEED_IS_NOT_ACTIVE_OR_RESERVE_CAPITAL';
+    };
+    proposedNewEpoch: {
+      activeTradingCapitalUsd: 1_000;
+      equityHwmUsd: 1_000;
+      dailyRiskBaselineUsd: 1_000;
+      weeklyRiskBaselineUsd: 1_000;
+      applied: false;
+      persistenceId: null;
+    };
+    boundaries: {
+      engineMode: 'PAPER' | 'LIVE' | null;
+      autoWorkerLiveEnabled: boolean | null;
+      liveTestExecutionLocked: boolean | null;
+      delegatedSignerEnabled: boolean | null;
+      gmxOrderSubmissionEnabled: boolean | null;
+      relaySubmissionEnabled: boolean | null;
+      relaySubmitNetworkEnabled: boolean | null;
+      relayMode: 'DISABLED' | 'DRY_RUN' | 'LIVE' | null;
+    };
+    preservedExecutionGates: {
+      readyForControlledCanary: boolean;
+      stopExecutionAvailable: boolean;
+      hardStopReason: string | null;
+      riskOperatingState: string | null;
+      riskEntryAllowed: boolean;
+      unchanged: true;
+    };
+    notices: string[];
+  };
   approvalSessionReady: boolean | null;
   blockingIntentCount: number | null;
   openRelayTaskCount: number | null;

@@ -95,6 +95,7 @@ export type PaperCostView = PaperReadinessView['costs']['BTC'];
 type PaperEconomicsView = PaperReadinessView['economics']['BTC'];
 type StopReadinessEvidenceView = NonNullable<NonNullable<GmxApiStatusView['stopCapability']>['readinessEvidence']>;
 type PaperRelayEvidenceView = NonNullable<GmxApiStatusView['paperRelayEvidence']>;
+type PaperEpochPreflightView = NonNullable<GmxApiStatusView['paperEpochPreflight']>;
 
 export const FAIL_CLOSED_STATUS_MAX_AGE_MS = 30_000;
 
@@ -336,6 +337,89 @@ export function PaperStopReadinessEvidence({ evidence }: { evidence: StopReadine
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+export function PaperEpochPreflight({ view }: { view: PaperEpochPreflightView }) {
+  const countRows: Array<[string, number | null]> = [
+    ['Open positions', view.counts.openPositionCount],
+    ['Pending approvals', view.counts.pendingApprovalCount],
+    ['Pending closes', view.counts.pendingCloseCount],
+    ['Blocking intents', view.counts.blockingIntentCount],
+    ['Blocking protections', view.counts.blockingProtectionCount],
+    ['PAPER unresolved', view.counts.paperExecutorUnresolvedCount],
+    ['Relay unresolved', view.counts.unresolvedRelayTaskCount],
+    ['Unsettled trades', view.counts.unsettledTradeCount],
+    ['Open Relay tasks', view.counts.openRelayTaskCount],
+  ];
+  return (
+    <div className="space-y-3 rounded-md border border-violet-500/30 bg-violet-500/5 p-3" data-testid="paper-epoch-preflight">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <p className="text-[11px] font-semibold text-violet-300">PAPER Epoch Readiness / Preflight</p>
+          <p className="text-[10px] text-muted-foreground">
+            현재 상태를 읽고 새 epoch 제안값을 계산만 합니다. 상태 변경·epoch 생성·reset은 수행하지 않습니다.
+          </p>
+          <p className="font-mono text-[10px] text-muted-foreground">
+            {view.scope} · {view.boundary} · executionAuthorized false
+          </p>
+        </div>
+        <Badge tone={view.readyForPaperEpochProposal ? 'ok' : 'error'}>
+          {view.readyForPaperEpochProposal ? 'PREFLIGHT READY' : 'FAIL-CLOSED'}
+        </Badge>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6">
+        {countRows.map(([label, value]) => (
+          <Row
+            key={label}
+            label={label}
+            tone={value === null ? 'warn' : value === 0 ? 'ok' : 'error'}
+            value={value === null ? 'UNAVAILABLE' : String(value)}
+          />
+        ))}
+      </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-2">
+        <div className="rounded border border-border/60 bg-background/50 p-2 space-y-1">
+          <p className="text-[11px] font-semibold">Current · 실제 관측</p>
+          <p className="text-[10px]">Active Trading Capital {fmtUsd(view.current.activeTradingCapitalUsd, 2)}</p>
+          <p className="text-[10px]">Equity / HWM {fmtUsd(view.current.currentEquityUsd, 2)} / {fmtUsd(view.current.equityHwmUsd, 2)}</p>
+          <p className="text-[10px]">Daily / Weekly baseline {fmtUsd(view.current.dailyRiskBaselineUsd, 2)} / {fmtUsd(view.current.weeklyRiskBaselineUsd, 2)}</p>
+          <p className="text-[10px]">Reserve policy {view.current.reserveCashPct === null ? '—' : `${view.current.reserveCashPct}%`} · 별도 상태</p>
+        </div>
+        <div className="rounded border border-border/60 bg-background/50 p-2 space-y-1">
+          <p className="text-[11px] font-semibold">Planned · 활성 자본 아님</p>
+          <p className="text-[10px]">Planned Seed {fmtUsd(view.planned.seedCapitalUsd, 0)}</p>
+          <p className="text-[10px]">Active Capital stages {view.planned.activeCapitalStagesUsd.map((v) => `$${v.toLocaleString()}`).join(' → ')}</p>
+          <p className="font-mono text-[9px] text-muted-foreground">{view.planned.separation}</p>
+        </div>
+        <div className="rounded border border-violet-500/30 bg-violet-500/5 p-2 space-y-1">
+          <p className="text-[11px] font-semibold">Proposed New Epoch · 계산 전용</p>
+          <p className="text-[10px]">Active Capital / HWM {fmtUsd(view.proposedNewEpoch.activeTradingCapitalUsd, 0)} / {fmtUsd(view.proposedNewEpoch.equityHwmUsd, 0)}</p>
+          <p className="text-[10px]">Daily / Weekly baseline {fmtUsd(view.proposedNewEpoch.dailyRiskBaselineUsd, 0)} / {fmtUsd(view.proposedNewEpoch.weeklyRiskBaselineUsd, 0)}</p>
+          <Badge tone="muted">APPLIED false · persistenceId —</Badge>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6">
+        <Row label="PAPER / AUTO LIVE" tone={view.boundaries.engineMode === 'PAPER' && view.boundaries.autoWorkerLiveEnabled === false ? 'ok' : 'error'}
+          value={`${view.boundaries.engineMode ?? 'UNAVAILABLE'} / ${String(view.boundaries.autoWorkerLiveEnabled)}`} />
+        <Row label="Relay submit / network / mode" tone={view.boundaries.relaySubmissionEnabled === false && view.boundaries.relaySubmitNetworkEnabled === false && view.boundaries.relayMode === 'DISABLED' ? 'ok' : 'error'}
+          value={`${String(view.boundaries.relaySubmissionEnabled)} / ${String(view.boundaries.relaySubmitNetworkEnabled)} / ${view.boundaries.relayMode ?? 'UNAVAILABLE'}`} />
+        <Row label="Canary / Stop gates" tone="muted"
+          value={`${String(view.preservedExecutionGates.readyForControlledCanary)} / ${String(view.preservedExecutionGates.stopExecutionAvailable)} · unchanged`} />
+        <Row label="RiskEngine gate" tone={view.preservedExecutionGates.riskEntryAllowed ? 'warn' : 'muted'}
+          value={`${view.preservedExecutionGates.riskOperatingState ?? 'UNAVAILABLE'} · entry ${String(view.preservedExecutionGates.riskEntryAllowed)} · unchanged`} />
+      </div>
+
+      <div className="flex flex-wrap gap-1" data-testid="paper-epoch-blocker-ids">
+        {view.blockerIds.length === 0
+          ? <Badge tone="ok">선행조건 결함 없음</Badge>
+          : view.blockerIds.map((id) => <Badge key={id} tone="error">{id}</Badge>)}
+      </div>
+      {view.notices.map((notice) => <p key={notice} className="text-[10px] text-muted-foreground">• {notice}</p>)}
     </div>
   );
 }
@@ -777,6 +861,8 @@ export function GmxApiStatusCard() {
           )}
         </div>
       )}
+
+      {s?.paperEpochPreflight && <PaperEpochPreflight view={s.paperEpochPreflight} />}
 
       {/* PAPER runtime diagnostics — execution authorization cache와 구조적으로 분리 */}
       {s?.paperRuntimeReadiness && (
