@@ -9,6 +9,55 @@ import type { ReleaseIdentity } from '../lib/releaseIdentity';
 
 const SHA = 'a'.repeat(40);
 const TREE = 'b'.repeat(40);
+const MANUAL_CANARY_PATH = resolve(import.meta.dirname, '../../docs/manual-canary.md');
+
+const DOCUMENTED_TARGET_BINDINGS = {
+  WORKER_ENGINE_MODE: 'engineMode',
+  AUTO_WORKER_LIVE_ENABLED: 'autoWorkerLiveEnabled',
+  DELEGATED_SIGNER_ENABLED: 'delegatedSignerEnabled',
+  GMX_API_ORDER_SUBMISSION_ENABLED: 'gmxOrderSubmissionEnabled',
+  LIVE_TEST_EXECUTION_LOCKED: 'liveTestExecutionLocked',
+  GMX_RELAY_SUBMISSION_ENABLED: 'relaySubmissionEnabled',
+  GMX_RELAY_NETWORK_ENABLED: 'relaySubmitNetworkEnabled',
+  GMX_RELAY_MODE: 'relayMode',
+} as const satisfies Record<string, keyof typeof APPROVED_PRODUCTION_SAFETY_TARGET>;
+
+function manualCanaryTargetDrift(document: string): string[] {
+  const section = document
+    .split('## 실제 실행 전 필요한 것 (이 작업에서는 변경하지 않음)')[1]
+    ?.split(/\n## /)[0];
+  if (!section) return ['approved Production target section missing'];
+
+  const entries = [...section.matchAll(/^- `([A-Z0-9_]+)=([^`]+)`$/gm)];
+  const documented = new Map<string, string[]>();
+  for (const [, envName, rawValue] of entries) {
+    documented.set(envName, [...(documented.get(envName) ?? []), rawValue]);
+  }
+
+  const drift: string[] = [];
+  for (const [envName, targetKey] of Object.entries(DOCUMENTED_TARGET_BINDINGS)) {
+    const values = documented.get(envName) ?? [];
+    if (values.length === 0) {
+      drift.push(`missing ${envName}`);
+      continue;
+    }
+    if (values.length !== 1) {
+      drift.push(`duplicate ${envName}`);
+      continue;
+    }
+    const expected = String(APPROVED_PRODUCTION_SAFETY_TARGET[targetKey]);
+    if (values[0] !== expected) {
+      drift.push(`${envName}: expected ${expected}, got ${values[0]}`);
+    }
+  }
+
+  for (const envName of documented.keys()) {
+    if (!(envName in DOCUMENTED_TARGET_BINDINGS)) {
+      drift.push(`unexpected documented target ${envName}`);
+    }
+  }
+  return drift;
+}
 
 function identity(
   workspaceTree = TREE,
@@ -63,6 +112,21 @@ describe('operational build/approved/effective diagnostics', () => {
       relaySubmitNetworkEnabled: false,
       relayMode: 'DISABLED',
     });
+  });
+
+  it('keeps the manual Canary operating target bound to the approved safety target', () => {
+    const manualCanary = readFileSync(MANUAL_CANARY_PATH, 'utf8');
+    expect(manualCanaryTargetDrift(manualCanary)).toEqual([]);
+  });
+
+  it('fails closed when a documented target drifts or is missing', () => {
+    const manualCanary = readFileSync(MANUAL_CANARY_PATH, 'utf8');
+    expect(manualCanaryTargetDrift(
+      manualCanary.replace('`WORKER_ENGINE_MODE=PAPER`', '`WORKER_ENGINE_MODE=LIVE`'),
+    )).toContain('WORKER_ENGINE_MODE: expected PAPER, got LIVE');
+    expect(manualCanaryTargetDrift(
+      manualCanary.replace('- `GMX_RELAY_MODE=DISABLED`', ''),
+    )).toContain('missing GMX_RELAY_MODE');
   });
 
   it('keeps the approved target bound to the checked-in Production overrides', () => {
