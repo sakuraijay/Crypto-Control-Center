@@ -21,6 +21,8 @@ interface RiskPolicyResponse {
     riskSizingCapitalUsd: number;
     riskSizingReserveUsd: number;
     riskSizingReservePercent: number;
+    currentRiskEquityUsd: number | null;
+    equityHwmUsd: number | null;
     onchainBalanceUsd: number | null;
     onchainBalanceAuthoritative: boolean;
     monthlyNetReturnReferenceRangePercent: readonly [number, number];
@@ -155,6 +157,7 @@ export function RiskPolicyCard() {
     ['Planned Seed', `$${capital.plannedSeedCapitalUsd.toLocaleString()} (계획 기준 · 입금/승격 권한 아님)`],
     ['Approved Active / Reserve', `$${capital.activeTradingCapitalUsd.toLocaleString()} / $${capital.reserveCapitalUsd.toLocaleString()} (${capital.reserveCapitalPercent}%)`],
     ['Current Risk Sizing / Reserve', `$${capital.riskSizingCapitalUsd.toLocaleString()} / $${capital.riskSizingReserveUsd.toLocaleString()} (${capital.riskSizingReservePercent}%) · 승인 단계 이하`],
+    ['Current Equity / HWM', `${capital.currentRiskEquityUsd === null ? 'Unavailable' : `$${capital.currentRiskEquityUsd.toLocaleString()}`} / ${capital.equityHwmUsd === null ? 'Unavailable' : `$${capital.equityHwmUsd.toLocaleString()}`} · RiskEngine 관측 상태`],
     ['On-chain balance', capital.onchainBalanceAuthoritative ? `$${capital.onchainBalanceUsd?.toLocaleString()}` : '별도 GMX RPC 카드에서 확인'],
     ['단계', '$1,000 → $2,500 → $5,000 → $10,000 · 증거+사용자 승인 필수'],
     ['일일 과열 경계 (+5%)', `$${d.primaryProfitTargetUsd.toFixed(0)} — 신규 진입 억제, 수익 목표 아님`],

@@ -24,6 +24,8 @@ describe('RiskPolicyCard Hard Stop labels', () => {
           riskSizingCapitalUsd: 1_000,
           riskSizingReserveUsd: 200,
           riskSizingReservePercent: 20,
+          currentRiskEquityUsd: 840,
+          equityHwmUsd: 1_000,
           onchainBalanceUsd: null,
           onchainBalanceAuthoritative: false,
           monthlyNetReturnReferenceRangePercent: [1, 3],
@@ -85,5 +87,10 @@ describe('RiskPolicyCard Hard Stop labels', () => {
     expect(screen.getByText('과거 HARD_STOP 발동 스냅샷:')).toBeTruthy();
     expect(screen.getByText('equity $840.00 ≤ hard stop $850')).toBeTruthy();
     expect(screen.getByText(/상태 발생 당시 기록이며 현재 정책 기준은 아래 별도 행/)).toBeTruthy();
+    expect(screen.getByText('Current Risk Sizing / Reserve')).toBeTruthy();
+    expect(screen.getByText('Current Equity / HWM')).toBeTruthy();
+    expect(screen.getByText('$840 / $1,000 · RiskEngine 관측 상태')).toBeTruthy();
+    expect(screen.getByText('On-chain balance')).toBeTruthy();
+    expect(screen.getByText('별도 GMX RPC 카드에서 확인')).toBeTruthy();
   });
 });

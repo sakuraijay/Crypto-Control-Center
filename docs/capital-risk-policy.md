@@ -7,6 +7,8 @@
 - **Current Risk Sizing Capital:** 저장된 실제 운용 설정값이며 Approved Active Stage 이하만 허용한다. 더 작은 기존 값은 안전한 축소이므로 강제로 덮어쓰지 않는다.
 - **Reserve Capital:** Approved Active의 20%인 `200 USDC`; 승인 단계 기준 배포 가능액은 `800 USDC`다. 실제 sizing reserve는 Current Risk Sizing Capital에서 별도 파생한다.
 - **On-chain Balance:** GMX RPC가 읽은 실제 지갑 잔액. Planned/Active/Reserve와 별도이며 어느 값도 실제 잔액으로 합성하지 않는다.
+- **Current Risk Equity:** RiskEngine이 현재 손실·진입 차단을 평가하는 관측 equity. Current Risk Sizing Capital이나 지갑 잔액과 동일하다고 가정하지 않는다.
+- **Equity HWM:** Worker가 보존한 equity 고점 기준값. 현재 equity·Active 단계·Planned Seed와 별도이며 조회만으로 초기화하거나 덮어쓰지 않는다.
 
 ## 위험 정책
 

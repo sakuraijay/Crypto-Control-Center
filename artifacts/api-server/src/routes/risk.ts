@@ -43,6 +43,8 @@ router.get('/risk/policy', (_req, res) => {
         riskSizingCapitalUsd,
         riskSizingReserveUsd,
         riskSizingReservePercent,
+        currentRiskEquityUsd: status.currentEquityUsd,
+        equityHwmUsd: status.equityHwm,
         onchainBalanceUsd: null,
         onchainBalanceAuthoritative: false,
         semantics: capitalSemantics,
