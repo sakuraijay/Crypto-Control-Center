@@ -936,6 +936,13 @@ describe('completed-candle decision replay idempotency', () => {
       expect(duplicateStatus.lastDecisionAt).toBe(firstStatus.lastDecisionAt);
       expect(duplicateStatus.lastCycleAt).toBe(firstStatus.lastCycleAt);
       expect(duplicateStatus.lastSchedulerCycleOutcome).toBe('SAFE_SKIP');
+      expect(duplicateStatus.lastCycleResult).toMatchObject({
+        cycleNumber: 2,
+        analysesCount: 2,
+        approvalCreated: false,
+        skipReason: 'DUPLICATE_COMPLETED_CANDLE_IN_PROCESS',
+      });
+      expect(duplicateStatus.lastCycleResult?.error).toBeUndefined();
     } finally {
       workerManager.stop();
       approvalDispatch.mockRestore();
@@ -993,6 +1000,46 @@ describe('completed-candle decision replay idempotency', () => {
     }
   });
 
+  it('replaces a stale insufficient-history error when the recovered candle is already durably claimed', async () => {
+    vi.useFakeTimers({ now: 1_800_000_000_000 });
+    setupDbSequence();
+    vi.mocked(runAiEngine).mockReturnValue(
+      CASH_DECISION as unknown as ReturnType<typeof runAiEngine>,
+    );
+    const wm = workerManager as unknown as {
+      priceBuffer: Map<string, number[]>;
+      runCycle(): Promise<void>;
+      persistDecision(...args: unknown[]): Promise<{ status: 'CONFLICT' }>;
+    };
+    const durableClaim = vi.spyOn(wm, 'persistDecision').mockResolvedValue({ status: 'CONFLICT' });
+
+    try {
+      await workerManager.start();
+      wm.priceBuffer.clear();
+      await wm.runCycle();
+      expect(workerManager.getStatus().lastCycleResult?.error).toContain('가격 히스토리 부족');
+
+      wm.priceBuffer.set('BTC', Array.from({ length: 5 }, (_, i) => 50_000 + i));
+      wm.priceBuffer.set('ETH', Array.from({ length: 5 }, (_, i) => 3_000 + i));
+      await wm.runCycle();
+
+      const recoveredDuplicate = workerManager.getStatus();
+      expect(recoveredDuplicate.lastSchedulerCycleOutcome).toBe('SAFE_SKIP');
+      expect(recoveredDuplicate.lastCycleResult).toMatchObject({
+        cycleNumber: 2,
+        analysesCount: 2,
+        approvalCreated: false,
+        skipReason: 'DUPLICATE_COMPLETED_CANDLE_DURABLE_CONFLICT',
+      });
+      expect(recoveredDuplicate.lastCycleResult?.error).toBeUndefined();
+      expect(durableClaim).toHaveBeenCalledTimes(1);
+    } finally {
+      workerManager.stop();
+      durableClaim.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it('next completed candle permits exactly one new claim and dispatch', async () => {
     vi.useFakeTimers({ now: 1_800_000_000_000 });
     setupDbSequence();
@@ -1015,10 +1062,19 @@ describe('completed-candle decision replay idempotency', () => {
         wm.lastTickUpdatedAtBySymbol.set(symbol, previous + 15 * 60_000);
       }
       await wm.runCycle();
+      const nextCandleStatus = workerManager.getStatus();
       await wm.runCycle();
 
       expect(_dbInsertTables.filter(table => table === aiDecisionsTable)).toHaveLength(firstClaims + 1);
       expect(runIntelServiceCycle).toHaveBeenCalledTimes(firstDispatches + 1);
+      expect(nextCandleStatus.lastSchedulerCycleOutcome).toBe('SUCCESS');
+      expect(nextCandleStatus.lastCycleResult).toMatchObject({
+        cycleNumber: 2,
+        analysesCount: 2,
+        approvalCreated: false,
+      });
+      expect(nextCandleStatus.lastCycleResult?.skipReason).toBeUndefined();
+      expect(nextCandleStatus.lastCycleResult?.error).toBeUndefined();
     } finally {
       workerManager.stop();
       vi.useRealTimers();
@@ -1085,6 +1141,13 @@ describe('completed-candle decision replay idempotency', () => {
       expect(decisionClaimAttempts).toBe(2);
       expect(runIntelServiceCycle).not.toHaveBeenCalled();
       expect(openServerPaperPosition).not.toHaveBeenCalled();
+      expect(workerManager.getStatus().lastCycleResult).toMatchObject({
+        cycleNumber: 3,
+        analysesCount: 2,
+        approvalCreated: false,
+        skipReason: 'DUPLICATE_COMPLETED_CANDLE_IN_PROCESS',
+      });
+      expect(workerManager.getStatus().lastCycleResult?.error).toBeUndefined();
     } finally {
       workerManager.stop();
       vi.useRealTimers();

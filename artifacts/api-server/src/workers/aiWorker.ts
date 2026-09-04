@@ -195,6 +195,7 @@ export interface WorkerCycleResult {
   confidence: number;
   analysesCount: number;
   approvalCreated: boolean;
+  skipReason?: 'DUPLICATE_COMPLETED_CANDLE_IN_PROCESS' | 'DUPLICATE_COMPLETED_CANDLE_DURABLE_CONFLICT';
   error?: string;
 }
 
@@ -1961,6 +1962,16 @@ class WorkerManager {
           `[AIWorker] 사이클 #${cycleNum} 동일 완료봉 결정 ${decision.id} 이미 처리됨 — ` +
           "DB claim과 one-shot downstream 생략",
         );
+        this.lastCycleResult = {
+          cycleNumber: cycleNum,
+          at: new Date().toISOString(),
+          operatingState: decision.operatingState,
+          primarySymbol: decision.primarySymbol,
+          confidence: decision.confidence,
+          analysesCount: analyses.length,
+          approvalCreated: false,
+          skipReason: 'DUPLICATE_COMPLETED_CANDLE_IN_PROCESS',
+        };
         cycleOutcome = 'SAFE_SKIP';
         return;
       }
@@ -1973,6 +1984,16 @@ class WorkerManager {
       this.lastDecisionIdentity = decision.id;
       if (decisionClaim.status === "CONFLICT") {
         console.info(`[AIWorker] 사이클 #${cycleNum} 완료봉 결정이 이미 claim됨 — 모든 downstream dispatch 차단 (fail-closed)`);
+        this.lastCycleResult = {
+          cycleNumber: cycleNum,
+          at: new Date().toISOString(),
+          operatingState: decision.operatingState,
+          primarySymbol: decision.primarySymbol,
+          confidence: decision.confidence,
+          analysesCount: analyses.length,
+          approvalCreated: false,
+          skipReason: 'DUPLICATE_COMPLETED_CANDLE_DURABLE_CONFLICT',
+        };
         cycleOutcome = 'SAFE_SKIP';
         return;
       }
