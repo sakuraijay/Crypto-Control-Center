@@ -31,6 +31,12 @@ import {
 import type { StrategyDataQuality, StrategySignal } from './strategySignalV2';
 import { evaluateTrendPullback } from './trendPullbackStrategyV2';
 import { evaluateVolatilityBreakout } from './volatilityBreakoutStrategyV2';
+import { evaluateCandleSignal } from './candleSignalCore';
+import type { CandleSignalToRisk } from './candleSignalContract';
+import {
+  buildCandleStrategyShadowEvidence,
+  type CandleStrategyShadowEvidence,
+} from './candleStrategyShadowEvidenceV2';
 
 export const STRATEGY_SHADOW_RUNNER_VERSION = 'strategy-shadow-runner/v1' as const;
 
@@ -67,6 +73,8 @@ export interface StrategyShadowRunnerResult {
   arbiter: StrategyArbiterDecision | null;
   eligibility: SignalEligibilityDecision | null;
   record: StrategyShadowRecord | null;
+  candleSignal?: CandleSignalToRisk | null;
+  candleSignalEvidence?: CandleStrategyShadowEvidence | null;
   reasons: string[];
   warnings: string[];
   executionAuthorized: false;
@@ -117,6 +125,8 @@ function notEvaluated(
     arbiter: null,
     eligibility: null,
     record: null,
+    candleSignal: null,
+    candleSignalEvidence: null,
     reasons,
     warnings,
     executionAuthorized: false,
@@ -162,6 +172,18 @@ export function runStrategyShadowSymbol(
   const foundation = buildMultiTimeframeCandleSet(symbol, input.frames, input.evaluatedAt);
   if (!foundation.tradeAllowed || foundation.quality === 'INVALID') {
     return notEvaluated(input, ['MTF candle foundation 미충족 — 가짜 record 생성 금지'], foundation.issues);
+  }
+  const candleSignal = evaluateCandleSignal({
+    symbol,
+    frames: input.frames,
+    evaluatedAtMs: input.evaluatedAt,
+  });
+  if (candleSignal.dataQuality.status === 'INVALID') {
+    return {
+      ...notEvaluated(input, ['Candle Signal 완료봉 evidence 미충족 — fail-closed'],
+        candleSignal.dataQuality.flags),
+      candleSignal,
+    };
   }
   const frame15m = foundation.frames['15m'];
   const frame1h = foundation.frames['1h'];
@@ -225,13 +247,25 @@ export function runStrategyShadowSymbol(
   const eligibility = arbiter.action === 'SELECT' && arbiter.selectedSignal !== null
     ? evaluateSignalEligibility(arbiter.selectedSignal, input.lifecycleRecords, input.historyEvents)
     : null;
-  const record = buildStrategyShadowRecord({
+  const baseRecord = buildStrategyShadowRecord({
     symbol,
     evaluatedAt: input.evaluatedAt,
     arbiter,
     eligibility,
     existingAi: input.existingAi,
   }, input.featureFlags ?? DEFAULT_STRATEGY_SHADOW_FEATURE_FLAGS);
+  const candleSignalEvidence = buildCandleStrategyShadowEvidence({
+    candleSignal,
+    v2Regime: regime,
+    shadowRecord: baseRecord,
+  });
+  if (candleSignalEvidence === null) {
+    return {
+      ...notEvaluated(input, ['Candle Signal과 v2 Ensemble identity/timestamp 결속 실패 — fail-closed']),
+      candleSignal,
+    };
+  }
+  const record: StrategyShadowRecord = { ...baseRecord, candleSignalEvidence };
 
   return {
     schemaVersion: STRATEGY_SHADOW_RUNNER_VERSION,
@@ -244,6 +278,8 @@ export function runStrategyShadowSymbol(
     arbiter,
     eligibility,
     record,
+    candleSignal,
+    candleSignalEvidence,
     reasons: ['완료된 15m/1h/4h candle evidence로 SHADOW record 계산'],
     warnings: foundation.issues,
     executionAuthorized: false,

@@ -7,6 +7,7 @@
 import type { SignalEligibilityDecision } from './signalLifecycleV2';
 import type { StrategyArbiterDecision } from './strategyArbiterV2';
 import type { StrategyDirection, StrategyId } from './strategySignalV2';
+import type { CandleStrategyShadowEvidence } from './candleStrategyShadowEvidenceV2';
 
 export const STRATEGY_SHADOW_ADAPTER_VERSION = 'strategy-shadow-adapter/v1' as const;
 
@@ -81,6 +82,8 @@ export interface StrategyShadowRecord {
   existingAi: ExistingAiDecisionSnapshot | null;
   reasons: string[];
   warnings: string[];
+  /** Present on runtime records after completed Candle Signal binding. */
+  candleSignalEvidence?: CandleStrategyShadowEvidence;
   executionAuthorized: false;
   paperPositionMutationAllowed: false;
   riskAuthority: 'NOT_EVALUATED';

@@ -51,6 +51,9 @@ vi.mock('../lib/paperCostCache', () => ({
 import { db } from '@workspace/db';
 import { getPaperCostBinding } from '../lib/paperCostCache';
 import { buildProfitProtectKey, manilaDayKey } from '../lib/profitProtection';
+import type { Candle } from '../intel/types';
+import type { CandleFrameInput, StrategyTimeframe } from '../intel/candleFoundationV2';
+import { runStrategyShadowSymbol } from '../intel/strategyShadowRunnerV2';
 import {
   openServerPaperPosition, closeServerPaperPosition, reduceServerPaper70,
   requestServerPaperCloseAll, loadPendingCloseFromDb, loadSubmittedReduce70FromDb, manageServerPaperTick,
@@ -101,6 +104,54 @@ const BASE_OPEN = {
     },
   },
 };
+
+// This fixture enters Candle Signal -> v2 Regime -> Ensemble once, then only
+// supplies test inputs to the existing PAPER boundary. It is not worker wiring.
+const SHADOW_CLOSE = 1_800_000_000_000;
+const SHADOW_NOW = SHADOW_CLOSE + 10_000;
+const SHADOW_STEP: Record<StrategyTimeframe, number> = {
+  '15m': 15 * 60_000, '1h': 60 * 60_000, '4h': 4 * 60 * 60_000,
+};
+function shadowFrame(timeframe: StrategyTimeframe): CandleFrameInput {
+  const step = SHADOW_STEP[timeframe];
+  const candles: Candle[] = Array.from({ length: 240 }, (_, index) => {
+    const center = 100 + index * 0.18 + Math.sin(index * 0.72) * 0.9;
+    const candle = {
+      t: SHADOW_CLOSE - step - (239 - index) * step,
+      o: center - 0.12, h: center + 0.36, l: center - 0.36, c: center + 0.12,
+      v: index === 239 ? 1_500 : 1_000,
+    };
+    if (index === 239) {
+      candle.o = candle.c - 0.2;
+      candle.h = candle.c + 0.1;
+      candle.l = candle.o - 0.5;
+    }
+    return candle;
+  });
+  return { symbol: 'BTC', timeframe, source: 'gmx-official-api', fetchedAtMs: SHADOW_NOW, candles };
+}
+function testOnlyPaperArgsFromCandleShadow() {
+  const shadow = runStrategyShadowSymbol({
+    symbol: 'BTC',
+    evaluatedAt: SHADOW_NOW,
+    frames: { '15m': shadowFrame('15m'), '1h': shadowFrame('1h'), '4h': shadowFrame('4h') },
+    expectedCostsBps: 10,
+    previousRegime: null,
+    lifecycleRecords: [],
+    historyEvents: [],
+    existingAi: null,
+  });
+  if (!shadow.candleSignalEvidence || !shadow.record || !shadow.regime) {
+    throw new Error('completed Candle -> v2 Regime -> Ensemble test fixture unavailable');
+  }
+  return {
+    ...BASE_OPEN,
+    // The fingerprint is merely an idempotency test input; it confers no authority.
+    decisionId: `test-only:${shadow.candleSignalEvidence.replayFingerprint}`,
+    symbol: shadow.candleSignalEvidence.symbol,
+    side: shadow.candleSignalEvidence.candleSignal.direction === 'SHORT' ? 'SHORT' as const : 'LONG' as const,
+  };
+}
 
 /** 서버 OPEN 행 fixture (managed_by='SERVER', close_time=0) */
 function serverOpenRow(over: Record<string, unknown> = {}) {
@@ -235,6 +286,39 @@ describe('openServerPaperPosition — fail-closed', () => {
     vi.mocked(db.insert).mockImplementation(() => makeChain(() => []) as never);
     const r = await openServerPaperPosition({ ...BASE_OPEN });
     expect(r.ok).toBe(false);
+  });
+});
+
+describe('Candle/v2 Ensemble fixture at test-only PAPER boundary', () => {
+  it('reuses one completed SHADOW fixture while the existing PAPER gate enforces stop, quote/cost, limits and idempotency', async () => {
+    const args = testOnlyPaperArgsFromCandleShadow();
+    const accepted = await openServerPaperPosition(args);
+    expect(accepted.ok).toBe(true);
+    if (accepted.ok) expect(accepted.stopPriceUsd).toBeGreaterThan(0); // mandatory server stop
+
+    const rejected = await Promise.all([
+      openServerPaperPosition({ ...args, quote: { priceUsd: 50_000, ageMs: MAX_ENTRY_PRICE_AGE_MS + 1 } }),
+      openServerPaperPosition({ ...args, sizeUsd: 1 }),
+      openServerPaperPosition({ ...args, leverage: 4 }),
+      openServerPaperPosition({ ...args, openPositionCount: 1 }),
+      openServerPaperPosition({ ...args, entriesManilaDay: 3 }),
+    ]);
+    expect(rejected.every(result => !result.ok)).toBe(true);
+
+    // This reaches the server's durable slot check (not merely the upstream count).
+    vi.mocked(db.select).mockImplementationOnce(() =>
+      makeChain(() => [serverOpenRow({ symbol: 'ETH', paperPositionSlot: 1 })]) as never);
+    const slotBlocked = await openServerPaperPosition({ ...args, openPositionCount: 0 });
+    expect(slotBlocked.ok).toBe(false);
+    if (!slotBlocked.ok) expect(slotBlocked.reason).toContain('슬롯 한도');
+
+    vi.mocked(getPaperCostBinding).mockReturnValue(null);
+    expect((await openServerPaperPosition({ ...args, decisionId: `${args.decisionId}:cost` })).ok).toBe(false);
+    vi.mocked(getPaperCostBinding).mockReturnValue(FRESH_BINDING as ReturnType<typeof getPaperCostBinding>);
+    vi.mocked(db.select).mockImplementation(() => makeChain(() => []) as never);
+    vi.mocked(db.insert).mockImplementationOnce(() =>
+      makeChain(() => { throw new Error('duplicate key value violates unique constraint'); }) as never);
+    expect((await openServerPaperPosition({ ...args, decisionId: `${args.decisionId}:duplicate` })).ok).toBe(false);
   });
 });
 

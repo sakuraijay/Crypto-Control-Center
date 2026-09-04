@@ -265,6 +265,8 @@ import {
 } from '../intel/strategyShadowLifecycleRuntimeV2';
 import { buildStrategyShadowWorkerEnvelope } from '../intel/strategyShadowWorkerEnvelopeV2';
 import type { StrategyShadowRecord } from '../intel/strategyShadowAdapterV2';
+import { buildCandleStrategyShadowEvidence } from '../intel/candleStrategyShadowEvidenceV2';
+import type { CandleSignalToRisk } from '../intel/candleSignalContract';
 import {
   runIntelServiceCycle,
   runStrategyShadowWorkerReadOnly,
@@ -1342,7 +1344,8 @@ describe('crash-restart — Strategy SHADOW lifecycle DB 복원', () => {
 
   const makeShadowRecord = (
     evidence: ReturnType<typeof makeRestartEvidence>,
-  ): StrategyShadowRecord => ({
+  ): StrategyShadowRecord => {
+    const base: StrategyShadowRecord = {
     schemaVersion: 'strategy-shadow-adapter/v1',
     shadowRecordId: `BTC:STRATEGY_SHADOW:TREND_UP:${evidence.close}`,
     mode: 'SHADOW_ONLY',
@@ -1367,8 +1370,33 @@ describe('crash-restart — Strategy SHADOW lifecycle DB 복원', () => {
     warnings: [],
     executionAuthorized: false,
     paperPositionMutationAllowed: false,
-    riskAuthority: 'NOT_EVALUATED',
-  });
+      riskAuthority: 'NOT_EVALUATED',
+    };
+    const candle = {
+      schemaVersion: 'candle-signal/v1', symbol: base.symbol, evaluatedAtMs: base.evaluatedAt,
+      direction: 'LONG',
+      dataQuality: {
+        status: 'GOOD',
+        frameCloseTimesMs: {
+          '15m': base.sourceCandleCloseTime,
+          '1h': base.sourceCandleCloseTime - 1,
+          '4h': base.sourceCandleCloseTime - 2,
+        },
+      },
+    } as CandleSignalToRisk;
+    return {
+      ...base,
+      candleSignalEvidence: buildCandleStrategyShadowEvidence({
+        candleSignal: candle,
+        v2Regime: {
+          configVersion: 'regime-engine/v2',
+          symbol: base.symbol,
+          calculatedAt: base.sourceCandleCloseTime,
+        } as never,
+        shadowRecord: base,
+      })!,
+    };
+  };
 
   it('첫 Worker의 durable decision을 두 번째 Worker가 복원해 Signal ID·동일 완료봉·cooldown을 보존한다', async () => {
     const fixedNow = 1_800_000_000_000;

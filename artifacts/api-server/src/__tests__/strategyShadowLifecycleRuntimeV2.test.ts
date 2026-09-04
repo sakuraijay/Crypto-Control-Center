@@ -6,11 +6,14 @@ import {
   restoreStrategyShadowLifecycleFromDecisionFullJson,
 } from '../intel/strategyShadowLifecycleRuntimeV2';
 import { buildStrategyShadowWorkerEnvelope } from '../intel/strategyShadowWorkerEnvelopeV2';
+import { buildCandleStrategyShadowEvidence } from '../intel/candleStrategyShadowEvidenceV2';
+import type { CandleSignalToRisk } from '../intel/candleSignalContract';
 
 const NOW = 1_800_000_000_000;
 const CLOSE = NOW - 15 * 60_000;
 const empty = () => buildSignalLifecycleSnapshot([], [], NOW - 1)!;
-const record = (overrides: Partial<StrategyShadowRecord> = {}): StrategyShadowRecord => ({
+const record = (overrides: Partial<StrategyShadowRecord> = {}): StrategyShadowRecord => {
+  const base: StrategyShadowRecord = {
   schemaVersion: 'strategy-shadow-adapter/v1',
   shadowRecordId: `BTC:STRATEGY_SHADOW:TREND_UP:${CLOSE}`,
   mode: 'SHADOW_ONLY', symbol: 'BTC', evaluatedAt: NOW - 1,
@@ -20,8 +23,25 @@ const record = (overrides: Partial<StrategyShadowRecord> = {}): StrategyShadowRe
   confidence: 80, selectedScore: 80, entryPrice: 100, structuralStop: 98,
   expectedNetEdgeBps: 200, expectedNetRR: 2, lifecycleEligible: true,
   existingAi: null, reasons: [], warnings: [], executionAuthorized: false,
-  paperPositionMutationAllowed: false, riskAuthority: 'NOT_EVALUATED', ...overrides,
-});
+    paperPositionMutationAllowed: false, riskAuthority: 'NOT_EVALUATED', ...overrides,
+  };
+  if (base.action !== 'LONG' && base.action !== 'SHORT') return base;
+  const candle = {
+    schemaVersion: 'candle-signal/v1', symbol: base.symbol, evaluatedAtMs: base.evaluatedAt,
+    direction: base.action, dataQuality: {
+      status: 'GOOD',
+      frameCloseTimesMs: { '15m': base.sourceCandleCloseTime, '1h': CLOSE - 1, '4h': CLOSE - 2 },
+    },
+  } as CandleSignalToRisk;
+  return {
+    ...base,
+    candleSignalEvidence: buildCandleStrategyShadowEvidence({
+      candleSignal: candle,
+      v2Regime: { configVersion: 'regime-engine/v2', symbol: base.symbol, calculatedAt: base.sourceCandleCloseTime } as never,
+      shadowRecord: base,
+    })!,
+  };
+};
 const envelope = (records: StrategyShadowRecord[], snapshot = empty()) =>
   buildStrategyShadowWorkerEnvelope({
     cycleNumber: 10, generatedAt: NOW, expectedSymbols: ['BTC'], records,

@@ -4,6 +4,7 @@ import {
   restoreSignalLifecycleSnapshot,
   type SignalLifecycleSnapshotV2,
 } from './signalLifecycleSnapshotV2';
+import { validateCandleStrategyShadowEvidence } from './candleStrategyShadowEvidenceV2';
 
 export const STRATEGY_SHADOW_WORKER_ENVELOPE_VERSION = 'strategy-shadow-worker-envelope/v1' as const;
 
@@ -150,6 +151,7 @@ export function buildStrategyShadowWorkerEnvelope(
   }
 
   const recordIds = new Set<string>();
+  const recordSymbols = new Set<string>();
   for (const record of input.records) {
     if (record.schemaVersion !== 'strategy-shadow-adapter/v1'
       || record.mode !== 'SHADOW_ONLY'
@@ -161,8 +163,20 @@ export function buildStrategyShadowWorkerEnvelope(
       issues.push(`unsafe 또는 불일치 Shadow record: ${record.shadowRecordId}`);
       continue;
     }
+    if (record.candleSignalEvidence) {
+      issues.push(...validateCandleStrategyShadowEvidence(record.candleSignalEvidence, record)
+        .map(issue => `${record.shadowRecordId}: ${issue}`));
+    }
     if (recordIds.has(record.shadowRecordId)) issues.push(`중복 Shadow record ID: ${record.shadowRecordId}`);
     recordIds.add(record.shadowRecordId);
+    const normalizedRecordSymbol = normalizeSymbol(record.symbol);
+    if (recordSymbols.has(normalizedRecordSymbol)) {
+      issues.push(`중복 Shadow record symbol: ${normalizedRecordSymbol}`);
+    }
+    recordSymbols.add(normalizedRecordSymbol);
+    if ((record.action === 'LONG' || record.action === 'SHORT') && !record.candleSignalEvidence) {
+      issues.push(`실행 후보 Candle Signal evidence 누락: ${record.shadowRecordId}`);
+    }
   }
   if (issues.length > 0) {
     return safeEnvelope(input, 'BLOCKED', STRATEGY_SHADOW_WORKER_ENVELOPE_VERSION,

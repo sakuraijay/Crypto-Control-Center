@@ -5,10 +5,13 @@ import {
   adaptStrategySignalToRisk,
   STRATEGY_RISK_ADAPTER_VERSION,
 } from '../intel/strategyRiskAdapterV2';
+import { buildCandleStrategyShadowEvidence } from '../intel/candleStrategyShadowEvidenceV2';
+import type { CandleSignalToRisk } from '../intel/candleSignalContract';
 
 const CLOSE = 1_800_000;
 
-const record = (overrides: Partial<StrategyShadowRecord> = {}): StrategyShadowRecord => ({
+const record = (overrides: Partial<StrategyShadowRecord> = {}): StrategyShadowRecord => {
+  const base: StrategyShadowRecord = {
   schemaVersion: 'strategy-shadow-adapter/v1',
   shadowRecordId: `BTC:STRATEGY_SHADOW:TREND_UP:${CLOSE}`,
   mode: 'SHADOW_ONLY', symbol: 'BTC', evaluatedAt: CLOSE + 1,
@@ -18,8 +21,34 @@ const record = (overrides: Partial<StrategyShadowRecord> = {}): StrategyShadowRe
   structuralStop: 98, expectedNetEdgeBps: 120, expectedNetRR: 2,
   lifecycleEligible: true, existingAi: null, reasons: [], warnings: [],
   executionAuthorized: false, paperPositionMutationAllowed: false,
-  riskAuthority: 'NOT_EVALUATED', ...overrides,
-});
+    riskAuthority: 'NOT_EVALUATED', ...overrides,
+  };
+  const candleDirection = base.action === 'LONG' || base.action === 'SHORT' ? base.action : 'NO_TRADE';
+  const candleSignal = {
+    schemaVersion: 'candle-signal/v1',
+    symbol: base.symbol,
+    evaluatedAtMs: base.evaluatedAt,
+    direction: candleDirection,
+    dataQuality: {
+      status: 'GOOD',
+      frameCloseTimesMs: { '15m': base.sourceCandleCloseTime, '1h': CLOSE - 1, '4h': CLOSE - 2 },
+    },
+  } as CandleSignalToRisk;
+  const v2Regime = {
+    configVersion: 'regime-engine/v2',
+    symbol: base.symbol,
+    calculatedAt: base.sourceCandleCloseTime,
+  } as never;
+  const bound = {
+    ...base,
+    candleSignalEvidence: buildCandleStrategyShadowEvidence({
+      candleSignal, v2Regime, shadowRecord: base,
+    })!,
+  };
+  return Object.prototype.hasOwnProperty.call(overrides, 'candleSignalEvidence')
+    ? { ...bound, candleSignalEvidence: overrides.candleSignalEvidence }
+    : bound;
+};
 
 const risk = (overrides: Partial<RiskEvaluationResult> = {}): RiskEvaluationResult => ({
   state: 'NORMAL', entryAllowed: true, blockReasons: [], actions: [],
@@ -84,6 +113,16 @@ describe('Strategy Signal → authoritative Risk advisory adapter', () => {
     }).action).toBe('REJECT');
     expect(adaptStrategySignalToRisk({
       shadowRecord: record({ executionAuthorized: true as false }), riskEvaluation: risk(),
+    }).action).toBe('REJECT');
+  });
+
+  it('executable candidate without Candle evidence is fail-closed, while NO_TRADE remains backward-compatible', () => {
+    expect(adaptStrategySignalToRisk({
+      shadowRecord: record({ candleSignalEvidence: undefined }), riskEvaluation: risk(),
+    }).action).toBe('REJECT');
+    expect(adaptStrategySignalToRisk({
+      shadowRecord: record({ action: 'NO_TRADE', direction: 'NONE', candleSignalEvidence: undefined }),
+      riskEvaluation: risk(),
     }).action).toBe('REJECT');
   });
 

@@ -4,6 +4,8 @@ import type { RiskEvaluationResult } from '../lib/riskStateMachine';
 import type { StrategyShadowRecord } from '../intel/strategyShadowAdapterV2';
 import { buildStrategyShadowWorkerEnvelope } from '../intel/strategyShadowWorkerEnvelopeV2';
 import { buildStrategyRiskWorkerAdvisory } from '../intel/strategyRiskWorkerBridgeV2';
+import { buildCandleStrategyShadowEvidence } from '../intel/candleStrategyShadowEvidenceV2';
+import type { CandleSignalToRisk } from '../intel/candleSignalContract';
 import {
   buildStrategyStructuralSizingWorkerAdvisory,
   STRATEGY_STRUCTURAL_SIZING_WORKER_VERSION,
@@ -12,7 +14,8 @@ import {
 } from '../intel/strategyStructuralSizingWorkerBridgeV2';
 
 const NOW = 2_000_000;
-const record = (overrides: Partial<StrategyShadowRecord> = {}): StrategyShadowRecord => ({
+const record = (overrides: Partial<StrategyShadowRecord> = {}): StrategyShadowRecord => {
+  const base: StrategyShadowRecord = {
   schemaVersion: 'strategy-shadow-adapter/v1', shadowRecordId: `BTC:SHADOW:${NOW}`,
   mode: 'SHADOW_ONLY', symbol: 'BTC', evaluatedAt: NOW, sourceCandleCloseTime: NOW - 1,
   regime: 'TREND_UP', action: 'LONG', comparison: 'ENSEMBLE_ONLY',
@@ -20,8 +23,24 @@ const record = (overrides: Partial<StrategyShadowRecord> = {}): StrategyShadowRe
   selectedScore: 75, entryPrice: 100, structuralStop: 98, expectedNetEdgeBps: 100,
   expectedNetRR: 2, lifecycleEligible: true, existingAi: null, reasons: [], warnings: [],
   executionAuthorized: false, paperPositionMutationAllowed: false,
-  riskAuthority: 'NOT_EVALUATED', ...overrides,
-});
+    riskAuthority: 'NOT_EVALUATED', ...overrides,
+  };
+  const candle = {
+    schemaVersion: 'candle-signal/v1', symbol: base.symbol, evaluatedAtMs: base.evaluatedAt,
+    direction: base.action, dataQuality: {
+      status: 'GOOD',
+      frameCloseTimesMs: { '15m': base.sourceCandleCloseTime, '1h': NOW - 2, '4h': NOW - 3 },
+    },
+  } as CandleSignalToRisk;
+  return {
+    ...base,
+    candleSignalEvidence: buildCandleStrategyShadowEvidence({
+      candleSignal: candle,
+      v2Regime: { configVersion: 'regime-engine/v2', symbol: base.symbol, calculatedAt: base.sourceCandleCloseTime } as never,
+      shadowRecord: base,
+    })!,
+  };
+};
 const envelope = (records: StrategyShadowRecord[] = [record()]) =>
   buildStrategyShadowWorkerEnvelope({
     cycleNumber: 8, generatedAt: NOW, expectedSymbols: records.map(value => value.symbol), records,

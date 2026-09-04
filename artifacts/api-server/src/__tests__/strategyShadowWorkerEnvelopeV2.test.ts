@@ -5,18 +5,40 @@ import {
   STRATEGY_SHADOW_WORKER_ENVELOPE_VERSION,
   type StrategyShadowWorkerEnvelopeInput,
 } from '../intel/strategyShadowWorkerEnvelopeV2';
+import { buildCandleStrategyShadowEvidence } from '../intel/candleStrategyShadowEvidenceV2';
+import type { CandleSignalToRisk } from '../intel/candleSignalContract';
 
 const NOW = 1_800_000_000_000;
 
-const record = (overrides: Partial<StrategyShadowRecord> = {}): StrategyShadowRecord => ({
+const record = (overrides: Partial<StrategyShadowRecord> = {}): StrategyShadowRecord => {
+  const base: StrategyShadowRecord = {
   schemaVersion: 'strategy-shadow-adapter/v1', shadowRecordId: 'BTC:STRATEGY_SHADOW:TREND_UP:1',
   mode: 'SHADOW_ONLY', symbol: 'BTC', evaluatedAt: NOW - 1, sourceCandleCloseTime: NOW - 2,
   regime: 'TREND_UP', action: 'LONG', comparison: 'ENSEMBLE_ONLY', strategyId: 'TREND_PULLBACK',
   signalId: 'BTC:signal', direction: 'LONG', confidence: 80, selectedScore: 82,
   entryPrice: 100, structuralStop: 97, expectedNetEdgeBps: 200, expectedNetRR: 2,
   lifecycleEligible: true, existingAi: null, reasons: [], warnings: [], executionAuthorized: false,
-  paperPositionMutationAllowed: false, riskAuthority: 'NOT_EVALUATED', ...overrides,
-});
+    paperPositionMutationAllowed: false, riskAuthority: 'NOT_EVALUATED', ...overrides,
+  };
+  if (base.action !== 'LONG' && base.action !== 'SHORT') return base;
+  const candle = {
+    schemaVersion: 'candle-signal/v1', symbol: base.symbol, evaluatedAtMs: base.evaluatedAt,
+    direction: base.action, dataQuality: {
+      status: 'GOOD',
+      frameCloseTimesMs: { '15m': base.sourceCandleCloseTime, '1h': NOW - 3, '4h': NOW - 4 },
+    },
+  } as CandleSignalToRisk;
+  return {
+    ...base,
+    candleSignalEvidence: buildCandleStrategyShadowEvidence({
+      candleSignal: candle,
+      v2Regime: {
+        configVersion: 'regime-engine/v2', symbol: base.symbol, calculatedAt: base.sourceCandleCloseTime,
+      } as never,
+      shadowRecord: base,
+    })!,
+  };
+};
 
 const input = (overrides: Partial<StrategyShadowWorkerEnvelopeInput> = {}): StrategyShadowWorkerEnvelopeInput => ({
   cycleNumber: 41, generatedAt: NOW, expectedSymbols: ['BTC', 'ETH'], records: [],
@@ -68,6 +90,19 @@ describe('Strategy Shadow worker envelope v2', () => {
   it('중복 record ID는 전체 record 채택을 차단한다', () => {
     const result = buildStrategyShadowWorkerEnvelope(input({ records: [record(), record()] }));
     expect(result).toMatchObject({ status: 'BLOCKED', records: [] });
+  });
+
+  it('record ID가 달라도 정규화 symbol 중복은 전체 record 채택을 차단한다', () => {
+    const duplicateSymbol = record({
+      shadowRecordId: 'btc:STRATEGY_SHADOW:RANGE:2',
+      symbol: ' btc ',
+      action: 'NO_TRADE',
+      direction: 'NONE',
+    });
+    expect(buildStrategyShadowWorkerEnvelope(input({
+      expectedSymbols: ['BTC'],
+      records: [record({ action: 'NO_TRADE', direction: 'NONE' }), duplicateSymbol],
+    })).status).toBe('BLOCKED');
   });
 
   it('unsafe record 경계를 BLOCKED한다', () => {

@@ -13,6 +13,7 @@ import type {
   RiskOperatingState,
 } from '../lib/riskStateMachine';
 import type { StrategyShadowRecord } from './strategyShadowAdapterV2';
+import { validateCandleStrategyShadowEvidence } from './candleStrategyShadowEvidenceV2';
 
 export const STRATEGY_RISK_ADAPTER_VERSION = 'strategy-risk-adapter/v1' as const;
 
@@ -131,6 +132,20 @@ export function adaptStrategySignalToRisk(
     return decision(input, 'REJECT', 'INVALID', ['Strategy SHADOW evidence 거부 — fail-closed'], {
       warnings: issues,
     });
+  }
+  const candleEvidence = input.shadowRecord.candleSignalEvidence;
+  if (!candleEvidence) {
+    return decision(input, 'REJECT', STRATEGY_RISK_ADAPTER_VERSION,
+      ['실행 후보의 Candle Signal SHADOW evidence 누락 — fail-closed']);
+  }
+  {
+    const candleIssues = validateCandleStrategyShadowEvidence(candleEvidence, input.shadowRecord);
+    if (candleIssues.length > 0 || candleEvidence.disposition !== 'AGREED') {
+      return decision(input, 'REJECT', STRATEGY_RISK_ADAPTER_VERSION,
+        ['Candle Signal/v2 Ensemble SHADOW 결속 veto — fail-closed', ...candleEvidence.reasons], {
+          warnings: candleIssues,
+        });
+    }
   }
 
   const risk = input.riskEvaluation;
