@@ -308,16 +308,22 @@ describe('GET /api/executor/gmx-api/status', () => {
       persistenceId: null,
     });
     expect(s.paperRelayEvidence.executionOnly).toEqual(expect.arrayContaining([
-      expect.objectContaining({
+      {
         id: 'canonicalAuthorization',
         status: 'not_evaluated',
+        fresh: false,
+        observedAtMs: null,
+        ageMs: null,
         failureId: 'CANONICAL_AUTHORIZATION_NOT_EVALUATED_IN_PAPER',
-      }),
-      expect.objectContaining({
+      },
+      {
         id: 'actionBudget',
         status: 'not_evaluated',
+        fresh: false,
+        observedAtMs: null,
+        ageMs: null,
         failureId: 'ACTION_BUDGET_NOT_EVALUATED_IN_PAPER',
-      }),
+      },
       expect.objectContaining({
         id: 'prepareReconciliation',
         status: 'not_evaluated',
@@ -331,6 +337,18 @@ describe('GET /api/executor/gmx-api/status', () => {
         status: 'not_evaluated',
       }),
     ]));
+    expect(s.paperRelayEvidence.executionOnly.filter(
+      (entry: { id: string }) => entry.id === 'canonicalAuthorization',
+    )).toHaveLength(1);
+    expect(s.paperRelayEvidence.executionOnly.filter(
+      (entry: { id: string }) => entry.id === 'actionBudget',
+    )).toHaveLength(1);
+    expect(s.paperRelayEvidence.failureIds).not.toContain(
+      'CANONICAL_AUTHORIZATION_NOT_EVALUATED_IN_PAPER',
+    );
+    expect(s.paperRelayEvidence.failureIds).not.toContain(
+      'ACTION_BUDGET_NOT_EVALUATED_IN_PAPER',
+    );
     expect(s.canonical).toEqual({
       authorized: false,
       approvalRemainingOk: false,
@@ -346,6 +364,10 @@ describe('GET /api/executor/gmx-api/status', () => {
       budgetShortfall: null,
       reasons: ['ACTION_BUDGET_NOT_EVALUATED_IN_PAPER'],
     });
+    // Canonical on-chain remaining=0 is a distinct readback concept. PAPER
+    // execution-only readiness must remain null/not_evaluated, never zero.
+    expect(s.canonical.remaining).toBeNull();
+    expect(s.actionBudget.remainingActions).toBeNull();
   });
 
   it('인증 GET은 외부 transport·DB write·execution-eligible evidence를 건드리지 않는다', async () => {
@@ -360,6 +382,9 @@ describe('GET /api/executor/gmx-api/status', () => {
     expect(res.status).toBe(200);
     expect(calls).toEqual([]);
     expect(dbWriteCalls).toEqual([]);
+    expect(refreshCanarySpy).not.toHaveBeenCalled();
+    expect(runPaperCycleSpy).not.toHaveBeenCalled();
+    expect(refreshStopSpy).not.toHaveBeenCalled();
     expect(res.body.status.paperEpochPreflight.stateChangePerformed).toBe(false);
     expect(getExecutionEligibleCostEvidence(Date.now())).toEqual(before);
     expect(before).toEqual({ fresh: false, evidence: null });
