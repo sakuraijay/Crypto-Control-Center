@@ -1,6 +1,6 @@
 import express from 'express';
 import request from 'supertest';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   identity: vi.fn(),
@@ -102,6 +102,10 @@ beforeEach(() => {
   });
 });
 
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
+
 describe('read-only release attestation routes', () => {
   function app() {
     const instance = express();
@@ -155,6 +159,64 @@ describe('read-only release attestation routes', () => {
       /privateKey|DATABASE_URL|RPC_URL|SESSION_SECRET|positionId|tradeId|lastCycleResult|pid|nodeEnv/,
     );
     expect(mocks.dbEvidence).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps build-time observations distinct from current runtime and reports source provenance drift', async () => {
+    vi.stubEnv('DELEGATED_SIGNER_ENABLED', 'true');
+    vi.stubEnv('GMX_API_ORDER_SUBMISSION_ENABLED', 'true');
+    vi.stubEnv('LIVE_TEST_EXECUTION_LOCKED', 'false');
+    mocks.identity.mockReturnValue({
+      ...identity,
+      workspaceSource: {
+        ...identity.workspaceSource,
+        productTree: 'e'.repeat(40),
+      },
+    });
+    mocks.executor.mockReturnValue({
+      ...mocks.executor(),
+      liveExecutionLocked: false,
+    });
+    mocks.relayFlags.mockReturnValue({
+      relaySubmitNetworkEnabled: false,
+      relaySubmissionEnabled: false,
+      relayMode: 'DISABLED',
+      delegatedSignerEnabled: true,
+    });
+
+    const response = await request(app()).get('/api/release/safety');
+
+    expect(response.status).toBe(200);
+    expect(response.body.identity).toMatchObject({
+      builtAt: '2026-08-28T10:00:00.000Z',
+      configuredSafetyFlags: {
+        delegatedSignerEnabled: false,
+        liveTestExecutionLocked: true,
+      },
+    });
+    expect(response.body.runtime).toMatchObject({
+      liveExecutionLocked: false,
+    });
+    expect(response.body.operationalDiagnostics.flags).toMatchObject({
+      delegatedSignerEnabled: {
+        buildObserved: false,
+        approvedTarget: true,
+        effective: true,
+        status: 'MATCH',
+        buildObservationStatus: 'DRIFT',
+      },
+      liveTestExecutionLocked: {
+        buildObserved: true,
+        approvedTarget: false,
+        effective: false,
+        status: 'MATCH',
+        buildObservationStatus: 'DRIFT',
+      },
+    });
+    expect(response.body.operationalDiagnostics.provenance).toMatchObject({
+      status: 'DRIFT',
+      sameCommit: true,
+      sameProductTree: false,
+    });
   });
 
   it('fails closed when build identity is unavailable', async () => {
