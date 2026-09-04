@@ -32,6 +32,12 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Install PostgreSQL test binaries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql
+          echo "$(pg_config --bindir)" >> "$GITHUB_PATH"
+
       # ── Step 1: TypeScript ─────────────────────────────────────────────────
       # calendar.tsx / spinner.tsx 에 기존 pre-existing React 19 ref 오류가 있음.
       # 이는 의도적으로 무시하며, 신규 오류만 CI 실패로 처리함.
@@ -64,6 +70,9 @@ jobs:
         env:
           # 테스트 환경에서는 VAPID 키 없음 → fail-closed 경로 검증
           NODE_ENV: test
+          # Unit imports need a syntactically valid URL; integration tests start
+          # and use their own isolated temporary PostgreSQL cluster.
+          DATABASE_URL: postgresql://postgres@127.0.0.1:1/postgres
 
       # ── Step 4b: Pin #140/#141 settlement/handoff regression tests ──────────
       # confirmedOpenStopHandoff (#140) and closeSettlementEvidence (#141) are
