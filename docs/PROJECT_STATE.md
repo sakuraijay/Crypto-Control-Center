@@ -11,7 +11,7 @@
 - 외부 고객용 SaaS가 **아님**
 - Arbitrage SaaS 프로젝트 B와 **완전히 분리** — 관련 코드 추가 금지
 - **외부 VPS 사용 안 함** — Replit Reserved VM에서 24시간 운영
-- **데스크톱 웹 우선**, 모바일(`artifacts/futures-terminal`) 개발 보류
+- **데스크톱 웹 전용**, 기존 모바일 아티팩트는 삭제되어 재도입하지 않음
 
 ## 코드 기준 소스
 
@@ -37,6 +37,35 @@
 - GitHub Actions CI (타입검사·빌드·배포 빌드 게이트·전체 테스트)
 - Reserved VM 단일 프로세스·단일 포트 배포 구조
 - api-server가 API + 정적 웹 + SPA fallback을 단일 포트로 제공
+
+### Task #173 — Canary read-only 진단 정합성 (완료)
+
+- PAPER readiness와 Canary status/preflight가 공용 deployment verification
+  snapshot을 사용하도록 정합성을 맞추고, 실패·미시도 결과도 fail-closed로 반영
+- bounded quote grid의 exact seed quote 계수와 실제 관측 배열을 일치시키고,
+  최대 5초 clock skew는 age 0으로 정규화하되 더 먼 미래 시각은 거부
+- 구현 `315f4099d4e52c8c340fa88f4f03a97b2fa3e39d`, CI 보정
+  `56253280e327d031ef6c42357b456943fa29dfce`가 원격 브랜치와 PR #1에 반영됨
+- 집중 회귀 54개, 전체 API 2,093개, Web 379개, TypeScript 및 production
+  build/topology 검증 통과; 독립 검토 PASS
+- GitHub Actions CI run #192 Quality Gate SUCCESS
+- `$0.40` cost cap과 Owner Approval, canonical delegation, signer, stop,
+  execution gate는 변경하지 않았으며 Production publish/deploy는 별도 범위
+
+### Task #175 — Canary 증거 fail-closed 강화 (완료)
+
+- 인증된 GMX status/readiness 스냅샷은 요청 실패(401/403/503/network/server),
+  PIN 변경, 30초 freshness 만료 시 즉시 폐기하여 이전 PASS성 표시를 남기지 않음
+- PAPER 비용 긍정 표시는 서버 고정 `$0.40` cap, observational freshness,
+  execution snapshot freshness·eligibility, `withinCap=true`가 모두 필요
+- LIVE Stop “가능” 표시는 PAPER가 아니며, 최근 successful readiness refresh와
+  5초 이내로 결속된 fresh capability 평가가 있을 때만 허용
+- 현재 운영 기준은 계속 PAPER, AUTO LIVE off, Relay 제출·네트워크 off이며
+  authorization/action budget·Stop capability 부재와 `HARD_STOPPED`가 Canary 차단 사유
+- 다음 운영 행동은 새 기능 활성화가 아니라 Owner Approval/authorization,
+  action budget, Stop readiness를 각각 명시적으로 충족한 뒤 authenticated refresh로
+  다시 관측하는 것; 이 작업은 실행·인증 경계와 capital 값을 변경하지 않음
+- focused Web 71개, 전체 API 2,095개, 전체 Web 393개 및 TypeScript 검증 통과
 
 ## 테스트 기준
 

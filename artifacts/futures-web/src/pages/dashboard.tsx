@@ -19,7 +19,7 @@ import {
   ShieldAlert, Layers, Plus, Target,
 } from 'lucide-react';
 import { format } from 'date-fns';
-import { AreaChart, Area, XAxis, Tooltip, ResponsiveContainer } from 'recharts';
+import { AreaChart, Area, XAxis, Tooltip, ResponsiveContainer } from '@/lib/recharts-compat';
 import { NewOrderDrawer } from '@/components/trading/NewOrderDrawer';
 import { DailyTargetCard } from '@/components/dashboard/DailyTargetCard';
 import { AiStateCard } from '@/components/dashboard/AiStateCard';
@@ -203,7 +203,7 @@ export default function Dashboard() {
       {/* ── Beta RC 상태 (읽기 전용 관제) ── */}
       <BetaRcStatusCard />
 
-      {/* ── $1,000 최종 운용 정책 (6H-1) ── */}
+      {/* ── Planned $10,000 / current Active $1,000 운용 정책 ── */}
       <RiskPolicyCard />
       <RiskExecutionStatusCard />
 
@@ -244,7 +244,7 @@ export default function Dashboard() {
                   </defs>
                   <XAxis
                     dataKey="time"
-                    tickFormatter={v => format(new Date(v), 'HH:mm')}
+                    tickFormatter={(v: number | string) => format(new Date(v), 'HH:mm')}
                     tick={{ fill: 'var(--muted-foreground)', fontSize: 10 }}
                     axisLine={false} tickLine={false}
                     interval="preserveStartEnd"

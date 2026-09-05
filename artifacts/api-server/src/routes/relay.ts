@@ -22,7 +22,9 @@ import {
 } from '../lib/relayOrderAssembly';
 import {
   createRelayTask, safeTransition, listRecentRelayTasks, RELAY_TASK_STATUS,
-  listUnresolvedTasks, getRelayTaskById,
+  listUnresolvedTasks, getRelayTaskById, getRelayTaskByIdOrThrow,
+  listInvestigationTasksOrThrow, isRelayTaskInvestigationEligible,
+  RELAY_SUBMITTING_STALE_MS,
 } from '../lib/relayLifecycle';
 import { allocateUserNonce } from '../lib/relayNonce';
 import { evaluateActivationGate } from '../lib/relayActivationGate';
@@ -41,8 +43,10 @@ import { listOpenRelayTaskIdsOrNull } from '../lib/relayLifecycle';
 import { countBlockingIntentsOrNull } from '../lib/executionIntents';
 import { countOpenRelayTasksOrNull } from '../lib/relayLifecycle';
 import { reconcileVerdict, applyReconcileVerdict, legacyTransportVerdict } from '../lib/relayTaskReconciler';
-import { createGelatoHttpTransport, type RelayTransport } from '../lib/relayTransport';
+import { createGelatoHttpTransport, TRANSPORT_GENERATION, type RelayTransport } from '../lib/relayTransport';
 import { createGmxApiTransport, GMX_API_PEERS, type GmxApiTransport } from '../lib/gmxApiTransport';
+import { GMX_API_TRANSPORT_GEN } from '../lib/gmxApiOrders';
+import { makeProductionDeps, reconcileOneGmxApiTask } from '../lib/gmxApiStatusReconciler';
 import {
   prepareRevokeSession, submitRevokeSignature, getActiveRevokeSession, cancelRevokeSession,
 } from '../lib/revokeSession';
@@ -89,6 +93,8 @@ interface CanonicalCheck {
   reason: string | null;
   approvalNonce: bigint | null;
   isSubaccountListed: boolean | null;
+  featureDisabled?: boolean | null;
+  integrationDisabled?: boolean | null;
   expiresAt: string | null;
   remaining: string | null;
 }
@@ -103,6 +109,8 @@ async function checkCanonical(): Promise<CanonicalCheck> {
     reason: result.reason,
     approvalNonce: result.approvalNonce?.toString() ?? null,
     isSubaccountListed: result.isSubaccountListed,
+    featureDisabled: result.featureDisabled ?? null,
+    integrationDisabled: result.integrationDisabled ?? null,
     expiresAt: result.expiresAt,
     remaining: result.remaining,
   });
@@ -144,6 +152,8 @@ async function checkCanonicalInner(): Promise<CanonicalCheck> {
       confirmed: true, reason: null,
       approvalNonce: result.data.approvalNonce,
       isSubaccountListed: result.data.isSubaccountListed,
+      featureDisabled: result.data.featureDisabled,
+      integrationDisabled: result.data.integrationDisabled,
       expiresAt: result.data.expiresAt.toString(),
       remaining: result.data.remaining.toString(),
     };
@@ -465,6 +475,10 @@ router.post('/executor/relay/revoke/dry-run', requireOperatorAuth, async (_req, 
 // ── UNRESOLVED 조사 (4단계 §9) ────────────────────────────────────────────────
 
 function investigationView(row: NonNullable<Awaited<ReturnType<typeof getRelayTaskById>>>) {
+  const nowMs = Date.now();
+  const updatedAtMs = row.updatedAt.getTime();
+  const ageMs = Math.max(0, nowMs - updatedAtMs);
+  const staleSubmitting = row.status === RELAY_TASK_STATUS.SUBMITTING && ageMs >= RELAY_SUBMITTING_STALE_MS;
   return {
     id: row.id,
     kind: row.kind,
@@ -479,22 +493,27 @@ function investigationView(row: NonNullable<Awaited<ReturnType<typeof getRelayTa
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
     transportGen: row.transportGen,
+    ageMs,
+    staleSubmitting,
     links: {
       arbiscanTx: row.txHash ? `https://arbiscan.io/tx/${row.txHash}` : null,
       // legacy REST status URL은 §3에 따라 완전 제거됨 — taskId 원문만 표시
     },
     // UNRESOLVED가 있는 동안 신규 제출이 차단되는 사유 표시용
-    blocking: row.status === RELAY_TASK_STATUS.UNRESOLVED,
+    blocking: row.status === RELAY_TASK_STATUS.UNRESOLVED || staleSubmitting,
   };
 }
 
 // GET /executor/relay/unresolved — 조사 목록
 router.get('/executor/relay/unresolved', requireOperatorAuth, async (_req, res) => {
   try {
-    const rows = await listUnresolvedTasks(50);
+    const rows = await listInvestigationTasksOrThrow(50);
     return res.json({ ok: true, tasks: rows.map(investigationView) });
-  } catch (e: unknown) {
-    return res.status(500).json({ ok: false, error: sanitizeRpcError(e) });
+  } catch {
+    return res.status(503).json({
+      ok: false,
+      error: '조사 데이터 저장소 조회 실패 — 상태 미확인 (fail-closed)',
+    });
   }
 });
 
@@ -504,20 +523,101 @@ router.post('/executor/relay/unresolved/recheck', requireOperatorAuth, async (re
   try {
     const { taskId } = req.body ?? {};
     if (typeof taskId !== 'string') return res.status(400).json({ ok: false, error: 'taskId 필요' });
-    const row = await getRelayTaskById(taskId);
+    const row = await getRelayTaskByIdOrThrow(taskId);
     if (!row) return res.status(404).json({ ok: false, error: 'task 없음' });
-    // SUBMITTING(taskId 저장 실패 등으로 stale 잔존)도 조사 대상 — 자동 종결은 없다
-    if (row.status !== RELAY_TASK_STATUS.UNRESOLVED && row.status !== RELAY_TASK_STATUS.SUBMITTING) {
-      return res.status(400).json({ ok: false, error: `상태 ${row.status} — UNRESOLVED/SUBMITTING만 재조회 대상` });
+    // SUBMITTING은 stale 경계 이후에만 조사 대상 — fresh in-flight task를 건드리지 않는다.
+    if (!isRelayTaskInvestigationEligible(row)) {
+      return res.status(409).json({
+        ok: false,
+        error: row.status === RELAY_TASK_STATUS.SUBMITTING
+          ? 'fresh SUBMITTING — stale 조사 경계 전이므로 상태 유지'
+          : `상태 ${row.status} — UNRESOLVED/stale SUBMITTING만 재조회 대상`,
+      });
     }
 
-    // 증거 재수집: Gelato task status (transport 필요) — 이번 단계에서는
-    // transport 미주입(활성화 env 미설정)이라 항상 "재수집 불가"로 응답.
+    // 공식 GMX API v2: 선택된 task 하나만 기존 readonly reconciler로 재확인.
+    // Gelato transport/legacy verdict를 절대 적용하지 않는다.
+    if (row.transportGen === GMX_API_TRANSPORT_GEN) {
+      const productionDeps = makeProductionDeps();
+      const gmxTransport = injectedGmxApiTransport ?? productionDeps.transport;
+      if (!gmxTransport.readonlyEnabled) {
+        return res.json({
+          ok: true,
+          rechecked: false,
+          reason: 'GMX API v2 readonly 조회 비활성 — legacy 판정 없이 상태 유지 (fail-closed)',
+          task: investigationView(row),
+        });
+      }
+      const summary = await reconcileOneGmxApiTask(row, {
+        ...productionDeps,
+        transport: gmxTransport,
+      });
+      if (summary.errors > 0 || summary.scanned !== 1) {
+        return res.status(503).json({
+          ok: false,
+          error: 'GMX API v2 조사 실패 — 상태 유지 (fail-closed)',
+        });
+      }
+      const updatedGmx = await getRelayTaskByIdOrThrow(row.id);
+      if (!updatedGmx) {
+        return res.status(503).json({
+          ok: false,
+          error: 'GMX API v2 조사 판정 재조회 실패 — 상태 미확인 (fail-closed)',
+        });
+      }
+      return res.json({
+        ok: true,
+        rechecked: true,
+        verdictBasis: updatedGmx.resolutionBasis ?? (
+          updatedGmx.gmxApiStatus
+            ? `GMX API v2 status=${updatedGmx.gmxApiStatus} — 온체인 증거 기준 상태 유지`
+            : 'GMX API v2 증거 재확인 — 종결 증거 부족, 상태 유지'
+        ),
+        task: investigationView(updatedGmx),
+      });
+    }
+
+    // exact legacy REST generation만 legacy 판정을 적용한다.
+    if (row.transportGen === 'legacy-digital') {
+      const verdict = legacyTransportVerdict();
+      if (row.status !== verdict.to) {
+        const applied = await applyReconcileVerdict(row.id, verdict);
+        if (!applied.ok) {
+          return res.status(503).json({
+            ok: false,
+            error: 'legacy 조사 판정 저장 실패 — 상태 유지 (fail-closed)',
+          });
+        }
+      }
+      const updatedLegacy = await getRelayTaskByIdOrThrow(row.id);
+      if (!updatedLegacy) {
+        return res.status(503).json({
+          ok: false,
+          error: 'legacy 조사 판정 재조회 실패 — 상태 미확인 (fail-closed)',
+        });
+      }
+      return res.json({
+        ok: true, rechecked: false, verdictBasis: verdict.basis,
+        reason: 'legacy transport 세대 — 신형 endpoint 조회 금지 (UNRESOLVED_LEGACY_TRANSPORT)',
+        task: investigationView(updatedLegacy),
+      });
+    }
+
+    if (row.transportGen !== TRANSPORT_GENERATION) {
+      return res.json({
+        ok: true,
+        rechecked: false,
+        reason: '알 수 없는 transport generation — 어떤 외부 조회·legacy 판정도 수행하지 않고 상태 유지',
+        task: investigationView(row),
+      });
+    }
+
+    // Gelato JSON-RPC generation: 테스트/활성화 환경에서 주입된 readonly transport만 사용.
     if (!injectedTransport) {
       return res.json({
         ok: true,
         rechecked: false,
-        reason: 'relay transport 비활성(GMX_RELAY_NETWORK_ENABLED 미설정) — 증거 재수집 불가, 상태 유지',
+        reason: 'Gelato JSON-RPC readonly transport 비활성 — 증거 재수집 불가, 상태 유지',
         task: investigationView(row),
       });
     }
@@ -528,18 +628,6 @@ router.post('/executor/relay/unresolved/recheck', requireOperatorAuth, async (re
         task: investigationView(row),
       });
     }
-    // 6F-2 §3 — legacy 세대 taskId는 신형 JSON-RPC endpoint로 조회 금지.
-    if (row.transportGen !== 'jsonrpc-gasless-0.0.10') {
-      const verdict = legacyTransportVerdict();
-      await applyReconcileVerdict(row.id, verdict);
-      const updatedLegacy = await getRelayTaskById(row.id);
-      return res.json({
-        ok: true, rechecked: false, verdictBasis: verdict.basis,
-        reason: 'legacy transport 세대 — 신형 endpoint 조회 금지 (UNRESOLVED_LEGACY_TRANSPORT)',
-        task: updatedLegacy ? investigationView(updatedLegacy) : investigationView(row),
-      });
-    }
-
     const status = await injectedTransport.getRelayTaskStatus({ taskId: row.relayTaskId });
     const verdict = reconcileVerdict({
       gelato: status.ok
@@ -547,14 +635,31 @@ router.post('/executor/relay/unresolved/recheck', requireOperatorAuth, async (re
         : { statusCode: null, transactionHash: null },
       onchain: { event: null, txHash: null, orderKey: null, blockNumber: null },
     });
-    await applyReconcileVerdict(row.id, verdict);
-    const updated = await getRelayTaskById(row.id);
+    if (verdict.to !== null && row.status !== verdict.to) {
+      const applied = await applyReconcileVerdict(row.id, verdict);
+      if (!applied.ok) {
+        return res.status(503).json({
+          ok: false,
+          error: '조사 판정 저장 실패 — 상태 유지 (fail-closed)',
+        });
+      }
+    }
+    const updated = await getRelayTaskByIdOrThrow(row.id);
+    if (!updated) {
+      return res.status(503).json({
+        ok: false,
+        error: '조사 판정 재조회 실패 — 상태 미확인 (fail-closed)',
+      });
+    }
     return res.json({
       ok: true, rechecked: true, verdictBasis: verdict.basis,
-      task: updated ? investigationView(updated) : null,
+      task: investigationView(updated),
     });
-  } catch (e: unknown) {
-    return res.status(500).json({ ok: false, error: sanitizeRpcError(e) });
+  } catch {
+    return res.status(503).json({
+      ok: false,
+      error: '조사 데이터 저장소 또는 RPC 조회 실패 — 상태 유지 (fail-closed)',
+    });
   }
 });
 

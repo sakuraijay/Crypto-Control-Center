@@ -7,7 +7,7 @@ id = "3B4_FFSkEVBkAeYMFRJ2e"
 [[services]]
 localPort = 8080
 name = "API Server"
-paths = ["/api", "/"]
+paths = ["/api", "/futures-web/", "/"]
 
 [services.development]
 run = "pnpm --filter @workspace/api-server run dev"
@@ -19,6 +19,14 @@ args = ["pnpm", "run", "build:deploy"]
 
 [services.production.build.env]
 NODE_ENV = "production"
+WORKER_ENGINE_MODE = "PAPER"
+AUTO_WORKER_LIVE_ENABLED = "false"
+LIVE_TEST_EXECUTION_LOCKED = "false"
+DELEGATED_SIGNER_ENABLED = "true"
+GMX_API_ORDER_SUBMISSION_ENABLED = "true"
+GMX_RELAY_SUBMISSION_ENABLED = "false"
+GMX_RELAY_NETWORK_ENABLED = "false"
+GMX_RELAY_MODE = "DISABLED"
 
 [services.production.run]
 # we don't run through pnpm to make startup faster in production

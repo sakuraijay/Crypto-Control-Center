@@ -5,32 +5,42 @@
  *  - signer 접근·서명·prepare/submit POST·자동 재시도 절대 없음.
  *  - GET status는 외부 호출 0회 — 저장 스냅샷·DB 파생값만 조립한다.
  *  - POST readiness/refresh는 readonly 조회만 — peer health GET(/markets/tickers)
- *    + 기존 미종결 task의 status readback(§9 reconciler 1회 실행).
+ *    + decimals/cost/stop capability의 read-only evidence 갱신.
  *    readonly 플래그 꺼짐 = 외부 호출 0회.
  *  - API base URL 전문·응답 원문·서명은 노출하지 않는다 (host명·상태 문자열만).
  */
 
 import { Router } from 'express';
+import type { Address } from 'viem';
 import { and, desc, eq, inArray, or } from 'drizzle-orm';
-import { db, relayTasksTable, subaccountApprovalSessionsTable, tradesTable } from '@workspace/db';
+import {
+  db,
+  liveApprovalsTable,
+  relayTasksTable,
+  strategyConfigTable,
+  tradesTable,
+  workerStateTable,
+} from '@workspace/db';
 import { requireOperatorAuth } from '../lib/operatorAuthGuard';
 import { createGmxApiTransport, GMX_API_PEERS, type GmxApiTransport } from '../lib/gmxApiTransport';
 import { GMX_API_TRANSPORT_GEN } from '../lib/gmxApiOrders';
 import { RELAY_TASK_STATUS, TERMINAL_STATUSES } from '../lib/relayLifecycle';
 import { countBlockingIntentsOrNull } from '../lib/executionIntents';
-import { countOpenRelayTasksOrNull, listUnresolvedTasks } from '../lib/relayLifecycle';
+import { countOpenRelayTasksOrNull, countUnresolvedTasksOrNull } from '../lib/relayLifecycle';
 import {
   getCanonicalSnapshot,
   getDeploymentVerificationState,
   getFeeEstimateState,
   getReadinessRefreshState,
+  deriveRelayEnvFlags,
 } from '../lib/relayActivationStatus';
-import { getActiveRevokeSession } from '../lib/revokeSession';
+import { getActiveRevokeSessionReadResult } from '../lib/revokeSession';
 import { resolveGmxLiveRelayConfig } from '../lib/gmxLiveConfig';
 import {
   isDelegatedSignerEnabled,
   isManualCanarySignerRestoreAllowed,
   isSignerInitialized,
+  getStoredPublicSignerAddress,
 } from '../lib/delegatedSigner';
 import { isLiveTestExecutionLocked } from '../lib/liveTestGate';
 import {
@@ -50,14 +60,36 @@ import { EXECUTION_ELIGIBLE_MAX_AGE_MS, getExecutionEligibleCostEvidence } from 
 import { listUncovered } from '../lib/stopLossPlan';
 import { loadStopCoverage } from '../workers/liveTestExecutor';
 import { getWorkerStatus } from '../workers/aiWorker';
-import { GMX_DEPLOYMENT_MANIFEST } from '../lib/gmxDeploymentManifest';
-import { APPROVAL_PURPOSE, SESSION_STATUS } from '../lib/ownerApprovalSession';
-import { reconcileGmxApiTasks, makeProductionDeps } from '../lib/gmxApiStatusReconciler';
+import { getServerPaperStatus } from '../workers/serverPaperExecutor';
+import { GMX_DEPLOYMENT_MANIFEST, validateEnvAgainstManifest } from '../lib/gmxDeploymentManifest';
+import { getActiveReadySession } from '../lib/ownerApprovalSession';
 import { getGmxPrepareStartupState } from '../lib/gmxApiPrepareStartup';
 import { sanitizeRpcError } from '../lib/rpcErrorSanitize';
 import { getLastPreflight, isPreflightPassedFresh, runGmxLivePreflight, PREFLIGHT_TTL_MS } from '../lib/gmxLivePreflight';
-import { refreshManualCanaryReadonlyEvidence } from '../lib/manualCanaryDeps';
-import { MARKET_BY_SYMBOL_SERVER } from '../lib/gmxMarkets';
+import { deriveCanaryDecimalsReadiness } from '../lib/canaryDecimalsReadiness';
+import { getPaperRuntimeReadinessSnapshot } from '../lib/paperRuntimeReadiness';
+import { runGmxApiReadinessRefresh } from '../lib/gmxApiReadinessCoordinator';
+import { getPaperStopReadinessEvidence } from '../lib/paperStopReadinessEvidence';
+import { buildPaperRelayEvidence } from '../lib/paperRelayEvidence';
+import {
+  deriveControlledCanaryReadiness,
+} from '../lib/controlledCanaryReadiness';
+import { evaluateManualCanaryCanonicalAuthorization } from '../lib/manualCanaryCanonicalAuthorization';
+import { EXPECTED_CANARY_SIGNER } from '../lib/canaryAllowanceInfo';
+import { deriveOperationalDiagnostics } from '../lib/operationalDiagnostics';
+import { getReleaseIdentity } from '../lib/releaseIdentity';
+import { buildPaperEpochPreflight } from '../lib/paperEpochPreflight';
+import { BASELINE_DAILY_KEY, BASELINE_WEEKLY_KEY } from '../lib/equityBaselines';
+import { RISK_ENGINE_STATE_KEY } from '../lib/riskEngineState';
+import {
+  activatePaperEpoch, PAPER_EPOCH_ACTIVE_KEY, validatePaperEpochActivationBody,
+  type PaperEpochActivationResult,
+} from '../lib/paperEpochActivation';
+import {
+  parseActivePaperEpoch,
+  verifyActivePaperEpochSnapshot,
+  type ActivePaperEpochV1,
+} from '../lib/paperEpochState';
 
 const router = Router();
 
@@ -66,30 +98,25 @@ let injectedTransport: GmxApiTransport | null = null;
 export function __setGmxApiRouteTransportForTests(t: GmxApiTransport | null): void {
   injectedTransport = t;
 }
+let paperEpochActivator: (idempotencyKey: string) => Promise<PaperEpochActivationResult> = activatePaperEpoch;
+/** Test-only route seam: authorization/body validation remain inside the route. */
+export function __setPaperEpochActivatorForTests(
+  activator: ((idempotencyKey: string) => Promise<PaperEpochActivationResult>) | null,
+): void {
+  paperEpochActivator = activator ?? activatePaperEpoch;
+}
 function transport(): GmxApiTransport {
   return injectedTransport ?? createGmxApiTransport(process.env);
-}
-
-export function deriveCanaryDecimalsReadiness(entries: Array<{
-  tokenAddress: string;
-  stale: boolean;
-  source: string;
-}>): Record<'BTC' | 'ETH', boolean> {
-  const freshValidated = new Set(
-    entries
-      .filter((entry) => !entry.stale && entry.source === 'sdk+onchain')
-      .map((entry) => entry.tokenAddress.toLowerCase()),
-  );
-  return {
-    BTC: freshValidated.has(MARKET_BY_SYMBOL_SERVER.get('BTC')!.indexToken.toLowerCase()),
-    ETH: freshValidated.has(MARKET_BY_SYMBOL_SERVER.get('ETH')!.indexToken.toLowerCase()),
-  };
 }
 
 /** GMX API v2 상태 스냅샷 조립 — 외부 호출 0회 (DB read + 메모리 getter만) */
 async function buildGmxApiStatusSnapshot() {
   const env = process.env;
-  const snap = getCanonicalSnapshot();
+  const nowMs = Date.now();
+  const paperMode = env.WORKER_ENGINE_MODE === 'PAPER';
+  const workerStatus = getWorkerStatus();
+  const serverPaperStatus = getServerPaperStatus();
+  const snap = paperMode ? null : getCanonicalSnapshot();
   const canonicalAuthorized = !!snap && snap.confirmed && snap.isSubaccountListed === true;
   let approvalRemainingOk = false;
   if (snap?.remaining && snap?.expiresAt) {
@@ -104,21 +131,31 @@ async function buildGmxApiStatusSnapshot() {
   ]);
   const dbOk = blockingIntents !== null && openRelayTasks !== null;
 
-  let revoke: boolean | null = null;
-  try { revoke = (await getActiveRevokeSession()) !== null; } catch { revoke = null; }
+  const revokeRead = await getActiveRevokeSessionReadResult();
+  const revoke = revokeRead.ok ? revokeRead.session !== null : null;
 
   // Owner approval 세션 준비 여부 — 복호화·signer 접근 없음 (행 존재 여부만)
   let approvalSessionReady: boolean | null = null;
-  try {
-    const rows = await db.select({ id: subaccountApprovalSessionsTable.id })
-      .from(subaccountApprovalSessionsTable)
-      .where(and(
-        eq(subaccountApprovalSessionsTable.purpose, APPROVAL_PURPOSE),
-        eq(subaccountApprovalSessionsTable.status, SESSION_STATUS.OWNER_SIGNATURE_READY),
-      ))
-      .limit(1);
-    approvalSessionReady = rows.length > 0;
-  } catch { approvalSessionReady = null; }
+  if (!paperMode) {
+    try {
+      const mainAccount = env.GMX_WALLET_ADDRESS?.trim() || null;
+      const storedSigner = await getStoredPublicSignerAddress(EXPECTED_CANARY_SIGNER);
+      const canonicalNonce = snap?.approvalNonce && /^\d+$/.test(snap.approvalNonce)
+        ? BigInt(snap.approvalNonce)
+        : null;
+      if (!mainAccount || !storedSigner.ok || canonicalNonce === null) {
+        approvalSessionReady = false;
+      } else {
+        const session = await getActiveReadySession({
+          expectedOwner: mainAccount as Address,
+          expectedSubaccount: storedSigner.address as Address,
+          canonicalNonce,
+          persistInvalidation: false,
+        });
+        approvalSessionReady = session !== null;
+      }
+    } catch { approvalSessionReady = null; }
+  }
 
   // GMX API v2 세대 task 현황
   let gmxTaskCounts: Record<string, number> | null = null;
@@ -164,8 +201,14 @@ async function buildGmxApiStatusSnapshot() {
     }));
   } catch { gmxTaskCounts = null; recentGmxTasks = null; prepareStageCounts = null; oldestBlockingTaskAt = null; }
 
-  let unresolvedCount: number | null = null;
-  try { unresolvedCount = (await listUnresolvedTasks(50)).length; } catch { unresolvedCount = null; }
+  const unresolvedCount = await countUnresolvedTasksOrNull();
+  let pendingApprovalCount: number | null = null;
+  try {
+    const pendingRows = await db.select({ id: liveApprovalsTable.id })
+      .from(liveApprovalsTable)
+      .where(eq(liveApprovalsTable.status, 'PENDING'));
+    pendingApprovalCount = pendingRows.length;
+  } catch { pendingApprovalCount = null; }
 
   const fe = getFeeEstimateState();
   const dv = getDeploymentVerificationState();
@@ -181,6 +224,7 @@ async function buildGmxApiStatusSnapshot() {
   const gmxConfigOk = resolveGmxLiveRelayConfig().ok;
   const manualCanaryPosture = isManualCanarySignerRestoreAllowed(env);
   const executionCostEvidence = getExecutionEligibleCostEvidence(Date.now());
+  const paperRuntimeReadiness = getPaperRuntimeReadinessSnapshot(Date.now(), env);
   const feeEstimateFresh =
     fe.attempted && fe.ok && fe.atMs !== null && Date.now() - fe.atMs < 10 * 60_000;
 
@@ -218,7 +262,7 @@ async function buildGmxApiStatusSnapshot() {
   } catch { uncoveredStopCount = null; }
   if ((uncoveredStopCount ?? 1) > 0) blockedReasons.push(`STOP_UNCOVERED ${uncoveredStopCount ?? '조회 실패'}건 — stop 미확보 포지션 존재/조회 실패`);
   // LIVE 정산 능력 (§5) — reconciliation 미완료/미실행 = 부적격
-  const settlementReconcile = getWorkerStatus().settlementReconcile;
+  const settlementReconcile = workerStatus.settlementReconcile;
   const settlementComplete = settlementReconcile !== null && !settlementReconcile.incomplete;
   if (!settlementComplete) {
     blockedReasons.push(`LIVE_SETTLEMENT_INCOMPLETE — ${settlementReconcile?.reasons[0] ?? '정산 reconciliation 미실행'}`);
@@ -243,6 +287,7 @@ async function buildGmxApiStatusSnapshot() {
 
   // ── 6H-2B §12 — 보호 주문(durable protection) 관측값 (조회 전용) ────────────
   const stopCapability = getStopExecutionCapability();
+  const paperStopReadinessEvidence = getPaperStopReadinessEvidence(Date.now(), env);
   let protectionCounts: Record<string, number> | null = null;
   let blockingProtectionCount: number | null = null;
   let staleStopCount: number | null = null;
@@ -269,13 +314,25 @@ async function buildGmxApiStatusSnapshot() {
   if (blockingProtectionCount === null) blockedReasons.push('보호 주문 상태 조회 실패 (fail-closed)');
   else if (blockingProtectionCount > 0) blockedReasons.push(`차단 상태 보호 주문 ${blockingProtectionCount}건 — 해소 전 신규 OPEN 금지`);
   // §7 — action 예산 (canonical remaining 기준, 표시 전용)
-  const actionBudget = evaluateActionBudget({
+  const inFlightReservedActions = paperMode ? null : await countInFlightReservedActions();
+  const actionBudget = paperMode ? {
+    sufficient: false,
+    remainingActions: null,
+    requiredActions: 0,
+    reservedEmergencyActions: 0,
+    inFlightReservedActions: null,
+    budgetShortfall: null,
+    budgetBasis: [] as string[],
+    reasons: ['ACTION_BUDGET_NOT_EVALUATED_IN_PAPER'],
+  } : evaluateActionBudget({
     remaining: snap?.remaining ?? null,
     expiresAt: snap?.expiresAt ?? null,
     nowMs: Date.now(),
-    inFlightReservedActions: await countInFlightReservedActions(),
+    inFlightReservedActions,
   });
-  if (!actionBudget.sufficient) blockedReasons.push(`action 예산 부족/조회불가 — ${actionBudget.reasons[0] ?? ''}`);
+  if (!paperMode && !actionBudget.sufficient) {
+    blockedReasons.push(`action 예산 부족/조회불가 — ${actionBudget.reasons[0] ?? ''}`);
+  }
   // ── 6H-2C §10 — decimals·증거 수집기·reconciliation 관측값 (저장 스냅샷만) ──
   const protectionRecon = getProtectionReconState();
   const decimalsCache = getDecimalsCacheSnapshot(Date.now());
@@ -301,17 +358,176 @@ async function buildGmxApiStatusSnapshot() {
 
   // readyForControlledCanary — 전 항목 파생값의 논리곱 (fail-closed; 어느 하나
   // null/false면 false). 현 단계는 submissionEnabled=false라 항상 false.
-  const readyForControlledCanary =
-    readonlyEnabled && submissionEnabled && signerEnabled && signerInitialized &&
-    !liveLocked && !emergencyStop && reconciled && dbOk &&
-    canonicalAuthorized && approvalRemainingOk && approvalSessionReady === true &&
-    blockingIntents === 0 && (unresolvedCount ?? 1) === 0 && revoke === false &&
-    manualCanaryPosture.allowed && dv.ok && executionCostEvidence.fresh && decimalsReady &&
-    stopExecutionAvailable && uncoveredStopCount === 0 && settlementComplete &&
-    legacyZeroFeeCount === 0 && unsettledLiveTradeCount === 0 &&
-    blockingProtectionCount === 0 && (staleStopCount ?? 1) === 0 && actionBudget.sufficient &&
-    priceConversionVerified && protectionRecon.complete && !protectionRecon.blockNewOpens &&
-    protectionRecon.ambiguousCount === 0 && actionBudget.requiredActions <= 10;
+  const canonicalAuthorizationReady = !paperMode
+    && evaluateManualCanaryCanonicalAuthorization(
+      snap,
+      nowMs,
+      inFlightReservedActions,
+    ).ok;
+  const readyForControlledCanary = deriveControlledCanaryReadiness({
+    readonlyEnabled,
+    submissionEnabled,
+    signerEnabled,
+    signerInitialized,
+    liveLocked,
+    emergencyStop,
+    reconciled,
+    dbOk,
+    canonicalAuthorizationReady,
+    ownerApprovalReady: approvalSessionReady === true,
+    blockingIntents,
+    unresolvedCount,
+    activeRevoke: revoke,
+    manualCanaryPostureAllowed: manualCanaryPosture.allowed,
+    deploymentVerified: dv.ok,
+    executionCostEvidence: {
+      fresh: executionCostEvidence.fresh,
+      effectiveRoundTripCostUsd:
+        executionCostEvidence.evidence?.effectiveRoundTripCostUsd ?? null,
+    },
+    decimalsReady,
+    stopCapability: {
+      available: stopExecutionAvailable,
+      evaluatedAt: stopCapability.evaluatedAt,
+    },
+    nowMs,
+    uncoveredStopCount,
+    settlementComplete,
+    legacyZeroFeeCount,
+    unsettledLiveTradeCount,
+    blockingProtectionCount,
+    staleStopCount,
+    actionBudgetSufficient: actionBudget.sufficient,
+    priceConversionVerified,
+    protectionReconciliationComplete: protectionRecon.complete,
+    protectionReconciliationBlocksNewOpens: protectionRecon.blockNewOpens,
+    protectionReconciliationAmbiguousCount: protectionRecon.ambiguousCount,
+    requiredActions: actionBudget.requiredActions,
+  });
+
+  const paperRelayEvidence = paperMode
+    ? buildPaperRelayEvidence({
+      nowMs,
+      dbOk,
+      blockingIntentCount: blockingIntents,
+      openRelayTaskCount: openRelayTasks,
+      unresolvedTaskCount: unresolvedCount,
+      activeRevokeInProgress: revoke,
+      prepareStageCounts,
+      blockingProtectionCount,
+      uncoveredStopCount,
+      legacyZeroFeeCount,
+      unsettledLiveTradeCount,
+      protectionReconciliation: {
+        lastRunAtMs: protectionRecon.lastRunAtMs,
+        complete: protectionRecon.complete,
+        blockNewOpens: protectionRecon.blockNewOpens,
+        ambiguousCount: protectionRecon.ambiguousCount,
+      },
+    })
+    : null;
+  let relayFlags: ReturnType<typeof deriveRelayEnvFlags> | null = null;
+  try {
+    relayFlags = deriveRelayEnvFlags(env, validateEnvAgainstManifest(env).ok);
+  } catch { relayFlags = null; }
+  const operationalDiagnostics = deriveOperationalDiagnostics(env, {
+    engineMode: paperMode ? 'PAPER' : 'LIVE',
+    liveExecutionLocked: liveLocked,
+    relayFlags,
+  }, getReleaseIdentity());
+  let activePaperEpoch:
+    | {
+      state: 'ACTIVE';
+      value: ActivePaperEpochV1;
+      audit: { state: 'VERIFIED'; idempotencyKey: string };
+    }
+    | { state: 'ABSENT'; value: null; reason: 'NO_ACTIVE_EPOCH' }
+    | { state: 'CORRUPT' | 'UNAVAILABLE'; value: null; reason: string; failClosed: true };
+  try {
+    const stateRows = await db.select().from(workerStateTable);
+    const activeRow = stateRows.find(row => row.key === PAPER_EPOCH_ACTIVE_KEY);
+    if (activeRow) {
+      const parsed = parseActivePaperEpoch(activeRow.value, nowMs);
+      if (!parsed.ok) {
+        activePaperEpoch = {
+          state: 'CORRUPT',
+          value: null,
+          reason: parsed.reason,
+          failClosed: true,
+        };
+      } else {
+        const configRows = await db.select({ limits: strategyConfigTable.limits })
+          .from(strategyConfigTable).limit(1);
+        const state = new Map(stateRows.map(row => [row.key, row.value]));
+        const verified = configRows.length === 1
+          ? verifyActivePaperEpochSnapshot({
+            activeRaw: activeRow.value,
+            auditRaw: state.get(parsed.value.auditKey) ?? null,
+            equityHwmRaw: state.get('equityHwm') ?? null,
+            limits: configRows[0].limits,
+            dailyRaw: state.get(BASELINE_DAILY_KEY) ?? null,
+            weeklyRaw: state.get(BASELINE_WEEKLY_KEY) ?? null,
+            riskRaw: state.get(RISK_ENGINE_STATE_KEY) ?? null,
+            nowMs,
+          })
+          : { ok: false as const, reason: 'ACTIVE_EPOCH_CONFIG_UNAVAILABLE' };
+        activePaperEpoch = verified.ok
+          ? {
+            state: 'ACTIVE',
+            value: verified.value.activeEpoch,
+            audit: {
+              state: 'VERIFIED',
+              idempotencyKey: verified.value.audit.idempotencyKey,
+            },
+          }
+          : {
+            state: 'CORRUPT',
+            value: null,
+            reason: verified.reason,
+            failClosed: true,
+          };
+      }
+    } else {
+      activePaperEpoch = { state: 'ABSENT', value: null, reason: 'NO_ACTIVE_EPOCH' };
+    }
+  } catch {
+    activePaperEpoch = {
+      state: 'UNAVAILABLE',
+      value: null,
+      reason: 'ACTIVE_EPOCH_READ_FAILED',
+      failClosed: true,
+    };
+  }
+  const paperEpochPreflight = buildPaperEpochPreflight({
+    observedAtMs: nowMs,
+    counts: {
+      openPositionCount: paperMode ? serverPaperStatus.openPositions.length : null,
+      pendingApprovalCount,
+      pendingCloseCount: paperMode ? (serverPaperStatus.pendingClose === null ? 0 : 1) : null,
+      blockingIntentCount: blockingIntents,
+      blockingProtectionCount,
+      paperExecutorUnresolvedCount: paperMode ? (serverPaperStatus.unresolved === null ? 0 : 1) : null,
+      unresolvedRelayTaskCount: unresolvedCount,
+      unsettledTradeCount: unsettledLiveTradeCount,
+      openRelayTaskCount: openRelayTasks,
+    },
+    current: {
+      activeTradingCapitalUsd: workerStatus.lastLimitsUsed?.tradingCapital ?? null,
+      equityHwmUsd: workerStatus.equityHwm,
+      dailyRiskBaselineUsd: workerStatus.dailyBaseline?.equity ?? null,
+      weeklyRiskBaselineUsd: workerStatus.weeklyBaseline?.equity ?? null,
+      currentEquityUsd: workerStatus.currentEquityUsd,
+      reserveCashPct: workerStatus.lastLimitsUsed?.reserveCashPct ?? null,
+      riskOperatingState: workerStatus.riskOperatingState,
+      riskEntryAllowed: workerStatus.riskEntryAllowed,
+    },
+    operationalDiagnostics,
+    gates: {
+      readyForControlledCanary,
+      stopExecutionAvailable,
+      hardStopReason: workerStatus.riskHistoricalHardStopTriggerReason,
+    },
+  });
 
   return {
     transportGen: GMX_API_TRANSPORT_GEN,
@@ -325,14 +541,20 @@ async function buildGmxApiStatusSnapshot() {
     emergencyStopActive: emergencyStop,
     reconciled,
     dbOk,
-    canonical: {
+    canonical: paperMode ? {
+      authorized: false,
+      approvalRemainingOk: false,
+      reason: 'CANONICAL_AUTHORIZATION_NOT_EVALUATED_IN_PAPER',
+      expiresAt: null,
+      remaining: null,
+    } : {
       authorized: canonicalAuthorized,
       approvalRemainingOk,
       reason: snap?.reason ?? 'canonical readback 미조회 — 저장 스냅샷 없음 (fail-closed)',
       expiresAt: snap?.expiresAt ?? null,
       remaining: snap?.remaining ?? null,
     },
-    approvalSessionReady,
+    approvalSessionReady: paperMode ? null : approvalSessionReady,
     blockingIntentCount: blockingIntents,
     openRelayTaskCount: openRelayTasks,
     unresolvedTaskCount: unresolvedCount,
@@ -343,6 +565,10 @@ async function buildGmxApiStatusSnapshot() {
     feeEstimate: { attempted: fe.attempted, ok: fe.ok, atMs: fe.atMs, fresh: feeEstimateFresh },
     manualCanaryPosture,
     executionEligibleCostEvidence: executionCostEvidence,
+    paperRuntimeReadiness,
+    paperRelayEvidence,
+    paperEpochPreflight,
+    activePaperEpoch,
     lastReadinessRefresh: {
       attempted: lastRefresh.attempted, atMs: lastRefresh.atMs,
       ok: lastRefresh.ok, basis: lastRefresh.basis,
@@ -356,13 +582,23 @@ async function buildGmxApiStatusSnapshot() {
       available: stopCapability.available,
       reasons: stopCapability.reasons,
       evaluatedAt: stopCapability.evaluatedAt,
+      scope: 'LIVE_STOP_EXECUTION',
+      boundary: 'READ_ONLY_STATUS_NOT_EXECUTION_AUTHORIZATION',
+      paperMode: process.env.WORKER_ENGINE_MODE === 'PAPER',
       schemaPin: { sdk: '@gmx-io/sdk@1.7.0', stopLossDecrease: 6 },
+      readinessEvidence: paperStopReadinessEvidence,
     },
     protectionCounts,
     blockingProtectionCount,
     staleStopCount,
     emergencyCloseInProgressCount,
-    actionBudget: {
+    actionBudget: paperMode ? {
+      ...actionBudget,
+      version: ACTION_BUDGET_VERSION,
+      autoCancelPolicy: AUTO_CANCEL_BUDGET_POLICY,
+      worstCasePath: 'NOT_EVALUATED_IN_PAPER',
+      recommendedOwnerApprovalCount: RECOMMENDED_OWNER_APPROVAL_COUNT,
+    } : {
       sufficient: actionBudget.sufficient,
       remainingActions: actionBudget.remainingActions,
       requiredActions: actionBudget.requiredActions,
@@ -412,7 +648,9 @@ async function buildGmxApiStatusSnapshot() {
       requestedToUnresolved: prepareStartup.requestedToUnresolved,
       apiPreparedHeld: prepareStartup.apiPreparedHeld,
     },
-    blockedReasons,
+    blockedReasons: paperMode
+      ? paperRelayEvidence?.failureIds ?? ['PAPER_RELAY_EVIDENCE_UNAVAILABLE']
+      : blockedReasons,
     notices: [
       '자동 재시도 없음 — UNRESOLVED/API_PREPARED는 운영자 확인 전 어떤 자동 조치도 하지 않습니다.',
       '운영자 확인 전 서명·제출 금지 — 이 화면은 조회 전용이며 강제 완료·삭제·재제출 기능이 없습니다.',
@@ -430,45 +668,47 @@ router.get('/executor/gmx-api/status', requireOperatorAuth, async (_req, res) =>
   }
 });
 
+// Explicit, authenticated and deliberately non-executing PAPER state activation.
+router.post('/executor/gmx-api/paper-epoch/activate', requireOperatorAuth, async (req, res) => {
+  const invalid = validatePaperEpochActivationBody(req.body);
+  if (invalid) return res.status(400).json({ ok: false, error: invalid });
+  const result = await paperEpochActivator((req.body as { idempotencyKey: string }).idempotencyKey);
+  if (result.status === 'BUSY') return res.status(409).json({ ok: false, ...result });
+  if (result.status === 'BLOCKED') return res.status(409).json({ ok: false, ...result });
+  return res.status(200).json({ ok: true, ...result });
+});
+
 // POST /executor/gmx-api/readiness/refresh — readonly 조회만.
-// 허용: peer health GET + 기존 미종결 task status readback(§9, 자동 재제출 0회).
-// 금지: signer 접근·서명·prepare/submit·task/intent 생성·자동 재시도.
+// 허용: peer health GET + decimals/cost/RPC capability readback.
+// 금지: reconciliation·DB 상태 전이·signer 접근·서명·prepare/submit·task/intent 생성·자동 재시도.
 router.post('/executor/gmx-api/readiness/refresh', requireOperatorAuth, async (_req, res) => {
   try {
     const t = transport();
-    let peerHealth: Array<{ peerHost: string; ok: boolean; kind?: string }> | null = null;
-    if (t.readonlyEnabled) {
-      peerHealth = [];
-      for (const base of t.peers) {
-        const single = injectedTransport ?? createGmxApiTransport(process.env, { peers: [base] });
-        const r = await single.getJson('/markets/tickers');
-        peerHealth.push(r.ok
-          ? { peerHost: r.peerHost, ok: true }
-          : { peerHost: new URL(base).host, ok: false, kind: r.kind });
-        if (injectedTransport) break; // 테스트 주입 시 단일 transport로만
-      }
-    }
-
-    // §9 reconciliation 1회 — readonly 게이트 내장 (플래그 꺼짐 = scanned 0)
-    const recon = await reconcileGmxApiTasks(
-      injectedTransport
-        ? { transport: injectedTransport, onchain: null, nowMs: () => Date.now() }
-        : makeProductionDeps(),
-    );
-    const canaryEvidence = t.readonlyEnabled
-      ? await refreshManualCanaryReadonlyEvidence()
-      : { decimals: {}, costs: {} };
-    const stopCapability = await refreshStopExecutionCapability();
+    const refreshResult = await runGmxApiReadinessRefresh({
+      transport: t,
+      peerTransportFactory: injectedTransport
+        ? () => injectedTransport as GmxApiTransport
+        : undefined,
+      singlePeerOnly: injectedTransport !== null,
+      forceDeployment: true,
+    });
 
     const snapshot = await buildGmxApiStatusSnapshot();
     return res.json({
       ok: true,
       refresh: {
-        readonlyEnabled: t.readonlyEnabled,
-        peerHealth,
-        reconciliation: recon,
-        canaryEvidence,
-        stopCapability,
+        generation: refreshResult.generation,
+        readonlyEnabled: refreshResult.readonlyEnabled,
+        peerHealth: refreshResult.peerHealth,
+        reconciliation: {
+          ran: false,
+          readOnly: true,
+          reason: 'readiness refresh에서는 durable reconciliation을 실행하지 않음',
+        },
+        canaryEvidence: refreshResult.canaryEvidence,
+        paperRuntimeReadiness: refreshResult.paperRuntimeReadiness,
+        paperStopReadinessEvidence: refreshResult.paperStopReadinessEvidence,
+        stopCapability: refreshResult.stopCapability,
       },
       status: snapshot,
     });

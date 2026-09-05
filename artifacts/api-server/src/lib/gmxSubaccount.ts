@@ -1,8 +1,13 @@
 /**
- * GMX V2 SubaccountRouter — 온체인 상태 조회 및 MetaMask 트랜잭션 빌더
+ * GMX V2 delegated authorization 조회 및 legacy MetaMask 트랜잭션 빌더
  *
  * 이 모듈은 읽기 전용(view call) 및 미서명 트랜잭션 데이터 빌드만 수행합니다.
  * 실제 온체인 전송은 liveTestExecutor.ts 또는 MetaMask(브라우저)가 담당합니다.
+ *
+ * Safety boundary:
+ * - Subaccount authorization/read/unsigned-tx paths must use the separately audited
+ *   canonical Arbitrum One SubaccountRouter only.
+ * - A syntactically valid but different address must never be accepted here.
  */
 
 import { createPublicClient, http, encodeFunctionData } from 'viem';
@@ -11,8 +16,33 @@ import {
   SUBACCOUNT_ROUTER_ABI,
   ERC20_APPROVE_ABI,
   USDC_ADDRESS,
-  getSubaccountRouterAddress,
 } from './gmxContracts';
+import {
+  GMX_CANONICAL_SUBACCOUNT_ROUTER_AUDIT,
+  validateCanonicalSubaccountRouterEnv,
+} from './gmxCanonicalSubaccountRouterAudit';
+import { createCanonicalDataStoreClient } from './gmxCanonicalClient';
+import { readSubaccountAuthorization, type DataStoreClient } from './gmxDataStore';
+import { resolveGmxLiveRelayConfig } from './gmxLiveConfig';
+import { validateEnvAgainstManifest } from './gmxDeploymentManifest';
+
+/**
+ * Execution-boundary router resolver.
+ *
+ * Keep this stricter than the generic gmxContracts getter: readiness and unrelated
+ * startup reads may need to report an invalid configuration without throwing, but
+ * any delegation read or unsigned authorization/revoke transaction built by this
+ * module must be pinned to the audited canonical router.
+ */
+function getCanonicalSubaccountRouterAddress(): `0x${string}` {
+  const validation = validateCanonicalSubaccountRouterEnv(process.env);
+  if (!validation.ok) {
+    throw new Error(
+      '[GMXSubaccount] canonical SubaccountRouter unavailable or mismatched — fail-closed',
+    );
+  }
+  return GMX_CANONICAL_SUBACCOUNT_ROUTER_AUDIT.address as `0x${string}`;
+}
 
 // ── RPC 클라이언트 ─────────────────────────────────────────────────────────────
 function getRpcUrl(): string {
@@ -28,7 +58,7 @@ function getPublicClient() {
   });
 }
 
-// ── 위임 상태 조회 ─────────────────────────────────────────────────────────────
+// ── API v2 canonical 위임 상태 조회 ────────────────────────────────────────────
 
 export interface DelegationStatus {
   /** 서브계정이 온체인에서 승인되어 있는지 여부 */
@@ -49,9 +79,21 @@ export interface DelegationStatus {
   queryError?:        string;
 }
 
+let apiV2DelegationClientFactory: () => DataStoreClient = createCanonicalDataStoreClient;
+
+export function __setApiV2DelegationClientFactoryForTests(
+  factory: (() => DataStoreClient) | null,
+): void {
+  apiV2DelegationClientFactory = factory ?? createCanonicalDataStoreClient;
+}
+
 /**
- * SubaccountRouter.subaccounts() 뷰 호출로 위임 상태를 온체인에서 조회.
- * RPC 실패 시 fail-closed (isAuthorized: false).
+ * GMX API v2의 canonical DataStore + SubaccountGelatoRelayRouter 계약으로
+ * delegated authorization을 조회한다.
+ *
+ * 중요: SubaccountRouter.subaccounts()는 legacy direct-router 세대의 상태다.
+ * API v2 submit path가 그 값을 요구하면 올바른 Owner Approval도 거부하므로,
+ * 이 readback은 반드시 API v2 manifest와 DataStore 키 계약만 사용한다.
  */
 export async function checkDelegationStatus(
   mainAddress: string,
@@ -68,22 +110,42 @@ export async function checkDelegationStatus(
   };
 
   try {
-    const routerAddress = getSubaccountRouterAddress();
-    const client        = getPublicClient();
-    const nowUnix       = Math.floor(Date.now() / 1000);
+    const relay = resolveGmxLiveRelayConfig();
+    if (!relay.ok || !relay.config) {
+      return {
+        ...base,
+        queryError: '[GMXSubaccount] GMX API v2 relay config unavailable — fail-closed',
+      };
+    }
 
-    const result = await client.readContract({
-      address:      routerAddress,
-      abi:          SUBACCOUNT_ROUTER_ABI,
-      functionName: 'subaccounts',
-      args:         [mainAddress as `0x${string}`, signerAddress as `0x${string}`],
+    const manifest = validateEnvAgainstManifest(process.env);
+    if (!manifest.ok) {
+      return {
+        ...base,
+        queryError: '[GMXSubaccount] GMX API v2 relay manifest mismatch — fail-closed',
+      };
+    }
+
+    const result = await readSubaccountAuthorization({
+      client: apiV2DelegationClientFactory(),
+      dataStore: relay.config.dataStore as `0x${string}`,
+      relayRouter: relay.config.subaccountGelatoRelayRouter as `0x${string}`,
+      account: mainAddress as `0x${string}`,
+      subaccount: signerAddress as `0x${string}`,
     });
+    if (!result.ok) return { ...base, queryError: result.reason };
 
-    // result = [remainingActions, expiresAt]
-    const remaining  = Number((result as [bigint, bigint])[0]);
-    const expiresAt  = Number((result as [bigint, bigint])[1]);
-    const isExpired  = expiresAt > 0 && expiresAt < nowUnix;
-    const isAuth     = remaining > 0 && !isExpired;
+    const onchain = result.data;
+    const remaining = Number(onchain.remaining);
+    const expiresAt = Number(onchain.expiresAt);
+    const nowUnix = Number(onchain.blockTimestamp ?? BigInt(Math.floor(Date.now() / 1000)));
+    const isExpired = expiresAt <= nowUnix;
+    const isAuth =
+      onchain.isSubaccountListed
+      && !onchain.featureDisabled
+      && !onchain.integrationDisabled
+      && remaining > 0
+      && !isExpired;
 
     return {
       ...base,
@@ -94,13 +156,17 @@ export async function checkDelegationStatus(
       queryOk:          true,
     };
   } catch (err: unknown) {
-    const msg = (err as Error).message ?? 'Unknown RPC error';
+    const msg = err instanceof Error && err.message.startsWith('[GMXSubaccount]')
+      ? err.message
+      : '[GMXSubaccount] GMX API v2 canonical readback unavailable — fail-closed';
     console.error('[GMXSubaccount] checkDelegationStatus 실패:', msg);
     return { ...base, queryError: msg };
   }
 }
 
-// ── MetaMask 트랜잭션 빌더 (실제 전송은 사용자가 MetaMask로 수행) ────────────────
+// ── Legacy direct-router MetaMask 트랜잭션 빌더 ─────────────────────────────────
+// API v2 Owner Approval과 혼용 금지. 기존 명시적 operator 경로 호환을 위해
+// 남겨 두되, audited legacy env가 없으면 계속 fail-closed한다.
 
 export interface UnsignedTx {
   to:    string;
@@ -110,11 +176,11 @@ export interface UnsignedTx {
 
 /**
  * MetaMask에서 실행할 USDC approve 트랜잭션 빌드.
- * 메인 지갑이 SubaccountRouter에게 USDC 사용 권한 부여.
+ * 메인 지갑이 canonical SubaccountRouter에게 USDC 사용 권한 부여.
  * amount: USDC wei (6 decimals). 기본값: 15 USDC (하드캡).
  */
 export function buildUsdcApproveTx(amount: bigint = 15_000_000n): UnsignedTx {
-  const routerAddress = getSubaccountRouterAddress();
+  const routerAddress = getCanonicalSubaccountRouterAddress();
   const data = encodeFunctionData({
     abi:          ERC20_APPROVE_ABI,
     functionName: 'approve',
@@ -136,7 +202,7 @@ export function buildAddSubaccountTx(
   maxActions: number = 10,
   validHours: number = 24,
 ): UnsignedTx {
-  const routerAddress = getSubaccountRouterAddress();
+  const routerAddress = getCanonicalSubaccountRouterAddress();
   const expiresAt     = BigInt(Math.floor(Date.now() / 1000) + validHours * 3600);
   const data = encodeFunctionData({
     abi:          SUBACCOUNT_ROUTER_ABI,
@@ -157,7 +223,7 @@ export function buildAddSubaccountTx(
  * 서버 사이너 지갑이 직접 온체인 전송할 수 있음.
  */
 export function buildRemoveSubaccountTx(signerAddress: string): UnsignedTx {
-  const routerAddress = getSubaccountRouterAddress();
+  const routerAddress = getCanonicalSubaccountRouterAddress();
   const data = encodeFunctionData({
     abi:          SUBACCOUNT_ROUTER_ABI,
     functionName: 'removeSubaccount',
@@ -171,7 +237,7 @@ export function buildRemoveSubaccountTx(signerAddress: string): UnsignedTx {
  */
 export async function getUsdcAllowance(mainAddress: string): Promise<bigint> {
   try {
-    const routerAddress = getSubaccountRouterAddress();
+    const routerAddress = getCanonicalSubaccountRouterAddress();
     const client        = getPublicClient();
     const result = await client.readContract({
       address:      USDC_ADDRESS as `0x${string}`,
@@ -188,6 +254,7 @@ export async function getUsdcAllowance(mainAddress: string): Promise<bigint> {
 /**
  * 지정 spender에 대한 USDC allowance 조회 (#124-B canary 카드용).
  * 조회 실패는 null 반환 (0으로 위장 금지 — 표시 fail-closed).
+ * 이 generic helper는 caller가 전달한 spender를 조회하며 authorization builder가 아니다.
  */
 export async function getUsdcAllowanceForSpender(mainAddress: string, spender: string): Promise<bigint | null> {
   try {
@@ -206,12 +273,12 @@ export async function getUsdcAllowanceForSpender(mainAddress: string, spender: s
 
 /**
  * SubaccountRouter 컨트랙트가 올바르게 배포되어 있는지 검증.
- * 알려진 주소로 view 호출을 시도하고 결과 형태를 확인.
+ * canonical 주소로 view 호출을 시도하고 결과 형태를 확인.
  * 서버 시작 시 한 번 호출.
  */
 export async function verifySubaccountRouter(): Promise<{ ok: boolean; error?: string }> {
   try {
-    const routerAddress = getSubaccountRouterAddress();
+    const routerAddress = getCanonicalSubaccountRouterAddress();
     const client        = getPublicClient();
     // 임의 주소로 view 호출 — 응답이 배열이어야 함
     await client.readContract({

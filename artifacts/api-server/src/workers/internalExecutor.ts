@@ -82,7 +82,13 @@ export interface ExecutorStatus {
   // ── AI Worker status ───────────────────────────────────────────────────────
   /** true when an AI cycle is actively executing */
   workerRunning: boolean;
-  /** ISO timestamp of the last completed AI cycle */
+  /** ISO timestamp of the last completed scheduler cycle, including duplicate skips/errors */
+  schedulerHeartbeatAt: string | null;
+  /** ISO timestamp of the most recent newly claimed durable decision */
+  lastDecisionAt: string | null;
+  /** Outcome of the latest completed scheduler cycle in the current lifecycle */
+  lastSchedulerCycleOutcome: import('./aiWorker').SchedulerCycleOutcome | null;
+  /** @deprecated Compatibility alias for lastDecisionAt */
   lastCycleAt: string | null;
   /** Summary of the last AI cycle result */
   lastCycleResult: import('./aiWorker').WorkerCycleResult | null;
@@ -235,6 +241,9 @@ export function getExecutorStatus(): ExecutorStatus {
     lastRpcCheckAt,
     // AI Worker
     workerRunning:        workerStatus.workerRunning,
+    schedulerHeartbeatAt: workerStatus.schedulerHeartbeatAt,
+    lastDecisionAt:       workerStatus.lastDecisionAt,
+    lastSchedulerCycleOutcome: workerStatus.lastSchedulerCycleOutcome,
     lastCycleAt:          workerStatus.lastCycleAt,
     lastCycleResult:      workerStatus.lastCycleResult,
     cycleCount:           workerStatus.cycleCount,

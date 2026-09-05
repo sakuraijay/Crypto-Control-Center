@@ -29,6 +29,7 @@ import {
   decryptSensitiveHex,
 } from './delegatedSigner';
 import { SESSION_STATUS, APPROVAL_PURPOSE, APPROVAL_LIMITS, getConfiguredMainAccount } from './ownerApprovalSession';
+import { isExpiredOrMalformedOwnerApprovalTimestamp } from './ownerApprovalExpiry';
 import { GMX_DEPLOYMENT_MANIFEST } from './gmxDeploymentManifest';
 import { USDC_ADDRESS, ZERO_ADDRESS, usdSizeToGmx, usdToUsdcWei } from './gmxContracts';
 import { GMX_API_CHAIN_ID, type GmxApiResult, type GmxApiTransport } from './gmxApiTransport';
@@ -484,6 +485,13 @@ export async function getReadyApprovalForSubmit(params: {
   if (!row) return { ok: false, reason: 'OWNER_SIGNATURE_READY approval 세션 없음' };
   if (row.mainAccount !== params.expectedOwner.toLowerCase()) return { ok: false, reason: 'approval main account 불일치' };
   if (row.subaccount !== params.expectedSubaccount.toLowerCase()) return { ok: false, reason: 'approval subaccount 불일치' };
+  const nowSeconds = BigInt(Math.floor(Date.now() / 1000));
+  if (
+    isExpiredOrMalformedOwnerApprovalTimestamp(row.expiresAt, nowSeconds)
+    || isExpiredOrMalformedOwnerApprovalTimestamp(row.deadline, nowSeconds)
+  ) {
+    return { ok: false, reason: 'approval 만료 또는 timestamp 비정상 — 제출 차단 (fail-closed)' };
+  }
   if (params.canonicalNonce !== null && BigInt(row.approvalNonce) !== params.canonicalNonce) {
     return { ok: false, reason: 'approval nonce가 canonical과 불일치' };
   }
@@ -540,6 +548,7 @@ export interface ActivationSourceDeps {
   reconciled: boolean;
   canonicalAuthorized: boolean;
   approvalRemainingOk: boolean;      // remainingActions > 0 && not expired
+  inFlightReservedActions: number | null; // null = DB 조회 실패 → Manual Canary OPEN 차단
   blockingIntentCount: number | null; // null = 조회 실패 → 차단
   activeRevokeInProgress: boolean;
   freshLiveFeeQuote: boolean;
@@ -558,6 +567,7 @@ export function buildActivationInput(d: ActivationSourceDeps): ActivationGateInp
     signerInitialized: isSignerInitialized(),
     // §6 — canonical verified + approval 미만료·잔여 액션 확인까지 묶어서 결속
     canonicalAuthorized: d.canonicalAuthorized && d.approvalRemainingOk,
+    canonicalInFlightReservedActions: d.inFlightReservedActions,
     emergencyStopActive: d.emergencyStopActive,
     dbOk: d.dbOk && d.blockingIntentCount !== null,
     rpcOk: d.rpcOk,
@@ -575,9 +585,16 @@ export function buildActivationInput(d: ActivationSourceDeps): ActivationGateInp
 // ── §5 실행 오케스트레이터 ────────────────────────────────────────────────────
 
 export interface OpenPositionEvidence {
+  /** GMX V2 canonical position key from PositionReader inputs. */
+  positionKey?: string;
+  /** PositionReader account address; required for exact CLOSE settlement binding. */
+  accountAddress?: string;
   marketAddress: string;
+  collateralToken?: string;
   isLong: boolean;
   sizeUsd: number;
+  /** PositionReader exact sizeInUsd uint256 (1e30 integer string). */
+  sizeUsd30?: string;
 }
 
 export interface ExecuteViaGmxApiInput {
@@ -590,6 +607,14 @@ export interface ExecuteViaGmxApiInput {
   openPosition?: OpenPositionEvidence | null;
   /** canonical approval nonce (재확인용). null = 미확인 → approval 동봉 불가 */
   canonicalNonce: bigint | null;
+  /**
+   * confirmed OPEN 보호 flow에서만: finality 검증된 source OPEN relay task 한 건.
+   * submit flow는 이 ID만 blocking count에서 제외하며 다른 task는 모두 보존한다.
+   */
+  allowedBlockingSourceOpen?: {
+    taskId: string;
+    intentId: string;
+  } | null;
   nowMs?: number;
 }
 
@@ -716,6 +741,7 @@ function makeFlowInput(
     // STOP_LOSS는 위험감소 주문 — durable flow/activation gate에는 CLOSE 계열로 취급
     kind: req.kind === 'OPEN' ? 'OPEN' as const : 'CLOSE' as const,
     intentId: input.intentId,
+    allowedBlockingSourceOpen: input.allowedBlockingSourceOpen ?? null,
     approvalSessionId: null,
     // 6G-3 §3 — 외부 prepare 호출 전에 결정되는 flow idempotency key.
     // intent 1건당 relay task 1건 (intent id 자체가 결정적 idempotent id).

@@ -40,6 +40,11 @@ export interface GmxSubmitFlowInput {
   activation: ActivationGateInput;
   kind: 'OPEN' | 'CLOSE';
   intentId: string | null;
+  /** confirmed OPEN 보호 handoff의 finality 검증된 source OPEN 결속 한 건만 제외. */
+  allowedBlockingSourceOpen?: {
+    taskId: string;
+    intentId: string;
+  } | null;
   approvalSessionId: string | null;
   /**
    * 6G-3 §3 — 외부 prepare 호출 전에 결정 가능한 flow idempotency key.
@@ -121,6 +126,16 @@ export async function runGmxApiSubmitFlow(input: GmxSubmitFlowInput): Promise<Gm
     finalStatus: null, taskRowId: null, gmxRequestId: null, blockReasons,
   };
 
+  // 실제 durable flow의 주문 의미와 activation gate의 의미를 먼저 결속한다.
+  // OPEN을 CLOSE로 위장해 Manual Canary canonical 검증을 우회하는 모순 입력은
+  // durable task 생성·prepare·서명·submit 이전에 fail-closed.
+  if (input.activation.kind !== input.kind) {
+    blockReasons.push(
+      `activation kind ${input.activation.kind} ≠ flow kind ${input.kind} — prepare·서명·제출 0회 (fail-closed)`,
+    );
+    return result;
+  }
+
   // 1. 중앙 게이트 — 미충족이면 durable 기록·prepare 호출 0회 (PAPER/LOCK 포함)
   const gate = evaluateActivationGate(input.activation);
   if (!gate.networkEligible) {
@@ -133,7 +148,11 @@ export async function runGmxApiSubmitFlow(input: GmxSubmitFlowInput): Promise<Gm
   }
 
   // 1b. §6 — 다른 blocking relay task 존재/조회 실패 시 신규 실행 차단 (prepare 0회)
-  const blockingBefore = await countBlockingRelayTasksOrNull({ transportGen: GMX_API_TRANSPORT_GEN });
+  const sourceOpen = input.allowedBlockingSourceOpen ?? null;
+  const blockingBefore = await countBlockingRelayTasksOrNull({
+    transportGen: GMX_API_TRANSPORT_GEN,
+    excludeSourceOpen: sourceOpen,
+  });
   if (blockingBefore === null) {
     blockReasons.push('blocking relay task 조회 실패 — 신규 실행 차단 (fail-closed)');
     return result;
@@ -165,7 +184,9 @@ export async function runGmxApiSubmitFlow(input: GmxSubmitFlowInput): Promise<Gm
   // 제외하고 다시 센다. 동시 flow가 있으면 양쪽 다 여기서 CANCELLED(외부 호출 0회)
   // — 승자 선출 대신 fail-closed. 조회 실패도 CANCELLED.
   const blockingAfterInsert = await countBlockingRelayTasksOrNull({
-    transportGen: GMX_API_TRANSPORT_GEN, excludeTaskId: created.taskId,
+    transportGen: GMX_API_TRANSPORT_GEN,
+    excludeTaskIds: [created.taskId],
+    excludeSourceOpen: sourceOpen,
   });
   if (blockingAfterInsert === null || blockingAfterInsert > 0) {
     blockReasons.push(blockingAfterInsert === null
@@ -324,6 +345,12 @@ export async function runGmxApiSubmitFlow(input: GmxSubmitFlowInput): Promise<Gm
     await cancelBeforeSubmit('게이트 재평가 실패 — 제출 0회 (fail-closed)');
     return result;
   }
+  if (regate.kind !== input.kind) {
+    await cancelBeforeSubmit(
+      `제출 직전 activation kind ${regate.kind} ≠ flow kind ${input.kind} — 제출 0회 (fail-closed)`,
+    );
+    return result;
+  }
   const gate2 = evaluateActivationGate(regate);
   if (!gate2.networkEligible) {
     blockReasons.push(...gate2.missing);
@@ -331,7 +358,9 @@ export async function runGmxApiSubmitFlow(input: GmxSubmitFlowInput): Promise<Gm
     return result;
   }
   const blockingAtSubmit = await countBlockingRelayTasksOrNull({
-    transportGen: GMX_API_TRANSPORT_GEN, excludeTaskId: result.taskRowId,
+    transportGen: GMX_API_TRANSPORT_GEN,
+    excludeTaskIds: [result.taskRowId!],
+    excludeSourceOpen: sourceOpen,
   });
   if (blockingAtSubmit === null || blockingAtSubmit > 0) {
     await cancelBeforeSubmit(blockingAtSubmit === null

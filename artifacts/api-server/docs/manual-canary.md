@@ -78,6 +78,101 @@ PIN·서명·암호문·개인키·RPC URL은 응답/로그/DB 평문에 절대 
 
 ## 실제 실행 전 필요한 것 (이 작업에서는 변경하지 않음)
 
-Production은 PAPER + LIVE_TEST_EXECUTION_LOCKED=true +
-GMX_API_ORDER_SUBMISSION_ENABLED=false 유지. 실제 canary는 별도 운영자 승인 후
-플래그 순서(readiness refresh 포함)를 따라야 한다.
+현재 승인된 Production effective 목표는 다음과 같다.
+
+- `WORKER_ENGINE_MODE=PAPER`
+- `AUTO_WORKER_LIVE_ENABLED=false`
+- `DELEGATED_SIGNER_ENABLED=true`
+- `GMX_API_ORDER_SUBMISSION_ENABLED=true`
+- `LIVE_TEST_EXECUTION_LOCKED=false`
+- `GMX_RELAY_SUBMISSION_ENABLED=false`
+- `GMX_RELAY_NETWORK_ENABLED=false`
+- `GMX_RELAY_MODE=DISABLED`
+
+`DELEGATED_SIGNER_ENABLED=true`, `GMX_API_ORDER_SUBMISSION_ENABLED=true`,
+`LIVE_TEST_EXECUTION_LOCKED=false`는 signer와 주문 API의 lower-layer capability를
+관측·검증할 수 있도록 준비한 상태일 뿐, 실제 execution authorization이나 주문
+제출 승인이 아니다.
+
+실제 주문 제출은 PAPER 모드와 AUTO LIVE 차단을 우회할 수 없으며, Relay
+submission/network가 모두 비활성화된 동안에는 구조적으로 차단된다. 이후에도
+fresh Owner Approval, canonical subaccount listed/authorized 상태와 action budget,
+Stop capability, fresh cost-cap, RiskEngine 허용, Controlled Canary readiness,
+운영자 명시 승인을 각각 통과해야 한다. 하나라도 충족하지 않으면 fail-closed로
+실행 권한은 부여되지 않는다.
+
+따라서 위 capability flag만으로 signer 사용, subaccount authorization, Relay
+submit, 실제 주문, 자금 이동 또는 Active Capital 승격이 자동 수행되지 않는다.
+실제 canary는 별도 운영자 승인 후 readiness refresh를 포함한 정해진 gate 순서를
+따라야 한다.
+
+## Controlled Canary blocker provenance
+
+운영자 status는 blocker의 출처와 실행 결과를 다음처럼 분리한다. 과거 기록이나
+PAPER 관측값을 active canonical READY 또는 execution-eligible 증거로 승격하지 않는다.
+
+| Blocker | Authoritative status provenance | Operator-facing 표시 | 실행 결과 |
+|---|---|---|---|
+| Historical Owner Approval READY | `staleOwnerSignatureReadySessionCount`; canonical nonce에 결속된 `approvalSessionReady`와 별도 | stale READY 수와 active READY 없음 | `actualSubmitPossible=false`; 과거 서명 재사용 금지 |
+| PAPER canonical authorization | `paperRelayEvidence.executionOnly[].failureId=CANONICAL_AUTHORIZATION_NOT_EVALUATED_IN_PAPER` | `NOT EVALUATED`, `READ-ONLY / NOT EXECUTION AUTHORIZATION` | canonical authorized로 간주하지 않음 |
+| PAPER action budget | `paperRelayEvidence.executionOnly[].failureId=ACTION_BUDGET_NOT_EVALUATED_IN_PAPER` | `NOT EVALUATED`; remaining actions를 `0`으로 대체하지 않음 | action budget sufficient로 간주하지 않음 |
+| RiskEngine HARD_STOPPED | `paperEpochPreflight.current`와 `preservedExecutionGates`의 risk state | `HARD_STOPPED`, entry false, unchanged | Canary/OPEN 차단; epoch 제안이 해제하지 않음 |
+| Fresh `$0.40` cost-cap evidence 없음 | `paperRuntimeReadiness.costs.*.executionSnapshot` 및 `executionEligibleCostEvidence` | `UNAVAILABLE (fail-closed)` 또는 cap 초과 blocker | 관측 비용을 실행 적격 비용으로 승격하지 않음 |
+| Stop capability false | `stopCapability.available=false`와 전체 `reasons` | `UNAVAILABLE (fail-closed)`, 평가 시각·경계·이유 | 보호 Stop을 보장할 수 없으므로 OPEN 차단 |
+| Relay disabled | `relaySubmissionEnabled=false`, `relaySubmitNetworkEnabled=false`, `relayMode=DISABLED` | `false / false / DISABLED`, 구조적으로 비활성 | Relay/LIVE 제출 불가 |
+
+모든 행은 독립 blocker다. 하나의 행이 PASS처럼 보이더라도 다른 blocker를 완화하지
+않으며, read-only status 조회 자체는 서명·authorization·주문·자금 이동을 수행하지
+않는다.
+
+## PAPER readiness와 Stop capability 진단
+
+- `GET /api/executor/gmx-api/status`는 process-memory snapshot만 표시하며 외부
+  호출, DB 상태 전이, signer 접근, 서명, prepare/submit을 수행하지 않는다.
+- 이 endpoint와 `POST /api/executor/gmx-api/readiness/refresh`는 모두 기존
+  operator 인증 경계 안에 있다. 인증되지 않은 자동 감사는 이 경계를 우회하지
+  않으며, 공개 `GET /api/executor/livetest/status`를 Canary 비용·Stop capability의
+  authoritative evidence로 해석하지 않는다.
+- 따라서 인증되지 않은 감사에서 fresh BTC/ETH cost-cap evidence가 보이지 않는
+  것은 GMX/RPC 조회 실패 판정이 아니라 `AUTHENTICATED_EVIDENCE_NOT_OBSERVED`다.
+  Stop capability도 같은 이유로 공개 status만으로 PASS를 주장할 수 없다.
+- 인증된 read-only snapshot의 상태 코드는 다음처럼 해석한다.
+  `NOT_EVALUATED`는 현재 process/generation에서 아직 평가 시도가 없었음을,
+  `MISSING`/`UNAVAILABLE`은 필요한 관측값이 없음을, `STALE`은 freshness window를
+  벗어났음을, `FAILED`는 새니타이즈된 조회 실패가 기록됐음을 뜻한다. 어느
+  상태도 PASS로 승격하거나 과거 snapshot을 fresh evidence로 재사용하지 않는다.
+- `paperRuntimeReadiness.boundary`는 항상
+  `READ_ONLY_NOT_EXECUTION_AUTHORIZATION`이다. Deployment/RPC/decimals/cost가
+  모두 verified여도 `readyForControlledCanary`나 Stop 실행 권한을 만들지 않는다.
+- Stop capability는 LIVE Stop 실행 전제조건의 순수 파생 상태다. UI는
+  `stopCapability.reasons` 전체와 평가 시각을 표시한다. PAPER에서 signer,
+  submission, 실행 잠금 등 독립 LIVE 조건이 미충족이면 불가가 정상이다.
+- scheduler는 45초 주기로 동작하며 process restart 시 cache를
+  `not_evaluated`에서 다시 구성한다. 같은 process의 timer, explicit refresh,
+  stop→restart 세대는 단일 active promise에 합류해 외부 read를 겹치지 않는다.
+- 실패 후 retry는 이전 cycle이 종료된 뒤 새 cycle 한 번으로만 수행한다.
+  중복 start는 새 scheduler를 만들지 않고, 정지된 이전 generation은 다음
+  timer를 예약하지 않는다.
+- 이 진단과 회귀 테스트는 DB-free dependency injection을 사용한다. HWM,
+  거래자본, 주문, execution-eligible cost evidence는 변경하지 않는다.
+
+## PAPER 비용 경제성 파생값
+
+- fresh/verified read-only cost snapshot에서만 거래수수료, 가스, 진입·청산
+  price impact, funding/borrowing, 기타 보수 조정과 총액을 표시한다.
+- 총 비용률은 `roundTripCost / $20`, cap 초과액은
+  `max(0, roundTripCost - $0.40)`, 필요 절감률은
+  `cap 초과액 / roundTripCost`로만 계산한다.
+- 현재 관측된 `$20 LONG / 1h` 총 비용 약 `$0.48`은 canonical `$0.40`
+  cap을 초과하므로 Canary는 차단 상태다. 이 한 점을 더 큰 주문에 선형
+  외삽하지 않는다. 경제적 최소 주문규모는 동일 market/direction/holding
+  조건에서 여러 notional의 fresh 공식 quote를 읽기 전용으로 sweep하고
+  `expectedGrossEdge(N) - effectiveRoundTripCost(N) > 0`인 최소 N을 찾아야 한다.
+  양의 기대값 근거와 Stop 실행 가능성이 모두 없으면 최소 주문규모는
+  `Unavailable`이며 주문 확대 근거로 사용할 수 없다.
+- 비용 회수 최소 gross move/edge는 총비용 USD와 `$20` 대비 총 비용률이다.
+  이는 수익 보장이나 주문 크기 확대 제안이 아니다.
+- snapshot이 missing/stale/invalid이면 비용 성분·총액·비율·절감값·손익분기값과
+  source를 모두 비우고 fail-closed `blockReason`만 표시한다.
+- 이 파생값은 process-memory 표시 전용이며 `$0.40` cap, HARD_STOP, HWM,
+  거래자본, LIVE/PAPER 잠금이나 execution-eligible evidence를 변경하지 않는다.

@@ -219,8 +219,12 @@ export interface ActiveRevokeSummary {
   createdAt: string;
 }
 
-/** 활성 REVOKE 세션 조회 — 서명·암호문 미포함. 없으면 null. */
-export async function getActiveRevokeSession(): Promise<ActiveRevokeSummary | null> {
+export type ActiveRevokeReadResult =
+  | { ok: true; session: ActiveRevokeSummary | null }
+  | { ok: false };
+
+/** 활성 REVOKE 세션 조회 결과 — 없음과 DB 조회 실패를 구분한다. */
+export async function getActiveRevokeSessionReadResult(): Promise<ActiveRevokeReadResult> {
   try {
     const rows = await db.select().from(subaccountApprovalSessionsTable)
       .where(and(
@@ -229,16 +233,24 @@ export async function getActiveRevokeSession(): Promise<ActiveRevokeSummary | nu
       ))
       .orderBy(desc(subaccountApprovalSessionsTable.createdAt)).limit(1);
     const row = rows[0];
-    if (!row) return null;
+    if (!row) return { ok: true, session: null };
     return {
-      sessionId: row.id, status: row.status, subaccount: row.subaccount,
-      deadline: row.deadline, feeToken: row.relayFeeToken, feeAmount: row.relayFeeAmount,
-      userNonce: row.relayUserNonce, createdAt: row.createdAt.toISOString(),
+      ok: true,
+      session: {
+        sessionId: row.id, status: row.status, subaccount: row.subaccount,
+        deadline: row.deadline, feeToken: row.relayFeeToken, feeAmount: row.relayFeeAmount,
+        userNonce: row.relayUserNonce, createdAt: row.createdAt.toISOString(),
+      },
     };
   } catch {
-    // 조회 실패 시 null — 호출측은 canonicalConfirmed 게이트로 이미 fail-closed
-    return null;
+    return { ok: false };
   }
+}
+
+/** 활성 REVOKE 세션 조회 — 서명·암호문 미포함. 없으면 null. */
+export async function getActiveRevokeSession(): Promise<ActiveRevokeSummary | null> {
+  const result = await getActiveRevokeSessionReadResult();
+  return result.ok ? result.session : null;
 }
 
 /** revoke 세션 취소 (운영자) — 활성 세션만 INVALIDATED */

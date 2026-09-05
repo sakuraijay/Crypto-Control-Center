@@ -10,7 +10,7 @@
  *  - PIN은 요청에만 사용, 저장·전달·표시 금지.
  */
 
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Radio, RefreshCw, Loader2, ShieldAlert, Lock, Ban, CheckCircle2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
@@ -62,21 +62,577 @@ function fmtExpires(expiresAt: string | number | null): string {
   try { return new Date(n * 1000).toLocaleString(); } catch { return '—'; }
 }
 
+function evidenceTone(state: 'not_evaluated' | 'verified' | 'stale' | 'failed'): Tone {
+  if (state === 'verified') return 'ok';
+  if (state === 'failed') return 'error';
+  if (state === 'stale') return 'warn';
+  return 'muted';
+}
+
+function evidenceLabel(state: 'not_evaluated' | 'verified' | 'stale' | 'failed'): string {
+  if (state === 'verified') return 'VERIFIED';
+  if (state === 'failed') return 'FAILED';
+  if (state === 'stale') return 'STALE';
+  return 'NOT EVALUATED';
+}
+
+function fmtAge(ageMs: number | null): string {
+  if (ageMs === null) return '—';
+  if (ageMs < 60_000) return `${Math.round(ageMs / 1000)}초`;
+  return `${Math.round(ageMs / 60_000)}분`;
+}
+
+function fmtUsd(value: number | null, digits = 6): string {
+  return value === null || !Number.isFinite(value) ? '—' : `$${value.toFixed(digits)}`;
+}
+
+function fmtPct(value: number | null, digits = 3): string {
+  return value === null || !Number.isFinite(value) ? '—' : `${value.toFixed(digits)}%`;
+}
+
+type PaperReadinessView = NonNullable<GmxApiStatusView['paperRuntimeReadiness']>;
+export type PaperCostView = PaperReadinessView['costs']['BTC'];
+type PaperEconomicsView = PaperReadinessView['economics']['BTC'];
+type StopReadinessEvidenceView = NonNullable<NonNullable<GmxApiStatusView['stopCapability']>['readinessEvidence']>;
+type PaperRelayEvidenceView = NonNullable<GmxApiStatusView['paperRelayEvidence']>;
+type PaperEpochPreflightView = NonNullable<GmxApiStatusView['paperEpochPreflight']>;
+
+export const FAIL_CLOSED_STATUS_MAX_AGE_MS = 30_000;
+
+export interface GmxApiCardEvidenceState {
+  status: GmxApiStatusView | null;
+  observedAtMs: number | null;
+  message: { tone: Tone; text: string } | null;
+}
+
+export function reduceGmxApiCardEvidence(
+  result: GmxApiFetchResult,
+  nowMs: number,
+): GmxApiCardEvidenceState {
+  if (result.kind === 'ok') {
+    return {
+      status: result.data,
+      observedAtMs: nowMs,
+      message: null,
+    };
+  }
+  return {
+    status: null,
+    observedAtMs: null,
+    message: {
+      tone: result.kind === 'OPERATOR_AUTH_REQUIRED' || result.kind === 'FORBIDDEN'
+        ? 'error'
+        : 'warn',
+      text: `${result.message} 이전 readiness 증거는 폐기되었습니다 (fail-closed).`,
+    },
+  };
+}
+
+export function getGmxApiEvidenceTtlMs(
+  status: GmxApiStatusView,
+  observedAtMs: number,
+  nowMs: number,
+): number {
+  const serverMaxAgeMs = status.executionEligibleCostMaxAgeMs;
+  const maxAgeMs = typeof serverMaxAgeMs === 'number'
+    && Number.isFinite(serverMaxAgeMs)
+    && serverMaxAgeMs > 0
+    ? Math.min(serverMaxAgeMs, FAIL_CLOSED_STATUS_MAX_AGE_MS)
+    : FAIL_CLOSED_STATUS_MAX_AGE_MS;
+  const localAgeMs = Math.max(0, nowMs - observedAtMs);
+  const currentPaperCostAges = status.paperRuntimeReadiness
+    ? Object.values(status.paperRuntimeReadiness.costs)
+      .filter((cost) => cost.state === 'verified' && cost.fresh && cost.observationalFresh)
+      .map((cost) => cost.ageMs)
+      .filter((ageMs): ageMs is number => ageMs !== null && Number.isFinite(ageMs))
+    : [];
+  const paperCostAgeMs = currentPaperCostAges.length > 0
+    ? Math.max(...currentPaperCostAges)
+    : 0;
+  const stopEvaluatedAtMs = status.stopCapability?.evaluatedAt
+    ? Date.parse(status.stopCapability.evaluatedAt)
+    : Number.NaN;
+  const stopCapabilityTtlMs = isStopCapabilityDisplayAvailable(status, nowMs)
+    && Number.isFinite(stopEvaluatedAtMs)
+    ? Math.max(0, stopEvaluatedAtMs + maxAgeMs - nowMs)
+    : maxAgeMs;
+  return Math.max(0, Math.min(
+    maxAgeMs - localAgeMs,
+    maxAgeMs - paperCostAgeMs,
+    stopCapabilityTtlMs,
+  ));
+}
+
+export function isPaperCostEvidenceCurrent(cost: PaperCostView): boolean {
+  return cost.state === 'verified'
+    && cost.fresh
+    && cost.observationalFresh
+    && cost.executionSnapshot.fresh
+    && cost.capUsd === 0.4
+    && cost.withinCap !== null
+    && cost.effectiveRoundTripCostUsd !== null
+    && Number.isFinite(cost.effectiveRoundTripCostUsd);
+}
+
+export function isPaperCostCapPass(cost: PaperCostView): boolean {
+  return isPaperCostEvidenceCurrent(cost)
+    && cost.executionSnapshot.eligible
+    && cost.withinCap === true;
+}
+
+export function isCurrentGmxApiRequest(
+  requestGeneration: number,
+  currentGeneration: number,
+): boolean {
+  return requestGeneration === currentGeneration;
+}
+
+export function isStopCapabilityDisplayAvailable(
+  status: GmxApiStatusView,
+  nowMs: number,
+): boolean {
+  const capability = status.stopCapability;
+  const evaluatedAtMs = capability?.evaluatedAt ? Date.parse(capability.evaluatedAt) : Number.NaN;
+  const refreshAtMs = status.lastReadinessRefresh.atMs;
+  const configuredMaxAgeMs = status.executionEligibleCostMaxAgeMs;
+  const maxAgeMs = typeof configuredMaxAgeMs === 'number'
+    && Number.isFinite(configuredMaxAgeMs)
+    && configuredMaxAgeMs > 0
+    ? Math.min(configuredMaxAgeMs, FAIL_CLOSED_STATUS_MAX_AGE_MS)
+    : FAIL_CLOSED_STATUS_MAX_AGE_MS;
+  const evaluationAgeMs = nowMs - evaluatedAtMs;
+  return capability?.available === true
+    && capability.reasons.length === 0
+    && capability.paperMode === false
+    && status.lastReadinessRefresh.ok
+    && refreshAtMs !== null
+    && Number.isFinite(evaluatedAtMs)
+    && Math.abs(evaluatedAtMs - refreshAtMs) <= 5_000
+    && evaluationAgeMs >= -5_000
+    && evaluationAgeMs <= maxAgeMs;
+}
+
+export function PaperRelayEvidence({ evidence }: { evidence: PaperRelayEvidenceView }) {
+  const entries = [...evidence.executionOnly, ...evidence.storedSafety];
+  return (
+    <div
+      className="sm:col-span-2 space-y-2 rounded border border-sky-500/30 bg-sky-500/5 p-2"
+      data-testid="paper-relay-evidence"
+    >
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <p className="text-[11px] font-semibold text-sky-300">PAPER Relay Evidence</p>
+          <p className="text-[10px] text-sky-200">
+            실행 전용 canonical·action budget·reconciliation은 PAPER에서 평가하지 않습니다.
+          </p>
+          <p className="font-mono text-[10px] text-muted-foreground">
+            {evidence.scope} · {evidence.boundary} · executionAuthorized false
+          </p>
+        </div>
+        <Badge tone="warn">READ-ONLY / NOT EXECUTION AUTHORIZATION</Badge>
+      </div>
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-2">
+        {entries.map((entry) => (
+          <div
+            key={entry.id}
+            className="rounded border border-border/60 bg-background/50 p-2"
+            data-testid={`paper-relay-evidence-${entry.id}`}
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="font-mono text-[10px]">{entry.id}</span>
+              <Badge tone={evidenceTone(entry.status)}>
+                {evidenceLabel(entry.status)}
+              </Badge>
+            </div>
+            <p className="text-[10px] text-muted-foreground">
+              {entry.fresh ? 'FRESH' : 'NOT FRESH'} · age {fmtAge(entry.ageMs)}
+              {' · '}failureId {entry.failureId ?? '—'}
+            </p>
+          </div>
+        ))}
+      </div>
+      <div className="flex flex-wrap gap-1" data-testid="paper-relay-failure-ids">
+        {evidence.failureIds.length === 0
+          ? <Badge tone="ok">저장 안전 결함 없음</Badge>
+          : evidence.failureIds.map((id) => <Badge key={id} tone="error">{id}</Badge>)}
+      </div>
+    </div>
+  );
+}
+
+export function PaperStopReadinessEvidence({ evidence }: { evidence: StopReadinessEvidenceView }) {
+  return (
+    <div
+      className="sm:col-span-2 w-full space-y-2 rounded border border-sky-500/30 bg-sky-500/5 p-2"
+      data-testid="paper-stop-readiness-evidence"
+    >
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <p className="text-[11px] font-semibold text-sky-300">PAPER Stop Readiness Evidence</p>
+          <p className="text-[10px] text-sky-200">
+            진단 전용·읽기 전용 · status는 권한 아님 · 실행 승인 아님
+          </p>
+          <p className="font-mono text-[10px] text-muted-foreground">
+            {evidence.scope} · {evidence.boundary} · executionAuthorized {String(evidence.executionAuthorized)}
+          </p>
+        </div>
+        <Badge tone="warn">READ-ONLY / NOT EXECUTION AUTHORIZATION</Badge>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6">
+        <Row
+          label="Readiness complete"
+          tone={evidence.readinessComplete ? 'ok' : 'error'}
+          value={String(evidence.readinessComplete)}
+        />
+        <Row
+          label="Freshness / generation"
+          tone={evidence.fresh ? 'ok' : 'warn'}
+          value={`${evidence.fresh ? 'FRESH' : 'STALE'} · generation ${evidence.generation ?? '—'}`}
+        />
+        <Row label="Evaluated" tone="muted" value={fmtEpochMs(evidence.evaluatedAtMs)} />
+        <Row label="Expires" tone={evidence.fresh ? 'muted' : 'warn'} value={fmtEpochMs(evidence.expiresAtMs)} />
+      </div>
+
+      <div className="space-y-1">
+        <p className="text-[10px] font-semibold text-muted-foreground">Missing condition IDs</p>
+        <div className="flex flex-wrap gap-1" data-testid="paper-stop-readiness-missing-ids">
+          {evidence.missingConditionIds.length === 0
+            ? <span className="text-[10px] text-muted-foreground">없음</span>
+            : evidence.missingConditionIds.map((id) => <Badge key={id} tone="warn">{id}</Badge>)}
+        </div>
+      </div>
+
+      {evidence.reasons.length > 0 && (
+        <div className="space-y-0.5" data-testid="paper-stop-readiness-reasons">
+          {evidence.reasons.map((reason) => (
+            <p key={reason} className="text-[10px] text-amber-300">• {reason}</p>
+          ))}
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-2">
+        {evidence.conditions.map((condition) => (
+          <div
+            key={condition.id}
+            className="rounded border border-border/60 bg-background/50 p-2 space-y-1"
+            data-testid={`paper-stop-readiness-condition-${condition.id}`}
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-[11px] font-semibold">{condition.label} · {condition.id}</span>
+              <Badge tone={evidenceTone(condition.status)}>{evidenceLabel(condition.status)}</Badge>
+            </div>
+            <p className="font-mono text-[10px] text-muted-foreground">
+              category {condition.category} · source {condition.source ?? '—'}
+            </p>
+            <p className="text-[10px] text-muted-foreground">
+              observed {fmtEpochMs(condition.observedAtMs)} · age {fmtAge(condition.ageMs)}
+              {' · '}{condition.fresh ? 'FRESH' : 'NOT FRESH'}
+            </p>
+            {(condition.failureId || condition.detail) && (
+              <p className="text-[10px] text-amber-300">
+                failureId {condition.failureId ?? '—'} · detail {condition.detail ?? '—'}
+              </p>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+export function PaperEpochPreflight({ view }: { view: PaperEpochPreflightView }) {
+  const countRows: Array<[string, number | null]> = [
+    ['Open positions', view.counts.openPositionCount],
+    ['Pending approvals', view.counts.pendingApprovalCount],
+    ['Pending closes', view.counts.pendingCloseCount],
+    ['Blocking intents', view.counts.blockingIntentCount],
+    ['Blocking protections', view.counts.blockingProtectionCount],
+    ['PAPER unresolved', view.counts.paperExecutorUnresolvedCount],
+    ['Relay unresolved', view.counts.unresolvedRelayTaskCount],
+    ['Unsettled trades', view.counts.unsettledTradeCount],
+    ['Open Relay tasks', view.counts.openRelayTaskCount],
+  ];
+  return (
+    <div className="space-y-3 rounded-md border border-violet-500/30 bg-violet-500/5 p-3" data-testid="paper-epoch-preflight">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <p className="text-[11px] font-semibold text-violet-300">PAPER Epoch Readiness / Preflight</p>
+          <p className="text-[10px] text-muted-foreground">
+            현재 상태를 읽고 새 epoch 제안값을 계산만 합니다. 상태 변경·epoch 생성·reset은 수행하지 않습니다.
+          </p>
+          <p className="font-mono text-[10px] text-muted-foreground">
+            {view.scope} · {view.boundary} · executionAuthorized false
+          </p>
+        </div>
+        <Badge tone={view.readyForPaperEpochProposal ? 'ok' : 'error'}>
+          {view.readyForPaperEpochProposal ? 'PREFLIGHT READY' : 'FAIL-CLOSED'}
+        </Badge>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6">
+        {countRows.map(([label, value]) => (
+          <Row
+            key={label}
+            label={label}
+            tone={value === null ? 'warn' : value === 0 ? 'ok' : 'error'}
+            value={value === null ? 'UNAVAILABLE' : String(value)}
+          />
+        ))}
+      </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-2">
+        <div className="rounded border border-border/60 bg-background/50 p-2 space-y-1">
+          <p className="text-[11px] font-semibold">Current · 실제 관측</p>
+          <p className="text-[10px]">Active Trading Capital {fmtUsd(view.current.activeTradingCapitalUsd, 2)}</p>
+          <p className="text-[10px]">Equity / HWM {fmtUsd(view.current.currentEquityUsd, 2)} / {fmtUsd(view.current.equityHwmUsd, 2)}</p>
+          <p className="text-[10px]">Daily / Weekly baseline {fmtUsd(view.current.dailyRiskBaselineUsd, 2)} / {fmtUsd(view.current.weeklyRiskBaselineUsd, 2)}</p>
+          <p className="text-[10px]">Reserve policy {view.current.reserveCashPct === null ? '—' : `${view.current.reserveCashPct}%`} · 별도 상태</p>
+        </div>
+        <div className="rounded border border-border/60 bg-background/50 p-2 space-y-1">
+          <p className="text-[11px] font-semibold">Planned · 활성 자본 아님</p>
+          <p className="text-[10px]">Planned Seed {fmtUsd(view.planned.seedCapitalUsd, 0)}</p>
+          <p className="text-[10px]">Active Capital stages {view.planned.activeCapitalStagesUsd.map((v) => `$${v.toLocaleString()}`).join(' → ')}</p>
+          <p className="font-mono text-[9px] text-muted-foreground">{view.planned.separation}</p>
+        </div>
+        <div className="rounded border border-violet-500/30 bg-violet-500/5 p-2 space-y-1">
+          <p className="text-[11px] font-semibold">Proposed New Epoch · 계산 전용</p>
+          <p className="text-[10px]">Active Capital / HWM {fmtUsd(view.proposedNewEpoch.activeTradingCapitalUsd, 0)} / {fmtUsd(view.proposedNewEpoch.equityHwmUsd, 0)}</p>
+          <p className="text-[10px]">Daily / Weekly baseline {fmtUsd(view.proposedNewEpoch.dailyRiskBaselineUsd, 0)} / {fmtUsd(view.proposedNewEpoch.weeklyRiskBaselineUsd, 0)}</p>
+          <Badge tone="muted">APPLIED false · persistenceId —</Badge>
+        </div>
+        <div className="rounded border border-sky-500/30 bg-sky-500/5 p-2 space-y-1" data-testid="paper-test-allocation-plan">
+          <p className="text-[11px] font-semibold text-sky-300">PAPER TEST ALLOCATION · approved plan</p>
+          <p className="text-[10px]">
+            Total {fmtUsd(view.paperTestAllocationPlan.totalAllocationUsd, 0)}
+            {' '}= deployable {fmtUsd(view.paperTestAllocationPlan.deployableUsd, 0)}
+            {' '}+ reserve {fmtUsd(view.paperTestAllocationPlan.reserveUsd, 0)} ({view.paperTestAllocationPlan.reservePercent}%)
+          </p>
+          <p className="text-[10px]">
+            Risk ${view.paperTestAllocationPlan.futureActiveCapitalPolicyCandidate.baseRiskPerTradeUsd}
+            {' '}/ ${view.paperTestAllocationPlan.futureActiveCapitalPolicyCandidate.maxRiskPerTradeUsd}
+            {' '}· Hard Stop candidate ${view.paperTestAllocationPlan.futureActiveCapitalPolicyCandidate.hardStopEquityUsd}
+            {' '}· max margin ${view.paperTestAllocationPlan.futureActiveCapitalPolicyCandidate.recommendedMaxMarginPerTradeUsd}
+          </p>
+          <Badge tone="muted">PROPOSED · runtime/DB/HWM unchanged</Badge>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6">
+        <Row label="PAPER / AUTO LIVE" tone={view.boundaries.engineMode === 'PAPER' && view.boundaries.autoWorkerLiveEnabled === false ? 'ok' : 'error'}
+          value={`${view.boundaries.engineMode ?? 'UNAVAILABLE'} / ${String(view.boundaries.autoWorkerLiveEnabled)}`} />
+        <Row label="Relay submit / network / mode" tone={view.boundaries.relaySubmissionEnabled === false && view.boundaries.relaySubmitNetworkEnabled === false && view.boundaries.relayMode === 'DISABLED' ? 'ok' : 'error'}
+          value={`${String(view.boundaries.relaySubmissionEnabled)} / ${String(view.boundaries.relaySubmitNetworkEnabled)} / ${view.boundaries.relayMode ?? 'UNAVAILABLE'}`} />
+        <Row label="Canary / Stop gates" tone="muted"
+          value={`${String(view.preservedExecutionGates.readyForControlledCanary)} / ${String(view.preservedExecutionGates.stopExecutionAvailable)} · unchanged`} />
+        <Row label="RiskEngine gate" tone={view.preservedExecutionGates.riskEntryAllowed ? 'warn' : 'muted'}
+          value={`${view.preservedExecutionGates.riskOperatingState ?? 'UNAVAILABLE'} · entry ${String(view.preservedExecutionGates.riskEntryAllowed)} · unchanged`} />
+      </div>
+
+      <div className="flex flex-wrap gap-1" data-testid="paper-epoch-blocker-ids">
+        {view.blockerIds.length === 0
+          ? <Badge tone="ok">선행조건 결함 없음</Badge>
+          : view.blockerIds.map((id) => <Badge key={id} tone="error">{id}</Badge>)}
+      </div>
+      {view.notices.map((notice) => <p key={notice} className="text-[10px] text-muted-foreground">• {notice}</p>)}
+    </div>
+  );
+}
+
+function PaperCostDiagnostics({ symbol, cost }: { symbol: 'BTC' | 'ETH'; cost: PaperCostView }) {
+  const diagnostics = cost.diagnostics;
+  if (!diagnostics) return null;
+  const firstFailure = diagnostics.firstFailure ?? diagnostics.failures[0] ?? null;
+  const firstFailureText = firstFailure
+    ? [
+      `첫 실패 ${firstFailure.component}←${firstFailure.sourceId}/${firstFailure.failureClass}`,
+      firstFailure.httpStatus === null ? null : `HTTP ${firstFailure.httpStatus}`,
+      firstFailure.peerPath.length > 0
+        ? firstFailure.peerPath.join('→')
+        : firstFailure.peerHost,
+    ].filter(Boolean).join(' · ')
+    : '성분 실패 없음';
+  const sourceTraceText = (diagnostics.sourceTraces ?? [])
+    .map((trace) => {
+      const path = trace.attempts
+        .map((attempt) =>
+          `${attempt.peerHost}:${attempt.failureClass ?? 'ok'}${attempt.httpStatus === null ? '' : `/HTTP${attempt.httpStatus}`}`)
+        .join('→');
+      return `${trace.sourceId}[${path || '호출 없음'}]`;
+    })
+    .join(' · ');
+  return (
+    <div className="font-mono text-[10px] text-muted-foreground leading-relaxed"
+      data-testid={`paper-cost-${symbol.toLowerCase()}-diagnostics`}>
+      <p>{firstFailureText}</p>
+      {sourceTraceText && <p>{sourceTraceText}</p>}
+      <p>
+        시도 {diagnostics.attemptCount} · retry {diagnostics.retryCount ?? 0} · failover {diagnostics.failoverCount}
+        {' · '}마지막 시도 {fmtEpochMs(diagnostics.lastAttemptAtMs)}
+        {' · '}성공 {fmtEpochMs(diagnostics.lastSuccessAtMs)}
+        {' · '}실패 {fmtEpochMs(diagnostics.lastFailureAtMs)}
+      </p>
+    </div>
+  );
+}
+
+export function PaperCostDetails({
+  symbol,
+  cost,
+}: {
+  symbol: 'BTC' | 'ETH';
+  cost: PaperCostView;
+}) {
+  const overCap = cost.withinCap === false;
+  const evidenceCurrent = isPaperCostEvidenceCurrent(cost);
+
+  if (!evidenceCurrent) {
+    return (
+      <>
+        <p className="text-[10px] text-amber-300" data-testid={`paper-cost-${symbol.toLowerCase()}-blocked`}>
+          UNAVAILABLE (fail-closed) · {cost.blockReason ?? cost.failureId ?? `${symbol} 비용 snapshot 사용 불가`}
+        </p>
+        <PaperCostDiagnostics symbol={symbol} cost={cost} />
+      </>
+    );
+  }
+
+  return (
+    <>
+      <p className="font-mono text-[10px] text-muted-foreground" data-testid={`paper-cost-${symbol.toLowerCase()}-evidence-boundary`}>
+        관측 evidence {cost.observationalFresh ? 'FRESH' : 'STALE'}
+        {' · '}실행 snapshot {cost.executionSnapshot.eligible ? 'ELIGIBLE' : 'INELIGIBLE'}
+        {' · '}실행 권한 {cost.executionSnapshot.authorized ? 'GRANTED' : 'NONE (read-only)'}
+      </p>
+      <p className={cn('font-mono text-[12px]', overCap ? 'text-red-300' : 'text-foreground')}>
+        총 {fmtUsd(cost.effectiveRoundTripCostUsd)} · notional 대비 {fmtPct(cost.totalCostRatePct)}
+        {' · '}cap {fmtUsd(cost.capUsd)} · 초과 {fmtUsd(cost.capExcessUsd)} ({fmtPct(cost.capExcessRatePct)})
+      </p>
+      <p className="font-mono text-[10px] text-muted-foreground leading-relaxed">
+        거래수수료 {fmtUsd(cost.tradingFeesUsd)} · 가스 {fmtUsd(cost.executionFeeUsd)}
+        {' · '}price impact {fmtUsd(cost.priceImpactTotalUsd)}
+        {' · '}funding/borrowing {fmtUsd(cost.carryCostUsd)}
+        {' · '}기타/보수 조정 {fmtUsd(cost.otherCostUsd)}
+      </p>
+      <p className="font-mono text-[10px] text-muted-foreground leading-relaxed">
+        raw: entry {fmtUsd(cost.positionFeeUsd)} · exit {fmtUsd(cost.estimatedExitFeeUsd)}
+        {' · '}entry impact {fmtUsd(cost.estimatedPriceImpactUsd)}
+        {' · '}exit impact {fmtUsd(cost.estimatedExitPriceImpactUsd)}
+        {' · '}funding {fmtUsd(cost.fundingFeeUsd)}
+        {' · '}borrowing {fmtUsd(cost.borrowingFeeUsd)}
+      </p>
+      <p className="text-[10px] text-muted-foreground">
+        cap 충족 필요 절감 {fmtUsd(cost.requiredCostReductionUsd)} ({fmtPct(cost.requiredCostReductionPct)})
+        {' · '}비용 회수 최소 gross move/edge {fmtUsd(cost.breakEvenGrossMoveUsd)} ({fmtPct(cost.breakEvenGrossMovePct)})
+      </p>
+      <p className="text-[10px] text-muted-foreground">
+        source {cost.source ?? '—'} · fetched {cost.fetchedAt ?? '—'} · observed {fmtEpochMs(cost.observedAtMs)} · age {fmtAge(cost.ageMs)}
+      </p>
+      <PaperCostDiagnostics symbol={symbol} cost={cost} />
+      {cost.executionSnapshot.blockReason && (
+        <p className="text-[10px] text-red-300" data-testid={`paper-cost-${symbol.toLowerCase()}-execution-block`}>
+          {cost.executionSnapshot.blockReason}
+        </p>
+      )}
+    </>
+  );
+}
+
+export function PaperEconomicsDetails({
+  symbol,
+  economics,
+}: {
+  symbol: 'BTC' | 'ETH';
+  economics: PaperEconomicsView;
+}) {
+  if (economics.state === 'UNAVAILABLE') {
+    return (
+      <div className="text-[10px] text-amber-300" data-testid={`paper-economics-${symbol.toLowerCase()}`}>
+        <p>UNAVAILABLE · {economics.reason ?? '경제성 입력 불완전'}</p>
+        <p className="text-muted-foreground">
+          candidate {fmtUsd(economics.candidateNotionalUsd, 2)}
+          {' · '}expected gross edge —
+          {' · '}economic minimum —
+          {' · '}required max(economic, technical) —
+          {' · '}sufficient —
+        </p>
+      </div>
+    );
+  }
+  return (
+    <div className="font-mono text-[10px] text-muted-foreground" data-testid={`paper-economics-${symbol.toLowerCase()}`}>
+      <p>
+        candidate {fmtUsd(economics.candidateNotionalUsd, 2)}
+        {' · '}expected gross edge {fmtUsd(economics.expectedGrossEdgeUsd)} ({fmtPct(
+          economics.expectedGrossEdgeFraction === null
+            ? null
+            : economics.expectedGrossEdgeFraction * 100,
+        )})
+      </p>
+      <p>
+        economic minimum {fmtUsd(economics.economicMinimumNotionalUsd, 2)}
+        {' · '}technical minimum {fmtUsd(economics.technicalMinimumNotionalUsd, 2)}
+        {' · '}required max(economic, technical) {fmtUsd(economics.requiredMinimumNotionalUsd, 2)}
+      </p>
+      <p>
+        candidate sufficient {economics.candidateSufficient ? 'YES' : 'NO'}
+        {' · '}immutable cap relationship {economics.capRelationship}
+        {' · '}edge source {economics.expectedGrossEdgeSource}
+      </p>
+    </div>
+  );
+}
+
 export function GmxApiStatusCard() {
   const [pin, setPin] = useState('');
   const [status, setStatus] = useState<GmxApiStatusView | null>(null);
+  const [statusObservedAtMs, setStatusObservedAtMs] = useState<number | null>(null);
   const [loading, setLoading] = useState<'idle' | 'status' | 'refresh'>('idle');
   const [message, setMessage] = useState<{ tone: Tone; text: string } | null>(null);
+  const requestGenerationRef = useRef(0);
 
   const applyResult = useCallback((r: GmxApiFetchResult) => {
-    if (r.kind === 'ok') {
-      setStatus(r.data);
-      setMessage(null);
-    } else {
-      // 조회 실패 ≠ 미설정 — 기존 스냅샷은 유지하고 실패 사유를 구분 표시
-      setMessage({ tone: r.kind === 'OPERATOR_AUTH_REQUIRED' || r.kind === 'FORBIDDEN' ? 'error' : 'warn', text: r.message });
-    }
+    const next = reduceGmxApiCardEvidence(r, Date.now());
+    setStatus(next.status);
+    setStatusObservedAtMs(next.observedAtMs);
+    setMessage(next.message);
   }, []);
+
+  const changePin = useCallback((nextPin: string) => {
+    requestGenerationRef.current += 1;
+    setPin(nextPin);
+    if (statusObservedAtMs !== null) {
+      setStatus(null);
+      setStatusObservedAtMs(null);
+      setMessage({
+        tone: 'warn',
+        text: '운영자 PIN이 변경되어 인증된 이전 readiness 증거를 폐기했습니다 (fail-closed).',
+      });
+    }
+  }, [statusObservedAtMs]);
+
+  useEffect(() => {
+    if (!status || statusObservedAtMs === null) return;
+    const ttlMs = getGmxApiEvidenceTtlMs(status, statusObservedAtMs, Date.now());
+    if (ttlMs <= 0) {
+      setStatus(null);
+      setStatusObservedAtMs(null);
+      setMessage({
+        tone: 'warn',
+        text: 'Readiness 증거 freshness가 만료되어 이전 스냅샷을 폐기했습니다 (fail-closed).',
+      });
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      setStatus(null);
+      setStatusObservedAtMs(null);
+      setMessage({
+        tone: 'warn',
+        text: 'Readiness 증거 freshness가 만료되어 이전 스냅샷을 폐기했습니다 (fail-closed).',
+      });
+    }, ttlMs);
+    return () => window.clearTimeout(timer);
+  }, [status, statusObservedAtMs]);
 
   const load = useCallback(async () => {
     if (pin.trim().length < 6) {
@@ -84,7 +640,11 @@ export function GmxApiStatusCard() {
       return;
     }
     setLoading('status');
-    applyResult(await fetchGmxApiStatus(pin.trim()));
+    const requestGeneration = requestGenerationRef.current;
+    const result = await fetchGmxApiStatus(pin.trim());
+    if (isCurrentGmxApiRequest(requestGeneration, requestGenerationRef.current)) {
+      applyResult(result);
+    }
     setLoading('idle');
   }, [pin, applyResult]);
 
@@ -94,12 +654,19 @@ export function GmxApiStatusCard() {
       return;
     }
     setLoading('refresh');
-    applyResult(await postGmxApiReadinessRefresh(pin.trim()));
+    const requestGeneration = requestGenerationRef.current;
+    const result = await postGmxApiReadinessRefresh(pin.trim());
+    if (isCurrentGmxApiRequest(requestGeneration, requestGenerationRef.current)) {
+      applyResult(result);
+    }
     setLoading('idle');
   }, [pin, applyResult]);
 
   const s = status;
   const signerReady = s ? s.signerEnabled && s.signerInitialized : null;
+  const stopCapabilityAvailable = s
+    ? isStopCapabilityDisplayAvailable(s, Date.now())
+    : false;
 
   return (
     <div className="rounded-lg border border-border bg-card p-4 space-y-3" data-testid="gmx-api-status-card">
@@ -117,7 +684,7 @@ export function GmxApiStatusCard() {
             inputMode="numeric"
             autoComplete="off"
             value={pin}
-            onChange={(e) => setPin(e.target.value)}
+            onChange={(e) => changePin(e.target.value)}
             placeholder="운영자 PIN"
             className="w-28 h-7 px-2 rounded border border-border bg-background text-xs"
             data-testid="gmx-api-pin-input"
@@ -167,20 +734,27 @@ export function GmxApiStatusCard() {
             value={s.emergencyStopActive ? <><Ban className="w-3 h-3" /> 활성</> : '비활성'} />
           <Row label="Delegated signer" tone={signerReady ? 'warn' : 'muted'}
             value={s.signerEnabled ? (s.signerInitialized ? 'initialized' : 'enabled·미초기화') : '비활성'} />
-          <Row label="Owner Approval 세션" tone={triState(s.approvalSessionReady, true, 'OWNER_SIGNATURE_READY', '없음').tone}
-            value={triState(s.approvalSessionReady, true, 'OWNER_SIGNATURE_READY', '없음').text} />
-          <Row label="Canonical verified" tone={s.canonical.authorized ? 'ok' : 'error'}
-            value={s.canonical.authorized ? '검증됨' : '미검증'} />
-          <Row label="Remaining actions" tone={s.canonical.approvalRemainingOk ? 'ok' : 'warn'}
-            value={s.canonical.remaining ?? '—'} />
-          <Row label="Approval expiresAt" tone="muted" value={fmtExpires(s.canonical.expiresAt)} />
+          {s.paperRelayEvidence && <PaperRelayEvidence evidence={s.paperRelayEvidence} />}
+          {!s.paperRelayEvidence && (
+            <>
+              <Row label="Owner Approval 세션" tone={triState(s.approvalSessionReady, true, 'OWNER_SIGNATURE_READY', '없음').tone}
+                value={triState(s.approvalSessionReady, true, 'OWNER_SIGNATURE_READY', '없음').text} />
+              <Row label="Canonical verified" tone={s.canonical.authorized ? 'ok' : 'error'}
+                value={s.canonical.authorized ? '검증됨' : '미검증'} />
+              <Row label="Remaining actions" tone={s.canonical.approvalRemainingOk ? 'ok' : 'warn'}
+                value={s.canonical.remaining ?? '—'} />
+              <Row label="Approval expiresAt" tone="muted" value={fmtExpires(s.canonical.expiresAt)} />
+            </>
+          )}
           <Row label="Active revoke" tone={triState(s.activeRevokeInProgress, false, '없음', '진행 중').tone}
             value={triState(s.activeRevokeInProgress, false, '없음', '진행 중').text} />
           <Row label="Blocking intents" tone={s.blockingIntentCount === null ? 'warn' : s.blockingIntentCount === 0 ? 'ok' : 'error'}
             value={s.blockingIntentCount === null ? '조회 실패' : String(s.blockingIntentCount)} />
           <Row label="Open tasks / Unresolved" tone={s.unresolvedTaskCount === null ? 'warn' : s.unresolvedTaskCount === 0 ? 'ok' : 'error'}
             value={`${s.openRelayTaskCount ?? '조회 실패'} / ${s.unresolvedTaskCount ?? '조회 실패'}`} />
-          <Row label="Reconciliation" tone={s.reconciled ? 'ok' : 'error'} value={s.reconciled ? '완료' : '미완료 — 신규 주문 차단'} />
+          {!s.paperRelayEvidence && (
+            <Row label="Reconciliation" tone={s.reconciled ? 'ok' : 'error'} value={s.reconciled ? '완료' : '미완료 — 신규 주문 차단'} />
+          )}
           <Row label="GMX 실행 구성" tone={s.gmxConfigOk ? 'ok' : 'error'} value={s.gmxConfigOk ? 'OK' : '미완비'} />
           <Row label="Deployment 검증" tone={s.deploymentVerification.ok ? 'ok' : s.deploymentVerification.attempted ? 'error' : 'muted'}
             value={s.deploymentVerification.ok ? `OK (${s.manifestVersion})` : s.deploymentVerification.attempted ? '실패' : '미시도'} />
@@ -200,22 +774,49 @@ export function GmxApiStatusCard() {
               : `${s.prepareStageCounts.PREPARE_REQUESTED ?? 0} / ${s.prepareStageCounts.API_PREPARED ?? 0} / ${s.prepareStageCounts.SUBMITTING ?? 0}`} />
           <Row label="가장 오래된 blocking task" tone="muted"
             value={s.oldestBlockingTaskAt ? new Date(s.oldestBlockingTaskAt).toLocaleString() : '없음'} />
-          <Row label="Prepare startup reconciliation"
-            tone={s.prepareStartupReconciliation.attempted && s.prepareStartupReconciliation.ok ? 'ok' : 'error'}
-            value={s.prepareStartupReconciliation.attempted
-              ? (s.prepareStartupReconciliation.ok
-                ? `완료 (stale ${s.prepareStartupReconciliation.stalePreparedFailed} · 불명 ${s.prepareStartupReconciliation.requestedToUnresolved} · 보류 ${s.prepareStartupReconciliation.apiPreparedHeld})`
-                : '실패 — LIVE 차단')
-              : '미시도 — LIVE 차단'} />
+          {!s.paperRelayEvidence && (
+            <Row label="Prepare startup reconciliation"
+              tone={s.prepareStartupReconciliation.attempted && s.prepareStartupReconciliation.ok ? 'ok' : 'error'}
+              value={s.prepareStartupReconciliation.attempted
+                ? (s.prepareStartupReconciliation.ok
+                  ? `완료 (stale ${s.prepareStartupReconciliation.stalePreparedFailed} · 불명 ${s.prepareStartupReconciliation.requestedToUnresolved} · 보류 ${s.prepareStartupReconciliation.apiPreparedHeld})`
+                  : '실패 — LIVE 차단')
+                : '미시도 — LIVE 차단'} />
+          )}
           {/* ── 6H-2B §12 — stop 실행 능력·보호 주문·action 예산 (조회 전용) ── */}
-          <Row label="Stop 실행 능력"
-            tone={s.stopCapability?.available ? 'ok' : 'muted'}
+          <Row label="LIVE Stop 실행 능력"
+            tone={stopCapabilityAvailable ? 'ok' : 'muted'}
             value={s.stopCapability
-              ? `${s.stopCapability.available ? '가능' : '불가'}${s.stopCapability.available ? '' : ` — ${s.stopCapability.reasons[0] ?? ''}`}`
+              ? `${stopCapabilityAvailable ? '가능' : 'UNAVAILABLE (fail-closed)'} · ${s.stopCapability.paperMode ? '현재 PAPER' : '현재 LIVE'} · status는 권한 아님`
               : String(s.stopExecutionAvailable ?? false)} />
           {s.stopCapability && (
-            <Row label="Stop 스키마 pin" tone="muted"
-              value={`${s.stopCapability.schemaPin.sdk} · StopLossDecrease=${s.stopCapability.schemaPin.stopLossDecrease}`} />
+            <>
+              <Row label="Stop 평가 시각 / 경계" tone="muted"
+                value={`${fmtEpochMs(s.stopCapability.evaluatedAt ? Date.parse(s.stopCapability.evaluatedAt) : null)} · ${s.stopCapability.boundary}`} />
+              <Row label="Stop 스키마 pin" tone="muted"
+                value={`${s.stopCapability.schemaPin.sdk} · StopLossDecrease=${s.stopCapability.schemaPin.stopLossDecrease}`} />
+              <div className="sm:col-span-2 space-y-1 py-1" data-testid="stop-capability-reasons">
+                <p className="text-[10px] font-semibold text-muted-foreground">
+                  Stop capability 판정 근거 ({s.stopCapability.scope})
+                </p>
+                {stopCapabilityAvailable && s.stopCapability.reasons.length === 0 ? (
+                  <p className="text-[10px] text-emerald-300">
+                    모든 Stop 실행 전제조건 충족 · 단, 이 읽기 전용 status 자체는 실행 승인이 아닙니다.
+                  </p>
+                ) : s.stopCapability.reasons.length === 0 ? (
+                  <p className="text-[10px] text-amber-300">
+                    Fresh·same-refresh Stop 증거가 없어 UNAVAILABLE (fail-closed)입니다.
+                  </p>
+                ) : (
+                  s.stopCapability.reasons.map((reason) => (
+                    <p key={reason} className="text-[10px] text-amber-300">• {reason}</p>
+                  ))
+                )}
+              </div>
+              {s.stopCapability.readinessEvidence && (
+                <PaperStopReadinessEvidence evidence={s.stopCapability.readinessEvidence} />
+              )}
+            </>
           )}
           <Row label="보호 주문 (차단/전체)"
             tone={s.blockingProtectionCount === null || s.blockingProtectionCount === undefined ? 'warn'
@@ -226,20 +827,20 @@ export function GmxApiStatusCard() {
           <Row label="Stale stop / 비상종료 진행"
             tone={(s.staleStopCount ?? 1) > 0 || (s.emergencyCloseInProgressCount ?? 0) > 0 ? 'warn' : 'ok'}
             value={`${s.staleStopCount ?? '조회 실패'} / ${s.emergencyCloseInProgressCount ?? '조회 실패'}`} />
-          {s.actionBudget && (
+          {s.actionBudget && !s.paperRelayEvidence && (
             <Row label="Action 예산 (잔여/필요)"
               tone={s.actionBudget.sufficient ? 'ok' : 'error'}
               value={s.actionBudget.remainingActions === null
                 ? `조회 실패 — ${s.actionBudget.reasons[0] ?? ''}`
                 : `${s.actionBudget.remainingActions} / ${s.actionBudget.requiredActions}${s.actionBudget.sufficient ? '' : ' — 부족 (자동 확대 금지)'}`} />
           )}
-          {s.actionBudget && (
+          {s.actionBudget && !s.paperRelayEvidence && (
             <Row label="Action 예산 세부 (예약/진행중/부족)"
               tone={(s.actionBudget.budgetShortfall ?? 1) > 0 ? 'error' : 'ok'}
               value={`예약 ${s.actionBudget.reservedEmergencyActions ?? '—'} · 진행중 ${s.actionBudget.inFlightReservedActions ?? '조회실패'} · 부족 ${s.actionBudget.budgetShortfall ?? '조회실패'}`} />
           )}
           {/* ── 6H-2D §6 — autoCancel 정책·예산 버전 ── */}
-          {s.actionBudget?.autoCancelPolicy && (
+          {s.actionBudget?.autoCancelPolicy && !s.paperRelayEvidence && (
             <Row label="autoCancel 정책 (§2)" tone="muted"
               value={`${s.actionBudget.autoCancelPolicy} · 기준 ${s.actionBudget.version ?? '—'} · 최악 경로 「${s.actionBudget.worstCasePath ?? '—'}」 · 권장 Owner count ${s.actionBudget.recommendedOwnerApprovalCount ?? '—'}`} />
           )}
@@ -256,13 +857,13 @@ export function GmxApiStatusCard() {
             value={s.evidenceCollector
               ? `emitter ${s.evidenceCollector.emitterConfigured ? 'OK' : '미설정'} · RPC ${s.evidenceCollector.rpcConfigured ? 'OK' : '미설정'}`
               : '조회 실패'} />
-          {s.protectionReconciliation && (
+          {s.protectionReconciliation && !s.paperRelayEvidence && (
             <Row label="보호 reconciliation (§5)"
               tone={s.protectionReconciliation.complete && !s.protectionReconciliation.blockNewOpens ? 'ok' : 'warn'}
               value={`${s.protectionReconciliation.lastRunAtMs ? new Date(s.protectionReconciliation.lastRunAtMs).toLocaleTimeString() : '미실행'} · ${s.protectionReconciliation.complete ? '완료' : '미완료'}${s.protectionReconciliation.blockNewOpens ? ' · OPEN 차단' : ''} · 무stop ${s.protectionReconciliation.uncoveredCount ?? '—'} / 고아 ${s.protectionReconciliation.staleActiveCount ?? '—'} / 초과 ${s.protectionReconciliation.oversizedCount ?? '—'} / 다중 ${s.protectionReconciliation.multipleActiveCount ?? '—'}`} />
           )}
           {/* ── 6H-2D §5·§9 — ambiguous 증거·finality ── */}
-          {s.protectionReconciliation && (
+          {s.protectionReconciliation && !s.paperRelayEvidence && (
             <Row label="모호 증거 / finality (§5)"
               tone={(s.protectionReconciliation.ambiguousCount ?? 0) > 0 ? 'error' : 'ok'}
               value={`ambiguous ${s.protectionReconciliation.ambiguousCount ?? '—'}건${(s.protectionReconciliation.ambiguousReasons?.length ?? 0) > 0 ? ` (${s.protectionReconciliation.ambiguousReasons!.slice(0, 2).join('; ')})` : ''} · 확정 깊이 ${s.protectionReconciliation.confirmationDepth ?? '—'}블록 · 실행 ${s.protectionReconciliation.lastSource ?? '—'}`} />
@@ -276,7 +877,184 @@ export function GmxApiStatusCard() {
         </div>
       )}
 
-      {s && s.blockedReasons.length > 0 && (
+      {s?.paperEpochPreflight && <PaperEpochPreflight view={s.paperEpochPreflight} />}
+
+      {/* PAPER runtime diagnostics — execution authorization cache와 구조적으로 분리 */}
+      {s?.paperRuntimeReadiness && (
+        <div
+          className="space-y-3 rounded-md border border-sky-500/30 bg-sky-500/5 p-3"
+          data-testid="paper-runtime-readiness"
+        >
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div>
+              <p className="text-[11px] font-semibold text-sky-300">PAPER Runtime Readiness Evidence</p>
+              <p className="text-[10px] text-muted-foreground">
+                서버 background cache · 외부 호출은 scheduler만 수행 · GET status는 저장값만 표시
+              </p>
+              <p className="text-[10px] text-sky-200">
+                PAPER evidence는 LIVE Stop capability를 설명만 하며, LIVE 권한·signer·submission을 활성화하지 않습니다.
+              </p>
+            </div>
+            <Badge tone="warn">READ-ONLY / NOT EXECUTION AUTHORIZATION</Badge>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6">
+            <Row
+              label="PAPER / Read-only"
+              tone={s.paperRuntimeReadiness.paperMode && s.paperRuntimeReadiness.readonlyEnabled ? 'ok' : 'error'}
+              value={`${s.paperRuntimeReadiness.paperMode ? 'PAPER' : 'NOT PAPER'} · ${s.paperRuntimeReadiness.readonlyEnabled ? 'READ-ONLY ON' : 'READ-ONLY OFF'}`}
+            />
+            <Row
+              label="Background scheduler"
+              tone={s.paperRuntimeReadiness.scheduler.running ? 'ok' : 'muted'}
+              value={`${s.paperRuntimeReadiness.scheduler.running ? 'RUNNING' : 'STOPPED'} · ${s.paperRuntimeReadiness.scheduler.inFlight ? 'IN-FLIGHT' : 'IDLE'} · 마지막 ${fmtEpochMs(s.paperRuntimeReadiness.scheduler.lastCompletedAtMs)}`}
+            />
+            <Row
+              label="Scheduler next / failure"
+              tone={s.paperRuntimeReadiness.scheduler.lastFailureId ? 'warn' : 'muted'}
+              value={`다음 ${fmtEpochMs(s.paperRuntimeReadiness.scheduler.nextRefreshAtMs)} · ${s.paperRuntimeReadiness.scheduler.lastFailureId ?? 'failure 없음'}`}
+            />
+            <Row
+              label="Deployment evidence"
+              tone={evidenceTone(s.paperRuntimeReadiness.deployment.state)}
+              value={`${evidenceLabel(s.paperRuntimeReadiness.deployment.state)} · age ${fmtAge(s.paperRuntimeReadiness.deployment.ageMs)}${s.paperRuntimeReadiness.deployment.failureId ? ` · ${s.paperRuntimeReadiness.deployment.failureId}` : ''}`}
+            />
+            <Row
+              label="Arbitrum RPC evidence"
+              tone={evidenceTone(s.paperRuntimeReadiness.rpc.state)}
+              value={`${evidenceLabel(s.paperRuntimeReadiness.rpc.state)} · chain ${s.paperRuntimeReadiness.rpc.chainId ?? '—'} · age ${fmtAge(s.paperRuntimeReadiness.rpc.ageMs)}${s.paperRuntimeReadiness.rpc.failureId ? ` · ${s.paperRuntimeReadiness.rpc.failureId}` : ''}`}
+            />
+            {(['BTC', 'ETH'] as const).map((symbol) => {
+              const decimals = s.paperRuntimeReadiness!.decimals[symbol];
+              return (
+                <Row
+                  key={`paper-decimals-${symbol}`}
+                  label={`${symbol} index decimals`}
+                  tone={evidenceTone(decimals.state)}
+                  value={`${decimals.decimals ?? '—'} · ${decimals.source ?? evidenceLabel(decimals.state)} · age ${fmtAge(decimals.ageMs)}${decimals.failureId ? ` · ${decimals.failureId}` : ''}`}
+                />
+              );
+            })}
+          </div>
+
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-2">
+            {(['BTC', 'ETH'] as const).map((symbol) => {
+              const cost = s.paperRuntimeReadiness!.costs[symbol];
+              const economics = s.paperRuntimeReadiness!.economics[symbol];
+              const overCap = cost.withinCap === false;
+              const evidenceCurrent = isPaperCostEvidenceCurrent(cost);
+              const capPass = isPaperCostCapPass(cost);
+              return (
+                <div
+                  key={`paper-cost-${symbol}`}
+                  className="rounded border border-border/60 bg-background/50 p-2 space-y-1"
+                  data-testid={`paper-cost-${symbol.toLowerCase()}`}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-[11px] font-semibold">
+                      {symbol} LONG · ${cost.notionalUsd} · {cost.holdingHours}h
+                    </span>
+                    <Badge tone={!evidenceCurrent ? 'warn' : overCap ? 'error' : capPass ? 'ok' : 'warn'}>
+                      {!evidenceCurrent
+                        ? 'UNAVAILABLE (fail-closed)'
+                        : overCap
+                          ? 'BLOCKED · CAP EXCEEDED'
+                          : capPass
+                            ? 'WITHIN CAP'
+                            : 'UNAVAILABLE (fail-closed)'}
+                    </Badge>
+                  </div>
+                  <PaperCostDetails symbol={symbol} cost={cost} />
+                   <PaperEconomicsDetails symbol={symbol} economics={economics} />
+                </div>
+              );
+            })}
+          </div>
+
+          <p className="text-[10px] text-muted-foreground">
+            경제성 진단은 LONG · $20 · 1h 비용 evidence domain만 사용하며, domain 밖 최소값은 외삽하지 않고 UNAVAILABLE입니다.
+            비용 상한은 서버 고정 $0.40이며, 경제적 최소값은 기존 cap·freshness·Manual Canary gate를 대체하거나 완화하지 않습니다.
+          </p>
+
+          <div className="space-y-1">
+            <p className="text-[10px] font-semibold text-muted-foreground">Blocker IDs</p>
+            <div className="flex flex-wrap gap-1" data-testid="paper-runtime-blocker-ids">
+              {s.paperRuntimeReadiness.blockerIds.map((id) => (
+                <Badge key={id} tone="warn">{id}</Badge>
+              ))}
+            </div>
+          </div>
+
+          <div className="space-y-1" data-testid="paper-runtime-holds">
+            <p className="text-[10px] font-semibold text-muted-foreground">Manual-action HOLD · requested 2026-08-20T13:59:15Z</p>
+            {s.paperRuntimeReadiness.manualActionHolds.map((hold) => (
+              <div key={hold.id} className="rounded border border-amber-500/20 bg-amber-500/5 px-2 py-1 text-[10px]">
+                <span className="font-mono text-amber-300">{hold.id}</span>
+                <span className="text-muted-foreground"> · 필요: {hold.requiredAction} · 재개: {hold.resumeCondition}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── CLOSE 정산 증거 (Settlement Evidence) — 읽기 전용 관측 ── */}
+      {s && (
+        <div className="space-y-1" data-testid="gmx-api-settlement-evidence">
+          <p className="text-[11px] font-semibold text-muted-foreground">Settlement Evidence</p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6">
+            {!s.paperRelayEvidence && <Row
+              label="CLOSE 정산 reconciliation"
+              tone={
+                s.settlementReconcile === null
+                  ? 'warn'
+                  : s.settlementReconcile.incomplete
+                    ? 'error'
+                    : 'ok'
+              }
+              value={
+                s.settlementReconcile === null
+                  ? '미실행/조회 불가'
+                  : s.settlementReconcile.incomplete
+                    ? `미완료 — ${s.settlementReconcile.unsettledCount}건 중 ${s.settlementReconcile.settledNow}건 정산`
+                    : `완료 (${s.settlementReconcile.unsettledCount}건)`
+              }
+            />}
+            {!s.paperRelayEvidence && s.settlementReconcile !== null && s.settlementReconcile.incomplete && s.settlementReconcile.reasons.length > 0 && (
+              <Row
+                label="정산 차단 사유 (첫 번째)"
+                tone="error"
+                value={s.settlementReconcile.reasons[0]
+                  .replace(/^LIVE_SETTLEMENT_INCOMPLETE:\s*/i, '')
+                  .slice(0, 80)}
+              />
+            )}
+            <Row
+              label="미정산 LIVE 거래"
+              tone={
+                s.unsettledLiveTradeCount === null
+                  ? 'warn'
+                  : s.unsettledLiveTradeCount > 0
+                    ? 'error'
+                    : 'ok'
+              }
+              value={s.unsettledLiveTradeCount === null ? '조회 실패' : String(s.unsettledLiveTradeCount)}
+            />
+            <Row
+              label="Legacy zero-fee 거래"
+              tone={
+                s.legacyZeroFeeCount === null
+                  ? 'warn'
+                  : s.legacyZeroFeeCount > 0
+                    ? 'error'
+                    : 'ok'
+              }
+              value={s.legacyZeroFeeCount === null ? '조회 실패' : String(s.legacyZeroFeeCount)}
+            />
+          </div>
+        </div>
+      )}
+
+      {s && !s.paperRelayEvidence && s.blockedReasons.length > 0 && (
         <div className="px-2.5 py-1.5 rounded border border-amber-500/40 bg-amber-500/10 text-[11px] text-amber-400 space-y-0.5"
           data-testid="gmx-api-blocked-reasons">
           <p className="font-medium">신규 주문 차단 사유</p>

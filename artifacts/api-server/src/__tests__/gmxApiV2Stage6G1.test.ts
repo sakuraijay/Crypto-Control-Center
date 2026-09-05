@@ -101,7 +101,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   createGmxApiTransport, createSdkApiAdapter, isAllowedPeer,
-  GMX_API_PEERS, GMX_API_CHAIN_ID, type GmxApiTransport,
+  GMX_API_PEERS, GMX_API_CHAIN_ID, GMX_API_MAX_READONLY_RESPONSE_BYTES,
+  GMX_API_MAX_SUBMIT_RESPONSE_BYTES, type GmxApiTransport,
 } from '../lib/gmxApiTransport';
 import {
   mapGmxApiStatus, isTerminalGmxApiStatus, validatePreparedOrder, hashPreparedPayload,
@@ -172,9 +173,72 @@ describe('6G-1 §3 — gmxApiTransport peer·플래그·failover·단일 제출'
     const t = createGmxApiTransport(BOTH_FLAGS);
     const r = await t.getJson('/markets');
     expect(r.ok).toBe(true);
+    expect(r.attemptCount).toBe(2);
+    expect(r.retryCount).toBe(0);
+    expect(r.failoverCount).toBe(1);
+    expect(r.attemptTrace).toEqual([
+      {
+        peerHost: 'arbitrum.gmxapi.io',
+        kind: 'network',
+        httpStatus: null,
+      },
+      {
+        peerHost: 'arbitrum.gmxapi.ai',
+        kind: null,
+        httpStatus: 200,
+      },
+    ]);
     expect(fetchSpy).toHaveBeenCalledTimes(2);
     const hosts = fetchSpy.mock.calls.map((c: unknown[]) => new URL(String(c[0])).host);
     expect(new Set(hosts).size).toBe(2); // 서로 다른 peer
+  });
+
+  it('readonly 시장 데이터는 256KiB 초과~1MiB 이하 응답을 허용한다', async () => {
+    const payload = { markets: ['x'.repeat(GMX_API_MAX_SUBMIT_RESPONSE_BYTES + 1024)] };
+    fetchSpy.mockImplementation(async () => jsonResponse(payload));
+    const r = await createGmxApiTransport(BOTH_FLAGS).getJson('/markets/info');
+    expect(r.ok).toBe(true);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('readonly도 1MiB 초과 응답은 peer별 거부 후 fail-closed 한다', async () => {
+    fetchSpy.mockImplementation(async () =>
+      jsonResponse({ markets: ['x'.repeat(GMX_API_MAX_READONLY_RESPONSE_BYTES + 1)] }));
+    const r = await createGmxApiTransport(BOTH_FLAGS).getJson('/markets/info');
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.kind).toBe('network');
+    expect(fetchSpy).toHaveBeenCalledTimes(GMX_API_PEERS.length);
+  });
+
+  it('readonly 5xx failover 실패는 정수 status·정규화 kind·allowlist peer 경로만 남긴다', async () => {
+    fetchSpy.mockImplementation(async () => jsonResponse({ error: 'upstream unavailable' }, 503));
+    const r = await createGmxApiTransport(BOTH_FLAGS).getJson('/markets/info');
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error('failure expected');
+    expect(r).toMatchObject({
+      kind: 'http_5xx',
+      httpStatus: 503,
+      attemptCount: 2,
+      retryCount: 0,
+      failoverCount: 1,
+      attemptTrace: [
+        { peerHost: 'arbitrum.gmxapi.io', kind: 'http_5xx', httpStatus: 503 },
+        { peerHost: 'arbitrum.gmxapi.ai', kind: 'http_5xx', httpStatus: 503 },
+      ],
+    });
+    expect(JSON.stringify(r)).not.toContain('https://');
+    expect(JSON.stringify(r)).not.toContain('/markets/info');
+    expect(fetchSpy).toHaveBeenCalledTimes(GMX_API_PEERS.length);
+  });
+
+  it('submit 응답 상한은 기존 256KiB로 유지한다', async () => {
+    fetchSpy.mockImplementation(async () =>
+      jsonResponse({ result: 'x'.repeat(GMX_API_MAX_SUBMIT_RESPONSE_BYTES + 1) }));
+    const r = await createGmxApiTransport(BOTH_FLAGS)
+      .postJson('/orders/txns/submit', {}, 'submit');
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.kind).toBe('network');
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
   it('submit POST — 단일 peer 1회만, 실패해도 다른 peer 재시도 0회', async () => {
@@ -183,6 +247,11 @@ describe('6G-1 §3 — gmxApiTransport peer·플래그·failover·단일 제출'
     const r = await t.postJson('/orders/txns/submit', { a: 1 }, 'submit');
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.ambiguous).toBe(true);
+    expect(r).toMatchObject({
+      attemptCount: 1,
+      retryCount: 0,
+      failoverCount: 0,
+    });
     expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 

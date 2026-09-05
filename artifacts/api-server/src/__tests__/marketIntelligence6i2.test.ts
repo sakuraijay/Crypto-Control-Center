@@ -148,6 +148,40 @@ describe('6I-2 §3 수명주기', () => {
     expect(s.cycleCount).toBe(1);
   });
 
+  it('stop→즉시 resume 뒤 구 flight 완료는 persist/state 갱신을 재개하지 않는다', async () => {
+    let releaseRead!: () => void;
+    let markReadStarted!: () => void;
+    const readStarted = new Promise<void>((resolve) => { markReadStarted = resolve; });
+    const blockedRead = new Promise<void>((resolve) => { releaseRead = resolve; });
+    __setIntelHandleForTests(stubHandle({
+      fetchMarketRows: async () => {
+        markReadStarted();
+        await blockedRead;
+        return { rows: [], complete: true, failureReason: null };
+      },
+    }));
+
+    const t = Date.now();
+    const staleFlight = runIntelServiceCycle({ cycleNum: 1, gates: gates(t) });
+    await readStarted;
+    stopIntelService();
+    resumeIntelService();
+    releaseRead();
+    await staleFlight;
+
+    let s = getIntelServiceState();
+    expect(s.inFlight).toBe(false);
+    expect(s.cycleCount).toBe(0);
+    expect(s.lastRecord).toBeNull();
+
+    await runIntelServiceCycle({
+      cycleNum: 2,
+      gates: gates(t + INTEL_CYCLE_MIN_INTERVAL_MS),
+    });
+    s = getIntelServiceState();
+    expect(s.cycleCount).toBe(1);
+  });
+
   it('timeout 시 flight ownership 유지 — 늦은 작업이 끝날 때까지 새 사이클 진입 불가', async () => {
     vi.useFakeTimers();
     try {

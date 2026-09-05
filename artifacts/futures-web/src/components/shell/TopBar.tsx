@@ -94,7 +94,7 @@ export function TopBar() {
       case '/watchlist': return 'Watchlist';
       case '/strategy': return 'Strategy Controls';
       case '/history': return 'History & Logs';
-      case '/settings': return 'Settings';
+      case '/settings': return 'Advanced Settings';
       default: return '';
     }
   };

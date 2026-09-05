@@ -82,6 +82,13 @@ vi.mock('../lib/delegatedSigner', () => ({
     writeContract: vi.fn().mockResolvedValue('0xTxSubmitted'),
   }),
   getSignerEthBalance:      vi.fn().mockResolvedValue({ ethWei: 5_000_000_000_000_000n, ethFormatted: '0.005', readyForGas: true }),
+  isManualCanarySignerRestoreAllowed: vi.fn((env: NodeJS.ProcessEnv) => ({
+    allowed:
+      env.WORKER_ENGINE_MODE === 'PAPER'
+      && env.AUTO_WORKER_LIVE_ENABLED !== 'true'
+      && env.GMX_API_ORDER_SUBMISSION_ENABLED === 'true',
+    missing: [],
+  })),
 }));
 
 vi.mock('../lib/gmxSubaccount', () => ({
@@ -137,6 +144,8 @@ vi.mock('../lib/protectionOrders', () => ({
 const ENV_KEYS = [
   'WORKER_ENGINE_MODE', 'LIVE_TEST_EXECUTION_LOCKED', 'DELEGATED_SIGNER_ENABLED', 'GMX_RPC_URL',
   'GMX_SUBACCOUNT_GELATO_RELAY_ROUTER_ADDRESS', 'GMX_EVENT_EMITTER_ADDRESS', 'GMX_DATA_STORE_ADDRESS',
+  'AUTO_WORKER_LIVE_ENABLED', 'GMX_API_ORDER_SUBMISSION_ENABLED',
+  'GMX_RELAY_SUBMISSION_ENABLED', 'GMX_RELAY_SUBMIT_NETWORK_ENABLED',
 ] as const;
 
 // legacy 주문 경로 Production 차단 가드 (gmxDelegatedTrading.test.ts에서 이동 —
@@ -156,6 +165,68 @@ describe('legacy SubaccountRouter 주문 경로 — Production 차단', () => {
       if (prevNodeEnv === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = prevNodeEnv;
       if (prevVitest === undefined) delete process.env.VITEST; else process.env.VITEST = prevVitest;
     }
+  });
+});
+
+describe('#142 Manual Canary execution evidence integration', () => {
+  it('production activator binds matching market/direction and enables the cached stop gate', async () => {
+    const nowMs = Date.now();
+    const at = new Date(nowMs).toISOString();
+    const market = '0x' + 'b'.repeat(40);
+    const expected = {
+      market,
+      isLong: true,
+      orderType: 'MarketIncrease' as const,
+      notionalUsd: 20,
+    };
+    const snapshot = {
+      ...expected,
+      positionFeeUsd: 0.05,
+      executionFeeUsd: 0.05,
+      estimatedPriceImpactUsd: 0.02,
+      fundingFeeUsd: 0.01,
+      borrowingFeeUsd: 0.01,
+      estimatedExitFeeUsd: 0.05,
+      estimatedExitPriceImpactUsd: 0.02,
+      fundingRatePerHourFraction: 0,
+      borrowingRatePerHourFraction: 0,
+      totalEstimatedRoundTripCostUsd: 0.21,
+      source: 'GMX_API' as const,
+      blockNumber: 123,
+      apiTimestamp: at,
+      fetchedAt: at,
+      expiresAt: new Date(nowMs + 60_000).toISOString(),
+    };
+    const {
+      __setStopExecutionAvailabilityForTests,
+      isStopExecutionAvailable,
+      refreshStopExecutionCapability,
+    } = await import('../workers/liveTestExecutor');
+    const {
+      __resetExecutionEligibleCostEvidenceForTests,
+      getExecutionEligibleCostEvidence,
+    } = await import('../lib/costSnapshot');
+    const { activateManualCanaryExecutionEvidence } =
+      await import('../lib/manualCanaryExecutionEvidence');
+
+    __resetExecutionEligibleCostEvidenceForTests();
+    __setStopExecutionAvailabilityForTests(true);
+    const activated = await activateManualCanaryExecutionEvidence(
+      snapshot,
+      expected,
+      nowMs,
+      {
+        refreshStopCapability: refreshStopExecutionCapability,
+        isStopCapabilityAvailable: isStopExecutionAvailable,
+      },
+    );
+
+    expect(activated).toBe(true);
+    expect(isStopExecutionAvailable()).toBe(true);
+    expect(getExecutionEligibleCostEvidence(nowMs)).toMatchObject({
+      fresh: true,
+      evidence: { market, isLong: true },
+    });
   });
 });
 
@@ -325,6 +396,32 @@ describe('checkCentralExecutionGate — fail-closed 조합', () => {
   });
 });
 
+describe('보호 주문 Manual Canary lineage 결속', () => {
+  it('parent OPEN 결정적 ID + Manual PAPER posture가 모두 맞아야 true', async () => {
+    process.env.WORKER_ENGINE_MODE = 'PAPER';
+    process.env.AUTO_WORKER_LIVE_ENABLED = 'false';
+    process.env.GMX_API_ORDER_SUBMISSION_ENABLED = 'true';
+    const { isManualCanaryProtectionRequest } = await import('../workers/liveTestExecutor');
+    expect(isManualCanaryProtectionRequest({
+      manualCanary: true,
+      parentOpenIntentId: 'intent:open:manual-canary:2026-08-19',
+    })).toBe(true);
+    expect(isManualCanaryProtectionRequest({
+      manualCanary: false,
+      parentOpenIntentId: 'intent:open:manual-canary:2026-08-19',
+    })).toBe(false);
+    expect(isManualCanaryProtectionRequest({
+      manualCanary: true,
+      parentOpenIntentId: 'intent:open:worker-cycle-1',
+    })).toBe(false);
+    process.env.AUTO_WORKER_LIVE_ENABLED = 'true';
+    expect(isManualCanaryProtectionRequest({
+      manualCanary: true,
+      parentOpenIntentId: 'intent:open:manual-canary:2026-08-19',
+    })).toBe(false);
+  });
+});
+
 describe('executeLiveTestOrder — 중앙 게이트 통합 (writeContract 도달 차단)', () => {
   function orderParams() {
     const now = Date.now();
@@ -344,7 +441,7 @@ describe('executeLiveTestOrder — 중앙 게이트 통합 (writeContract 도달
           fundingFeeUsd: 0.005, borrowingFeeUsd: 0,
           fundingRatePerHourFraction: 0.00001, borrowingRatePerHourFraction: 0.000005,
           estimatedExitFeeUsd: 0.206, totalEstimatedRoundTripCostUsd: 0.427,
-          source: 'GMX_API' as const, blockNumber: null, apiTimestamp: null,
+          source: 'GMX_API' as const, blockNumber: null, apiTimestamp: new Date(now).toISOString(),
           fetchedAt: new Date(now).toISOString(), expiresAt: new Date(now + 60_000).toISOString(),
         },
         liquidityCapUsd: 50_000, tierNotionalCapUsd: 30,
@@ -363,6 +460,46 @@ describe('executeLiveTestOrder — 중앙 게이트 통합 (writeContract 도달
     expect(r.ok).toBe(false);
     expect(r.txHash).toBeNull();
     expect(r.error).toMatch(/CENTRAL GATE/);
+  });
+
+  it('승인 플래그 3개가 켜져도 PAPER + AUTO false + Relay disabled + signer/canonical false면 prepare/sign/submit 0회', async () => {
+    process.env.WORKER_ENGINE_MODE = 'PAPER';
+    process.env.AUTO_WORKER_LIVE_ENABLED = 'false';
+    process.env.DELEGATED_SIGNER_ENABLED = 'true';
+    process.env.GMX_API_ORDER_SUBMISSION_ENABLED = 'true';
+    process.env.LIVE_TEST_EXECUTION_LOCKED = 'false';
+    process.env.GMX_RELAY_SUBMISSION_ENABLED = 'false';
+    process.env.GMX_RELAY_SUBMIT_NETWORK_ENABLED = 'false';
+    process.env.GMX_RPC_URL = 'https://rpc';
+
+    const delegatedSigner = await import('../lib/delegatedSigner');
+    vi.mocked(delegatedSigner.isSignerInitialized).mockReturnValue(false);
+    const { recordCanonicalSnapshot } = await import('../lib/relayActivationStatus');
+    recordCanonicalSnapshot({
+      atMs: Date.now(),
+      confirmed: false,
+      reason: 'canonical delegation unavailable',
+      approvalNonce: null,
+      isSubaccountListed: false,
+      expiresAt: null,
+      remaining: null,
+    });
+    const gmxExecution = await import('../lib/gmxApiExecution');
+    vi.mocked(gmxExecution.executeViaGmxApi).mockClear();
+
+    const { executeLiveTestOrder } = await import('../workers/liveTestExecutor');
+    const result = await executeLiveTestOrder(orderParams());
+
+    expect(result.ok).toBe(false);
+    expect(result.txHash).toBeNull();
+    expect(gmxExecution.executeViaGmxApi).not.toHaveBeenCalled();
+    expect(gmxFlowState.result).toMatchObject({
+      prepareCalls: 0,
+      signCalls: 0,
+      submitCalls: 0,
+    });
+
+    vi.mocked(delegatedSigner.isSignerInitialized).mockReturnValue(true);
   });
 
   it('unlock + LIVE여도 DELEGATED_SIGNER_ENABLED 미설정이면 차단', async () => {

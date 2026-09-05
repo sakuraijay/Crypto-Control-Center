@@ -46,13 +46,22 @@ function makeDeps(overrides: Partial<ManualCanaryDeps> = {}) {
     allowance: async () => OK,
     gmxApiReadonly: () => OK,
     rpcHealthy: async () => OK,
+    canonicalAuthorization: async () => OK,
     reconciliationClean: async () => OK,
     openPositionCount: async () => 0,
     openPositions: async () => [
-      { marketAddress: '0x47c031236e19d024b42f8ae6780e44a573170703', isLong: true, sizeUsd: 18.4 },
+      {
+        positionKey: '0xposkey1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab',
+        accountAddress: '0x46c27887c5ec5e36b2a21e1ec1bc69e7a593950e',
+        marketAddress: '0x47c031236e19d024b42f8ae6780e44a573170703',
+        collateralToken: '0xaf88d065e77c8cc2239327c5edb3a432268e5831',
+        isLong: true,
+        sizeUsd: 18.4,
+        sizeUsd30: '18400000000000000000000000000000',
+      },
     ],
     costSnapshot: async () => ({ ok: true, snapshot: {} as never, roundTripCostUsd: 0.25 }),
-    decimalsReady: async () => OK,
+    canaryDecimalsReady: async () => OK,
     stopCapability: async () => OK,
     currentPriceUsd: async () => 60000,
     accumCanaryLossUsd: async () => ({ ok: true, lossUsd: 0.5 }),
@@ -60,9 +69,12 @@ function makeDeps(overrides: Partial<ManualCanaryDeps> = {}) {
     mainAddress: () => '0x46c27887c5ec5e36b2a21e1ec1bc69e7a593950e',
     liveTestMode: () => true,
     envSubmissionState: () => ({ locked: false, submissionEnabled: true, detail: '활성' }),
+    // #142: tests override to OK so preflight can pass; production is always UNATTESTED
+    githubCiAttestation: () => OK,
     executeOrder,
     closePosition,
     runEmergencyClose,
+    recordCostEvidenceForExecution: vi.fn(async (_snap, _args, _nowMs) => true),
     intentStatus: async () => ({ status: 'CONFIRMED', orderKey: '0xkey', txHash: '0xabc' }),
     initialStopStatus: async () => ({ status: 'ACTIVE', orderKey: '0xstop' }),
     loadState: async (k) => state.get(k) ?? null,
@@ -74,7 +86,8 @@ function makeDeps(overrides: Partial<ManualCanaryDeps> = {}) {
     },
     ...overrides,
   };
-  return { deps, state, executeOrder, closePosition, runEmergencyClose };
+  return { deps, state, executeOrder, closePosition, runEmergencyClose,
+    recordCostEvidenceForExecution: deps.recordCostEvidenceForExecution as ReturnType<typeof vi.fn> };
 }
 
 async function preflightThenBody(deps: ManualCanaryDeps, symbol = 'BTC', direction = 'LONG') {
@@ -153,6 +166,16 @@ describe('#135 Manual Controlled Canary — 장애주입', () => {
     expect(failedIds(pf.items)).toEqual(expect.arrayContaining(['rpc', 'gmx_api']));
   });
 
+  it('F5b canonical authorization/action budget 실패 → preflight FAIL·제출 0회', async () => {
+    const { deps, executeOrder } = makeDeps({
+      canonicalAuthorization: async () => FAIL('canonical authorization 비활성'),
+    });
+    const pf = await runCanaryPreflight(deps, 'BTC', 'LONG');
+    expect(pf.ok).toBe(false);
+    expect(failedIds(pf.items)).toContain('canonical_authorization');
+    expect(executeOrder).not.toHaveBeenCalled();
+  });
+
   it('F6 미종결 intent/task/protection 존재 → FAIL', async () => {
     const { deps } = makeDeps({ reconciliationClean: async () => FAIL('intents 1') });
     const pf = await runCanaryPreflight(deps, 'BTC', 'LONG');
@@ -177,7 +200,7 @@ describe('#135 Manual Controlled Canary — 장애주입', () => {
   });
 
   it('F9 decimals 미검증 → FAIL', async () => {
-    const { deps } = makeDeps({ decimalsReady: async () => FAIL('교차검증 실패') });
+    const { deps } = makeDeps({ canaryDecimalsReady: async () => FAIL('BTC/ETH 교차검증 실패') });
     expect(failedIds((await runCanaryPreflight(deps, 'ETH', 'LONG')).items)).toContain('decimals');
   });
 
@@ -243,6 +266,19 @@ describe('#135 Manual Controlled Canary — 장애주입', () => {
     expect(r.phase).toBe('REJECTED');
     expect(r.failures.map(f => f.id)).toContain('rpc');
     expect(executeOrder).not.toHaveBeenCalled();
+  });
+
+  it('F15b durable claim 직전 BTC+ETH decimals 재검증 실패 → 예산 미소진·제출 0회', async () => {
+    let checks = 0;
+    const { deps, state, executeOrder } = makeDeps({
+      canaryDecimalsReady: async () => (++checks >= 3 ? FAIL('ETH evidence stale') : OK),
+    });
+    const body = await preflightThenBody(deps);
+    const r = await executeManualCanaryOpen(deps, body);
+    expect(r.phase).toBe('REJECTED');
+    expect(r.reason).toContain('BTC+ETH decimals');
+    expect(executeOrder).not.toHaveBeenCalled();
+    expect(state.get('manualCanaryDaily') ?? null).toBeNull();
   });
 
   it('F16 가격 드리프트 0.5% 초과 → 거부 (시장가 추격 방지)', async () => {
@@ -442,12 +478,17 @@ describe('durable/CAS fail-closed 보강 (리뷰 후속)', () => {
       closeIntentId: null, emergencyCloseUsed: false, openedAt: NOW.toISOString(),
       open: { symbol: 'BTC', direction: 'LONG', collateralUsd: 10, leverage: 2, requestedSizeUsd: 20 },
     }));
-    // ① 정상 — 실측 18.4 사용
+    // ① 정상 — 실측 18.4 사용 + exactPosition이 closePosition에 전달됨
     const a = makeDeps();
     mkDaily(a.state);
     const ra = await executeManualCanaryClose(a.deps, { confirm: CANARY_CONFIRM_CLOSE });
     expect(ra.phase).toBe('SUBMITTED');
-    expect((a.closePosition.mock.calls[0][0] as { sizeUsd: number }).sizeUsd).toBeCloseTo(18.4, 6);
+    const closeCall = a.closePosition.mock.calls[0][0] as { sizeUsd: number; exactPosition?: { positionKey: string; collateralToken: string } };
+    expect(closeCall.sizeUsd).toBeCloseTo(18.4, 6);
+    // 0030: exactPosition이 하위 계층에 전달되어야 한다
+    expect(closeCall.exactPosition).toBeDefined();
+    expect(closeCall.exactPosition?.positionKey).toBe('0xposkey1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab');
+    expect(closeCall.exactPosition?.collateralToken).toBe('0xaf88d065e77c8cc2239327c5edb3a432268e5831');
     // ② 조회 실패(null) → 거부
     const b = makeDeps({ openPositions: async () => null });
     mkDaily(b.state);
@@ -456,7 +497,15 @@ describe('durable/CAS fail-closed 보강 (리뷰 후속)', () => {
     expect(b.closePosition).not.toHaveBeenCalled();
     // ③ 결속 방향 불일치(SHORT만 존재) → 거부
     const c = makeDeps({ openPositions: async () => [
-      { marketAddress: '0x47c031236e19d024b42f8ae6780e44a573170703', isLong: false, sizeUsd: 18.4 },
+      {
+        positionKey: '0xposkey1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab',
+        accountAddress: '0x46c27887c5ec5e36b2a21e1ec1bc69e7a593950e',
+        marketAddress: '0x47c031236e19d024b42f8ae6780e44a573170703',
+        collateralToken: '0xaf88d065e77c8cc2239327c5edb3a432268e5831',
+        isLong: false,
+        sizeUsd: 18.4,
+        sizeUsd30: '18400000000000000000000000000000',
+      },
     ] });
     mkDaily(c.state);
     const rc = await executeManualCanaryClose(c.deps, { confirm: CANARY_CONFIRM_CLOSE });

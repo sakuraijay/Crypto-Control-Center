@@ -5,7 +5,7 @@
  * 부트스트랩 핸들러가 503 JSON을 반환하도록 했다. 이 파일의 내용과 순서는
  * 기존 index.ts 본체와 동일하다: 정적 서빙 부착 → RPC 모니터 →
  * (포트는 이미 열림) → migration → markReady → signer 게이트 → reconciliation
- * → Worker 시작. Worker 시작 순서·migration fail-closed·잠금 로직 불변.
+ * → safety barrier → readiness. Worker 시작 순서·migration fail-closed·잠금 로직 불변.
  */
 import type { Server } from "node:http";
 import app from "./app";
@@ -20,10 +20,21 @@ import {
   isSignerStorageAccessAllowed,
   restoreExistingManualCanarySigner,
 } from "./lib/delegatedSigner";
-import { reconcileOnRestart, loadEmergencyStopFromDb, startPeriodicIntentReconciliation } from "./workers/liveTestExecutor";
+import {
+  reconcileOnRestart,
+  loadEmergencyStopFromDb,
+  startPeriodicIntentReconciliation,
+  stopPeriodicIntentReconciliation,
+} from "./workers/liveTestExecutor";
 import { resolveStaticDir, assertStaticDirReady, attachStaticServing } from "./lib/staticSite";
 import { markReady } from "./lib/readiness";
-import { reconcileGmxApiTasksOnStartup, startPeriodicGmxApiReconciliation } from "./lib/gmxApiStatusReconciler";
+import {
+  reconcileGmxApiTasksOnStartup,
+  startPeriodicGmxApiReconciliation,
+  stopPeriodicGmxApiReconciliation,
+} from "./lib/gmxApiStatusReconciler";
+import { reconcileLiveSettlements } from "./lib/tradeSettlement";
+import { createProductionCloseSettlementFetcher } from "./lib/productionCloseSettlementFetcher";
 import { reconcileGmxPrepareStagesOnStartup } from "./lib/gmxApiPrepareStartup";
 import { runStartupRelayReconciliation, isRelayReadonlyNetworkEnabled } from "./lib/relayActivationStatus";
 import { countBlockingIntentsOrNull } from "./lib/executionIntents";
@@ -31,6 +42,14 @@ import { countOpenRelayTasksOrNull } from "./lib/relayLifecycle";
 import { countUnboundNoncesOrNull } from "./lib/relayNonce";
 import { getActiveRevokeSession } from "./lib/revokeSession";
 import type { Delegate } from "./lib/bootstrapServer";
+import { attachDevWebProxy, type DevWebProxyHandle } from "./lib/devWebProxy";
+import {
+  startPaperRuntimeReadinessScheduler,
+  stopPaperRuntimeReadinessScheduler,
+} from "./lib/paperRuntimeReadiness";
+import { completeStartupSafetyBarrier } from "./lib/startupSafetyBarrier";
+
+let devWebProxy: DevWebProxyHandle | null = null;
 
 export interface StartupHooks {
   /** 부트스트랩 서버 — graceful shutdown 시 close()에 사용 */
@@ -55,10 +74,12 @@ export function startServer({ httpServer, setDelegate, isShuttingDown }: Startup
     }
     attachStaticServing(app, staticDir);
     logger.info({ staticDir }, "Static frontend serving enabled (production)");
+  } else {
+    // Replit artifact router의 공개 경로는 Development에서도 API 8080이 소유한다.
+    // Vite 25285를 직접 route owner로 되돌리면 Production에서 router-level 500이
+    // 재발하므로, 개발 환경에서만 HTTP/HMR WebSocket을 내부 Vite로 전달한다.
+    devWebProxy = attachDevWebProxy(app, httpServer);
   }
-
-  // Start internal executor RPC health monitor (non-blocking)
-  startRpcHealthMonitor();
 
   // 본체 로드 완료 — 이제 모든 요청은 Express app이 처리한다.
   // (migration 완료 전에는 app.ts의 readiness 게이트가 /api에 503,
@@ -66,18 +87,24 @@ export function startServer({ httpServer, setDelegate, isShuttingDown }: Startup
   setDelegate(app as unknown as Delegate);
   logger.info("Application loaded — requests delegated to Express (readiness gate active until migrations finish)");
 
-  // Run database migrations, then open the API and start background services.
+  // Run database migrations, then complete the startup safety barrier before
+  // opening the API readiness gate.
   // Each migration file uses IF NOT EXISTS guards — safe to run on every start.
   runMigrations()
-    .then(() => {
+    .then(async () => {
       // 종료 신호가 이미 들어온 경우: ready 전환·백그라운드 서비스 기동 생략
       // (server.close() 드레인 중 worker/signer가 새로 시작되는 race 방지)
       if (isShuttingDown()) {
         logger.info("Shutdown in progress — skipping post-migration startup");
         return;
       }
-      markReady();
-      logger.info("Migrations complete — API ready");
+
+      logger.info("Migrations complete — startup safety barrier pending");
+
+      // 만료 owner-signature 세션은 상태/submit 경계에서 논리적으로 차단한다.
+      // Startup과 상태 조회는 세션을 UPDATE하지 않으며 persistent cleanup은
+      // 별도의 명시적 operator action에만 맡긴다.
+      startRpcHealthMonitor();
 
       // Delegated signer: DELEGATED_SIGNER_ENABLED=true(정확히 'true')일 때만
       // 키 복원/신규 생성 시도. 기본값(미설정)에서는 DB 접근·키 생성·SESSION_SECRET
@@ -107,16 +134,59 @@ export function startServer({ httpServer, setDelegate, isShuttingDown }: Startup
         logger.info("Delegated signer disabled (DELEGATED_SIGNER_ENABLED != 'true')");
       }
 
-      // Emergency Stop 상태 복원 + SUBMITTED 주문 reconciliation
-      loadEmergencyStopFromDb().catch(() => {});
-      reconcileOnRestart().catch(() => {});
+      // Emergency Stop 복원 → restart/pending execution reconciliation
+      // → Stop capability 평가를 Worker 기동 전 barrier로 완료한다.
+      // 어느 단계든 실패하거나 blocking 상태가 남으면 Worker를 시작하지
+      // 않아 fail-closed 상태를 유지한다.
+      const startupSafety = await completeStartupSafetyBarrier({
+        loadEmergencyStop: loadEmergencyStopFromDb,
+        reconcileOnRestart: async () => {
+          if (await reconcileOnRestart() !== true) return false;
+
+          // prepare 단계는 전이 실패/전수 확인 실패를 명시적 ok=false로 반환한다.
+          const prepare = await reconcileGmxPrepareStagesOnStartup();
+          if (prepare.attempted !== true || prepare.ok !== true) return false;
+
+          // GMX API task reconciliation은 오류를 throw하지 않고 summary에 기록하므로
+          // errors=0을 명시적으로 확인해야 한다.
+          const gmxApi = await reconcileGmxApiTasksOnStartup();
+          if (gmxApi.errors !== 0) return false;
+
+          // readonly 경로 비활성/receipt pending/UNRESOLVED/API_PREPARED 등 summary만으로
+          // 완결 여부를 단정할 수 없으므로 durable non-terminal task를 다시 센다.
+          const openRelayTasks = await countOpenRelayTasksOrNull();
+          if (openRelayTasks !== 0) return false;
+
+          const settlements = await reconcileLiveSettlements(
+            createProductionCloseSettlementFetcher(),
+          );
+          return settlements.ok === true
+            && settlements.incomplete === false
+            && settlements.unsettledCount === 0;
+        },
+        shouldRefreshStopCapability: () => process.env.WORKER_ENGINE_MODE !== 'PAPER',
+        refreshStopCapability: async () => {
+          const { refreshStopExecutionCapability } =
+            await import('./workers/liveTestExecutor');
+          await refreshStopExecutionCapability();
+        },
+        shouldAbort: isShuttingDown,
+        startWorker: () => workerManager.start(),
+        stopWorker: () => workerManager.stop(),
+      });
+      if (!startupSafety.ready) {
+        logger.warn(
+          { err: startupSafety.error },
+          "Startup safety reconciliation incomplete — Worker startup blocked (fail-closed)",
+        );
+      } else {
+        markReady();
+        logger.info("Startup safety barrier complete — API ready");
+      }
       // 차단 intent 온체인 재판정 (차단 intent 없으면 no-op — PAPER 무영향)
       startPeriodicIntentReconciliation();
 
-      // 6G-2 §9 — GMX API v2 relay task reconciliation (readonly 플래그 꺼짐 = 외부 호출 0회)
-      // 6G-3 §4 — prepare 단계 durable 상태 reconciliation (GMX POST·서명 0회)
-      reconcileGmxPrepareStagesOnStartup().catch(() => {});
-      reconcileGmxApiTasksOnStartup().catch(() => {});
+      // Startup reconciliation은 위 barrier에서 완료됐다. 이후 주기 조회만 시작한다.
       startPeriodicGmxApiReconciliation();
 
       // Relay startup reconciliation (5단계 §8) — migration 이후 순서 고정.
@@ -142,9 +212,14 @@ export function startServer({ httpServer, setDelegate, isShuttingDown }: Startup
         logger.info({ complete: s.complete, reasons: s.reasons }, "Relay startup reconciliation recorded");
       }).catch(() => {});
 
-      // Start the 24/7 AI Worker after migrations complete
-      // so the worker can read/write DB.
-      void workerManager.start();
+      // PAPER diagnostics only: process-memory evidence warm-up via public read-only
+      // calls. Exact PAPER + GMX API read-only gates are enforced inside the
+      // scheduler; other modes perform zero external calls. This is not execution
+      // authorization and does not mutate DB/signer/preflight/order state.
+      startPaperRuntimeReadinessScheduler();
+
+      // The 24/7 AI Worker was started inside the safety barrier only after all
+      // required restoration and reconciliation completed successfully.
     })
     .catch((err2) => {
       logger.error({ err: err2 }, "Database migration failed — aborting startup");
@@ -157,5 +232,10 @@ export function startServer({ httpServer, setDelegate, isShuttingDown }: Startup
 
 /** index.ts가 신호 수신 시 호출 — worker 정지 등 본체 자원 정리 */
 export function stopServices(): void {
+  devWebProxy?.close();
+  devWebProxy = null;
+  stopPeriodicIntentReconciliation();
+  stopPeriodicGmxApiReconciliation();
+  stopPaperRuntimeReadinessScheduler();
   workerManager.stop();
 }
