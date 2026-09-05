@@ -4,7 +4,7 @@
  */
 import type { CandleFrameInput, StrategyTimeframe } from './candleFoundationV2';
 import type { CostSnapshot } from '../lib/costSnapshot';
-import { validateCostSnapshot } from '../lib/costSnapshot';
+import { COST_SNAPSHOT_TTL_MS, validateCostSnapshot } from '../lib/costSnapshot';
 import type { RegimeState } from './regimeEngineV2';
 import type { SignalHistoryEvent, SignalLifecycleRecord } from './signalLifecycleV2';
 import { buildSignalLifecycleSnapshot } from './signalLifecycleSnapshotV2';
@@ -33,6 +33,8 @@ export interface StrategyShadowCostBpsResult {
   expectedCostsBps: number | null;
   reasons: string[];
 }
+
+export const STRATEGY_SHADOW_COST_MAX_AGE_MS = COST_SNAPSHOT_TTL_MS;
 
 export interface StrategyShadowWorkerBatchInput {
   cycleNumber: number;
@@ -74,6 +76,28 @@ const DEFAULT_DEPS: StrategyShadowWorkerBatchDeps = Object.freeze({
 const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
 const normalizeSymbol = (value: string): string => value.trim().toUpperCase();
 
+function validateShadowCostFreshness(snapshot: CostSnapshot, nowMs: number): string | null {
+  if (typeof snapshot.apiTimestamp !== 'string' || snapshot.apiTimestamp.length === 0) {
+    return 'upstream 비용 관측 시각 누락';
+  }
+  const observed = Date.parse(snapshot.apiTimestamp);
+  const fetched = Date.parse(snapshot.fetchedAt);
+  const expires = Date.parse(snapshot.expiresAt);
+  if (!finite(observed) || !finite(fetched) || !finite(expires)
+    || observed <= 0 || fetched <= 0 || expires <= 0) {
+    return '비용 관측 시각 INVALID';
+  }
+  if (observed !== fetched) return 'apiTimestamp/fetchedAt 불일치';
+  if (nowMs - observed > STRATEGY_SHADOW_COST_MAX_AGE_MS) {
+    return `SHADOW 비용 age 초과: ${nowMs - observed}ms > ${STRATEGY_SHADOW_COST_MAX_AGE_MS}ms`;
+  }
+  const ttlMs = expires - fetched;
+  if (ttlMs <= 0 || ttlMs > COST_SNAPSHOT_TTL_MS) {
+    return `SHADOW 비용 TTL 비정상: ${ttlMs}ms`;
+  }
+  return null;
+}
+
 /**
  * Converts direction-bound, fresh cost evidence into one conservative scalar.
  * Both LONG and SHORT must validate; the more expensive side wins.
@@ -110,6 +134,17 @@ export function deriveConservativeShadowCostBps(
       ],
     };
   }
+  const longFreshness = validateShadowCostFreshness(pair.long, nowMs);
+  const shortFreshness = validateShadowCostFreshness(pair.short, nowMs);
+  if (longFreshness || shortFreshness) {
+    return {
+      expectedCostsBps: null,
+      reasons: [
+        ...(longFreshness ? [`LONG 비용 INVALID: ${longFreshness}`] : []),
+        ...(shortFreshness ? [`SHORT 비용 INVALID: ${shortFreshness}`] : []),
+      ],
+    };
+  }
   const bps = Math.max(long.effectiveRoundTripCostUsd, short.effectiveRoundTripCostUsd)
     / pair.notionalUsd * 10_000;
   if (!finite(bps) || bps < 0) return { expectedCostsBps: null, reasons: ['비용 bps 변환 INVALID'] };
@@ -138,12 +173,32 @@ export function buildStrategyShadowWorkerBatch(
   const symbols = [...new Set(rawSymbols
     .filter((symbol): symbol is string => typeof symbol === 'string' && symbol.trim().length > 0)
     .map(normalizeSymbol))].sort();
+  const normalizedCosts: Record<string, StrategyShadowCostPair | null> = {};
+  const costInputIssues: string[] = [];
+  if (typeof input.costsBySymbol !== 'object' || input.costsBySymbol === null
+    || Array.isArray(input.costsBySymbol)) {
+    costInputIssues.push('costsBySymbol 객체 필요');
+  } else {
+    for (const [rawSymbol, pair] of Object.entries(input.costsBySymbol)) {
+      const symbol = normalizeSymbol(rawSymbol);
+      if (!symbol) {
+        costInputIssues.push('비어 있는 cost symbol key');
+      } else if (!symbols.includes(symbol)) {
+        costInputIssues.push(`예상 외 cost symbol: ${symbol}`);
+      } else if (Object.prototype.hasOwnProperty.call(normalizedCosts, symbol)) {
+        costInputIssues.push(`중복 canonical cost symbol: ${symbol}`);
+      } else {
+        normalizedCosts[symbol] = pair;
+      }
+    }
+  }
   const invalid = !Number.isInteger(input.cycleNumber) || input.cycleNumber <= 0
     || !finite(input.evaluatedAt) || input.evaluatedAt <= 0
     || symbols.length === 0
     || symbols.length !== rawSymbols.length
     || !Array.isArray(input.lifecycleRecords)
-    || !Array.isArray(input.historyEvents);
+    || !Array.isArray(input.historyEvents)
+    || costInputIssues.length > 0;
   const lifecycleSnapshot = invalid ? null : buildSignalLifecycleSnapshot(
     input.lifecycleRecords, input.historyEvents, input.evaluatedAt);
 
@@ -180,7 +235,17 @@ export function buildStrategyShadowWorkerBatch(
   const existingAi = adapterExistingAi(input.existingAi);
 
   for (const symbol of symbols) {
-    const cost = deriveConservativeShadowCostBps(input.costsBySymbol[symbol], input.evaluatedAt);
+    const cost = deriveConservativeShadowCostBps(normalizedCosts[symbol], input.evaluatedAt);
+    if (cost.expectedCostsBps === null) {
+      notEvaluatedSymbols.push({
+        symbol,
+        reasons: cost.reasons.length > 0
+          ? cost.reasons
+          : ['양방향 fresh cost SHADOW 근거 미충족 — record 생성 금지'],
+        warnings: [],
+      });
+      continue;
+    }
     const result = deps.runSymbol({
       symbol,
       evaluatedAt: input.evaluatedAt,
@@ -196,7 +261,7 @@ export function buildStrategyShadowWorkerBatch(
     } else {
       notEvaluatedSymbols.push({
         symbol,
-        reasons: [...result.reasons, ...cost.reasons],
+        reasons: [...result.reasons],
         warnings: [...result.warnings],
       });
     }

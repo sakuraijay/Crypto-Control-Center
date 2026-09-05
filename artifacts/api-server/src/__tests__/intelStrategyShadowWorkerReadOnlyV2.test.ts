@@ -42,6 +42,7 @@ vi.mock('../routes/gmx', () => ({
 
 import type { ProductionFetchersHandle } from '../intel/dataSource';
 import type { Timeframe } from '../intel/types';
+import type { CostSnapshot } from '../lib/costSnapshot';
 import {
   __resetIntelServiceForTests,
   __setIntelHandleForTests,
@@ -57,6 +58,42 @@ const STEPS: Partial<Record<Timeframe, number>> = {
   '1h': 60 * 60_000,
   '4h': 4 * 60 * 60_000,
 };
+const MARKET = '0x1111111111111111111111111111111111111111';
+
+function cost(isLong: boolean): CostSnapshot {
+  return {
+    market: MARKET,
+    isLong,
+    orderType: 'MarketIncrease',
+    notionalUsd: 1_000,
+    positionFeeUsd: 0.5,
+    executionFeeUsd: 0.2,
+    estimatedPriceImpactUsd: 0.1,
+    fundingFeeUsd: 0.1,
+    borrowingFeeUsd: 0.1,
+    estimatedExitFeeUsd: 0.5,
+    estimatedExitPriceImpactUsd: 0.1,
+    fundingRatePerHourFraction: 0.0001,
+    borrowingRatePerHourFraction: 0.0001,
+    totalEstimatedRoundTripCostUsd: 1.6,
+    source: 'PAPER_GMX_ESTIMATE',
+    blockNumber: null,
+    apiTimestamp: new Date(NOW - 1_000).toISOString(),
+    fetchedAt: new Date(NOW - 1_000).toISOString(),
+    expiresAt: new Date(NOW + 59_000).toISOString(),
+  };
+}
+
+function costsBySymbol() {
+  return {
+    BTC: {
+      market: MARKET,
+      notionalUsd: 1_000,
+      long: cost(true),
+      short: cost(false),
+    },
+  };
+}
 
 function candles(timeframe: Timeframe, count: number) {
   const step = STEPS[timeframe];
@@ -141,7 +178,7 @@ describe('Intel service Strategy SHADOW Worker read-only bridge', () => {
     vi.useRealTimers();
   });
 
-  it('fresh MTF frames를 실행 권한 없는 실제 SHADOW record로 평가한다', async () => {
+  it('fresh MTF와 양방향 cost를 실행 권한 없는 실제 SHADOW record로 평가한다', async () => {
     const fetchCandles = vi.fn(async (_symbol: string, timeframe: Timeframe, count: number) =>
       candles(timeframe, count));
     const injected = handle(fetchCandles);
@@ -152,6 +189,7 @@ describe('Intel service Strategy SHADOW Worker read-only bridge', () => {
       evaluatedAt: NOW,
       expectedSymbols: ['BTC'],
       existingAi: existingAi(),
+      costsBySymbol: costsBySymbol(),
     });
 
     expect(envelope).toMatchObject({
@@ -170,6 +208,32 @@ describe('Intel service Strategy SHADOW Worker read-only bridge', () => {
     expect(getIntelServiceState().shadowReadInFlight).toBe(false);
   });
 
+  it('fresh MTF라도 cost evidence가 없으면 runner record를 만들지 않는다', async () => {
+    const fetchCandles = vi.fn(async (_symbol: string, timeframe: Timeframe, count: number) =>
+      candles(timeframe, count));
+    __setIntelHandleForTests(handle(fetchCandles));
+
+    const envelope = await runStrategyShadowWorkerReadOnly({
+      cycleNumber: 11,
+      evaluatedAt: NOW,
+      expectedSymbols: ['BTC'],
+      existingAi: existingAi('cost-missing'),
+    });
+
+    expect(envelope.status).toBe('NOT_EVALUATED');
+    expect(envelope.records).toEqual([]);
+    expect(envelope.missingSymbols).toEqual(['BTC']);
+    expect(envelope.reasons.join(' ')).toContain('MTF/cost');
+    expect(envelope).toMatchObject({
+      executionAuthorized: false,
+      approvalCreationAllowed: false,
+      paperPositionMutationAllowed: false,
+      livePositionMutationAllowed: false,
+      riskAuthority: 'NOT_EVALUATED',
+    });
+    expect(fetchCandles).toHaveBeenCalledTimes(3);
+  });
+
   it('동일 cycle 동시 요청은 한 external read에 합류하고 예산을 한 번만 reset한다', async () => {
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
@@ -182,9 +246,11 @@ describe('Intel service Strategy SHADOW Worker read-only bridge', () => {
 
     const first = runStrategyShadowWorkerReadOnly({
       cycleNumber: 2, evaluatedAt: NOW, expectedSymbols: ['BTC'], existingAi: existingAi('first'),
+      costsBySymbol: costsBySymbol(),
     });
     const second = runStrategyShadowWorkerReadOnly({
       cycleNumber: 2, evaluatedAt: NOW, expectedSymbols: ['BTC'], existingAi: existingAi('second'),
+      costsBySymbol: costsBySymbol(),
     });
     await Promise.resolve();
     expect(getIntelServiceState().shadowReadInFlight).toBe(true);

@@ -23,7 +23,10 @@ import { lookupSdkIndexToken, ARBITRUM_CHAIN_ID } from '../lib/indexTokenDecimal
 import { createGmxCostReader, createProductionCostReaderClient, GmxCostReader } from './gmxCostReader';
 import type { CostBreakdownUsd } from './candidate';
 import { StrategyShadowMtfFrameCoordinator } from './strategyShadowMtfFrameCoordinatorV2';
-import { buildStrategyShadowWorkerBatch } from './strategyShadowWorkerBatchV2';
+import {
+  buildStrategyShadowWorkerBatch,
+  type StrategyShadowCostPair,
+} from './strategyShadowWorkerBatchV2';
 import {
   buildStrategyShadowWorkerEnvelope,
   type ExistingWorkerAiSummary,
@@ -167,6 +170,8 @@ export interface StrategyShadowWorkerReadOnlyInput {
   expectedSymbols: string[];
   existingAi: ExistingWorkerAiSummary;
   lifecycleSnapshot?: import('./signalLifecycleSnapshotV2').SignalLifecycleSnapshotV2 | null;
+  /** Caller-supplied, direction-bound read-only evidence. Missing pairs remain NOT_EVALUATED. */
+  costsBySymbol?: Readonly<Record<string, StrategyShadowCostPair | null>>;
 }
 
 function buildNotEvaluatedStrategyShadowEnvelope(
@@ -242,7 +247,7 @@ export async function runStrategyShadowWorkerReadOnly(
       evaluatedAt: input.evaluatedAt,
       expectedSymbols: input.expectedSymbols,
       framesBySymbol: read.framesBySymbol,
-      costsBySymbol: {},
+      costsBySymbol: input.costsBySymbol ?? {},
       previousRegimes: {},
       lifecycleRecords: lifecycle.records,
       historyEvents: lifecycle.historyEvents,

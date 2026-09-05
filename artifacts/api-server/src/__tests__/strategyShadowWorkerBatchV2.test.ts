@@ -31,8 +31,17 @@ function cost(isLong: boolean, total = 0.48, overrides: Partial<CostSnapshot> = 
     blockNumber: null,
     apiTimestamp: new Date(NOW - 1_000).toISOString(),
     fetchedAt: new Date(NOW - 1_000).toISOString(),
-    expiresAt: new Date(NOW + 60_000).toISOString(),
+    expiresAt: new Date(NOW + 59_000).toISOString(),
     ...overrides,
+  };
+}
+
+function costPair() {
+  return {
+    market: MARKET,
+    notionalUsd: 20,
+    long: cost(true, 0.4),
+    short: cost(false, 0.5),
   };
 }
 
@@ -140,17 +149,45 @@ describe('Strategy SHADOW worker batch bridge', () => {
     expect(result.reasons).toHaveLength(2);
   });
 
+  it('rejects old observations even when expiresAt is forged into the future', () => {
+    const old = NOW - 10 * 60_000;
+    const result = deriveConservativeShadowCostBps({
+      market: MARKET,
+      notionalUsd: 20,
+      long: cost(true, 0.48, {
+        apiTimestamp: new Date(old).toISOString(),
+        fetchedAt: new Date(old).toISOString(),
+        expiresAt: new Date(NOW + 60_000).toISOString(),
+      }),
+      short: cost(false),
+    }, NOW);
+    expect(result.expectedCostsBps).toBeNull();
+    expect(result.reasons.join(' ')).toMatch(/age 초과|TTL 비정상/);
+  });
+
   it('keeps an all-missing batch NOT_EVALUATED with no fabricated records', () => {
-    const result = buildStrategyShadowWorkerBatch(input(), { runSymbol: x => missing(x.symbol) });
+    let runnerCalls = 0;
+    const result = buildStrategyShadowWorkerBatch(input(), {
+      runSymbol: x => {
+        runnerCalls++;
+        return missing(x.symbol);
+      },
+    });
     expect(result.envelope.status).toBe('NOT_EVALUATED');
     expect(result.envelope.records).toEqual([]);
     expect(result.notEvaluatedSymbols.map(x => x.symbol)).toEqual(['BTC', 'ETH']);
+    expect(result.notEvaluatedSymbols[0].reasons.join(' ')).toContain('비용');
+    expect(runnerCalls).toBe(0);
     expect(result.executionAuthorized).toBe(false);
     expect(result.paperPositionMutationAllowed).toBe(false);
   });
 
   it('stores only evaluated records and marks a mixed batch PARTIAL', () => {
-    const result = buildStrategyShadowWorkerBatch(input(), {
+    const base = input();
+    const result = buildStrategyShadowWorkerBatch({
+      ...base,
+      costsBySymbol: { BTC: costPair(), ETH: costPair() },
+    }, {
       runSymbol: x => x.symbol === 'BTC' ? evaluated('BTC') : missing('ETH'),
     });
     expect(result.envelope.status).toBe('PARTIAL');
@@ -160,7 +197,10 @@ describe('Strategy SHADOW worker batch bridge', () => {
   });
 
   it('filters lifecycle and history evidence by symbol', () => {
-    const base = input(['BTC']);
+    const base = {
+      ...input(['BTC']),
+      costsBySymbol: { BTC: costPair() },
+    };
     let received: StrategyShadowWorkerBatchInput | null = null;
     const result = buildStrategyShadowWorkerBatch({ ...base }, {
       runSymbol: x => {
@@ -172,6 +212,39 @@ describe('Strategy SHADOW worker batch bridge', () => {
     });
     expect(received).not.toBeNull();
     expect(result.envelope.status).toBe('EVALUATED');
+  });
+
+  it('normalizes cost symbol keys consistently with expected symbols', () => {
+    const base = input(['btc']);
+    let receivedSymbol: string | null = null;
+    const result = buildStrategyShadowWorkerBatch({
+      ...base,
+      costsBySymbol: { btc: costPair() },
+    }, {
+      runSymbol: x => {
+        receivedSymbol = x.symbol;
+        return evaluated(x.symbol);
+      },
+    });
+    expect(receivedSymbol).toBe('BTC');
+    expect(result.envelope.status).toBe('EVALUATED');
+  });
+
+  it('fails closed on duplicate canonical cost keys', () => {
+    let runnerCalls = 0;
+    const result = buildStrategyShadowWorkerBatch({
+      ...input(['BTC']),
+      costsBySymbol: { BTC: costPair(), btc: costPair() },
+    }, {
+      runSymbol: x => {
+        runnerCalls++;
+        return evaluated(x.symbol);
+      },
+    });
+    expect(result.schemaVersion).toBe('INVALID');
+    expect(result.envelope.records).toEqual([]);
+    expect(result.envelope.executionAuthorized).toBe(false);
+    expect(runnerCalls).toBe(0);
   });
 
   it('fails closed on duplicate or malformed expected symbols', () => {
