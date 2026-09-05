@@ -173,6 +173,11 @@ describe('authenticated signer readiness snapshot', () => {
     expect(result.body.readiness.blockedReasons).toContain(
       'READONLY_SNAPSHOT_CANNOT_VERIFY_CANONICAL_AUTHORIZATION',
     );
+    expect(result.body.readiness.blockedReasons).toContain(
+      'STALE_OWNER_SIGNATURE_READY_SESSION_PRESENT',
+    );
+    expect(result.body.readiness.staleOwnerSignatureReadySessionCount).toBeGreaterThan(0);
+    expect(result.body.readiness.actualSubmitPossible).toBe(false);
     expect(result.body.readiness.blockedReasons).not.toContain('CANONICAL_SUBACCOUNT_ROUTER_INVALID');
     expect(mocks.selectSpy).toHaveBeenCalledTimes(3);
     expect(mocks.insertSpy).not.toHaveBeenCalled();

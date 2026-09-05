@@ -664,6 +664,68 @@ describe('GmxApiStatusCard — 렌더 계약', () => {
     expect(html).not.toMatch(/Gelato Enterprise|Gas Tank|GELATO_API_KEY/i);
     expect(html).not.toMatch(/private[_ ]?key/i);
   });
+
+  it('PAPER Canary blocker provenance를 active READY나 execution eligibility로 승격하지 않는다', async () => {
+    const blockedStatus: GmxApiStatusView = {
+      ...STATUS_FIXTURE,
+      approvalSessionReady: null,
+      readyForControlledCanary: false,
+      stopExecutionAvailable: false,
+      paperRuntimeReadiness: {
+        ...STATUS_FIXTURE.paperRuntimeReadiness!,
+        costs: {
+          BTC: {
+            ...STATUS_FIXTURE.paperRuntimeReadiness!.costs.BTC,
+            observationalFresh: false,
+            fresh: false,
+            blockReason: 'COST_BTC_EXECUTION_SNAPSHOT_INELIGIBLE — fresh $0.40 cap evidence 없음',
+            executionSnapshot: {
+              ...STATUS_FIXTURE.paperRuntimeReadiness!.costs.BTC.executionSnapshot,
+              fresh: false,
+              eligible: false,
+              authorized: false,
+            },
+          },
+          ETH: {
+            ...STATUS_FIXTURE.paperRuntimeReadiness!.costs.ETH,
+            observationalFresh: false,
+            fresh: false,
+            blockReason: 'COST_ETH_EXECUTION_SNAPSHOT_INELIGIBLE — fresh $0.40 cap evidence 없음',
+            executionSnapshot: {
+              ...STATUS_FIXTURE.paperRuntimeReadiness!.costs.ETH.executionSnapshot,
+              fresh: false,
+              eligible: false,
+              authorized: false,
+            },
+          },
+        },
+      },
+    };
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      jsonResponse(200, { ok: true, status: blockedStatus })));
+
+    render(<GmxApiStatusCard />);
+    fireEvent.change(screen.getByTestId('gmx-api-pin-input'), {
+      target: { value: '123456' },
+    });
+    fireEvent.click(screen.getByTestId('gmx-api-load-button'));
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const html = screen.getByTestId('gmx-api-status-card').textContent ?? '';
+    expect(html).toContain('CANONICAL_AUTHORIZATION_NOT_EVALUATED_IN_PAPER');
+    expect(html).toContain('ACTION_BUDGET_NOT_EVALUATED_IN_PAPER');
+    expect(html).toContain('READ-ONLY / NOT EXECUTION AUTHORIZATION');
+    expect(html).toContain('HARD_STOPPED');
+    expect(html).toContain('false / false / DISABLED');
+    expect(html).toContain('readyForControlledCanaryfalse');
+    expect(html).toContain('UNAVAILABLE (fail-closed)');
+    expect(html).toContain('fresh $0.40 cap evidence 없음');
+    expect(html).not.toContain('OWNER_SIGNATURE_READY');
+    expect(html).not.toContain('실행 권한 GRANTED');
+    expect(html).not.toContain('가능 · 현재 LIVE');
+  });
 });
 
 describe('PAPER Relay Evidence 렌더 계약', () => {

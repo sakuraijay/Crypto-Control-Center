@@ -368,6 +368,22 @@ describe('GET /api/executor/gmx-api/status', () => {
     // execution-only readiness must remain null/not_evaluated, never zero.
     expect(s.canonical.remaining).toBeNull();
     expect(s.actionBudget.remainingActions).toBeNull();
+    expect(s.readyForControlledCanary).toBe(false);
+    expect(s.stopExecutionAvailable).toBe(false);
+    expect(s.executionEligibleCostEvidence).toEqual({ fresh: false, evidence: null });
+    expect(s.paperEpochPreflight.boundaries).toMatchObject({
+      engineMode: 'PAPER',
+      autoWorkerLiveEnabled: false,
+      relaySubmissionEnabled: false,
+      relaySubmitNetworkEnabled: false,
+      relayMode: 'DISABLED',
+    });
+    expect(s.paperEpochPreflight.preservedExecutionGates).toMatchObject({
+      readyForControlledCanary: false,
+      stopExecutionAvailable: false,
+      riskEntryAllowed: false,
+      unchanged: true,
+    });
   });
 
   it('인증 GET은 외부 transport·DB write·execution-eligible evidence를 건드리지 않는다', async () => {

@@ -106,6 +106,25 @@ submit, 실제 주문, 자금 이동 또는 Active Capital 승격이 자동 수�
 실제 canary는 별도 운영자 승인 후 readiness refresh를 포함한 정해진 gate 순서를
 따라야 한다.
 
+## Controlled Canary blocker provenance
+
+운영자 status는 blocker의 출처와 실행 결과를 다음처럼 분리한다. 과거 기록이나
+PAPER 관측값을 active canonical READY 또는 execution-eligible 증거로 승격하지 않는다.
+
+| Blocker | Authoritative status provenance | Operator-facing 표시 | 실행 결과 |
+|---|---|---|---|
+| Historical Owner Approval READY | `staleOwnerSignatureReadySessionCount`; canonical nonce에 결속된 `approvalSessionReady`와 별도 | stale READY 수와 active READY 없음 | `actualSubmitPossible=false`; 과거 서명 재사용 금지 |
+| PAPER canonical authorization | `paperRelayEvidence.executionOnly[].failureId=CANONICAL_AUTHORIZATION_NOT_EVALUATED_IN_PAPER` | `NOT EVALUATED`, `READ-ONLY / NOT EXECUTION AUTHORIZATION` | canonical authorized로 간주하지 않음 |
+| PAPER action budget | `paperRelayEvidence.executionOnly[].failureId=ACTION_BUDGET_NOT_EVALUATED_IN_PAPER` | `NOT EVALUATED`; remaining actions를 `0`으로 대체하지 않음 | action budget sufficient로 간주하지 않음 |
+| RiskEngine HARD_STOPPED | `paperEpochPreflight.current`와 `preservedExecutionGates`의 risk state | `HARD_STOPPED`, entry false, unchanged | Canary/OPEN 차단; epoch 제안이 해제하지 않음 |
+| Fresh `$0.40` cost-cap evidence 없음 | `paperRuntimeReadiness.costs.*.executionSnapshot` 및 `executionEligibleCostEvidence` | `UNAVAILABLE (fail-closed)` 또는 cap 초과 blocker | 관측 비용을 실행 적격 비용으로 승격하지 않음 |
+| Stop capability false | `stopCapability.available=false`와 전체 `reasons` | `UNAVAILABLE (fail-closed)`, 평가 시각·경계·이유 | 보호 Stop을 보장할 수 없으므로 OPEN 차단 |
+| Relay disabled | `relaySubmissionEnabled=false`, `relaySubmitNetworkEnabled=false`, `relayMode=DISABLED` | `false / false / DISABLED`, 구조적으로 비활성 | Relay/LIVE 제출 불가 |
+
+모든 행은 독립 blocker다. 하나의 행이 PASS처럼 보이더라도 다른 blocker를 완화하지
+않으며, read-only status 조회 자체는 서명·authorization·주문·자금 이동을 수행하지
+않는다.
+
 ## PAPER readiness와 Stop capability 진단
 
 - `GET /api/executor/gmx-api/status`는 process-memory snapshot만 표시하며 외부
