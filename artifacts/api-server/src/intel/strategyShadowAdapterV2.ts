@@ -8,6 +8,7 @@ import type { SignalEligibilityDecision } from './signalLifecycleV2';
 import type { StrategyArbiterDecision } from './strategyArbiterV2';
 import type { StrategyDirection, StrategyId } from './strategySignalV2';
 import type { CandleStrategyShadowEvidence } from './candleStrategyShadowEvidenceV2';
+import type { StrategyNetEdgeResearchResult } from './strategyNetEdgeResearchGateV1';
 
 export const STRATEGY_SHADOW_ADAPTER_VERSION = 'strategy-shadow-adapter/v1' as const;
 
@@ -53,6 +54,7 @@ export interface StrategyShadowAdapterInput {
   arbiter: StrategyArbiterDecision;
   eligibility: SignalEligibilityDecision | null;
   existingAi: ExistingAiDecisionSnapshot | null;
+  netEdgeResearch: StrategyNetEdgeResearchResult | null;
 }
 
 export type StrategyShadowAction = 'LONG' | 'SHORT' | 'NO_TRADE' | 'REJECTED' | 'DISABLED';
@@ -78,10 +80,12 @@ export interface StrategyShadowRecord {
   structuralStop: number | null;
   expectedNetEdgeBps: number | null;
   expectedNetRR: number | null;
+  strategyEconomicsBasis?: 'STRATEGY_SIGNAL_PRE_TURNOVER' | null;
   lifecycleEligible: boolean | null;
   existingAi: ExistingAiDecisionSnapshot | null;
   reasons: string[];
   warnings: string[];
+  netEdgeResearch?: StrategyNetEdgeResearchResult | null;
   /** Present on runtime records after completed Candle Signal binding. */
   candleSignalEvidence?: CandleStrategyShadowEvidence;
   executionAuthorized: false;
@@ -181,10 +185,12 @@ function baseRecord(
     structuralStop: selected?.structuralStop ?? null,
     expectedNetEdgeBps: selected?.netExpectedEdgeBps ?? null,
     expectedNetRR: selected?.expectedNetRR ?? null,
+    strategyEconomicsBasis: selected ? 'STRATEGY_SIGNAL_PRE_TURNOVER' : null,
     lifecycleEligible: input.eligibility?.eligible ?? null,
     existingAi: input.existingAi,
     reasons,
     warnings,
+    netEdgeResearch: input.netEdgeResearch,
     executionAuthorized: false,
     paperPositionMutationAllowed: false,
     riskAuthority: 'NOT_EVALUATED',
@@ -248,6 +254,13 @@ export function buildStrategyShadowRecord(
   if (!input.eligibility.eligible) {
     return baseRecord(input, 'NO_TRADE', flags.version,
       ['Signal lifecycle/cooldown 차단 — NO TRADE', ...input.eligibility.reasons], input.eligibility.warnings);
+  }
+  if (!input.netEdgeResearch || !input.netEdgeResearch.eligible
+    || input.netEdgeResearch.signalId !== selected.signalId) {
+    return baseRecord(input, 'NO_TRADE', flags.version, [
+      'Net-Edge Research Gate 차단 — NO TRADE',
+      ...(input.netEdgeResearch?.reasons ?? ['Net-Edge research evidence 누락']),
+    ], input.netEdgeResearch?.warnings ?? []);
   }
   return baseRecord(input, selected.direction, flags.version, [
     `${selected.strategyId} ${selected.direction} 후보를 SHADOW 비교 대상으로 채택`,

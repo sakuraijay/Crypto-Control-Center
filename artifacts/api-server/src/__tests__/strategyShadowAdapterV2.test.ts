@@ -10,6 +10,7 @@ import {
   type StrategyShadowAdapterInput,
 } from '../intel/strategyShadowAdapterV2';
 import type { StrategySignal } from '../intel/strategySignalV2';
+import type { StrategyNetEdgeResearchResult } from '../intel/strategyNetEdgeResearchGateV1';
 
 const CLOSE = 1_800_000_000_000;
 
@@ -46,7 +47,12 @@ const existing = (overrides: Partial<ExistingAiDecisionSnapshot> = {}): Existing
 
 const input = (overrides: Partial<StrategyShadowAdapterInput> = {}): StrategyShadowAdapterInput => ({
   symbol: 'BTC', evaluatedAt: CLOSE + 1, arbiter: arbiter(), eligibility: eligibility(),
-  existingAi: existing(), ...overrides,
+  existingAi: existing(),
+  netEdgeResearch: {
+    eligible: true,
+    signalId: signal().signalId,
+  } as StrategyNetEdgeResearchResult,
+  ...overrides,
 });
 
 describe('Strategy Shadow Adapter v2', () => {
@@ -63,6 +69,20 @@ describe('Strategy Shadow Adapter v2', () => {
     expect(result).toMatchObject({ schemaVersion: STRATEGY_SHADOW_ADAPTER_VERSION, mode: 'SHADOW_ONLY',
       action: 'LONG', direction: 'LONG', comparison: 'ENSEMBLE_ONLY', strategyId: 'TREND_PULLBACK',
       executionAuthorized: false, paperPositionMutationAllowed: false, riskAuthority: 'NOT_EVALUATED' });
+  });
+
+  it('Net-Edge research 결과가 누락되면 actionable record 대신 NO_TRADE다', () => {
+    const missing = {
+      ...input(),
+      netEdgeResearch: undefined,
+    } as unknown as StrategyShadowAdapterInput;
+    expect(buildStrategyShadowRecord(missing)).toMatchObject({
+      action: 'NO_TRADE',
+      direction: 'NONE',
+      executionAuthorized: false,
+      paperPositionMutationAllowed: false,
+      riskAuthority: 'NOT_EVALUATED',
+    });
   });
 
   it('동일 방향의 기존 AI와 AGREE_DIRECTION으로 비교한다', () => {

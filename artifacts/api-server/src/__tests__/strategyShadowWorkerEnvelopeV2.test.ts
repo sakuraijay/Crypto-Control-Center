@@ -7,8 +7,99 @@ import {
 } from '../intel/strategyShadowWorkerEnvelopeV2';
 import { buildCandleStrategyShadowEvidence } from '../intel/candleStrategyShadowEvidenceV2';
 import type { CandleSignalToRisk } from '../intel/candleSignalContract';
+import {
+  STRATEGY_NET_EDGE_COST_EVIDENCE_VERSION,
+  STRATEGY_NET_EDGE_RESEARCH_VERSION,
+  type StrategyNetEdgeResearchResult,
+} from '../intel/strategyNetEdgeResearchGateV1';
 
 const NOW = 1_800_000_000_000;
+
+const netEdge = (base: StrategyShadowRecord): StrategyNetEdgeResearchResult => {
+  const observedAtMs = base.evaluatedAt - 1_000;
+  const quote = (direction: 'LONG' | 'SHORT') => ({
+    direction,
+    market: '0x1111111111111111111111111111111111111111',
+    orderType: 'MarketIncrease' as const,
+    notionalUsd: 1_000,
+    holdingHorizonHours: 12,
+    source: 'PAPER_GMX_ESTIMATE' as const,
+    blockNumber: null,
+    observedAtMs,
+    fetchedAtMs: observedAtMs,
+    expiresAtMs: observedAtMs + 60_000,
+    fundingRatePerHourFraction: 0.3 / 1_000 / 12,
+    borrowingRatePerHourFraction: 0.2 / 1_000 / 12,
+    positionFee: { usd: 0.5, bps: 5 },
+    exitFee: { usd: 0.5, bps: 5 },
+    funding: { usd: 0.3, bps: 3 },
+    borrowing: { usd: 0.2, bps: 2 },
+    priceImpact: { usd: 0.4, bps: 4 },
+    network: { usd: 0.1, bps: 1 },
+    totalRoundTripCost: { usd: 2, bps: 20 },
+  });
+  return {
+    schemaVersion: STRATEGY_NET_EDGE_RESEARCH_VERSION,
+    signalId: base.signalId,
+    symbol: base.symbol,
+    strategyId: 'TREND_PULLBACK',
+    signalConfidence: 80,
+    signalDataQuality: 'GOOD',
+    sourceTimeframes: ['4h', '1h', '15m'],
+    riskBps: 100,
+    researchOnly: true,
+    researchLabel: 'PAPER_SHADOW_RESEARCH',
+    eligible: true,
+    policy: {
+      strategyId: 'TREND_PULLBACK',
+      researchPriority: 1,
+      minimumConfidence: 75,
+      minimumHoldingHorizonHours: 8,
+      turnoverPenaltyBps: 5,
+      minimumNetEdgeBps: 25,
+      minimumNetEdgeToCostRatio: 1.5,
+      minimumExpectedNetRR: 1.5,
+    },
+    expectedGrossEdge: { usd: 22, bps: 220 },
+    expectedRoundTripCost: { usd: 2, bps: 20 },
+    turnoverPenalty: { usd: 0.5, bps: 5 },
+    expectedNetEdge: { usd: 19.5, bps: 195 },
+    breakEvenMoveBps: 25,
+    breakEvenMovePct: 0.25,
+    minimumRequiredPriceMoveBps: 55,
+    minimumRequiredPriceMovePct: 0.55,
+    grossEdgeToCostRatio: 11,
+    netEdgeToCostRatio: 9.75,
+    expectedNetRR: 1.95,
+    minimumExpectedNetRR: 1.5,
+    holdingHorizonHours: 12,
+    cooldownSatisfied: true,
+    cooldownCodes: ['ELIGIBLE'],
+    costEvidence: {
+      schemaVersion: STRATEGY_NET_EDGE_COST_EVIDENCE_VERSION,
+      market: '0x1111111111111111111111111111111111111111',
+      notionalUsd: 1_000,
+      holdingHorizonHours: 12,
+      observedAtMs,
+      bidirectionalValidated: true,
+      holdingCostsDerivedFromRates: true,
+      holdingCostProjectionMethod: 'ENTRY_RATE_CONSTANT',
+      conservativeBasisDirection: 'LONG',
+      directionalQuotes: { LONG: quote('LONG'), SHORT: quote('SHORT') },
+    },
+    reasons: ['eligible'],
+    warnings: [],
+    executionAuthorized: false,
+    approvalCreationAllowed: false,
+    paperPositionMutationAllowed: false,
+    livePositionMutationAllowed: false,
+    capitalSizingUsed: false,
+    plannedSeedUsed: false,
+    strategySignalEconomicsPreserved: true,
+    turnoverAdjustedResearchEconomics: true,
+    riskAuthority: 'NOT_EVALUATED',
+  };
+};
 
 const record = (overrides: Partial<StrategyShadowRecord> = {}): StrategyShadowRecord => {
   const base: StrategyShadowRecord = {
@@ -20,7 +111,8 @@ const record = (overrides: Partial<StrategyShadowRecord> = {}): StrategyShadowRe
   lifecycleEligible: true, existingAi: null, reasons: [], warnings: [], executionAuthorized: false,
     paperPositionMutationAllowed: false, riskAuthority: 'NOT_EVALUATED', ...overrides,
   };
-  if (base.action !== 'LONG' && base.action !== 'SHORT') return base;
+  if (base.action !== 'LONG' && base.action !== 'SHORT') return { ...base, netEdgeResearch: null };
+  const withNetEdge: StrategyShadowRecord = { ...base, netEdgeResearch: netEdge(base) };
   const candle = {
     schemaVersion: 'candle-signal/v1', symbol: base.symbol, evaluatedAtMs: base.evaluatedAt,
     direction: base.action, dataQuality: {
@@ -29,13 +121,13 @@ const record = (overrides: Partial<StrategyShadowRecord> = {}): StrategyShadowRe
     },
   } as CandleSignalToRisk;
   return {
-    ...base,
+    ...withNetEdge,
     candleSignalEvidence: buildCandleStrategyShadowEvidence({
       candleSignal: candle,
       v2Regime: {
         configVersion: 'regime-engine/v2', symbol: base.symbol, calculatedAt: base.sourceCandleCloseTime,
       } as never,
-      shadowRecord: base,
+      shadowRecord: withNetEdge,
     })!,
   };
 };
@@ -108,6 +200,15 @@ describe('Strategy Shadow worker envelope v2', () => {
   it('unsafe record 경계를 BLOCKED한다', () => {
     const unsafe = { ...record(), executionAuthorized: true } as unknown as StrategyShadowRecord;
     expect(buildStrategyShadowWorkerEnvelope(input({ records: [unsafe] })).status).toBe('BLOCKED');
+  });
+
+  it('actionable record에서 Net-Edge evidence 필드를 삭제하면 BLOCKED한다', () => {
+    const missing = { ...record() };
+    delete missing.netEdgeResearch;
+    expect(buildStrategyShadowWorkerEnvelope(input({
+      expectedSymbols: ['BTC'],
+      records: [missing],
+    })).status).toBe('BLOCKED');
   });
 
   it('기대하지 않은 종목 record를 BLOCKED한다', () => {

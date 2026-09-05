@@ -4,7 +4,12 @@
  */
 import type { CandleFrameInput, StrategyTimeframe } from './candleFoundationV2';
 import type { CostSnapshot } from '../lib/costSnapshot';
-import { COST_SNAPSHOT_TTL_MS, validateCostSnapshot } from '../lib/costSnapshot';
+import {
+  COST_SNAPSHOT_TTL_MS,
+  MAX_POSITIVE_IMPACT_OFFSET_FRACTION,
+  validateCostSnapshot,
+} from '../lib/costSnapshot';
+import { accrueHoldingCostsFromEntryRates } from '../lib/holdingCosts';
 import type { RegimeState } from './regimeEngineV2';
 import type { SignalHistoryEvent, SignalLifecycleRecord } from './signalLifecycleV2';
 import { buildSignalLifecycleSnapshot } from './signalLifecycleSnapshotV2';
@@ -19,18 +24,26 @@ import {
   type ExistingWorkerAiSummary,
   type StrategyShadowWorkerEnvelope,
 } from './strategyShadowWorkerEnvelopeV2';
+import {
+  STRATEGY_NET_EDGE_COST_EVIDENCE_VERSION,
+  type StrategyNetEdgeCostComponent,
+  type StrategyNetEdgeCostEvidence,
+  type StrategyNetEdgeDirectionalQuoteEvidence,
+} from './strategyNetEdgeResearchGateV1';
 
 export const STRATEGY_SHADOW_WORKER_BATCH_VERSION = 'strategy-shadow-worker-batch/v1' as const;
 
 export interface StrategyShadowCostPair {
   market: string;
   notionalUsd: number;
+  holdingHorizonHours: number;
   long: CostSnapshot | null;
   short: CostSnapshot | null;
 }
 
 export interface StrategyShadowCostBpsResult {
   expectedCostsBps: number | null;
+  costEvidence: StrategyNetEdgeCostEvidence | null;
   reasons: string[];
 }
 
@@ -75,6 +88,11 @@ const DEFAULT_DEPS: StrategyShadowWorkerBatchDeps = Object.freeze({
 
 const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
 const normalizeSymbol = (value: string): string => value.trim().toUpperCase();
+const round = (value: number): number => Number(value.toPrecision(12));
+const costComponent = (usd: number, notionalUsd: number): StrategyNetEdgeCostComponent => ({
+  usd: round(usd),
+  bps: round(usd / notionalUsd * 10_000),
+});
 
 function validateShadowCostFreshness(snapshot: CostSnapshot, nowMs: number): string | null {
   if (typeof snapshot.apiTimestamp !== 'string' || snapshot.apiTimestamp.length === 0) {
@@ -107,11 +125,13 @@ export function deriveConservativeShadowCostBps(
   nowMs: number,
 ): StrategyShadowCostBpsResult {
   if (!pair || !finite(nowMs) || nowMs <= 0 || !pair.market.trim()
-    || !finite(pair.notionalUsd) || pair.notionalUsd <= 0) {
-    return { expectedCostsBps: null, reasons: ['비용 pair 입력 누락 또는 INVALID'] };
+    || !finite(pair.notionalUsd) || pair.notionalUsd <= 0
+    || !finite(pair.holdingHorizonHours) || pair.holdingHorizonHours <= 0
+    || pair.holdingHorizonHours > 168) {
+    return { expectedCostsBps: null, costEvidence: null, reasons: ['비용 pair 입력 누락 또는 INVALID'] };
   }
   if (!pair.long || !pair.short) {
-    return { expectedCostsBps: null, reasons: ['LONG/SHORT 양방향 비용 증거 미완성'] };
+    return { expectedCostsBps: null, costEvidence: null, reasons: ['LONG/SHORT 양방향 비용 증거 미완성'] };
   }
   const long = validateCostSnapshot(pair.long, {
     market: pair.market,
@@ -128,6 +148,7 @@ export function deriveConservativeShadowCostBps(
   if (!long.ok || !short.ok) {
     return {
       expectedCostsBps: null,
+      costEvidence: null,
       reasons: [
         ...(!long.ok ? [`LONG 비용 INVALID: ${long.reason}`] : []),
         ...(!short.ok ? [`SHORT 비용 INVALID: ${short.reason}`] : []),
@@ -139,16 +160,94 @@ export function deriveConservativeShadowCostBps(
   if (longFreshness || shortFreshness) {
     return {
       expectedCostsBps: null,
+      costEvidence: null,
       reasons: [
         ...(longFreshness ? [`LONG 비용 INVALID: ${longFreshness}`] : []),
         ...(shortFreshness ? [`SHORT 비용 INVALID: ${shortFreshness}`] : []),
       ],
     };
   }
-  const bps = Math.max(long.effectiveRoundTripCostUsd, short.effectiveRoundTripCostUsd)
-    / pair.notionalUsd * 10_000;
-  if (!finite(bps) || bps < 0) return { expectedCostsBps: null, reasons: ['비용 bps 변환 INVALID'] };
-  return { expectedCostsBps: Number(bps.toPrecision(12)), reasons: [] };
+  const buildQuote = (
+    direction: 'LONG' | 'SHORT',
+    snapshot: CostSnapshot,
+  ): { ok: true; quote: StrategyNetEdgeDirectionalQuoteEvidence } | { ok: false; reason: string } => {
+    if (snapshot.notionalUsd !== pair.notionalUsd) {
+      return { ok: false, reason: `${direction} quote notional exact 결속 실패` };
+    }
+    const holding = accrueHoldingCostsFromEntryRates({
+      notionalUsd: pair.notionalUsd,
+      openedAtMs: 0,
+      closedAtMs: pair.holdingHorizonHours * 3_600_000,
+      fundingRatePerHourFraction: snapshot.fundingRatePerHourFraction,
+      borrowingRatePerHourFraction: snapshot.borrowingRatePerHourFraction,
+    });
+    if (!holding.ok) return { ok: false, reason: `${direction} ${holding.reason}` };
+    const nonImpactUsd = snapshot.positionFeeUsd + snapshot.estimatedExitFeeUsd + snapshot.executionFeeUsd
+      + holding.fundingUsd + holding.borrowingUsd;
+    const effectiveImpactUsd = Math.max(
+      snapshot.estimatedPriceImpactUsd + snapshot.estimatedExitPriceImpactUsd,
+      -(nonImpactUsd * MAX_POSITIVE_IMPACT_OFFSET_FRACTION),
+    );
+    const totalUsd = nonImpactUsd + effectiveImpactUsd;
+    if (!finite(totalUsd) || totalUsd <= 0) {
+      return { ok: false, reason: `${direction} horizon 비용 INVALID` };
+    }
+    return {
+      ok: true,
+      quote: {
+        direction,
+        market: pair.market,
+        orderType: 'MarketIncrease',
+        notionalUsd: pair.notionalUsd,
+        holdingHorizonHours: pair.holdingHorizonHours,
+        source: snapshot.source,
+        blockNumber: snapshot.blockNumber,
+        observedAtMs: Date.parse(snapshot.apiTimestamp as string),
+        fetchedAtMs: Date.parse(snapshot.fetchedAt),
+        expiresAtMs: Date.parse(snapshot.expiresAt),
+        fundingRatePerHourFraction: snapshot.fundingRatePerHourFraction as number,
+        borrowingRatePerHourFraction: snapshot.borrowingRatePerHourFraction as number,
+        positionFee: costComponent(snapshot.positionFeeUsd, pair.notionalUsd),
+        exitFee: costComponent(snapshot.estimatedExitFeeUsd, pair.notionalUsd),
+        funding: costComponent(holding.fundingUsd, pair.notionalUsd),
+        borrowing: costComponent(holding.borrowingUsd, pair.notionalUsd),
+        priceImpact: costComponent(effectiveImpactUsd, pair.notionalUsd),
+        network: costComponent(snapshot.executionFeeUsd, pair.notionalUsd),
+        totalRoundTripCost: costComponent(totalUsd, pair.notionalUsd),
+      },
+    };
+  };
+  const longQuote = buildQuote('LONG', pair.long);
+  const shortQuote = buildQuote('SHORT', pair.short);
+  if (!longQuote.ok || !shortQuote.ok) {
+    return {
+      expectedCostsBps: null,
+      costEvidence: null,
+      reasons: [
+        ...(!longQuote.ok ? [longQuote.reason] : []),
+        ...(!shortQuote.ok ? [shortQuote.reason] : []),
+      ],
+    };
+  }
+  const conservativeDirection = longQuote.quote.totalRoundTripCost.usd
+    >= shortQuote.quote.totalRoundTripCost.usd ? 'LONG' : 'SHORT';
+  const costEvidence: StrategyNetEdgeCostEvidence = {
+    schemaVersion: STRATEGY_NET_EDGE_COST_EVIDENCE_VERSION,
+    market: pair.market,
+    notionalUsd: pair.notionalUsd,
+    holdingHorizonHours: pair.holdingHorizonHours,
+    observedAtMs: Math.min(longQuote.quote.observedAtMs, shortQuote.quote.observedAtMs),
+    bidirectionalValidated: true,
+    holdingCostsDerivedFromRates: true,
+    holdingCostProjectionMethod: 'ENTRY_RATE_CONSTANT',
+    conservativeBasisDirection: conservativeDirection,
+    directionalQuotes: { LONG: longQuote.quote, SHORT: shortQuote.quote },
+  };
+  const bps = costEvidence.directionalQuotes[conservativeDirection].totalRoundTripCost.bps;
+  if (!finite(bps) || bps < 0) {
+    return { expectedCostsBps: null, costEvidence: null, reasons: ['비용 bps 변환 INVALID'] };
+  }
+  return { expectedCostsBps: bps, costEvidence, reasons: [] };
 }
 
 function adapterExistingAi(existingAi: ExistingWorkerAiSummary): ExistingAiDecisionSnapshot {
@@ -251,6 +350,7 @@ export function buildStrategyShadowWorkerBatch(
       evaluatedAt: input.evaluatedAt,
       frames: input.framesBySymbol[symbol] ?? {},
       expectedCostsBps: cost.expectedCostsBps,
+      netEdgeCostEvidence: cost.costEvidence,
       previousRegime: input.previousRegimes[symbol] ?? null,
       lifecycleRecords: input.lifecycleRecords.filter(record => normalizeSymbol(record.symbol) === symbol),
       historyEvents: input.historyEvents.filter(event => normalizeSymbol(event.symbol) === symbol),

@@ -37,6 +37,11 @@ import {
   buildCandleStrategyShadowEvidence,
   type CandleStrategyShadowEvidence,
 } from './candleStrategyShadowEvidenceV2';
+import {
+  evaluateStrategyNetEdgeResearch,
+  type StrategyNetEdgeCostEvidence,
+  type StrategyNetEdgeResearchResult,
+} from './strategyNetEdgeResearchGateV1';
 
 export const STRATEGY_SHADOW_RUNNER_VERSION = 'strategy-shadow-runner/v1' as const;
 
@@ -55,6 +60,7 @@ export interface StrategyShadowRunnerInput {
   evaluatedAt: number;
   frames: Partial<Record<StrategyTimeframe, CandleFrameInput>>;
   expectedCostsBps: number | null;
+  netEdgeCostEvidence?: StrategyNetEdgeCostEvidence | null;
   previousRegime: RegimeState | null;
   lifecycleRecords: SignalLifecycleRecord[];
   historyEvents: SignalHistoryEvent[];
@@ -75,6 +81,7 @@ export interface StrategyShadowRunnerResult {
   record: StrategyShadowRecord | null;
   candleSignal?: CandleSignalToRisk | null;
   candleSignalEvidence?: CandleStrategyShadowEvidence | null;
+  netEdgeResearch?: StrategyNetEdgeResearchResult | null;
   reasons: string[];
   warnings: string[];
   executionAuthorized: false;
@@ -127,6 +134,7 @@ function notEvaluated(
     record: null,
     candleSignal: null,
     candleSignalEvidence: null,
+    netEdgeResearch: null,
     reasons,
     warnings,
     executionAuthorized: false,
@@ -247,12 +255,21 @@ export function runStrategyShadowSymbol(
   const eligibility = arbiter.action === 'SELECT' && arbiter.selectedSignal !== null
     ? evaluateSignalEligibility(arbiter.selectedSignal, input.lifecycleRecords, input.historyEvents)
     : null;
+  const netEdgeResearch = arbiter.action === 'SELECT' && arbiter.selectedSignal !== null
+    ? evaluateStrategyNetEdgeResearch({
+      signal: arbiter.selectedSignal,
+      costEvidence: input.netEdgeCostEvidence ?? null,
+      eligibility,
+      evaluatedAt: input.evaluatedAt,
+    })
+    : null;
   const baseRecord = buildStrategyShadowRecord({
     symbol,
     evaluatedAt: input.evaluatedAt,
     arbiter,
     eligibility,
     existingAi: input.existingAi,
+    netEdgeResearch,
   }, input.featureFlags ?? DEFAULT_STRATEGY_SHADOW_FEATURE_FLAGS);
   const candleSignalEvidence = buildCandleStrategyShadowEvidence({
     candleSignal,
@@ -280,6 +297,7 @@ export function runStrategyShadowSymbol(
     record,
     candleSignal,
     candleSignalEvidence,
+    netEdgeResearch,
     reasons: ['완료된 15m/1h/4h candle evidence로 SHADOW record 계산'],
     warnings: foundation.issues,
     executionAuthorized: false,

@@ -8,6 +8,7 @@ import {
 } from '../intel/strategyRiskWorkerBridgeV2';
 import { buildCandleStrategyShadowEvidence } from '../intel/candleStrategyShadowEvidenceV2';
 import type { CandleSignalToRisk } from '../intel/candleSignalContract';
+import { buildTestNetEdgeResearch } from './helpers/strategyNetEdgeResearchFixture';
 
 const NOW = 1_900_000;
 const record = (overrides: Partial<StrategyShadowRecord> = {}): StrategyShadowRecord => {
@@ -21,6 +22,10 @@ const record = (overrides: Partial<StrategyShadowRecord> = {}): StrategyShadowRe
   executionAuthorized: false, paperPositionMutationAllowed: false,
     riskAuthority: 'NOT_EVALUATED', ...overrides,
   };
+  const withNetEdge: StrategyShadowRecord = {
+    ...base,
+    netEdgeResearch: buildTestNetEdgeResearch(base),
+  };
   const candle = {
     schemaVersion: 'candle-signal/v1', symbol: base.symbol, evaluatedAtMs: base.evaluatedAt,
     direction: base.action, dataQuality: {
@@ -29,11 +34,11 @@ const record = (overrides: Partial<StrategyShadowRecord> = {}): StrategyShadowRe
     },
   } as CandleSignalToRisk;
   return {
-    ...base,
+    ...withNetEdge,
     candleSignalEvidence: buildCandleStrategyShadowEvidence({
       candleSignal: candle,
       v2Regime: { configVersion: 'regime-engine/v2', symbol: base.symbol, calculatedAt: base.sourceCandleCloseTime } as never,
-      shadowRecord: base,
+      shadowRecord: withNetEdge,
     })!,
   };
 };

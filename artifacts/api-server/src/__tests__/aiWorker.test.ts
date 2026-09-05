@@ -266,6 +266,7 @@ import {
 import { buildStrategyShadowWorkerEnvelope } from '../intel/strategyShadowWorkerEnvelopeV2';
 import type { StrategyShadowRecord } from '../intel/strategyShadowAdapterV2';
 import { buildCandleStrategyShadowEvidence } from '../intel/candleStrategyShadowEvidenceV2';
+import { buildTestNetEdgeResearch } from './helpers/strategyNetEdgeResearchFixture';
 import type { CandleSignalToRisk } from '../intel/candleSignalContract';
 import {
   runIntelServiceCycle,
@@ -1372,6 +1373,10 @@ describe('crash-restart — Strategy SHADOW lifecycle DB 복원', () => {
     paperPositionMutationAllowed: false,
       riskAuthority: 'NOT_EVALUATED',
     };
+    const withNetEdge: StrategyShadowRecord = {
+      ...base,
+      netEdgeResearch: buildTestNetEdgeResearch(base),
+    };
     const candle = {
       schemaVersion: 'candle-signal/v1', symbol: base.symbol, evaluatedAtMs: base.evaluatedAt,
       direction: 'LONG',
@@ -1385,7 +1390,7 @@ describe('crash-restart — Strategy SHADOW lifecycle DB 복원', () => {
       },
     } as CandleSignalToRisk;
     return {
-      ...base,
+      ...withNetEdge,
       candleSignalEvidence: buildCandleStrategyShadowEvidence({
         candleSignal: candle,
         v2Regime: {
@@ -1393,7 +1398,7 @@ describe('crash-restart — Strategy SHADOW lifecycle DB 복원', () => {
           symbol: base.symbol,
           calculatedAt: base.sourceCandleCloseTime,
         } as never,
-        shadowRecord: base,
+        shadowRecord: withNetEdge,
       })!,
     };
   };

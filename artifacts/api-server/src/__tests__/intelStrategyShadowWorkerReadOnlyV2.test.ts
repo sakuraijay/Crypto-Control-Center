@@ -89,6 +89,7 @@ function costsBySymbol() {
     BTC: {
       market: MARKET,
       notionalUsd: 1_000,
+      holdingHorizonHours: 12,
       long: cost(true),
       short: cost(false),
     },

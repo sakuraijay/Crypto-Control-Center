@@ -14,6 +14,7 @@ import {
   advanceStrategyShadowLifecycleSnapshot,
   restoreStrategyShadowLifecycleFromDecisionFullJson,
 } from '../intel/strategyShadowLifecycleRuntimeV2';
+import { STRATEGY_NET_EDGE_COST_EVIDENCE_VERSION } from '../intel/strategyNetEdgeResearchGateV1';
 
 const CLOSE = 1_800_000_000_000;
 const NOW = CLOSE + 10_000;
@@ -80,6 +81,61 @@ function run(frames = {
     evaluatedAt: NOW,
     frames,
     expectedCostsBps: 10,
+    netEdgeCostEvidence: {
+      schemaVersion: STRATEGY_NET_EDGE_COST_EVIDENCE_VERSION,
+      market: '0x1111111111111111111111111111111111111111',
+      notionalUsd: 1_000,
+      holdingHorizonHours: 12,
+      observedAtMs: NOW - 1_000,
+      bidirectionalValidated: true,
+      holdingCostsDerivedFromRates: true,
+      holdingCostProjectionMethod: 'ENTRY_RATE_CONSTANT',
+      conservativeBasisDirection: 'LONG',
+      directionalQuotes: {
+        LONG: {
+          direction: 'LONG',
+          market: '0x1111111111111111111111111111111111111111',
+          orderType: 'MarketIncrease',
+          notionalUsd: 1_000,
+          holdingHorizonHours: 12,
+          source: 'PAPER_GMX_ESTIMATE',
+          blockNumber: null,
+          observedAtMs: NOW - 1_000,
+          fetchedAtMs: NOW - 1_000,
+          expiresAtMs: NOW + 59_000,
+          fundingRatePerHourFraction: 0,
+          borrowingRatePerHourFraction: 0,
+          positionFee: { usd: 0.2, bps: 2 },
+          exitFee: { usd: 0.2, bps: 2 },
+          funding: { usd: 0, bps: 0 },
+          borrowing: { usd: 0, bps: 0 },
+          priceImpact: { usd: 0.5, bps: 5 },
+          network: { usd: 0.1, bps: 1 },
+          totalRoundTripCost: { usd: 1, bps: 10 },
+        },
+        SHORT: {
+          direction: 'SHORT',
+          market: '0x1111111111111111111111111111111111111111',
+          orderType: 'MarketIncrease',
+          notionalUsd: 1_000,
+          holdingHorizonHours: 12,
+          source: 'PAPER_GMX_ESTIMATE',
+          blockNumber: null,
+          observedAtMs: NOW - 1_000,
+          fetchedAtMs: NOW - 1_000,
+          expiresAtMs: NOW + 59_000,
+          fundingRatePerHourFraction: 0,
+          borrowingRatePerHourFraction: 0,
+          positionFee: { usd: 0.2, bps: 2 },
+          exitFee: { usd: 0.2, bps: 2 },
+          funding: { usd: 0, bps: 0 },
+          borrowing: { usd: 0, bps: 0 },
+          priceImpact: { usd: 0.5, bps: 5 },
+          network: { usd: 0.1, bps: 1 },
+          totalRoundTripCost: { usd: 1, bps: 10 },
+        },
+      },
+    },
     previousRegime: null,
     lifecycleRecords: [],
     historyEvents: [],
@@ -211,6 +267,16 @@ describe('completed Candle Signal → v2 Regime/Ensemble SHADOW binding', () => 
     };
     const envelope = buildStrategyShadowWorkerEnvelope(envelopeInput);
     expect(envelope.status).toBe('EVALUATED');
+    expect(result.netEdgeResearch).toMatchObject({
+      eligible: true,
+      researchOnly: true,
+      executionAuthorized: false,
+      paperPositionMutationAllowed: false,
+      livePositionMutationAllowed: false,
+      capitalSizingUsed: false,
+      plannedSeedUsed: false,
+      riskAuthority: 'NOT_EVALUATED',
+    });
     expect(result.record).toMatchObject({
       action: 'LONG',
       direction: 'LONG',
@@ -219,6 +285,31 @@ describe('completed Candle Signal → v2 Regime/Ensemble SHADOW binding', () => 
       paperPositionMutationAllowed: false,
       riskAuthority: 'NOT_EVALUATED',
     });
+    const unsafeNetEdge = {
+      ...result.record!,
+      netEdgeResearch: {
+        ...result.record!.netEdgeResearch!,
+        executionAuthorized: true,
+      },
+    } as unknown as NonNullable<typeof result.record>;
+    expect(buildStrategyShadowWorkerEnvelope({
+      ...envelopeInput,
+      records: [unsafeNetEdge],
+    }).status).toBe('BLOCKED');
+    const policyTamper = {
+      ...result.record!,
+      netEdgeResearch: {
+        ...result.record!.netEdgeResearch!,
+        policy: {
+          ...result.record!.netEdgeResearch!.policy!,
+          minimumNetEdgeBps: 0,
+        },
+      },
+    };
+    expect(buildStrategyShadowWorkerEnvelope({
+      ...envelopeInput,
+      records: [policyTamper],
+    }).status).toBe('BLOCKED');
     const advanced = advanceStrategyShadowLifecycleSnapshot(snapshot, envelope, NOW);
     expect(advanced).toMatchObject({
       records: [{

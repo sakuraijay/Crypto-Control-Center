@@ -5,6 +5,7 @@ import {
   type SignalLifecycleSnapshotV2,
 } from './signalLifecycleSnapshotV2';
 import { validateCandleStrategyShadowEvidence } from './candleStrategyShadowEvidenceV2';
+import { validateStrategyNetEdgeResearchResult } from './strategyNetEdgeResearchGateV1';
 
 export const STRATEGY_SHADOW_WORKER_ENVELOPE_VERSION = 'strategy-shadow-worker-envelope/v1' as const;
 
@@ -166,6 +167,21 @@ export function buildStrategyShadowWorkerEnvelope(
     if (record.candleSignalEvidence) {
       issues.push(...validateCandleStrategyShadowEvidence(record.candleSignalEvidence, record)
         .map(issue => `${record.shadowRecordId}: ${issue}`));
+    }
+    if ((record.action === 'LONG' || record.action === 'SHORT') && !record.netEdgeResearch) {
+      issues.push(`${record.shadowRecordId}: actionable Net-Edge research evidence 누락`);
+    } else if (record.netEdgeResearch) {
+      issues.push(...validateStrategyNetEdgeResearchResult(record.netEdgeResearch, {
+        signalId: record.signalId,
+        symbol: record.symbol,
+        strategyId: record.strategyId,
+        confidence: record.confidence,
+        expectedNetEdgeBps: record.expectedNetEdgeBps,
+        expectedNetRR: record.expectedNetRR,
+        lifecycleEligible: record.lifecycleEligible,
+        action: record.action,
+        evaluatedAt: record.evaluatedAt,
+      }).map(issue => `${record.shadowRecordId}: ${issue}`));
     }
     if (recordIds.has(record.shadowRecordId)) issues.push(`중복 Shadow record ID: ${record.shadowRecordId}`);
     recordIds.add(record.shadowRecordId);

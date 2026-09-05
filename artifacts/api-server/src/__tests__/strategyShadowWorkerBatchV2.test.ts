@@ -40,6 +40,7 @@ function costPair() {
   return {
     market: MARKET,
     notionalUsd: 20,
+    holdingHorizonHours: 12,
     long: cost(true, 0.4),
     short: cost(false, 0.5),
   };
@@ -124,15 +125,70 @@ function missing(symbol: string): StrategyShadowRunnerResult {
 describe('Strategy SHADOW worker batch bridge', () => {
   it('uses the more expensive of valid LONG/SHORT cost evidence', () => {
     const result = deriveConservativeShadowCostBps({
-      market: MARKET, notionalUsd: 20, long: cost(true, 0.4), short: cost(false, 0.5),
+      market: MARKET, notionalUsd: 20, holdingHorizonHours: 12,
+      long: cost(true, 0.4), short: cost(false, 0.5),
     }, NOW);
     expect(result.reasons).toEqual([]);
-    expect(result.expectedCostsBps).toBeCloseTo(250, 8);
+    expect(result.expectedCostsBps).toBeCloseTo(255, 8);
+    expect(result.costEvidence).toMatchObject({
+      conservativeBasisDirection: 'SHORT',
+      holdingHorizonHours: 12,
+      bidirectionalValidated: true,
+      holdingCostsDerivedFromRates: true,
+      holdingCostProjectionMethod: 'ENTRY_RATE_CONSTANT',
+      directionalQuotes: {
+        LONG: { direction: 'LONG', funding: { usd: 0.03, bps: 15 },
+          borrowing: { usd: 0.03, bps: 15 } },
+        SHORT: { direction: 'SHORT', totalRoundTripCost: { usd: 0.51, bps: 255 } },
+      },
+    });
+    const conservative = result.costEvidence!.directionalQuotes.SHORT;
+    expect(conservative.positionFee.usd + conservative.exitFee.usd + conservative.funding.usd
+      + conservative.borrowing.usd + conservative.priceImpact.usd
+      + conservative.network.usd).toBeCloseTo(0.51, 8);
+  });
+
+  it('binds funding and borrowing to the declared holding horizon', () => {
+    const fourHours = deriveConservativeShadowCostBps({
+      market: MARKET, notionalUsd: 20, holdingHorizonHours: 4,
+      long: cost(true, 0.4), short: cost(false, 0.5),
+    }, NOW);
+    const twelveHours = deriveConservativeShadowCostBps({
+      market: MARKET, notionalUsd: 20, holdingHorizonHours: 12,
+      long: cost(true, 0.4), short: cost(false, 0.5),
+    }, NOW);
+    expect(fourHours.expectedCostsBps).toBeCloseTo(235, 8);
+    expect(twelveHours.expectedCostsBps).toBeCloseTo(255, 8);
+    expect(twelveHours.costEvidence!.directionalQuotes.SHORT.funding.usd)
+      .toBeGreaterThan(fourHours.costEvidence!.directionalQuotes.SHORT.funding.usd);
+  });
+
+  it('rejects a declared horizon when either directional holding rate is missing', () => {
+    const result = deriveConservativeShadowCostBps({
+      market: MARKET, notionalUsd: 20, holdingHorizonHours: 12,
+      long: cost(true, 0.4, { fundingRatePerHourFraction: null }),
+      short: cost(false, 0.5),
+    }, NOW);
+    expect(result.expectedCostsBps).toBeNull();
+    expect(result.costEvidence).toBeNull();
+    expect(result.reasons.join(' ')).toContain('HOLDING_COST_UNAVAILABLE');
+  });
+
+  it('rejects a lower-notional quote even inside the execution validator 1% tolerance', () => {
+    const result = deriveConservativeShadowCostBps({
+      market: MARKET, notionalUsd: 20, holdingHorizonHours: 12,
+      long: cost(true, 0.4, { notionalUsd: 19.9 }),
+      short: cost(false, 0.5),
+    }, NOW);
+    expect(result.expectedCostsBps).toBeNull();
+    expect(result.costEvidence).toBeNull();
+    expect(result.reasons.join(' ')).toContain('notional exact');
   });
 
   it('returns null instead of inventing zero when either direction is absent', () => {
     const result = deriveConservativeShadowCostBps({
-      market: MARKET, notionalUsd: 20, long: cost(true), short: null,
+      market: MARKET, notionalUsd: 20, holdingHorizonHours: 12,
+      long: cost(true), short: null,
     }, NOW);
     expect(result.expectedCostsBps).toBeNull();
     expect(result.reasons[0]).toContain('양방향');
@@ -142,6 +198,7 @@ describe('Strategy SHADOW worker batch bridge', () => {
     const result = deriveConservativeShadowCostBps({
       market: MARKET,
       notionalUsd: 20,
+      holdingHorizonHours: 12,
       long: cost(true, 0.48, { expiresAt: new Date(NOW - 1).toISOString() }),
       short: cost(false, 0.48, { market: '0x2222222222222222222222222222222222222222' }),
     }, NOW);
@@ -154,6 +211,7 @@ describe('Strategy SHADOW worker batch bridge', () => {
     const result = deriveConservativeShadowCostBps({
       market: MARKET,
       notionalUsd: 20,
+      holdingHorizonHours: 12,
       long: cost(true, 0.48, {
         apiTimestamp: new Date(old).toISOString(),
         fetchedAt: new Date(old).toISOString(),
@@ -212,6 +270,29 @@ describe('Strategy SHADOW worker batch bridge', () => {
     });
     expect(received).not.toBeNull();
     expect(result.envelope.status).toBe('EVALUATED');
+  });
+
+  it('passes conservative component cost evidence into the pure runner', () => {
+    const base = {
+      ...input(['BTC']),
+      costsBySymbol: { BTC: costPair() },
+    };
+    const result = buildStrategyShadowWorkerBatch(base, {
+      runSymbol: x => {
+        expect(x.expectedCostsBps).toBe(255);
+        expect(x.netEdgeCostEvidence).toMatchObject({
+          conservativeBasisDirection: 'SHORT',
+          holdingHorizonHours: 12,
+          bidirectionalValidated: true,
+          directionalQuotes: {
+            SHORT: { totalRoundTripCost: { usd: 0.51, bps: 255 } },
+          },
+        });
+        return evaluated(x.symbol);
+      },
+    });
+    expect(result.envelope.status).toBe('EVALUATED');
+    expect(result.executionAuthorized).toBe(false);
   });
 
   it('normalizes cost symbol keys consistently with expected symbols', () => {
