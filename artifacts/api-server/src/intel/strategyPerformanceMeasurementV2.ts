@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   STRATEGY_AGGRESSIVE_NET_EDGE_VERSION,
   type StrategyAggressiveNetEdgeAdvisory,
@@ -5,6 +6,7 @@ import {
 import type { StrategyDecisionExplainabilityEnvelope } from './strategyDecisionExplainabilityV2';
 import type { StrategyRiskAdapterDecision } from './strategyRiskAdapterV2';
 import type { StrategyShadowRecord } from './strategyShadowAdapterV2';
+import { computeShadowOutcome, type ShadowOutcomeInput } from './shadowOutcome';
 import { validateStrategyNetEdgeResearchResult } from './strategyNetEdgeResearchGateV1';
 import { MANUAL_CANARY_CAPS } from '../lib/manualCanaryCaps';
 
@@ -12,7 +14,9 @@ export const STRATEGY_PERFORMANCE_MEASUREMENT_VERSION =
   'strategy-performance-measurement/v1' as const;
 export const IMMUTABLE_PERFORMANCE_COST_CAP_USD = MANUAL_CANARY_CAPS.maxRoundTripCostUsd;
 const PERFORMANCE_HORIZON_MS = 4 * 60 * 60 * 1_000;
+const PERFORMANCE_CANDLE_INTERVAL_MS = 15 * 60 * 1_000;
 const COST_EVIDENCE_MAX_TTL_MS = 60_000;
+const COMPLETION_EVIDENCE_VERSION = 'strategy-performance-completion/v1' as const;
 
 export type StrategyPerformanceVariant = 'STANDARD_EXISTING' | 'AGGRESSIVE_CANDIDATE';
 
@@ -31,7 +35,7 @@ export interface StrategyPerformanceCandidate {
   costEvidenceExpiresAtMs: number | null;
   riskUsd: number | null;
   status: 'ELIGIBLE' | 'REJECTED' | 'NOT_EVALUATED';
-  reasons: string[];
+  reasons: readonly string[];
   authority: 'MEASUREMENT_ONLY';
   executionAuthorized: false;
   approvalCreationAllowed: false;
@@ -42,7 +46,7 @@ export interface StrategyPerformanceCandidate {
 export interface StrategyPerformanceMeasurementPlan {
   schemaVersion: typeof STRATEGY_PERFORMANCE_MEASUREMENT_VERSION;
   mode: 'SHADOW_PAPER_ONLY';
-  candidates: StrategyPerformanceCandidate[];
+  candidates: readonly StrategyPerformanceCandidate[];
   immutableCostCapUsd: typeof IMMUTABLE_PERFORMANCE_COST_CAP_USD;
   executionAuthorized: false;
   approvalCreationAllowed: false;
@@ -50,8 +54,175 @@ export interface StrategyPerformanceMeasurementPlan {
   livePositionMutationAllowed: false;
 }
 
+export interface StrategyPerformanceCompletionEvidence {
+  readonly schemaVersion: typeof COMPLETION_EVIDENCE_VERSION;
+  readonly completionEvidenceId: string;
+  readonly candidateId: string;
+  readonly candidateIdentity: string;
+  readonly outcomeWindowStartedAtMs: number;
+  readonly outcomeWindowEndedAtMs: number;
+  readonly closedCandleEvidenceId: string;
+  readonly completedAtMs: number;
+  readonly grossPnlUsd: number;
+  readonly totalCostUsd: number;
+  readonly netPnlUsd: number;
+  readonly dataCoverage: number;
+  readonly sourceCandleFromMs: number;
+  readonly sourceCandleToMs: number;
+}
+
+const issuedMeasurementPlans = new WeakSet<StrategyPerformanceMeasurementPlan>();
+const issuedCompletionEvidence = new WeakSet<StrategyPerformanceCompletionEvidence>();
+
 const finite = (value: unknown): value is number =>
   typeof value === 'number' && Number.isFinite(value);
+
+function hashIdentity(parts: readonly (string | number)[]): string {
+  return createHash('sha256').update(JSON.stringify(parts)).digest('hex');
+}
+
+function candidateIdentity(candidateValue: StrategyPerformanceCandidate): string {
+  return hashIdentity([
+    candidateValue.candidateId,
+    candidateValue.variant,
+    candidateValue.strategyId,
+    candidateValue.regime,
+    candidateValue.symbol,
+    candidateValue.direction,
+    candidateValue.evaluatedAt,
+    candidateValue.notionalUsd ?? 'null',
+    candidateValue.expectedTotalCostUsd ?? 'null',
+    candidateValue.costEvidenceId ?? 'null',
+    candidateValue.costEvidenceObservedAtMs ?? 'null',
+    candidateValue.costEvidenceExpiresAtMs ?? 'null',
+    candidateValue.riskUsd ?? 'null',
+  ]);
+}
+
+function issueStrategyPerformanceMeasurementPlan(
+  candidates: readonly StrategyPerformanceCandidate[],
+): StrategyPerformanceMeasurementPlan {
+  const frozenCandidates = candidates.map(candidateValue => Object.freeze({
+    ...candidateValue,
+    reasons: Object.freeze([...candidateValue.reasons]),
+  })) as readonly StrategyPerformanceCandidate[];
+  const plan = Object.freeze({
+    schemaVersion: STRATEGY_PERFORMANCE_MEASUREMENT_VERSION,
+    mode: 'SHADOW_PAPER_ONLY' as const,
+    candidates: Object.freeze(frozenCandidates),
+    immutableCostCapUsd: IMMUTABLE_PERFORMANCE_COST_CAP_USD,
+    executionAuthorized: false as const,
+    approvalCreationAllowed: false as const,
+    paperPositionMutationAllowed: false as const,
+    livePositionMutationAllowed: false as const,
+  });
+  issuedMeasurementPlans.add(plan);
+  return plan;
+}
+
+function issueStrategyPerformanceCompletionEvidence(input: {
+  plan: StrategyPerformanceMeasurementPlan;
+  candidateId: string;
+  outcomeInput: Omit<
+    ShadowOutcomeInput,
+    'direction' | 'notionalUsd' | 'totalCostUsd' | 'decidedAtMs' | 'horizonMs' | 'candleIntervalMs'
+  >;
+}): StrategyPerformanceCompletionEvidence | null {
+  if (!issuedMeasurementPlans.has(input.plan)) return null;
+  const matches = input.plan.candidates.filter(value => value.candidateId === input.candidateId);
+  if (matches.length !== 1 || !eligibleCandidateIsValid(matches[0])) return null;
+  const candidateValue = matches[0];
+  const expectedEnd = candidateValue.evaluatedAt + PERFORMANCE_HORIZON_MS;
+  const outcome = computeShadowOutcome({
+    ...input.outcomeInput,
+    direction: candidateValue.direction,
+    notionalUsd: candidateValue.notionalUsd as number,
+    totalCostUsd: candidateValue.expectedTotalCostUsd,
+    decidedAtMs: candidateValue.evaluatedAt,
+    horizonMs: PERFORMANCE_HORIZON_MS,
+    candleIntervalMs: PERFORMANCE_CANDLE_INTERVAL_MS,
+  });
+  if (!outcome.complete || outcome.status !== 'COMPLETE'
+    || outcome.horizonEndMs !== expectedEnd
+    || !finite(outcome.measuredAtMs) || outcome.measuredAtMs < expectedEnd
+    || !finite(outcome.hypotheticalGrossPnlUsd)
+    || !finite(outcome.hypotheticalTotalCostUsd)
+    || !finite(outcome.hypotheticalNetPnlUsd)
+    || outcome.hypotheticalTotalCostUsd !== candidateValue.expectedTotalCostUsd
+    || Math.abs((outcome.hypotheticalGrossPnlUsd - outcome.hypotheticalTotalCostUsd)
+      - outcome.hypotheticalNetPnlUsd) > 1e-6
+    || !finite(outcome.dataCoverage) || outcome.dataCoverage <= 0
+    || !finite(outcome.sourceCandleFromMs) || !finite(outcome.sourceCandleToMs)
+    || outcome.sourceCandleFromMs <= candidateValue.evaluatedAt
+    || outcome.sourceCandleToMs >= expectedEnd) return null;
+  const identity = candidateIdentity(candidateValue);
+  const closedCandleEvidenceId = hashIdentity([
+    'shadow-outcome/closed-candle/v1',
+    identity,
+    candidateValue.evaluatedAt,
+    expectedEnd,
+    outcome.measuredAtMs,
+    outcome.sourceCandleFromMs,
+    outcome.sourceCandleToMs,
+    outcome.dataCoverage,
+    outcome.hypotheticalGrossPnlUsd,
+    outcome.hypotheticalTotalCostUsd,
+    outcome.hypotheticalNetPnlUsd,
+  ]);
+  const completionEvidenceId = hashIdentity([
+    COMPLETION_EVIDENCE_VERSION,
+    identity,
+    candidateValue.evaluatedAt,
+    expectedEnd,
+    closedCandleEvidenceId,
+  ]);
+  const evidence = Object.freeze({
+    schemaVersion: COMPLETION_EVIDENCE_VERSION,
+    completionEvidenceId,
+    candidateId: candidateValue.candidateId,
+    candidateIdentity: identity,
+    outcomeWindowStartedAtMs: candidateValue.evaluatedAt,
+    outcomeWindowEndedAtMs: expectedEnd,
+    closedCandleEvidenceId,
+    completedAtMs: outcome.measuredAtMs,
+    grossPnlUsd: outcome.hypotheticalGrossPnlUsd,
+    totalCostUsd: outcome.hypotheticalTotalCostUsd,
+    netPnlUsd: outcome.hypotheticalNetPnlUsd,
+    dataCoverage: outcome.dataCoverage,
+    sourceCandleFromMs: outcome.sourceCandleFromMs,
+    sourceCandleToMs: outcome.sourceCandleToMs,
+  });
+  issuedCompletionEvidence.add(evidence);
+  return evidence;
+}
+
+export function __testIssueStrategyPerformanceFixture(input: {
+  candidates: readonly StrategyPerformanceCandidate[];
+  completions: readonly {
+    candidateId: string;
+    outcomeInput: Omit<
+      ShadowOutcomeInput,
+      'direction' | 'notionalUsd' | 'totalCostUsd' | 'decidedAtMs' | 'horizonMs' | 'candleIntervalMs'
+    >;
+  }[];
+}): {
+  plan: StrategyPerformanceMeasurementPlan;
+  completionEvidence: readonly (StrategyPerformanceCompletionEvidence | null)[];
+} {
+  if (process.env.NODE_ENV !== 'test') {
+    throw new Error('Strategy performance fixture issuance is test-only');
+  }
+  const plan = issueStrategyPerformanceMeasurementPlan(input.candidates);
+  return Object.freeze({
+    plan,
+    completionEvidence: Object.freeze(input.completions.map(value =>
+      issueStrategyPerformanceCompletionEvidence({
+        plan,
+        candidateId: value.candidateId,
+        outcomeInput: value.outcomeInput,
+      }))),
+  });
+}
 
 function candidate(
   shadow: StrategyShadowRecord,
@@ -205,23 +376,11 @@ export function buildStrategyPerformanceMeasurementPlan(input: {
       if (aggressiveCandidate) candidates.push(aggressiveCandidate);
     }
   });
-  return {
-    ...emptyStrategyPerformanceMeasurementPlan(),
-    candidates,
-  };
+  return issueStrategyPerformanceMeasurementPlan(candidates);
 }
 
 export function emptyStrategyPerformanceMeasurementPlan(): StrategyPerformanceMeasurementPlan {
-  return {
-    schemaVersion: STRATEGY_PERFORMANCE_MEASUREMENT_VERSION,
-    mode: 'SHADOW_PAPER_ONLY',
-    candidates: [],
-    immutableCostCapUsd: IMMUTABLE_PERFORMANCE_COST_CAP_USD,
-    executionAuthorized: false,
-    approvalCreationAllowed: false,
-    paperPositionMutationAllowed: false,
-    livePositionMutationAllowed: false,
-  };
+  return issueStrategyPerformanceMeasurementPlan([]);
 }
 
 export interface StrategyPerformanceObservation {
@@ -235,8 +394,13 @@ export interface StrategyPerformanceObservation {
   outcomeWindowStartedAtMs: number;
   outcomeWindowEndedAtMs: number;
   completionEvidenceId: string | null;
+  completionEvidence: StrategyPerformanceCompletionEvidence | null;
   outcomeStatus: 'COMPLETE' | 'INCOMPLETE' | 'AMBIGUOUS_INTRABAR' | 'DATA_UNAVAILABLE';
   costEvidenceId: string | null;
+  measuredNotionalUsd: number | null;
+  immutableCostCapUsd: number | null;
+  costEvidenceObservedAtMs: number | null;
+  costEvidenceExpiresAtMs: number | null;
   grossPnlUsd: number | null;
   totalCostUsd: number | null;
   netPnlUsd: number | null;
@@ -350,6 +514,7 @@ export function computeStrategyPerformanceAggregate(
     observationCounts.set(row.candidateId, (observationCounts.get(row.candidateId) ?? 0) + 1);
   }
   const planSafe = input.plan.schemaVersion === STRATEGY_PERFORMANCE_MEASUREMENT_VERSION
+    && issuedMeasurementPlans.has(input.plan)
     && input.plan.mode === 'SHADOW_PAPER_ONLY'
     && input.plan.immutableCostCapUsd === IMMUTABLE_PERFORMANCE_COST_CAP_USD
     && input.plan.executionAuthorized === false && input.plan.approvalCreationAllowed === false
@@ -362,14 +527,32 @@ export function computeStrategyPerformanceAggregate(
     && issued.variant === row.variant && issued.strategyId === row.strategyId
     && issued.regime === row.regime && issued.direction === row.direction
     && issued.costEvidenceId !== null && row.costEvidenceId === issued.costEvidenceId
+    && row.measuredNotionalUsd === issued.notionalUsd
+    && row.immutableCostCapUsd === input.plan.immutableCostCapUsd
+    && row.costEvidenceObservedAtMs === issued.costEvidenceObservedAtMs
+    && row.costEvidenceExpiresAtMs === issued.costEvidenceExpiresAtMs
     && finite(issued.expectedTotalCostUsd) && issued.expectedTotalCostUsd >= 0
     && row.totalCostUsd === issued.expectedTotalCostUsd
     && row.riskUsd === issued.riskUsd
     && row.horizonHours === 4
     && typeof row.completionEvidenceId === 'string' && row.completionEvidenceId.length > 0
+    && row.completionEvidence !== null
+    && issuedCompletionEvidence.has(row.completionEvidence)
+    && row.completionEvidence.schemaVersion === COMPLETION_EVIDENCE_VERSION
+    && row.completionEvidence.completionEvidenceId === row.completionEvidenceId
+    && row.completionEvidence.candidateId === issued.candidateId
+    && row.completionEvidence.candidateIdentity === candidateIdentity(issued)
+    && row.completionEvidence.outcomeWindowStartedAtMs === row.outcomeWindowStartedAtMs
+    && row.completionEvidence.outcomeWindowEndedAtMs === row.outcomeWindowEndedAtMs
+    && row.completionEvidence.completedAtMs <= row.measuredAtMs
+    && finite(row.grossPnlUsd)
+    && Math.abs(row.completionEvidence.grossPnlUsd - row.grossPnlUsd) <= 1e-6
+    && row.completionEvidence.totalCostUsd === row.totalCostUsd
+    && finite(row.netPnlUsd)
+    && Math.abs(row.completionEvidence.netPnlUsd - row.netPnlUsd) <= 1e-6
     && finite(row.outcomeWindowStartedAtMs) && finite(row.outcomeWindowEndedAtMs)
-    && row.outcomeWindowStartedAtMs >= issued.evaluatedAt
-    && row.outcomeWindowEndedAtMs - row.outcomeWindowStartedAtMs >= PERFORMANCE_HORIZON_MS
+    && row.outcomeWindowStartedAtMs === issued.evaluatedAt
+    && row.outcomeWindowEndedAtMs === issued.evaluatedAt + PERFORMANCE_HORIZON_MS
     && row.measuredAtMs >= row.outcomeWindowEndedAtMs
     && row.outcomeStatus === 'COMPLETE'
     && finite(row.measuredAtMs) && row.measuredAtMs > 0
