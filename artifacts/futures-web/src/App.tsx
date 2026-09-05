@@ -7,6 +7,7 @@ import NotFound from '@/pages/not-found';
 import { GlobalProviders, useAppContext } from '@/lib/context';
 import { Shell } from '@/components/shell';
 import { AuthOverlay } from '@/components/auth/AuthOverlay';
+import { OnboardingOverlay } from '@/components/onboarding/OnboardingOverlay';
 import { RiskAlertMonitor } from '@/components/trading/RiskAlertMonitor';
 
 import Dashboard from '@/pages/dashboard';
@@ -72,6 +73,7 @@ export function AppContent() {
   return (
     <>
       <AuthOverlay />
+      <OnboardingOverlay />
       <EmergencyBanner />
       <RiskAlertMonitor />
       <AppRouter />

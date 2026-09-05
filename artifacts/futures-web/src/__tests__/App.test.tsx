@@ -44,6 +44,10 @@ vi.mock('@/pages/not-found', () => ({
   default: () => <div data-route-test="not-found">404 Page Not Found</div>,
 }));
 
+vi.mock('@/components/onboarding/OnboardingOverlay', () => ({
+  OnboardingOverlay: () => null,
+}));
+
 import { APP_ROUTER_BASE, AppContent } from '@/App';
 
 const PUBLISHED_ROUTER_BASE = '/futures-web';

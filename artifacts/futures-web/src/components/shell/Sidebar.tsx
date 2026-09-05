@@ -12,7 +12,10 @@ const navItems = [
   { href: '/ai-log',    label: 'AI Log',    icon: Brain },
   { href: '/history',   label: 'History',   icon: History },
   { href: '/backtest',  label: 'Backtest',  icon: FlaskConical },
-  { href: '/settings',  label: 'Settings',  icon: Settings },
+];
+
+const bottomNavItems = [
+  { href: '/settings',  label: 'Advanced Settings',  icon: Settings },
 ];
 
 const MODE_DOT: Record<OperatingMode, string> = {
@@ -72,7 +75,7 @@ export function Sidebar() {
                   ? 'bg-sidebar-accent text-sidebar-accent-foreground font-medium'
                   : 'text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/50'
               }`}
-              data-testid={`nav-${item.label.toLowerCase().replace(' ', '-')}`}
+              data-testid={`nav-${item.label.toLowerCase().replace(/\s+/g, '-')}`}
             >
               <item.icon className="w-4 h-4 shrink-0" />
               <span className="text-sm">{item.label}</span>
@@ -83,6 +86,27 @@ export function Sidebar() {
           );
         })}
       </nav>
+
+      <div className="px-3 pb-3 flex flex-col gap-1">
+        {bottomNavItems.map((item) => {
+          const isActive = location === item.href;
+          return (
+            <Link
+              key={item.href}
+              href={item.href}
+              className={`flex items-center gap-3 px-3 py-2 rounded-md transition-colors ${
+                isActive
+                  ? 'bg-sidebar-accent text-sidebar-accent-foreground font-medium'
+                  : 'text-muted-foreground hover:text-foreground hover:bg-sidebar-accent/50'
+              }`}
+              data-testid={`nav-${item.label.toLowerCase().replace(/\s+/g, '-')}`}
+            >
+              <item.icon className="w-4 h-4 shrink-0" />
+              <span className="text-sm">{item.label}</span>
+            </Link>
+          );
+        })}
+      </div>
 
       <div className="p-4 border-t border-border flex flex-col gap-2">
         {/* Operating mode indicator */}
