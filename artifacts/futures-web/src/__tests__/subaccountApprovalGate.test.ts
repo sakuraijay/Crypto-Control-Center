@@ -6,7 +6,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import {
   mapAuthFetchToDisplayState, mapAuthStateToView, canPrepareApproval,
-  fetchSubaccountAuthDetailed,
+  fetchSubaccountAuthDetailed, getOwnerApprovalRecoveryNotice,
   type SubaccountAuthResponse, type AuthFetchResult,
 } from '../lib/subaccountApproval';
 
@@ -59,6 +59,29 @@ describe('신규 상태 라벨 (§2)', () => {
   it('NOT_AUTHORIZED / SIGNER_NOT_INITIALIZED 라벨 존재', () => {
     expect(mapAuthStateToView('NOT_AUTHORIZED').label).not.toBe('NOT_AUTHORIZED');
     expect(mapAuthStateToView('SIGNER_NOT_INITIALIZED').label).not.toBe('SIGNER_NOT_INITIALIZED');
+  });
+});
+
+describe('Owner Approval durable recovery 진단', () => {
+  it('만료된 durable evidence 원인은 숨기지 않고 표시', () => {
+    expect(getOwnerApprovalRecoveryNotice({
+      ready: false,
+      code: 'SESSION_TIMESTAMP_INVALID_OR_EXPIRED',
+      reason: 'approval expiry 만료 + signature deadline 만료 — 새 서명 전에는 복원 불가',
+    })).toContain('approval expiry 만료');
+  });
+
+  it('정상 READY 또는 durable evidence 자체가 없는 최초 상태는 경고를 표시하지 않음', () => {
+    expect(getOwnerApprovalRecoveryNotice({
+      ready: true,
+      code: 'READY_VERIFIED',
+      reason: 'verified',
+    })).toBeNull();
+    expect(getOwnerApprovalRecoveryNotice({
+      ready: false,
+      code: 'NO_DURABLE_READY_SESSION',
+      reason: '없음',
+    })).toBeNull();
   });
 });
 

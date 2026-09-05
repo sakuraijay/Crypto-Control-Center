@@ -19,6 +19,7 @@ import {
   isManualCanarySignerRestoreAllowed,
   isSignerStorageAccessAllowed,
   restoreExistingManualCanarySigner,
+  getStoredPublicSignerAddress,
 } from "./lib/delegatedSigner";
 import {
   reconcileOnRestart,
@@ -48,6 +49,9 @@ import {
   stopPaperRuntimeReadinessScheduler,
 } from "./lib/paperRuntimeReadiness";
 import { completeStartupSafetyBarrier } from "./lib/startupSafetyBarrier";
+import { getConfiguredMainAccount, warmOwnerApprovalRecoveryCache } from "./lib/ownerApprovalSession";
+import { EXPECTED_CANARY_SIGNER } from "./lib/canaryAllowanceInfo";
+import { resolveGmxLiveRelayConfig } from "./lib/gmxLiveConfig";
 
 let devWebProxy: DevWebProxyHandle | null = null;
 
@@ -118,11 +122,11 @@ export function startServer({ httpServer, setDelegate, isShuttingDown }: Startup
       const signerStorage = isSignerStorageAccessAllowed(process.env);
       const manualCanaryRestore = isManualCanarySignerRestoreAllowed(process.env);
       if (isDelegatedSignerEnabled() && signerStorage.allowed) {
-        initializeDelegatedSigner()
+        await initializeDelegatedSigner()
           .then(() => logger.info("Delegated signer initialized"))
           .catch((e: Error) => logger.warn({ err: e }, "Delegated signer init failed (fail-closed — signer 비활성 유지)"));
       } else if (isDelegatedSignerEnabled() && manualCanaryRestore.allowed) {
-        restoreExistingManualCanarySigner()
+        await restoreExistingManualCanarySigner()
           .then(() => logger.info("Manual Canary existing signer restored"))
           .catch((e: Error) => logger.warn({ err: e }, "Manual Canary signer restore failed (fail-closed — signer 비활성 유지)"));
       } else if (isDelegatedSignerEnabled()) {
@@ -133,6 +137,24 @@ export function startServer({ httpServer, setDelegate, isShuttingDown }: Startup
       } else {
         logger.info("Delegated signer disabled (DELEGATED_SIGNER_ENABLED != 'true')");
       }
+
+      // Owner Approval durable recovery: startup에서만 암호화 서명을 1회 검증한다.
+      // 외부 호출·DB write는 없으며, 이후 상태 GET은 검증 캐시 + 현재 canonical
+      // nonce가 모두 일치해야만 OWNER_SIGNATURE_READY를 표시한다.
+      const mainAccount = getConfiguredMainAccount();
+      const relayConfig = resolveGmxLiveRelayConfig();
+      const storedSigner = await getStoredPublicSignerAddress(EXPECTED_CANARY_SIGNER);
+      const ownerRecovery = await warmOwnerApprovalRecoveryCache({
+        expectedOwner: mainAccount,
+        expectedSubaccount: storedSigner.ok ? storedSigner.address as `0x${string}` : null,
+        expectedVerifyingContract: relayConfig.ok
+          ? relayConfig.config.subaccountGelatoRelayRouter as `0x${string}`
+          : null,
+      });
+      logger.info(
+        { ready: ownerRecovery.ok, code: ownerRecovery.code, reason: ownerRecovery.reason },
+        "Owner Approval startup recovery evaluated",
+      );
 
       // Emergency Stop 복원 → restart/pending execution reconciliation
       // → Stop capability 평가를 Worker 기동 전 barrier로 완료한다.

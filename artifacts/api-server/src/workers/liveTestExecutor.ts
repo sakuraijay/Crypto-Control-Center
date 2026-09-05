@@ -942,6 +942,8 @@ export async function runConfirmedOpenInitialStopHandoff(
       try { nonce = canonical?.approvalNonce == null ? null : BigInt(canonical.approvalNonce); }
       catch { nonce = null; }
       if (!owner || !signer || !isSignerInitialized() || nonce === null) return false;
+      const relay = resolveGmxLiveRelayConfig();
+      if (!relay.ok) return false;
       const stored = await getStoredPublicSignerAddress(signer);
       if (!stored.ok
           || signer.toLowerCase() !== stored.address.toLowerCase()) {
@@ -950,6 +952,7 @@ export async function runConfirmedOpenInitialStopHandoff(
       const session = await getActiveReadySession({
         expectedOwner: owner,
         expectedSubaccount: signer as `0x${string}`,
+        expectedVerifyingContract: relay.config.subaccountGelatoRelayRouter as `0x${string}`,
         canonicalNonce: nonce,
       });
       return session !== null && session.subaccount.toLowerCase() === signer.toLowerCase();

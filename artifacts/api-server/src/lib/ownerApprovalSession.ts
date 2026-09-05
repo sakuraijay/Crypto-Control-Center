@@ -17,7 +17,7 @@
  *    canonical 온체인 조회로만 도달한다. LIVE 잠금·Gelato 제출은 절대 없다.
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import { db, subaccountApprovalSessionsTable, type SubaccountApprovalSessionRow } from '@workspace/db';
 import type { Address, Hex } from 'viem';
@@ -30,7 +30,7 @@ import {
   type SubaccountApprovalMessage,
 } from './gmxEip712';
 import { SUBACCOUNT_ORDER_ACTION } from './gmxDataStore';
-import { encryptSensitiveHex } from './delegatedSigner';
+import { decryptSensitiveHex, encryptSensitiveHex } from './delegatedSigner';
 import { ARBITRUM_ONE_CHAIN_ID } from './gmxLiveConfig';
 
 // ── 서버 강제 한도 (사용자 입력은 이 범위로 클램프) ──────────────────────────
@@ -372,6 +372,11 @@ export async function submitApprovalSignature(params: {
     if (updated.length !== 1) {
       return { ok: false, reason: '세션 상태 전환 실패 — 저장되지 않음 (fail-closed)' };
     }
+    cacheVerifiedReadyEvidence({
+      ...row,
+      encryptedSignature: encrypted,
+      status: SESSION_STATUS.OWNER_SIGNATURE_READY,
+    });
   } catch {
     return { ok: false, reason: '서명 저장 실패 — READY 전환되지 않음 (fail-closed)' };
   }
@@ -439,79 +444,449 @@ export interface ActiveSessionSummary {
   createdAt: string;
 }
 
-/**
- * 활성(READY) 세션 요약 — 서명·암호문 절대 미포함.
- * canonical nonce/account/signer와 불일치하면 즉시 INVALIDATED 처리 후 null.
- */
-export async function getActiveReadySession(params: {
+export type ReadySessionRecoveryCode =
+  | 'READY_VERIFIED'
+  | 'EXPECTED_OWNER_UNAVAILABLE'
+  | 'EXPECTED_SUBACCOUNT_UNAVAILABLE'
+  | 'EXPECTED_ROUTER_UNAVAILABLE'
+  | 'CANONICAL_NONCE_UNAVAILABLE'
+  | 'DB_READ_FAILED'
+  | 'NO_DURABLE_READY_SESSION'
+  | 'MULTIPLE_READY_SESSIONS'
+  | 'SESSION_TIMESTAMP_INVALID_OR_EXPIRED'
+  | 'OWNER_BINDING_MISMATCH'
+  | 'SIGNER_BINDING_MISMATCH'
+  | 'CHAIN_BINDING_MISMATCH'
+  | 'ROUTER_BINDING_MISMATCH'
+  | 'MESSAGE_BINDING_MISMATCH'
+  | 'NONCE_BINDING_MISMATCH'
+  | 'DIGEST_BINDING_MISMATCH'
+  | 'ENCRYPTED_SIGNATURE_MISSING'
+  | 'SIGNATURE_NOT_VERIFIED_AFTER_STARTUP'
+  | 'SIGNATURE_DECRYPT_FAILED'
+  | 'SIGNATURE_VERIFY_FAILED';
+
+export type ReadySessionRecoveryResult =
+  | {
+      ok: true;
+      code: 'READY_VERIFIED';
+      reason: string;
+      session: ActiveSessionSummary;
+    }
+  | {
+      ok: false;
+      code: Exclude<ReadySessionRecoveryCode, 'READY_VERIFIED'>;
+      reason: string;
+      session: null;
+    };
+
+export interface VerifiedOwnerApprovalCapability {
+  sessionId: string;
+  approval: {
+    subaccount: string;
+    shouldAdd: boolean;
+    expiresAt: string;
+    maxAllowedCount: string;
+    actionType: string;
+    nonce: string;
+    desChainId: string;
+    deadline: string;
+    integrationId: string;
+    signature: string;
+  };
+}
+
+interface ReadySessionRecoveryParams {
   expectedOwner: Address | null;
   expectedSubaccount: Address | null;
-  canonicalNonce: bigint | null;   // null = canonical 미확인 (무효화 판단 보류)
-  persistInvalidation?: boolean;   // status/readiness 조회는 false: 논리적 차단만, DB write 금지
-}): Promise<ActiveSessionSummary | null> {
+  expectedVerifyingContract: Address | null;
+  canonicalNonce: bigint | null;
+  persistInvalidation?: boolean;
+  nowSec?: bigint;
+  verifyEncryptedSignature?: boolean;
+}
+
+type InternalReadySessionRecoveryResult = ReadySessionRecoveryResult & {
+  capability?: VerifiedOwnerApprovalCapability;
+};
+
+function recoveryFailure(
+  code: Exclude<ReadySessionRecoveryCode, 'READY_VERIFIED'>,
+  reason: string,
+): ReadySessionRecoveryResult {
+  return { ok: false, code, reason, session: null };
+}
+
+function parseCanonicalUint(value: string): bigint | null {
+  if (!/^(0|[1-9]\d*)$/.test(value)) return null;
+  try {
+    const parsed = BigInt(value);
+    return parsed <= ((1n << 256n) - 1n) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+interface VerifiedReadyEvidenceCache {
+  sessionId: string;
+  typedDataDigest: string;
+  encryptedSignatureHash: string;
+}
+
+let verifiedReadyEvidenceCache: VerifiedReadyEvidenceCache | null = null;
+
+function encryptedSignatureHash(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
+function cacheVerifiedReadyEvidence(row: SubaccountApprovalSessionRow): void {
+  if (!row.encryptedSignature) return;
+  verifiedReadyEvidenceCache = {
+    sessionId: row.id,
+    typedDataDigest: row.typedDataDigest.toLowerCase(),
+    encryptedSignatureHash: encryptedSignatureHash(row.encryptedSignature),
+  };
+}
+
+function isReadyEvidenceVerifiedInThisProcess(row: SubaccountApprovalSessionRow): boolean {
+  return !!row.encryptedSignature
+    && verifiedReadyEvidenceCache?.sessionId === row.id
+    && verifiedReadyEvidenceCache.typedDataDigest === row.typedDataDigest.toLowerCase()
+    && verifiedReadyEvidenceCache.encryptedSignatureHash === encryptedSignatureHash(row.encryptedSignature);
+}
+
+/** 테스트 전용 — Production 호출 금지. */
+export function __resetOwnerApprovalRecoveryCacheForTests(): void {
+  verifiedReadyEvidenceCache = null;
+}
+
+/**
+ * Durable OWNER_SIGNATURE_READY 복원 검증.
+ *
+ * READY는 DB status 문자열만으로 복원하지 않는다. 현재 owner/signer/router/chain/
+ * canonical nonce와 모든 저장 message 필드를 다시 결속하고, 저장 digest 재계산,
+ * AES-GCM 복호화, EIP-712 owner recovery까지 모두 통과해야 한다.
+ *
+ * 반환값과 오류에는 서명·암호문·SESSION_SECRET을 절대 포함하지 않는다.
+ */
+async function recoverActiveReadySessionInternal(
+  params: ReadySessionRecoveryParams,
+  includeCapability: boolean,
+): Promise<InternalReadySessionRecoveryResult> {
+  if (!params.expectedOwner) {
+    return recoveryFailure('EXPECTED_OWNER_UNAVAILABLE', 'configured owner 주소 없음 — READY 복원 차단 (fail-closed)');
+  }
+  if (!params.expectedSubaccount) {
+    return recoveryFailure('EXPECTED_SUBACCOUNT_UNAVAILABLE', 'canonical signer 주소 없음 — READY 복원 차단 (fail-closed)');
+  }
+  if (!params.expectedVerifyingContract) {
+    return recoveryFailure('EXPECTED_ROUTER_UNAVAILABLE', 'canonical relay router 주소 없음 — READY 복원 차단 (fail-closed)');
+  }
+  if (params.canonicalNonce === null) {
+    return recoveryFailure('CANONICAL_NONCE_UNAVAILABLE', 'canonical approval nonce 미확인 — READY 복원 차단 (fail-closed)');
+  }
+
   let rows: SubaccountApprovalSessionRow[];
   try {
     rows = await db.select().from(subaccountApprovalSessionsTable)
       .where(and(
         eq(subaccountApprovalSessionsTable.purpose, APPROVAL_PURPOSE),
         eq(subaccountApprovalSessionsTable.status, SESSION_STATUS.OWNER_SIGNATURE_READY),
+        eq(subaccountApprovalSessionsTable.mainAccount, params.expectedOwner.toLowerCase()),
       ))
-      .orderBy(desc(subaccountApprovalSessionsTable.createdAt)).limit(1);
+      .orderBy(desc(subaccountApprovalSessionsTable.createdAt)).limit(2);
   } catch {
-    return null;
+    return recoveryFailure('DB_READ_FAILED', 'Owner Approval durable evidence DB 조회 실패 (fail-closed)');
+  }
+  if (rows.length === 0) {
+    let anyReady: SubaccountApprovalSessionRow[] = [];
+    try {
+      anyReady = await db.select().from(subaccountApprovalSessionsTable)
+        .where(and(
+          eq(subaccountApprovalSessionsTable.purpose, APPROVAL_PURPOSE),
+          eq(subaccountApprovalSessionsTable.status, SESSION_STATUS.OWNER_SIGNATURE_READY),
+        ))
+        .orderBy(desc(subaccountApprovalSessionsTable.createdAt)).limit(1);
+    } catch {
+      return recoveryFailure('DB_READ_FAILED', 'Owner Approval durable evidence DB 조회 실패 (fail-closed)');
+    }
+    return anyReady.length > 0
+      ? recoveryFailure(
+          'OWNER_BINDING_MISMATCH',
+          'durable READY evidence는 존재하지만 현재 configured owner와 결속되지 않음',
+        )
+      : recoveryFailure('NO_DURABLE_READY_SESSION', '현재 owner에 결속된 durable READY 세션 없음');
+  }
+  if (rows.length !== 1) {
+    return recoveryFailure('MULTIPLE_READY_SESSIONS', '동일 owner의 READY 세션 중복 감지 — 복원 차단 (fail-closed)');
   }
   const row = rows[0];
-  if (!row) return null;
 
-  const nowSeconds = BigInt(Math.floor(Date.now() / 1000));
-  const isExpiredOrMalformed = (value: string): boolean => {
-    if (!/^(0|[1-9]\d*)$/.test(value)) return true;
-    try {
-      const parsed = BigInt(value);
-      return parsed > ((1n << 256n) - 1n) || parsed <= nowSeconds;
-    } catch {
-      return true;
-    }
-  };
+  const nowSeconds = params.nowSec ?? BigInt(Math.floor(Date.now() / 1000));
+  const expiresAt = parseCanonicalUint(row.expiresAt);
+  const deadline = parseCanonicalUint(row.deadline);
   // 만료/비정상 READY는 조회 시 논리적으로만 무효화한다. Persistent cleanup은
   // 명시적 operator action 전용이며 status/startup에서 자동 UPDATE하지 않는다.
-  if (
-    params.persistInvalidation === false
-    && (isExpiredOrMalformed(row.expiresAt) || isExpiredOrMalformed(row.deadline))
-  ) {
-    return null;
+  if (expiresAt === null || deadline === null || expiresAt <= nowSeconds || deadline <= nowSeconds) {
+    if (params.persistInvalidation !== false) {
+      await markInvalid(row.id, 'Owner Approval timestamp 비정상 또는 만료');
+    }
+    const timestampFailures = [
+      expiresAt === null ? 'approval expiry 형식 손상' : expiresAt <= nowSeconds ? 'approval expiry 만료' : null,
+      deadline === null ? 'signature deadline 형식 손상' : deadline <= nowSeconds ? 'signature deadline 만료' : null,
+    ].filter((item): item is string => item !== null);
+    return recoveryFailure(
+      'SESSION_TIMESTAMP_INVALID_OR_EXPIRED',
+      `durable READY 세션 ${timestampFailures.join(' + ')} — 새 서명 전에는 복원 불가`,
+    );
   }
 
   const invalidateIfAllowed = async (reason: string): Promise<void> => {
     if (params.persistInvalidation !== false) await markInvalid(row.id, reason);
   };
-  if (params.expectedOwner && row.mainAccount !== params.expectedOwner.toLowerCase()) {
+  if (row.mainAccount !== params.expectedOwner.toLowerCase()) {
     await invalidateIfAllowed('main account 변경');
-    return null;
+    return recoveryFailure('OWNER_BINDING_MISMATCH', 'durable READY owner가 현재 configured owner와 불일치');
   }
-  if (params.expectedSubaccount && row.subaccount !== params.expectedSubaccount.toLowerCase()) {
+  if (row.subaccount !== params.expectedSubaccount.toLowerCase()) {
     await invalidateIfAllowed('signer 변경');
-    return null;
+    return recoveryFailure('SIGNER_BINDING_MISMATCH', 'durable READY signer가 현재 canonical signer와 불일치');
   }
-  if (params.canonicalNonce !== null && BigInt(row.approvalNonce) !== params.canonicalNonce) {
-    await invalidateIfAllowed('canonical nonce 변경');
-    return null;
+  if (row.chainId !== String(ARBITRUM_ONE_CHAIN_ID)) {
+    await invalidateIfAllowed('chainId 변경/손상');
+    return recoveryFailure('CHAIN_BINDING_MISMATCH', 'durable READY chainId가 Arbitrum One(42161)과 불일치');
   }
-  // canonical 8 불변식 — 레거시(≠8) READY 세션은 즉시 무효화 (fail-closed)
-  if (BigInt(row.maxAllowedCount) !== APPROVAL_LIMITS.CANONICAL_MAX_ALLOWED_COUNT) {
-    await invalidateIfAllowed(`maxAllowedCount ${row.maxAllowedCount} ≠ canonical ${APPROVAL_LIMITS.CANONICAL_MAX_ALLOWED_COUNT}`);
-    return null;
+  if (row.verifyingContract.toLowerCase() !== params.expectedVerifyingContract.toLowerCase()) {
+    await invalidateIfAllowed('verifying contract 변경');
+    return recoveryFailure('ROUTER_BINDING_MISMATCH', 'durable READY relay router가 현재 canonical router와 불일치');
   }
 
+  const approvalNonce = parseCanonicalUint(row.approvalNonce);
+  const maxAllowedCount = parseCanonicalUint(row.maxAllowedCount);
+  const desChainId = parseCanonicalUint(row.desChainId);
+  if (approvalNonce === null || approvalNonce !== params.canonicalNonce) {
+    await invalidateIfAllowed('canonical nonce 변경');
+    return recoveryFailure('NONCE_BINDING_MISMATCH', 'durable READY nonce가 현재 canonical nonce와 불일치');
+  }
+  if (
+    maxAllowedCount !== APPROVAL_LIMITS.CANONICAL_MAX_ALLOWED_COUNT
+    || desChainId !== BigInt(ARBITRUM_ONE_CHAIN_ID)
+    || row.actionType.toLowerCase() !== SUBACCOUNT_ORDER_ACTION.toLowerCase()
+    || row.shouldAdd !== true
+    || row.integrationId.toLowerCase() !== DEFAULT_INTEGRATION_ID.toLowerCase()
+  ) {
+    await invalidateIfAllowed(`maxAllowedCount ${row.maxAllowedCount} ≠ canonical ${APPROVAL_LIMITS.CANONICAL_MAX_ALLOWED_COUNT}`);
+    return recoveryFailure('MESSAGE_BINDING_MISMATCH', 'durable READY approval message가 canonical 정책과 불일치');
+  }
+
+  let message: SubaccountApprovalMessage;
+  let digest: Hex;
+  try {
+    message = rowToMessage(row);
+    digest = computeSessionDigest(ARBITRUM_ONE_CHAIN_ID, params.expectedVerifyingContract, message);
+  } catch {
+    await invalidateIfAllowed('approval message 파싱/해시 실패');
+    return recoveryFailure('DIGEST_BINDING_MISMATCH', 'durable READY approval message 파싱 또는 digest 계산 실패');
+  }
+  if (
+    !/^0x[0-9a-fA-F]{64}$/.test(row.typedDataDigest)
+    || digest.toLowerCase() !== row.typedDataDigest.toLowerCase()
+  ) {
+    await invalidateIfAllowed('digest 불일치 (durable evidence 손상)');
+    return recoveryFailure('DIGEST_BINDING_MISMATCH', 'durable READY digest가 저장 message와 불일치');
+  }
+  if (!row.encryptedSignature) {
+    await invalidateIfAllowed('encrypted signature 누락');
+    return recoveryFailure('ENCRYPTED_SIGNATURE_MISSING', 'durable READY 행에 암호화 Owner 서명이 없음');
+  }
+
+  if (isReadyEvidenceVerifiedInThisProcess(row) && !includeCapability) {
+    return {
+      ok: true,
+      code: 'READY_VERIFIED',
+      reason: 'durable Owner Approval evidence cryptographically verified at startup/submit and canonical-bound',
+      session: {
+        sessionId: row.id,
+        status: row.status,
+        mainAccount: row.mainAccount,
+        subaccount: row.subaccount,
+        approvalNonce: row.approvalNonce,
+        expiresAt: row.expiresAt,
+        maxAllowedCount: row.maxAllowedCount,
+        deadline: row.deadline,
+        createdAt: row.createdAt.toISOString(),
+      },
+    };
+  }
+  if (params.verifyEncryptedSignature !== true) {
+    return recoveryFailure(
+      'SIGNATURE_NOT_VERIFIED_AFTER_STARTUP',
+      'durable READY metadata는 있으나 이 runtime에서 암호화 Owner 서명 검증이 완료되지 않음 — READY 복원 차단',
+    );
+  }
+
+  let signature: Hex;
+  try {
+    signature = decryptSensitiveHex(row.encryptedSignature) as Hex;
+  } catch {
+    return recoveryFailure(
+      'SIGNATURE_DECRYPT_FAILED',
+      'durable Owner 서명 복호화 실패 — SESSION_SECRET 변경 또는 evidence 손상 가능성, READY 복원 차단',
+    );
+  }
+  const verified = await verifySubaccountApprovalSignature({
+    chainId: ARBITRUM_ONE_CHAIN_ID,
+    verifyingContract: params.expectedVerifyingContract,
+    approval: message,
+    signature,
+    expectedOwner: params.expectedOwner,
+    expectedNonce: params.canonicalNonce,
+    nowSec: nowSeconds,
+  });
+  if (!verified.ok) {
+    await invalidateIfAllowed('durable Owner 서명 cryptographic verification 실패');
+    return recoveryFailure(
+      'SIGNATURE_VERIFY_FAILED',
+      `durable Owner 서명 cryptographic verification 실패 — ${verified.reason}`,
+    );
+  }
+  cacheVerifiedReadyEvidence(row);
+
   return {
-    sessionId: row.id,
-    status: row.status,
-    mainAccount: row.mainAccount,
-    subaccount: row.subaccount,
-    approvalNonce: row.approvalNonce,
-    expiresAt: row.expiresAt,
-    maxAllowedCount: row.maxAllowedCount,
-    deadline: row.deadline,
-    createdAt: row.createdAt.toISOString(),
+    ok: true,
+    code: 'READY_VERIFIED',
+    reason: 'durable Owner Approval evidence cryptographically verified and canonical-bound',
+    session: {
+      sessionId: row.id,
+      status: row.status,
+      mainAccount: row.mainAccount,
+      subaccount: row.subaccount,
+      approvalNonce: row.approvalNonce,
+      expiresAt: row.expiresAt,
+      maxAllowedCount: row.maxAllowedCount,
+      deadline: row.deadline,
+      createdAt: row.createdAt.toISOString(),
+    },
+    ...(includeCapability ? {
+      capability: {
+        sessionId: row.id,
+        approval: {
+          subaccount: row.subaccount,
+          shouldAdd: row.shouldAdd,
+          expiresAt: row.expiresAt,
+          maxAllowedCount: row.maxAllowedCount,
+          actionType: row.actionType,
+          nonce: row.approvalNonce,
+          desChainId: row.desChainId,
+          deadline: row.deadline,
+          integrationId: row.integrationId,
+          signature,
+        },
+      },
+    } : {}),
   };
+}
+
+/**
+ * 상태/readiness용 검증 결과. capability 평문은 어떤 경우에도 반환하지 않는다.
+ */
+export async function recoverActiveReadySession(
+  params: ReadySessionRecoveryParams,
+): Promise<ReadySessionRecoveryResult> {
+  const result = await recoverActiveReadySessionInternal(params, false);
+  if (!result.ok) return result;
+  return {
+    ok: true,
+    code: result.code,
+    reason: result.reason,
+    session: result.session,
+  };
+}
+
+/**
+ * 실제 submit 경계 전용. 강한 durable 검증과 동일 DB snapshot에서 복호화·검증된
+ * approval capability를 반환해 검증 후 재조회 TOCTOU를 만들지 않는다.
+ */
+export async function getVerifiedOwnerApprovalCapability(params: {
+  expectedOwner: Address;
+  expectedSubaccount: Address;
+  expectedVerifyingContract: Address;
+  canonicalNonce: bigint;
+  nowSec?: bigint;
+}): Promise<
+  | { ok: true; capability: VerifiedOwnerApprovalCapability }
+  | { ok: false; code: Exclude<ReadySessionRecoveryCode, 'READY_VERIFIED'>; reason: string }
+> {
+  const result = await recoverActiveReadySessionInternal({
+    ...params,
+    persistInvalidation: false,
+    verifyEncryptedSignature: true,
+  }, true);
+  if (!result.ok) return { ok: false, code: result.code, reason: result.reason };
+  if (!result.capability) {
+    return {
+      ok: false,
+      code: 'SIGNATURE_VERIFY_FAILED',
+      reason: 'verified capability snapshot 생성 실패 (fail-closed)',
+    };
+  }
+  return { ok: true, capability: result.capability };
+}
+
+/**
+ * 콜드스타트 복구 전용. DB에 저장된 nonce로 서명 자체의 EIP-712 결속을 한 번
+ * 검증하고 프로세스 로컬 캐시를 만든다. 이후 상태 GET이 읽은 현재 canonical
+ * nonce와 동일할 때만 recoverActiveReadySession이 READY를 반환한다.
+ *
+ * DB write/외부 호출/서명/주문/Relay 제출은 수행하지 않는다.
+ */
+export async function warmOwnerApprovalRecoveryCache(params: {
+  expectedOwner: Address | null;
+  expectedSubaccount: Address | null;
+  expectedVerifyingContract: Address | null;
+  nowSec?: bigint;
+}): Promise<ReadySessionRecoveryResult> {
+  if (!params.expectedOwner) {
+    return recoveryFailure('EXPECTED_OWNER_UNAVAILABLE', 'configured owner 주소 없음 — startup READY 검증 차단');
+  }
+  let rows: Pick<SubaccountApprovalSessionRow, 'approvalNonce'>[];
+  try {
+    rows = await db.select({ approvalNonce: subaccountApprovalSessionsTable.approvalNonce })
+      .from(subaccountApprovalSessionsTable)
+      .where(and(
+        eq(subaccountApprovalSessionsTable.purpose, APPROVAL_PURPOSE),
+        eq(subaccountApprovalSessionsTable.status, SESSION_STATUS.OWNER_SIGNATURE_READY),
+        eq(subaccountApprovalSessionsTable.mainAccount, params.expectedOwner.toLowerCase()),
+      ))
+      .orderBy(desc(subaccountApprovalSessionsTable.createdAt)).limit(2);
+  } catch {
+    return recoveryFailure('DB_READ_FAILED', 'startup Owner Approval durable evidence DB 조회 실패');
+  }
+  if (rows.length === 0) {
+    return recoveryFailure('NO_DURABLE_READY_SESSION', 'startup에서 검증할 durable READY 세션 없음');
+  }
+  if (rows.length !== 1) {
+    return recoveryFailure('MULTIPLE_READY_SESSIONS', 'startup에서 동일 owner READY 세션 중복 감지');
+  }
+  const storedNonce = parseCanonicalUint(rows[0].approvalNonce);
+  if (storedNonce === null) {
+    return recoveryFailure('NONCE_BINDING_MISMATCH', 'startup durable READY nonce 형식 손상');
+  }
+  return recoverActiveReadySessionInternal({
+    ...params,
+    canonicalNonce: storedNonce,
+    persistInvalidation: false,
+    verifyEncryptedSignature: true,
+  }, false);
+}
+
+/**
+ * 기존 호출자를 위한 요약 wrapper. READY 검증 기준은 recoverActiveReadySession과
+ * 동일하며, 실패 상세가 필요한 상태 API는 detailed result를 직접 사용한다.
+ */
+export async function getActiveReadySession(
+  params: Parameters<typeof recoverActiveReadySession>[0],
+): Promise<ActiveSessionSummary | null> {
+  const result = await recoverActiveReadySession(params);
+  return result.ok ? result.session : null;
 }

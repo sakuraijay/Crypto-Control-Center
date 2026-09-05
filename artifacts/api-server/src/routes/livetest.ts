@@ -21,6 +21,7 @@ import {
   prepareApprovalSession,
   submitApprovalSignature,
   getActiveReadySession,
+  recoverActiveReadySession,
   getConfiguredMainAccount,
   APPROVAL_LIMITS,
 } from '../lib/ownerApprovalSession';
@@ -214,12 +215,17 @@ router.get('/executor/subaccount-auth', async (_req, res) => {
 
     // READY 세션 조회는 read-only: 만료/불일치 세션은 논리적으로만 무효 처리한다.
     // Persistent cleanup은 명시적 operator action 전용이다.
-    const readySession = await getActiveReadySession({
+    const readyRecovery = await recoverActiveReadySession({
       expectedOwner: mainAccount,
       expectedSubaccount: (signerAddress as Address | null),
+      expectedVerifyingContract: relay.ok && relay.config
+        ? relay.config.subaccountGelatoRelayRouter as Address
+        : null,
       canonicalNonce: canonical.onchain ? canonical.onchain.approvalNonce : null,
       persistInvalidation: false,
+      verifyEncryptedSignature: false,
     });
+    const readySession = readyRecovery.ok ? readyRecovery.session : null;
 
     // 상태 표시 규칙: 서명만 저장된 경우(canonical 미등록) OWNER_SIGNATURE_READY 노출.
     // AUTHORIZED는 canonical 확인으로만 도달 — 세션 존재가 상태를 승격시키지 않는다.
@@ -257,6 +263,11 @@ router.get('/executor/subaccount-auth', async (_req, res) => {
       expiresAt: oc ? oc.expiresAt.toString() : null,
       remainingActions: oc ? oc.remaining.toString() : null,
       readySession,          // 서명·암호문 절대 미포함 (요약만)
+      ownerApprovalRecovery: {
+        ready: readyRecovery.ok,
+        code: readyRecovery.code,
+        reason: readyRecovery.reason,
+      },
       // #125 리뷰 지적 — authEligible(순수 canonical 판정)과 liveEligible(실제 서명 능력 포함)을 구분.
       // stored_public 경로는 서명 능력이 없으므로 canonical이 AUTHORIZED여도 LIVE 부적격.
       authEligible: isAuthStateLiveEligible(state),

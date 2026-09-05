@@ -3,6 +3,7 @@ import type { CheckOutcome } from './manualCanary';
 import { EXPECTED_CANARY_SIGNER } from './canaryAllowanceInfo';
 import { evaluateCanonicalAuthorizationFreshness } from './canonicalAuthorizationFreshness';
 import type { CanonicalSnapshot } from './relayActivationStatus';
+import { GMX_DEPLOYMENT_MANIFEST } from './gmxDeploymentManifest';
 
 type StoredSignerResult =
   | { ok: true; address: string }
@@ -20,6 +21,7 @@ export interface ManualCanaryOwnerApprovalDeps {
   getReadySession(args: {
     expectedOwner: `0x${string}` | null;
     expectedSubaccount: `0x${string}`;
+    expectedVerifyingContract: `0x${string}` | null;
     canonicalNonce: bigint | null;
     persistInvalidation?: boolean;
   }): Promise<OwnerApprovalSession | null>;
@@ -82,6 +84,9 @@ export async function checkManualCanaryOwnerApproval(
     const session = await deps.getReadySession({
       expectedOwner: getAddress(ownerAddress),
       expectedSubaccount: storedAddress,
+      expectedVerifyingContract: getAddress(
+        GMX_DEPLOYMENT_MANIFEST.addresses.subaccountGelatoRelayRouter,
+      ),
       canonicalNonce,
       persistInvalidation: false,
     });

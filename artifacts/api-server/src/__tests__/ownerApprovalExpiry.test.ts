@@ -137,31 +137,39 @@ describe('invalidateExpiredOwnerSignatureReadySessions', () => {
     ).toBe(true);
   });
 
-  it('keeps submit selection fail-closed before signature decryption', () => {
-    const source = readFileSync(
+  it('keeps submit capability on the shared fail-closed verifier with timestamp checks before decryption', () => {
+    const executionSource = readFileSync(
       new URL('../lib/gmxApiExecution.ts', import.meta.url),
       'utf8',
     );
-    const selectorAt = source.indexOf(
+    const sessionSource = readFileSync(
+      new URL('../lib/ownerApprovalSession.ts', import.meta.url),
+      'utf8',
+    );
+    const selectorAt = executionSource.indexOf(
       'export async function getReadyApprovalForSubmit',
     );
-    const expiryAt = source.indexOf(
-      'isExpiredOrMalformedOwnerApprovalTimestamp(row.expiresAt',
+    const verifierAt = executionSource.indexOf(
+      'getVerifiedOwnerApprovalCapability({',
       selectorAt,
     );
-    const deadlineAt = source.indexOf(
-      'isExpiredOrMalformedOwnerApprovalTimestamp(row.deadline',
-      selectorAt,
+    const internalVerifierAt = sessionSource.indexOf(
+      'async function recoverActiveReadySessionInternal',
     );
-    const decryptAt = source.indexOf(
+    const timestampAt = sessionSource.indexOf(
+      'expiresAt <= nowSeconds || deadline <= nowSeconds',
+      internalVerifierAt,
+    );
+    const decryptAt = sessionSource.indexOf(
       'decryptSensitiveHex(row.encryptedSignature)',
-      selectorAt,
+      internalVerifierAt,
     );
 
     expect(selectorAt).toBeGreaterThan(-1);
-    expect(expiryAt).toBeGreaterThan(selectorAt);
-    expect(deadlineAt).toBeGreaterThan(expiryAt);
-    expect(decryptAt).toBeGreaterThan(deadlineAt);
+    expect(verifierAt).toBeGreaterThan(selectorAt);
+    expect(internalVerifierAt).toBeGreaterThan(-1);
+    expect(timestampAt).toBeGreaterThan(internalVerifierAt);
+    expect(decryptAt).toBeGreaterThan(timestampAt);
   });
 
   it('invalidates only expired or malformed APPROVAL READY sessions', async () => {

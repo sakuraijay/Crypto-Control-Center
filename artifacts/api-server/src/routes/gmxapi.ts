@@ -146,9 +146,13 @@ async function buildGmxApiStatusSnapshot() {
       if (!mainAccount || !storedSigner.ok || canonicalNonce === null) {
         approvalSessionReady = false;
       } else {
+        const relayConfig = resolveGmxLiveRelayConfig(env);
         const session = await getActiveReadySession({
           expectedOwner: mainAccount as Address,
           expectedSubaccount: storedSigner.address as Address,
+          expectedVerifyingContract: relayConfig.ok
+            ? relayConfig.config.subaccountGelatoRelayRouter as Address
+            : null,
           canonicalNonce,
           persistInvalidation: false,
         });

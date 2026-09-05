@@ -36,6 +36,12 @@ export interface ReadySessionSummary {
   createdAt?: string;
 }
 
+export interface OwnerApprovalRecoverySummary {
+  ready: boolean;
+  code: string;
+  reason: string;
+}
+
 export interface SubaccountAuthResponse {
   ok: boolean;
   state: string;
@@ -53,12 +59,24 @@ export interface SubaccountAuthResponse {
   onchain: SubaccountAuthOnchainSummary | null;
   onchainError: string | null;
   readySession: ReadySessionSummary | null;
+  /**
+   * Durable Owner Approval 복구의 fail-closed 진단. 서명·암호문·secret은
+   * 포함하지 않으며, READY가 복원되지 않은 실제 이유를 UI에 표시한다.
+   */
+  ownerApprovalRecovery?: OwnerApprovalRecoverySummary;
   /** #125 — 순수 canonical 판정 (서명 능력 무관) */
   authEligible?: boolean;
   /** 실제 LIVE 적격 (canonical + 런타임 signer 서명 능력) */
   liveEligible: boolean;
   liveBlockedReason: string | null;
   error?: string;
+}
+
+export function getOwnerApprovalRecoveryNotice(
+  recovery: OwnerApprovalRecoverySummary | null | undefined,
+): string | null {
+  if (!recovery || recovery.ready || recovery.code === 'NO_DURABLE_READY_SESSION') return null;
+  return recovery.reason;
 }
 
 // ── 상태 → UI 매핑 ───────────────────────────────────────────────────────────

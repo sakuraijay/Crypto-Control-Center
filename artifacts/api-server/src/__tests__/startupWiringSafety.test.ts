@@ -63,6 +63,22 @@ vi.mock('../lib/delegatedSigner', () => ({
   isManualCanarySignerRestoreAllowed: vi.fn(() => ({ allowed: false, missing: [] })),
   isSignerStorageAccessAllowed: vi.fn(() => ({ allowed: false, missing: [] })),
   restoreExistingManualCanarySigner: vi.fn(async () => {}),
+  getStoredPublicSignerAddress: vi.fn(async () => ({ ok: false, reason: 'test: no signer' })),
+}));
+vi.mock('../lib/ownerApprovalSession', () => ({
+  getConfiguredMainAccount: vi.fn(() => null),
+  warmOwnerApprovalRecoveryCache: vi.fn(async () => ({
+    ok: false,
+    code: 'EXPECTED_OWNER_UNAVAILABLE',
+    reason: 'test: no owner',
+    session: null,
+  })),
+}));
+vi.mock('../lib/canaryAllowanceInfo', () => ({
+  EXPECTED_CANARY_SIGNER: '0xc56436f09039e15aa2244659d0fc5b7f706ddbf6',
+}));
+vi.mock('../lib/gmxLiveConfig', () => ({
+  resolveGmxLiveRelayConfig: vi.fn(() => ({ ok: false, reasons: ['test'] })),
 }));
 vi.mock('../workers/liveTestExecutor', () => ({
   reconcileOnRestart: mocks.reconcileOnRestart,
