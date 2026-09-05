@@ -20,6 +20,11 @@ import type { StrategyRiskWorkerAdvisory } from './strategyRiskWorkerBridgeV2';
 import type { StrategyShadowWorkerEnvelope } from './strategyShadowWorkerEnvelopeV2';
 import type { StrategyStructuralSizingReadinessBinding } from './strategyStructuralSizingReadinessBindingV2';
 import type { StrategyStructuralSizingWorkerAdvisory } from './strategyStructuralSizingWorkerBridgeV2';
+import {
+  buildStrategyPerformanceMeasurementPlan,
+  emptyStrategyPerformanceMeasurementPlan,
+  type StrategyPerformanceMeasurementPlan,
+} from './strategyPerformanceMeasurementV2';
 
 export const STRATEGY_DECISION_EXPLAINABILITY_WORKER_VERSION =
   'strategy-decision-explainability-worker/v1' as const;
@@ -52,6 +57,7 @@ export interface StrategyDecisionExplainabilityWorkerAdvisory {
   envelopes: StrategyDecisionExplainabilityEnvelope[];
   summary: { evaluated: number; rejected: number; notEvaluated: number; blocked: number };
   reasons: string[];
+  performanceMeasurement: StrategyPerformanceMeasurementPlan;
   authority: 'ADVISORY_ONLY';
   externalReadStarted: false;
   independentPersistenceAllowed: false;
@@ -81,6 +87,7 @@ function output(
       blocked: envelopes.filter(value => value.status === 'BLOCKED').length,
     },
     reasons,
+    performanceMeasurement: emptyStrategyPerformanceMeasurementPlan(),
     authority: 'ADVISORY_ONLY',
     externalReadStarted: false,
     independentPersistenceAllowed: false,
@@ -158,11 +165,20 @@ export function buildStrategyDecisionExplainabilityWorkerAdvisory(
     ? 'PARTIAL'
     : terminal === envelopes.length ? 'EVALUATED'
       : terminal > 0 ? 'PARTIAL' : 'NOT_EVALUATED';
-  return output(input, status, STRATEGY_DECISION_EXPLAINABILITY_WORKER_VERSION, envelopes, [
+  const result = output(input, status, STRATEGY_DECISION_EXPLAINABILITY_WORKER_VERSION, envelopes, [
     '기존 SHADOW·Risk 결과만 parent AI decision explainability에 직렬화',
     'Sizing·Confidence·GMX 근거는 미연결 상태를 null·NOT_EVALUATED로 보존',
     '독립 저장·외부 read·실행·승인·PAPER/LIVE 권한 없음',
   ]);
+  return {
+    ...result,
+    performanceMeasurement: buildStrategyPerformanceMeasurementPlan({
+      shadowRecords: shadow.records,
+      riskDecisions: risk.decisions,
+      envelopes,
+      aggressiveAdvisories: envelopes.map(() => null),
+    }),
+  };
 }
 
 function downstreamAggregateBoundariesValid(
@@ -296,9 +312,18 @@ export function buildStrategyDecisionExplainabilityWorkerAdvisoryWithDownstream(
     ? 'PARTIAL'
     : terminal === envelopes.length ? 'EVALUATED'
       : terminal > 0 ? 'PARTIAL' : 'NOT_EVALUATED';
-  return output(input, status, STRATEGY_DECISION_EXPLAINABILITY_WORKER_VERSION, envelopes, [
+  const result = output(input, status, STRATEGY_DECISION_EXPLAINABILITY_WORKER_VERSION, envelopes, [
     `readiness coordinator generation ${binding.coordinatorGeneration} 후속 근거만 결속`,
     '결측 stage는 null·NOT_EVALUATED, terminal reject 이후 stage는 금지',
     '독립 저장·외부 read·실행·승인·PAPER/LIVE 권한 없음',
   ]);
+  return {
+    ...result,
+    performanceMeasurement: buildStrategyPerformanceMeasurementPlan({
+      shadowRecords: shadow.records,
+      riskDecisions: risk.decisions,
+      envelopes,
+      aggressiveAdvisories: envelopeInputs.map(value => value!.aggressiveAdvisory),
+    }),
+  };
 }

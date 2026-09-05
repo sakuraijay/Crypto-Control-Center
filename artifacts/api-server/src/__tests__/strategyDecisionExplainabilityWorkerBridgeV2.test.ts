@@ -205,11 +205,23 @@ const aggressiveInput = (
 describe('Strategy decision explainability aiWorker bridge', () => {
   it('ALLOW는 downstream을 추정하지 않고 NOT_EVALUATED로 직렬화한다', () => {
     const s = shadow();
-    expect(buildStrategyDecisionExplainabilityWorkerAdvisory({ shadowEnvelope: s, riskAdvisory: risk(s) }))
-      .toMatchObject({
+    const result = buildStrategyDecisionExplainabilityWorkerAdvisory({
+      shadowEnvelope: s, riskAdvisory: risk(s),
+    });
+    expect(result).toMatchObject({
         schemaVersion: STRATEGY_DECISION_EXPLAINABILITY_WORKER_VERSION,
         status: 'NOT_EVALUATED', summary: { notEvaluated: 1 },
         envelopes: [{ status: 'NOT_EVALUATED', stages: { sizing: null, confidence: null, gmxNetEdge: null } }],
+        performanceMeasurement: {
+          mode: 'SHADOW_PAPER_ONLY', immutableCostCapUsd: 0.4,
+          candidates: [{
+            variant: 'STANDARD_EXISTING', status: 'ELIGIBLE',
+            notionalUsd: 17.5, expectedTotalCostUsd: 0.14,
+            authority: 'MEASUREMENT_ONLY', executionAuthorized: false,
+            approvalCreationAllowed: false, paperPositionMutationAllowed: false,
+            livePositionMutationAllowed: false,
+          }],
+        },
         authority: 'ADVISORY_ONLY', externalReadStarted: false,
         independentPersistenceAllowed: false, executionAuthorized: false,
       });
@@ -222,6 +234,25 @@ describe('Strategy decision explainability aiWorker bridge', () => {
     });
     expect(result).toMatchObject({ status: 'EVALUATED', summary: { rejected: 1 } });
     expect(result.envelopes[0]).toMatchObject({ status: 'REJECTED', finalAdvisoryNotionalUsd: 0 });
+    expect(result.performanceMeasurement.candidates).toMatchObject([
+      { variant: 'STANDARD_EXISTING', status: 'REJECTED', notionalUsd: null },
+    ]);
+  });
+
+  it('stale Research cost는 Standard 성과 후보에도 null·NOT_EVALUATED로 남긴다', () => {
+    const s = shadow();
+    const research = s.records[0].netEdgeResearch!;
+    research.costEvidence!.directionalQuotes.LONG.expiresAtMs = 1;
+    research.costEvidence!.directionalQuotes.SHORT.expiresAtMs = 1;
+    const result = buildStrategyDecisionExplainabilityWorkerAdvisory({
+      shadowEnvelope: s, riskAdvisory: risk(s),
+    });
+    expect(result.performanceMeasurement.candidates).toMatchObject([
+      {
+        variant: 'STANDARD_EXISTING', status: 'NOT_EVALUATED',
+        notionalUsd: null, expectedTotalCostUsd: null,
+      },
+    ]);
   });
 
   it('terminal과 미평가가 섞이면 PARTIAL을 유지한다', () => {
@@ -286,6 +317,15 @@ describe('Strategy decision explainability same-generation downstream bridge', (
         stages: { gmxNetEdge: { coordinatorGeneration: 7 },
           aggressive: { status: 'ELIGIBLE', applicability: 'APPLICABLE' } } }],
     });
+    expect(result.performanceMeasurement.candidates).toMatchObject([
+      { variant: 'STANDARD_EXISTING', status: 'ELIGIBLE', notionalUsd: 17.5 },
+      {
+        variant: 'AGGRESSIVE_CANDIDATE', status: 'ELIGIBLE', notionalUsd: 17.5,
+        expectedTotalCostUsd: 0.14, authority: 'MEASUREMENT_ONLY',
+        executionAuthorized: false, approvalCreationAllowed: false,
+        paperPositionMutationAllowed: false, livePositionMutationAllowed: false,
+      },
+    ]);
   });
 
   it('GMX 비용 상한 거부를 terminal REJECTED로 보존한다', () => {
