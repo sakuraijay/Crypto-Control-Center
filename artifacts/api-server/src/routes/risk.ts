@@ -5,6 +5,7 @@
 import { Router, type IRouter } from 'express';
 import {
   RISK_POLICY, CANARY_POLICY, CAPITAL_PLAN, CAPITAL_TIER_LADDER,
+  PAPER_TEST_ALLOCATION_PLAN,
   deriveDailyTargets, deriveWeeklyMaxLossUsd, deriveTradeRiskUsd,
   isAutoPromotionAllowed,
 } from '../lib/riskPolicy';
@@ -50,6 +51,7 @@ router.get('/risk/policy', (_req, res) => {
         semantics: capitalSemantics,
       },
       canary: CANARY_POLICY,
+      paperTestAllocationPlan: PAPER_TEST_ALLOCATION_PLAN,
       tierLadder: CAPITAL_TIER_LADDER,
       autoPromotionAllowed: isAutoPromotionAllowed(),
       derived: {

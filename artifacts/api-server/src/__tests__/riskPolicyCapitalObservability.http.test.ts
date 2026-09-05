@@ -59,6 +59,34 @@ describe('GET /api/risk/policy capital observability contract', () => {
       (entry: { capitalUsd: number }) => entry.capitalUsd,
     )).toEqual([15, 1_000, 2_500, 5_000, 10_000]);
     expect(res.body.autoPromotionAllowed).toBe(false);
+    expect(res.body.paperTestAllocationPlan).toEqual({
+      scope: 'PAPER_TEST_ALLOCATION',
+      authority: 'SERVER_CODE_USER_APPROVED_PLAN',
+      approvalStatus: 'USER_APPROVED_PLAN',
+      applicationStatus: 'PROPOSED_NOT_APPLIED',
+      totalAllocationUsd: 400,
+      reservePercent: 20,
+      reserveUsd: 80,
+      deployableUsd: 320,
+      walletEligibilityMinimumUsdc: 400,
+      futureActiveCapitalPolicyCandidate: {
+        baseRiskPerTradePercent: 0.25,
+        baseRiskPerTradeUsd: 1,
+        maxRiskPerTradePercent: 0.5,
+        maxRiskPerTradeUsd: 2,
+        hardStopDrawdownPercent: 8,
+        hardStopEquityUsd: 368,
+        maxLeverage: 3,
+        recommendedMaxMarginPerTradeUsd: 100,
+        targetRoundTripCostCapUsd: 0.4,
+      },
+      applied: false,
+      executionAuthorized: false,
+      autoActivationAllowed: false,
+      stateChangePerformed: false,
+      runtimeDbHwmUnchanged: true,
+    });
+    expect(res.body.paperTestAllocationPlan).not.toHaveProperty('persistenceId');
     expect(res.body.state).toMatchObject({
       riskOperatingState: 'HARD_STOPPED',
       riskEntryAllowed: false,

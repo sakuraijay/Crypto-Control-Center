@@ -12,6 +12,22 @@ import { Button } from '@/components/ui/button';
 import { apiUrl } from '@/lib/apiUrl';
 
 interface RiskPolicyResponse {
+  paperTestAllocationPlan: {
+    totalAllocationUsd: number;
+    reservePercent: number;
+    reserveUsd: number;
+    deployableUsd: number;
+    futureActiveCapitalPolicyCandidate: {
+      baseRiskPerTradeUsd: number;
+      maxRiskPerTradeUsd: number;
+      hardStopEquityUsd: number;
+      maxLeverage: number;
+      recommendedMaxMarginPerTradeUsd: number;
+    };
+    applied: false;
+    executionAuthorized: false;
+    runtimeDbHwmUnchanged: true;
+  };
   capital: {
     plannedSeedCapitalUsd: number;
     activeTradingCapitalUsd: number;
@@ -149,12 +165,15 @@ export function RiskPolicyCard() {
     );
   }
 
-  const { policy: p, capital, derived: d, state: s, canary, manila } = data;
+  const { policy: p, capital, derived: d, state: s, canary, manila, paperTestAllocationPlan: testPlan } = data;
   const stateLabel = s.riskOperatingState ?? '미평가';
   const stateColor = STATE_COLORS[s.riskOperatingState ?? ''] ?? 'text-muted-foreground';
 
   const rows: Array<[string, string]> = [
     ['Planned Seed', `$${capital.plannedSeedCapitalUsd.toLocaleString()} (계획 기준 · 입금/승격 권한 아님)`],
+    ['PAPER Test Allocation', `$${testPlan.totalAllocationUsd} total = $${testPlan.deployableUsd} deployable + $${testPlan.reserveUsd} reserve (${testPlan.reservePercent}%) · proposed/approved plan`],
+    ['400 후보 Risk / Hard Stop', `$${testPlan.futureActiveCapitalPolicyCandidate.baseRiskPerTradeUsd} 기본 · $${testPlan.futureActiveCapitalPolicyCandidate.maxRiskPerTradeUsd} 최대 · equity $${testPlan.futureActiveCapitalPolicyCandidate.hardStopEquityUsd} · margin $${testPlan.futureActiveCapitalPolicyCandidate.recommendedMaxMarginPerTradeUsd}`],
+    ['400 적용 상태', '미적용 · runtime/DB/HWM unchanged · 실행 권한 없음'],
     ['Approved Active / Reserve', `$${capital.activeTradingCapitalUsd.toLocaleString()} / $${capital.reserveCapitalUsd.toLocaleString()} (${capital.reserveCapitalPercent}%)`],
     ['Current Risk Sizing / Reserve', `$${capital.riskSizingCapitalUsd.toLocaleString()} / $${capital.riskSizingReserveUsd.toLocaleString()} (${capital.riskSizingReservePercent}%) · 승인 단계 이하`],
     ['Current Equity / HWM', `${capital.currentRiskEquityUsd === null ? 'Unavailable' : `$${capital.currentRiskEquityUsd.toLocaleString()}`} / ${capital.equityHwmUsd === null ? 'Unavailable' : `$${capital.equityHwmUsd.toLocaleString()}`} · RiskEngine 관측 상태`],

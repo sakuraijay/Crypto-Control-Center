@@ -77,6 +77,44 @@ export const CAPITAL_PLAN = {
   monthlyNetReturnReferenceRangePercent: [1, 3] as const,
 } as const;
 
+/**
+ * 사용자가 승인한 차기 PAPER 테스트 할당 계획.
+ *
+ * 이 객체는 코드에 고정된 권위 있는 계획/표시 원본일 뿐이며, 현재 runtime의
+ * Active Trading Capital, DB 전략값, HWM, baseline 또는 HARD_STOP을 변경하거나
+ * 실행 권한을 부여하지 않는다. 실제 적용은 별도의 명시적 epoch activation
+ * 절차와 운영자 승인을 필요로 한다.
+ */
+export const PAPER_TEST_ALLOCATION_PLAN = {
+  scope: 'PAPER_TEST_ALLOCATION',
+  authority: 'SERVER_CODE_USER_APPROVED_PLAN',
+  approvalStatus: 'USER_APPROVED_PLAN',
+  applicationStatus: 'PROPOSED_NOT_APPLIED',
+  totalAllocationUsd: 400,
+  reservePercent: 20,
+  reserveUsd: 80,
+  deployableUsd: 320,
+  walletEligibilityMinimumUsdc: 400,
+  futureActiveCapitalPolicyCandidate: {
+    baseRiskPerTradePercent: 0.25,
+    baseRiskPerTradeUsd: 1,
+    maxRiskPerTradePercent: 0.5,
+    maxRiskPerTradeUsd: 2,
+    hardStopDrawdownPercent: 8,
+    hardStopEquityUsd: 368,
+    maxLeverage: 3,
+    recommendedMaxMarginPerTradeUsd: 100,
+    targetRoundTripCostCapUsd: 0.40,
+  },
+  applied: false,
+  executionAuthorized: false,
+  autoActivationAllowed: false,
+  stateChangePerformed: false,
+  runtimeDbHwmUnchanged: true,
+} as const;
+
+export type PaperTestAllocationPlan = typeof PAPER_TEST_ALLOCATION_PLAN;
+
 /** 서버가 기준 자본에서 파생한 달러 한도 (§3 — 파생값은 저장하지 않고 계산) */
 export interface DerivedRiskTargets {
   /** 오늘 위험계산 기준금액 = min(startOfDayEquity, 1000) */

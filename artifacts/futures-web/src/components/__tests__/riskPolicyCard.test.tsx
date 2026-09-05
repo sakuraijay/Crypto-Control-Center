@@ -30,6 +30,22 @@ describe('RiskPolicyCard Hard Stop labels', () => {
           onchainBalanceAuthoritative: false,
           monthlyNetReturnReferenceRangePercent: [1, 3],
         },
+        paperTestAllocationPlan: {
+          totalAllocationUsd: 400,
+          reservePercent: 20,
+          reserveUsd: 80,
+          deployableUsd: 320,
+          futureActiveCapitalPolicyCandidate: {
+            baseRiskPerTradeUsd: 1,
+            maxRiskPerTradeUsd: 2,
+            hardStopEquityUsd: 368,
+            maxLeverage: 3,
+            recommendedMaxMarginPerTradeUsd: 100,
+          },
+          applied: false,
+          executionAuthorized: false,
+          runtimeDbHwmUnchanged: true,
+        },
         policy: {
           initialCapitalUsd: 1_000,
           maxRiskCapitalUsd: 1_000,
@@ -92,5 +108,9 @@ describe('RiskPolicyCard Hard Stop labels', () => {
     expect(screen.getByText('$840 / $1,000 · RiskEngine 관측 상태')).toBeTruthy();
     expect(screen.getByText('On-chain balance')).toBeTruthy();
     expect(screen.getByText('별도 GMX RPC 카드에서 확인')).toBeTruthy();
+    expect(screen.getByText('PAPER Test Allocation')).toBeTruthy();
+    expect(screen.getByText(/\$400 total = \$320 deployable \+ \$80 reserve/)).toBeTruthy();
+    expect(screen.getByText('400 적용 상태')).toBeTruthy();
+    expect(screen.getByText(/runtime\/DB\/HWM unchanged · 실행 권한 없음/)).toBeTruthy();
   });
 });

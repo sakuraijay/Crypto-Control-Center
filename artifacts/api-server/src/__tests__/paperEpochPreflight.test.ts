@@ -91,6 +91,33 @@ describe('buildPaperEpochPreflight', () => {
         seedCapitalUsd: 10_000,
         activeCapitalStagesUsd: [1_000, 2_500, 5_000, 10_000],
       },
+      paperTestAllocationPlan: {
+        scope: 'PAPER_TEST_ALLOCATION',
+        authority: 'SERVER_CODE_USER_APPROVED_PLAN',
+        approvalStatus: 'USER_APPROVED_PLAN',
+        applicationStatus: 'PROPOSED_NOT_APPLIED',
+        totalAllocationUsd: 400,
+        reservePercent: 20,
+        reserveUsd: 80,
+        deployableUsd: 320,
+        walletEligibilityMinimumUsdc: 400,
+        futureActiveCapitalPolicyCandidate: {
+          baseRiskPerTradePercent: 0.25,
+          baseRiskPerTradeUsd: 1,
+          maxRiskPerTradePercent: 0.5,
+          maxRiskPerTradeUsd: 2,
+          hardStopDrawdownPercent: 8,
+          hardStopEquityUsd: 368,
+          maxLeverage: 3,
+          recommendedMaxMarginPerTradeUsd: 100,
+          targetRoundTripCostCapUsd: 0.4,
+        },
+        applied: false,
+        executionAuthorized: false,
+        autoActivationAllowed: false,
+        stateChangePerformed: false,
+        runtimeDbHwmUnchanged: true,
+      },
       proposedNewEpoch: {
         activeTradingCapitalUsd: 1_000,
         equityHwmUsd: 1_000,
@@ -108,6 +135,7 @@ describe('buildPaperEpochPreflight', () => {
       },
     });
     expect(view.current.activeTradingCapitalUsd).toBe(24.5);
+    expect(view.paperTestAllocationPlan).not.toHaveProperty('persistenceId');
   });
 
   it.each([1_000, 2_500, 5_000, 10_000])(
@@ -127,6 +155,12 @@ describe('buildPaperEpochPreflight', () => {
       expect(first.current.reserveCashPct).toBe(20);
       expect(first.proposedNewEpoch.applied).toBe(false);
       expect(first.proposedNewEpoch.persistenceId).toBeNull();
+      expect(first.paperTestAllocationPlan.applied).toBe(false);
+      expect(first.paperTestAllocationPlan.executionAuthorized).toBe(false);
+      expect(first.paperTestAllocationPlan.autoActivationAllowed).toBe(false);
+      expect(first.paperTestAllocationPlan.stateChangePerformed).toBe(false);
+      expect(first.paperTestAllocationPlan.runtimeDbHwmUnchanged).toBe(true);
+      expect(first.paperTestAllocationPlan).not.toHaveProperty('persistenceId');
       expect(second).toEqual(first);
       expect(source).toEqual(before);
       expect(source.current).not.toHaveProperty('walletBalanceUsd');

@@ -150,6 +150,33 @@ const STATUS_FIXTURE: GmxApiStatusView = {
       activeCapitalStagesUsd: [1_000, 2_500, 5_000, 10_000],
       separation: 'PLANNED_SEED_IS_NOT_ACTIVE_OR_RESERVE_CAPITAL',
     },
+    paperTestAllocationPlan: {
+      scope: 'PAPER_TEST_ALLOCATION',
+      authority: 'SERVER_CODE_USER_APPROVED_PLAN',
+      approvalStatus: 'USER_APPROVED_PLAN',
+      applicationStatus: 'PROPOSED_NOT_APPLIED',
+      totalAllocationUsd: 400,
+      reservePercent: 20,
+      reserveUsd: 80,
+      deployableUsd: 320,
+      walletEligibilityMinimumUsdc: 400,
+      futureActiveCapitalPolicyCandidate: {
+        baseRiskPerTradePercent: 0.25,
+        baseRiskPerTradeUsd: 1,
+        maxRiskPerTradePercent: 0.5,
+        maxRiskPerTradeUsd: 2,
+        hardStopDrawdownPercent: 8,
+        hardStopEquityUsd: 368,
+        maxLeverage: 3,
+        recommendedMaxMarginPerTradeUsd: 100,
+        targetRoundTripCostCapUsd: 0.4,
+      },
+      applied: false,
+      executionAuthorized: false,
+      autoActivationAllowed: false,
+      stateChangePerformed: false,
+      runtimeDbHwmUnchanged: true,
+    },
     proposedNewEpoch: {
       activeTradingCapitalUsd: 1_000,
       equityHwmUsd: 1_000,
@@ -751,6 +778,14 @@ describe('PAPER Epoch readiness/preflight 렌더 계약', () => {
     expect(html).toContain('Planned Seed');
     expect(html).toContain('$1,000 → $2,500 → $5,000 → $10,000');
     expect(html).toContain('Proposed New Epoch');
+    expect(html).toContain('PAPER TEST ALLOCATION');
+    expect(html).toContain('Total $400');
+    expect(html).toContain('deployable $320');
+    expect(html).toContain('reserve $80 (20%)');
+    expect(html).toContain('Risk $1 / $2');
+    expect(html).toContain('Hard Stop candidate $368');
+    expect(html).toContain('max margin $100');
+    expect(html).toContain('runtime/DB/HWM unchanged');
     expect(html).toContain('APPLIED false');
     expect(html).toContain('READ_ONLY_CALCULATION_NOT_STATE_CHANGE');
     expect(html).toContain('HARD_STOPPED');

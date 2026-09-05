@@ -1,4 +1,5 @@
 import type { OperationalDiagnostics } from './operationalDiagnostics';
+import { PAPER_TEST_ALLOCATION_PLAN, type PaperTestAllocationPlan } from './riskPolicy';
 
 export const PAPER_PLANNED_SEED_CAPITAL_USD = 10_000;
 export const PAPER_ACTIVE_CAPITAL_STAGES_USD = [1_000, 2_500, 5_000, 10_000] as const;
@@ -50,6 +51,7 @@ export interface PaperEpochPreflightView {
     activeCapitalStagesUsd: readonly [1_000, 2_500, 5_000, 10_000];
     separation: 'PLANNED_SEED_IS_NOT_ACTIVE_OR_RESERVE_CAPITAL';
   };
+  paperTestAllocationPlan: PaperTestAllocationPlan;
   proposedNewEpoch: {
     activeTradingCapitalUsd: 1_000;
     equityHwmUsd: 1_000;
@@ -138,6 +140,12 @@ export function buildPaperEpochPreflight(
       activeCapitalStagesUsd: [...PAPER_ACTIVE_CAPITAL_STAGES_USD],
       separation: 'PLANNED_SEED_IS_NOT_ACTIVE_OR_RESERVE_CAPITAL',
     },
+    paperTestAllocationPlan: {
+      ...PAPER_TEST_ALLOCATION_PLAN,
+      futureActiveCapitalPolicyCandidate: {
+        ...PAPER_TEST_ALLOCATION_PLAN.futureActiveCapitalPolicyCandidate,
+      },
+    },
     proposedNewEpoch: {
       activeTradingCapitalUsd: PAPER_EPOCH_PROPOSED_START_USD,
       equityHwmUsd: PAPER_EPOCH_PROPOSED_START_USD,
@@ -165,6 +173,7 @@ export function buildPaperEpochPreflight(
     notices: [
       '계산 전용 — epoch, DB, HWM, Active Trading Capital, Risk baseline을 변경하지 않습니다.',
       'Planned Seed는 Active Capital 또는 Reserve Capital이 아닙니다.',
+      'PAPER TEST ALLOCATION $400 = deployable $320 + reserve $80은 승인된 계획이며 아직 runtime에 적용되지 않았습니다.',
       '제안값은 Canary, LIVE, cost, Stop, HARD_STOP gate를 대체하거나 완화하지 않습니다.',
     ],
   };

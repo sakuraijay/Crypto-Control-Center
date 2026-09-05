@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Activity, AlertCircle, Check, ChevronRight, CircleDollarSign,
   Database, Loader2, LockKeyhole, RefreshCw, ShieldCheck, Wallet,
@@ -11,8 +11,29 @@ import { useWallet } from '@/lib/context/WalletContext';
 import { useExecutorOnlineStatus } from '@/hooks/useExecutorHealth';
 import { deriveOnboardingReadiness } from '@/lib/onboardingReadiness';
 import { cn } from '@/lib/utils';
+import { apiUrl } from '@/lib/apiUrl';
+import { parseObservedUsdcBalance } from '@/lib/paperTestAllocation';
 
 const STORAGE_KEY = 'ccc_zero_config_onboarding_v1';
+
+interface PaperTestAllocationPlan {
+  totalAllocationUsd: number;
+  reservePercent: number;
+  reserveUsd: number;
+  deployableUsd: number;
+  walletEligibilityMinimumUsdc: number;
+  futureActiveCapitalPolicyCandidate: {
+    baseRiskPerTradeUsd: number;
+    maxRiskPerTradeUsd: number;
+    hardStopEquityUsd: number;
+    maxLeverage: number;
+    recommendedMaxMarginPerTradeUsd: number;
+  };
+  applied: false;
+  executionAuthorized: false;
+  autoActivationAllowed: false;
+  runtimeDbHwmUnchanged: true;
+}
 
 function effectiveBoolean(
   value: { effective?: boolean; status?: string } | undefined,
@@ -72,6 +93,29 @@ export function OnboardingOverlay() {
     }
   });
   const [switchingNetwork, setSwitchingNetwork] = useState(false);
+  const [paperTestPlan, setPaperTestPlan] = useState<PaperTestAllocationPlan | null>(null);
+
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    let cancelled = false;
+    void fetch(apiUrl('/risk/policy'))
+      .then(async (response) => {
+        if (!response.ok) throw new Error(String(response.status));
+        const body = await response.json() as { paperTestAllocationPlan?: PaperTestAllocationPlan };
+        if (!cancelled && body.paperTestAllocationPlan?.applied === false
+          && body.paperTestAllocationPlan.executionAuthorized === false
+          && body.paperTestAllocationPlan.autoActivationAllowed === false
+          && body.paperTestAllocationPlan.runtimeDbHwmUnchanged === true) {
+          setPaperTestPlan(body.paperTestAllocationPlan);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setPaperTestPlan(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isAuthenticated]);
 
   const flags = executor.snapshot?.operationalDiagnostics?.flags;
   const readiness = deriveOnboardingReadiness({
@@ -103,6 +147,11 @@ export function OnboardingOverlay() {
     () => limits.tradingCapital * (1 - limits.reserveCashPct / 100),
     [limits.reserveCashPct, limits.tradingCapital],
   );
+  const walletUsdc = parseObservedUsdcBalance(wallet.usdcBalance);
+  const showPaperTestPlan = paperTestPlan !== null
+    && walletUsdc !== null
+    && Number.isFinite(walletUsdc)
+    && walletUsdc >= paperTestPlan.walletEligibilityMinimumUsdc;
 
   const switchToArbitrum = async () => {
     const provider = (window as {
@@ -357,6 +406,29 @@ export function OnboardingOverlay() {
                 최신 증거와 사용자 승인을 다시 확인하며 지금은 잠금 상태입니다.
               </p>
             </div>
+
+            {showPaperTestPlan && (
+              <div className="mt-3 rounded-xl border border-sky-500/30 bg-sky-500/5 p-4" data-testid="onboarding-paper-test-allocation">
+                <div className="flex items-center gap-2 text-xs font-semibold text-sky-300">
+                  <CircleDollarSign className="h-4 w-4" />
+                  PAPER TEST ALLOCATION · proposed/approved plan
+                </div>
+                <p className="mt-2 text-[11px] text-foreground">
+                  ${paperTestPlan.totalAllocationUsd} total = ${paperTestPlan.deployableUsd} deployable
+                  {' '}+ ${paperTestPlan.reserveUsd} reserve ({paperTestPlan.reservePercent}%)
+                </p>
+                <p className="mt-1 text-[11px] leading-5 text-muted-foreground">
+                  향후 후보: risk ${paperTestPlan.futureActiveCapitalPolicyCandidate.baseRiskPerTradeUsd}
+                  /${paperTestPlan.futureActiveCapitalPolicyCandidate.maxRiskPerTradeUsd}
+                  {' '}· Hard Stop ${paperTestPlan.futureActiveCapitalPolicyCandidate.hardStopEquityUsd}
+                  {' '}· {paperTestPlan.futureActiveCapitalPolicyCandidate.maxLeverage}x
+                  {' '}· max margin ${paperTestPlan.futureActiveCapitalPolicyCandidate.recommendedMaxMarginPerTradeUsd}
+                </p>
+                <p className="mt-2 text-[10px] font-semibold text-sky-300">
+                  미적용 · runtime/DB/HWM unchanged · 자동 activation/실행 권한 없음
+                </p>
+              </div>
+            )}
           </div>
         </section>
       </main>

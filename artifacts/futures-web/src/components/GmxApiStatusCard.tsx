@@ -381,7 +381,7 @@ export function PaperEpochPreflight({ view }: { view: PaperEpochPreflightView })
         ))}
       </div>
 
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-2">
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-2">
         <div className="rounded border border-border/60 bg-background/50 p-2 space-y-1">
           <p className="text-[11px] font-semibold">Current · 실제 관측</p>
           <p className="text-[10px]">Active Trading Capital {fmtUsd(view.current.activeTradingCapitalUsd, 2)}</p>
@@ -400,6 +400,21 @@ export function PaperEpochPreflight({ view }: { view: PaperEpochPreflightView })
           <p className="text-[10px]">Active Capital / HWM {fmtUsd(view.proposedNewEpoch.activeTradingCapitalUsd, 0)} / {fmtUsd(view.proposedNewEpoch.equityHwmUsd, 0)}</p>
           <p className="text-[10px]">Daily / Weekly baseline {fmtUsd(view.proposedNewEpoch.dailyRiskBaselineUsd, 0)} / {fmtUsd(view.proposedNewEpoch.weeklyRiskBaselineUsd, 0)}</p>
           <Badge tone="muted">APPLIED false · persistenceId —</Badge>
+        </div>
+        <div className="rounded border border-sky-500/30 bg-sky-500/5 p-2 space-y-1" data-testid="paper-test-allocation-plan">
+          <p className="text-[11px] font-semibold text-sky-300">PAPER TEST ALLOCATION · approved plan</p>
+          <p className="text-[10px]">
+            Total {fmtUsd(view.paperTestAllocationPlan.totalAllocationUsd, 0)}
+            {' '}= deployable {fmtUsd(view.paperTestAllocationPlan.deployableUsd, 0)}
+            {' '}+ reserve {fmtUsd(view.paperTestAllocationPlan.reserveUsd, 0)} ({view.paperTestAllocationPlan.reservePercent}%)
+          </p>
+          <p className="text-[10px]">
+            Risk ${view.paperTestAllocationPlan.futureActiveCapitalPolicyCandidate.baseRiskPerTradeUsd}
+            {' '}/ ${view.paperTestAllocationPlan.futureActiveCapitalPolicyCandidate.maxRiskPerTradeUsd}
+            {' '}· Hard Stop candidate ${view.paperTestAllocationPlan.futureActiveCapitalPolicyCandidate.hardStopEquityUsd}
+            {' '}· max margin ${view.paperTestAllocationPlan.futureActiveCapitalPolicyCandidate.recommendedMaxMarginPerTradeUsd}
+          </p>
+          <Badge tone="muted">PROPOSED · runtime/DB/HWM unchanged</Badge>
         </div>
       </div>
 
