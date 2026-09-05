@@ -10,7 +10,10 @@ import { adaptStrategySignalToRisk } from '../intel/strategyRiskAdapterV2';
 import type { RiskEvaluationResult } from '../lib/riskStateMachine';
 import { buildStrategyShadowWorkerEnvelope } from '../intel/strategyShadowWorkerEnvelopeV2';
 import { buildSignalLifecycleSnapshot } from '../intel/signalLifecycleSnapshotV2';
-import { restoreStrategyShadowLifecycleFromDecisionFullJson } from '../intel/strategyShadowLifecycleRuntimeV2';
+import {
+  advanceStrategyShadowLifecycleSnapshot,
+  restoreStrategyShadowLifecycleFromDecisionFullJson,
+} from '../intel/strategyShadowLifecycleRuntimeV2';
 
 const CLOSE = 1_800_000_000_000;
 const NOW = CLOSE + 10_000;
@@ -50,6 +53,21 @@ function frame(timeframe: StrategyTimeframe): CandleFrameInput {
     fetchedAtMs: NOW,
     candles: candles(timeframe),
   };
+}
+
+function bullishPullback15mFrame(): CandleFrameInput {
+  const base = frame('15m');
+  const values = [...base.candles!];
+  const close = 140.9;
+  values[239] = {
+    ...values[239]!,
+    o: close - 0.1,
+    h: close + 0.1,
+    l: close - 0.4,
+    c: close,
+    v: 1_500,
+  };
+  return { ...base, candles: values };
 }
 
 function run(frames = {
@@ -170,8 +188,12 @@ describe('completed Candle Signal → v2 Regime/Ensemble SHADOW binding', () => 
       .toContain('malformed');
   });
 
-  it('blocks tampered or duplicate evidence in the SHADOW envelope and restores its lifecycle snapshot', () => {
-    const result = run();
+  it('carries the real runner record through the worker envelope into lifecycle continuity', () => {
+    const result = run({
+      '15m': bullishPullback15mFrame(),
+      '1h': frame('1h'),
+      '4h': frame('4h'),
+    });
     const snapshot = buildSignalLifecycleSnapshot([], [], NOW)!;
     const envelopeInput = {
       cycleNumber: 1,
@@ -189,9 +211,54 @@ describe('completed Candle Signal → v2 Regime/Ensemble SHADOW binding', () => 
     };
     const envelope = buildStrategyShadowWorkerEnvelope(envelopeInput);
     expect(envelope.status).toBe('EVALUATED');
+    expect(result.record).toMatchObject({
+      action: 'LONG',
+      direction: 'LONG',
+      lifecycleEligible: true,
+      executionAuthorized: false,
+      paperPositionMutationAllowed: false,
+      riskAuthority: 'NOT_EVALUATED',
+    });
+    const advanced = advanceStrategyShadowLifecycleSnapshot(snapshot, envelope, NOW);
+    expect(advanced).toMatchObject({
+      records: [{
+        signalId: result.record!.signalId,
+        symbol: 'BTC',
+        strategyId: result.record!.strategyId,
+        direction: 'LONG',
+        sourceCandleCloseTime: CLOSE,
+        status: 'GENERATED',
+        generatedAt: NOW,
+      }],
+    });
     expect(restoreStrategyShadowLifecycleFromDecisionFullJson(JSON.stringify({
-      strategyEnsembleShadow: envelope,
-    }), NOW).snapshot).toEqual(snapshot);
+      strategyEnsembleShadow: { ...envelope, lifecycleSnapshot: advanced },
+    }), NOW + 1).snapshot).toEqual(advanced);
+
+    expect(advanceStrategyShadowLifecycleSnapshot(advanced!, envelope, NOW + 1)).toBeNull();
+    expect(advanceStrategyShadowLifecycleSnapshot(snapshot, {
+      ...envelope,
+      executionAuthorized: true as never,
+    }, NOW)).toBeNull();
+  });
+
+  it('blocks tampered or duplicate Candle evidence before lifecycle adoption', () => {
+    const result = run();
+    const snapshot = buildSignalLifecycleSnapshot([], [], NOW)!;
+    const envelopeInput = {
+      cycleNumber: 1,
+      generatedAt: NOW,
+      expectedSymbols: ['BTC'],
+      records: [result.record!],
+      lifecycleSnapshot: snapshot,
+      existingAi: {
+        decisionId: 'test-only-candle-shadow',
+        action: 'NO_TRADE' as const,
+        confidence: 0,
+        primarySymbol: null,
+        createdAt: new Date(NOW - 1).toISOString(),
+      },
+    };
     expect(buildStrategyShadowWorkerEnvelope({
       ...envelopeInput,
       records: [{ ...result.record!, candleSignalEvidence: {
