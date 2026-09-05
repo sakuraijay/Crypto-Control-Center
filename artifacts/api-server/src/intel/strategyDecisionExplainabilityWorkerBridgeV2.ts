@@ -12,6 +12,10 @@ import {
 } from './strategyDecisionExplainabilityV2';
 import type { StrategyConfidenceRiskReductionAdvisory } from './strategyConfidenceRiskReductionV2';
 import type { StrategyGmxContextNetEdgeAdvisory } from './strategyGmxContextNetEdgeV2';
+import {
+  evaluateAggressiveNetEdge,
+  type StrategyAggressiveNetEdgeInput,
+} from './strategyAggressiveNetEdgeV2';
 import type { StrategyRiskWorkerAdvisory } from './strategyRiskWorkerBridgeV2';
 import type { StrategyShadowWorkerEnvelope } from './strategyShadowWorkerEnvelopeV2';
 import type { StrategyStructuralSizingReadinessBinding } from './strategyStructuralSizingReadinessBindingV2';
@@ -36,6 +40,8 @@ export interface StrategyDecisionExplainabilityWorkerDownstreamInput
   readinessBinding: StrategyStructuralSizingReadinessBinding;
   confidenceAdvisories: readonly (StrategyConfidenceRiskReductionAdvisory | null)[];
   gmxNetEdgeAdvisories: readonly (StrategyGmxContextNetEdgeAdvisory | null)[];
+  /** Per-record evaluator inputs; null is the explicit NOT_EVALUATED marker. */
+  aggressiveInputs: readonly (StrategyAggressiveNetEdgeInput | null)[];
 }
 
 export interface StrategyDecisionExplainabilityWorkerAdvisory {
@@ -205,7 +211,8 @@ export function buildStrategyDecisionExplainabilityWorkerAdvisoryWithDownstream(
 ): StrategyDecisionExplainabilityWorkerAdvisory {
   const { shadowEnvelope: shadow, riskAdvisory: risk, sizingAdvisory: sizing,
     readinessBinding: binding, confidenceAdvisories: confidences,
-    gmxNetEdgeAdvisories: gmxAdvisories } = input;
+    gmxNetEdgeAdvisories: gmxAdvisories,
+    aggressiveInputs } = input;
   const count = shadow.records.length;
   if (!downstreamAggregateBoundariesValid(input)
     || shadow.status === 'BLOCKED' || risk.status === 'BLOCKED'
@@ -214,7 +221,8 @@ export function buildStrategyDecisionExplainabilityWorkerAdvisoryWithDownstream(
       ['SHADOW/Risk/Sizing/readiness 권한 또는 generation 결속 INVALID — 전체 설명 차단']);
   }
   if (count !== risk.decisions.length || count !== sizing.sizings.length
-    || count !== confidences.length || count !== gmxAdvisories.length) {
+    || count !== confidences.length || count !== gmxAdvisories.length
+    || count !== aggressiveInputs.length) {
     return output(input, 'BLOCKED', 'INVALID', [],
       ['downstream evidence 일대일 개수 결속 실패 — 부분 설명 저장 금지']);
   }
@@ -224,22 +232,50 @@ export function buildStrategyDecisionExplainabilityWorkerAdvisoryWithDownstream(
     const sizingValue = sizing.sizings[index];
     const confidence = confidences[index];
     const gmx = gmxAdvisories[index];
+    const aggressiveInput = aggressiveInputs[index];
     if (riskDecision.action === 'REJECT') {
-      if (sizingValue.status !== 'REJECTED' || confidence !== null || gmx !== null) return null;
+      if (sizingValue.status !== 'REJECTED' || confidence !== null || gmx !== null || aggressiveInput !== null) return null;
       return { shadowRecord, riskDecision, sizingAdvisory: null,
-        confidenceAdvisory: null, gmxNetEdgeAdvisory: null };
+        confidenceAdvisory: null, gmxNetEdgeAdvisory: null, aggressiveAdvisory: null };
     }
     if (sizingValue.schemaVersion === 'INVALID') {
-      if (confidence !== null || gmx !== null) return null;
+      if (confidence !== null || gmx !== null || aggressiveInput !== null) return null;
       return { shadowRecord, riskDecision, sizingAdvisory: null,
-        confidenceAdvisory: null, gmxNetEdgeAdvisory: null };
+        confidenceAdvisory: null, gmxNetEdgeAdvisory: null, aggressiveAdvisory: null };
     }
-    if (sizingValue.status === 'REJECTED' && (confidence !== null || gmx !== null)) return null;
-    if (confidence === null && gmx !== null) return null;
-    if (confidence?.status === 'REJECTED' && gmx !== null) return null;
+    if (sizingValue.status === 'REJECTED' && (confidence !== null || gmx !== null || aggressiveInput !== null)) return null;
+    if (confidence === null && (gmx !== null || aggressiveInput !== null)) return null;
+    if (confidence?.status === 'REJECTED' && (gmx !== null || aggressiveInput !== null)) return null;
+    if (gmx === null && aggressiveInput !== null) return null;
     if (gmx !== null && gmx.coordinatorGeneration !== binding.coordinatorGeneration) return null;
+    if (aggressiveInput !== null && (
+      aggressiveInput.riskDecision !== riskDecision
+      || aggressiveInput.structuralSizing !== sizingValue
+      || aggressiveInput.netEdge !== gmx
+      || aggressiveInput.researchResult !== shadowRecord.netEdgeResearch
+      || aggressiveInput.evaluatedAt !== shadowRecord.evaluatedAt
+      || aggressiveInput.lifecycleEligible !== shadowRecord.lifecycleEligible
+      || aggressiveInput.signal.signalId !== shadowRecord.signalId
+      || aggressiveInput.signal.symbol.trim().toUpperCase() !== shadowRecord.symbol.trim().toUpperCase()
+      || aggressiveInput.signal.direction !== shadowRecord.direction
+      || aggressiveInput.signal.strategyId !== shadowRecord.netEdgeResearch?.strategyId
+      || aggressiveInput.signal.confidence !== shadowRecord.netEdgeResearch?.signalConfidence
+      || aggressiveInput.signal.netExpectedEdgeBps !== (
+        (shadowRecord.netEdgeResearch?.expectedGrossEdge?.bps ?? Number.NaN)
+        - (shadowRecord.netEdgeResearch?.expectedRoundTripCost?.bps ?? Number.NaN))
+      || aggressiveInput.signal.expectedNetRR !== (
+        ((shadowRecord.netEdgeResearch?.expectedGrossEdge?.bps ?? Number.NaN)
+          - (shadowRecord.netEdgeResearch?.expectedRoundTripCost?.bps ?? Number.NaN))
+        / (shadowRecord.netEdgeResearch?.riskBps ?? Number.NaN))
+      || aggressiveInput.signal.dataQuality !== shadowRecord.netEdgeResearch?.signalDataQuality
+      || aggressiveInput.signal.sourceTimeframes.length
+        !== (shadowRecord.netEdgeResearch?.sourceTimeframes.length ?? -1)
+      || aggressiveInput.signal.sourceTimeframes.some((timeframe, timeframeIndex) =>
+        timeframe !== shadowRecord.netEdgeResearch?.sourceTimeframes[timeframeIndex])
+    )) return null;
+    const aggressive = aggressiveInput === null ? null : evaluateAggressiveNetEdge(aggressiveInput);
     return { shadowRecord, riskDecision, sizingAdvisory: sizingValue,
-      confidenceAdvisory: confidence, gmxNetEdgeAdvisory: gmx };
+      confidenceAdvisory: confidence, gmxNetEdgeAdvisory: gmx, aggressiveAdvisory: aggressive };
   });
   if (envelopeInputs.some(value => value === null)) {
     return output(input, 'BLOCKED', 'INVALID', [], [

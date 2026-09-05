@@ -10,6 +10,13 @@ import {
 } from '../intel/strategyDecisionExplainabilityRuntimeV2';
 import type { StrategyConfidenceRiskReductionAdvisory } from '../intel/strategyConfidenceRiskReductionV2';
 import type { StrategyGmxContextNetEdgeAdvisory } from '../intel/strategyGmxContextNetEdgeV2';
+import type { StrategyAggressiveNetEdgeAdvisory } from '../intel/strategyAggressiveNetEdgeV2';
+import type { StrategyAggressiveNetEdgeInput } from '../intel/strategyAggressiveNetEdgeV2';
+import type { StrategySignal } from '../intel/strategySignalV2';
+import {
+  evaluateStrategyNetEdgeResearch, STRATEGY_NET_EDGE_COST_EVIDENCE_VERSION,
+  type StrategyNetEdgeCostEvidence,
+} from '../intel/strategyNetEdgeResearchGateV1';
 import type { StrategyRiskWorkerAdvisory } from '../intel/strategyRiskWorkerBridgeV2';
 import type { StrategyRiskAdapterDecision } from '../intel/strategyRiskAdapterV2';
 import type { StrategyShadowRecord } from '../intel/strategyShadowAdapterV2';
@@ -18,14 +25,47 @@ import type { StrategyStructuralSizingAdvisory } from '../intel/strategyStructur
 import type { StrategyStructuralSizingReadinessBinding } from '../intel/strategyStructuralSizingReadinessBindingV2';
 import type { StrategyStructuralSizingWorkerAdvisory } from '../intel/strategyStructuralSizingWorkerBridgeV2';
 
+const researchSignal = (symbol = 'BTC'): StrategySignal => ({
+  schemaVersion: 'strategy-signal/v2', signalId: `${symbol}-signal`, strategyId: 'TREND_PULLBACK',
+  symbol, regime: 'TREND_UP', direction: 'LONG', confidence: 85, entryZoneLow: 99,
+  entryZoneHigh: 101, proposedEntryPrice: 100, structuralStop: 99, stopDistancePct: 1,
+  invalidationPrice: 99, targets: [{ price: 103, expectedR: 2.2, allocationPct: 100 }],
+  grossExpectedEdgeBps: 300, expectedCostsBps: 80, netExpectedEdgeBps: 220, expectedNetRR: 2.2,
+  higherTimeframeTrend: 'UP', marketStructure: 'HH_HL', confirmationPattern: 'BULLISH_REJECTION',
+  sourceTimeframes: ['4h', '1h', '15m'], sourceCandleCloseTime: 1, dataQuality: 'GOOD',
+  volumeConfirmation: true, reasons: [], warnings: [],
+});
+const researchCost = (): StrategyNetEdgeCostEvidence => {
+  const component = (usd: number) => ({ usd, bps: usd / 17.5 * 10_000 });
+  const quote = (direction: 'LONG' | 'SHORT') => ({
+    direction, market: '0x1111111111111111111111111111111111111111', orderType: 'MarketIncrease' as const,
+    notionalUsd: 17.5, holdingHorizonHours: 12, source: 'PAPER_GMX_ESTIMATE' as const,
+    blockNumber: null, observedAtMs: 1, fetchedAtMs: 1, expiresAtMs: 60_001,
+    fundingRatePerHourFraction: 0.01 / 17.5 / 12,
+    borrowingRatePerHourFraction: 0.01 / 17.5 / 12,
+    positionFee: component(0.04), exitFee: component(0.04), funding: component(0.01),
+    borrowing: component(0.01), priceImpact: component(0.03), network: component(0.01),
+    totalRoundTripCost: { usd: 0.14, bps: 80 },
+  });
+  return { schemaVersion: STRATEGY_NET_EDGE_COST_EVIDENCE_VERSION,
+    market: '0x1111111111111111111111111111111111111111', notionalUsd: 17.5,
+    holdingHorizonHours: 12, observedAtMs: 1, bidirectionalValidated: true,
+    holdingCostsDerivedFromRates: true, holdingCostProjectionMethod: 'ENTRY_RATE_CONSTANT',
+    conservativeBasisDirection: 'LONG', directionalQuotes: { LONG: quote('LONG'), SHORT: quote('SHORT') } };
+};
+
 const record = (symbol = 'BTC'): StrategyShadowRecord => ({
   schemaVersion: 'strategy-shadow-adapter/v1', shadowRecordId: `${symbol}:SHADOW:1`,
   mode: 'SHADOW_ONLY', symbol, evaluatedAt: 2, sourceCandleCloseTime: 1,
   regime: 'TREND_UP', action: 'LONG', comparison: 'ENSEMBLE_ONLY',
   strategyId: 'TREND_PULLBACK', signalId: `${symbol}-signal`, direction: 'LONG',
-  confidence: 75, selectedScore: 80, entryPrice: 100, structuralStop: 98,
-  expectedNetEdgeBps: 200, expectedNetRR: 2, lifecycleEligible: true,
+  confidence: 85, selectedScore: 80, entryPrice: 100, structuralStop: 99,
+  expectedNetEdgeBps: 220, expectedNetRR: 2.2, lifecycleEligible: true,
   existingAi: null, reasons: [], warnings: [], executionAuthorized: false,
+  netEdgeResearch: evaluateStrategyNetEdgeResearch({ signal: researchSignal(symbol),
+    costEvidence: researchCost(), eligibility: { configVersion: 'signal-lifecycle/v1',
+      signalId: `${symbol}-signal`, eligible: true, codes: [], blockedUntilCandleCloseTime: null,
+      strategyConsecutiveLosses: 0, symbolConsecutiveLosses: 0, reasons: [], warnings: [] }, evaluatedAt: 2 }),
   paperPositionMutationAllowed: false, riskAuthority: 'NOT_EVALUATED',
 });
 const decision = (value: StrategyShadowRecord, action: 'ALLOW' | 'REJECT'):
@@ -80,8 +120,8 @@ StrategyStructuralSizingAdvisory => ({
   riskSizeFactor: action === 'ALLOW' ? 1 : 0, allowedLeverage: action === 'ALLOW' ? 2 : 0,
   allowedRiskUsd: action === 'ALLOW' ? 1 : 0,
   effectiveStopLossFraction: action === 'ALLOW' ? 0.025 : 0,
-  maxNotionalBeforeRiskReductionUsd: action === 'ALLOW' ? 20 : 0,
-  finalAdvisoryNotionalUsd: action === 'ALLOW' ? 20 : 0, reasons: [],
+  maxNotionalBeforeRiskReductionUsd: action === 'ALLOW' ? 17.5 : 0,
+  finalAdvisoryNotionalUsd: action === 'ALLOW' ? 17.5 : 0, reasons: [],
   authority: 'ADVISORY_ONLY', executionAuthorized: false, approvalCreationAllowed: false,
   paperPositionMutationAllowed: false, livePositionMutationAllowed: false,
 });
@@ -133,6 +173,33 @@ const gmx = (value: StrategyShadowRecord, generation = 7,
   costAdjustedNetEdgeUsd: 0.385, reasons: [], authority: 'ADVISORY_ONLY',
   externalReadStarted: false, executionAuthorized: false, approvalCreationAllowed: false,
   paperPositionMutationAllowed: false, livePositionMutationAllowed: false,
+});
+const aggressive = (value: StrategyShadowRecord): StrategyAggressiveNetEdgeAdvisory => ({
+  schemaVersion: 'strategy-aggressive-net-edge/v1', advisoryId: `${value.signalId}:AGGRESSIVE_NET_EDGE`,
+  signalId: value.signalId, symbol: value.symbol, status: 'ELIGIBLE', applicability: 'APPLICABLE',
+  direction: value.direction, confidence: value.confidence, expectedNetRR: value.expectedNetRR,
+  notionalUsd: 17.5, structuralStopRiskUsd: 0.35, maxProfileRiskUsd: 1,
+  structuralStopRiskPctOfCapital: 0.035, grossEdgeToCostRatio: 3.75,
+  costAdjustedNetEdgeUsd: 0.385, roundTripCostUsd: 0.14, immutableCostCapUsd: 0.4,
+  reasons: [], authority: 'ADVISORY_ONLY', executionAuthorized: false, approvalCreationAllowed: false,
+  paperPositionMutationAllowed: false, livePositionMutationAllowed: false,
+});
+const aggressiveInput = (
+  value: StrategyShadowRecord,
+  riskDecision: StrategyRiskAdapterDecision,
+  sizingAdvisory: StrategyStructuralSizingAdvisory,
+  gmxAdvisory: StrategyGmxContextNetEdgeAdvisory,
+  profileName: 'aggressive' | 'conservative' = 'aggressive',
+): StrategyAggressiveNetEdgeInput => ({
+  signal: researchSignal(value.symbol), riskDecision, structuralSizing: sizingAdvisory,
+  netEdge: gmxAdvisory, researchResult: value.netEdgeResearch!, evaluatedAt: value.evaluatedAt,
+  lifecycleEligible: value.lifecycleEligible!,
+  riskProfile: { name: profileName, version: 'risk-profile/v1', appliedAt: '2026-09-05T00:00:00.000Z',
+    derivedLimits: { immediateEntryThreshold: 80,
+      maxRiskPerTradePct: profileName === 'conservative' ? 0.25 : 0.5, reserveCashPct: 20,
+      maxMarginPerTradeUsd: 334, maxConcurrentPositions: 1, cooldownMinutes: 30, maxLeverage: 3,
+      maxTotalExposureUsd: 3000, allocatedTradingCapitalUsd: 1000,
+      maxRiskPerTradeUsd: profileName === 'conservative' ? 2.5 : 5 } },
 });
 
 describe('Strategy decision explainability aiWorker bridge', () => {
@@ -195,18 +262,29 @@ describe('Strategy decision explainability aiWorker bridge', () => {
 describe('Strategy decision explainability same-generation downstream bridge', () => {
   it('동일 readiness generation의 전체 downstream chain을 결속한다', () => {
     const s = shadow(); const r = risk(s); const z = workerSizing(s);
+    const gm = gmx(s.records[0]);
+    gm.grossExpectedEdgeUsd = s.records[0].netEdgeResearch!.expectedGrossEdge!.usd;
+    gm.grossExpectedEdgeBps = s.records[0].netEdgeResearch!.expectedGrossEdge!.bps;
+    gm.roundTripCostUsd = s.records[0].netEdgeResearch!.expectedRoundTripCost!.usd;
+    gm.roundTripCostBps = s.records[0].netEdgeResearch!.expectedRoundTripCost!.bps;
+    gm.costAdjustedNetEdgeUsd = s.records[0].netEdgeResearch!.expectedNetEdge!.usd
+      + s.records[0].netEdgeResearch!.turnoverPenalty!.usd;
+    gm.costAdjustedNetEdgeBps = s.records[0].netEdgeResearch!.expectedNetEdge!.bps
+      + s.records[0].netEdgeResearch!.turnoverPenalty!.bps;
     const result = buildStrategyDecisionExplainabilityWorkerAdvisoryWithDownstream({
       shadowEnvelope: s, riskAdvisory: r, sizingAdvisory: z,
       readinessBinding: readiness(s.expectedSymbols),
       confidenceAdvisories: [confidence(s.records[0])],
-      gmxNetEdgeAdvisories: [gmx(s.records[0])],
+      gmxNetEdgeAdvisories: [gm],
+      aggressiveInputs: [aggressiveInput(s.records[0], r.decisions[0], z.sizings[0], gm)],
     });
     expect(result).toMatchObject({
       schemaVersion: STRATEGY_DECISION_EXPLAINABILITY_WORKER_VERSION,
       status: 'EVALUATED', summary: { evaluated: 1 }, externalReadStarted: false,
       independentPersistenceAllowed: false, executionAuthorized: false,
       envelopes: [{ status: 'EVALUATED', finalAdvisoryNotionalUsd: 17.5,
-        stages: { gmxNetEdge: { coordinatorGeneration: 7 } } }],
+        stages: { gmxNetEdge: { coordinatorGeneration: 7 },
+          aggressive: { status: 'ELIGIBLE', applicability: 'APPLICABLE' } } }],
     });
   });
 
@@ -216,7 +294,7 @@ describe('Strategy decision explainability same-generation downstream bridge', (
       shadowEnvelope: s, riskAdvisory: r, sizingAdvisory: z,
       readinessBinding: readiness(s.expectedSymbols),
       confidenceAdvisories: [confidence(s.records[0])],
-      gmxNetEdgeAdvisories: [gmx(s.records[0], 7, 'REJECTED')],
+      gmxNetEdgeAdvisories: [gmx(s.records[0], 7, 'REJECTED')], aggressiveInputs: [null],
     })).toMatchObject({ status: 'EVALUATED', summary: { rejected: 1 },
       envelopes: [{ status: 'REJECTED', finalAdvisoryNotionalUsd: 0 }] });
   });
@@ -226,7 +304,7 @@ describe('Strategy decision explainability same-generation downstream bridge', (
     expect(buildStrategyDecisionExplainabilityWorkerAdvisoryWithDownstream({
       shadowEnvelope: s, riskAdvisory: r, sizingAdvisory: z,
       readinessBinding: readiness(s.expectedSymbols), confidenceAdvisories: [null],
-      gmxNetEdgeAdvisories: [null],
+      gmxNetEdgeAdvisories: [null], aggressiveInputs: [null],
     })).toMatchObject({ status: 'NOT_EVALUATED', externalReadStarted: false,
       envelopes: [{ status: 'NOT_EVALUATED', stages: { confidence: null, gmxNetEdge: null } }] });
   });
@@ -237,14 +315,14 @@ describe('Strategy decision explainability same-generation downstream bridge', (
       shadowEnvelope: s, riskAdvisory: r, sizingAdvisory: z,
       readinessBinding: readiness(s.expectedSymbols, 7),
       confidenceAdvisories: [confidence(s.records[0])],
-      gmxNetEdgeAdvisories: [gmx(s.records[0], 8)],
+      gmxNetEdgeAdvisories: [gmx(s.records[0], 8)], aggressiveInputs: [null],
     })).toMatchObject({ schemaVersion: 'INVALID', status: 'BLOCKED', envelopes: [] });
 
     const rejectedRisk = risk(s, ['REJECT']); const rejectedSizing = workerSizing(s, ['REJECT']);
     expect(buildStrategyDecisionExplainabilityWorkerAdvisoryWithDownstream({
       shadowEnvelope: s, riskAdvisory: rejectedRisk, sizingAdvisory: rejectedSizing,
       readinessBinding: readiness(s.expectedSymbols),
-      confidenceAdvisories: [confidence(s.records[0])], gmxNetEdgeAdvisories: [null],
+      confidenceAdvisories: [confidence(s.records[0])], gmxNetEdgeAdvisories: [null], aggressiveInputs: [null],
     })).toMatchObject({ schemaVersion: 'INVALID', status: 'BLOCKED', envelopes: [] });
   });
 
@@ -253,16 +331,62 @@ describe('Strategy decision explainability same-generation downstream bridge', (
     const b = readiness(s.expectedSymbols);
     expect(buildStrategyDecisionExplainabilityWorkerAdvisoryWithDownstream({
       shadowEnvelope: s, riskAdvisory: r, sizingAdvisory: z, readinessBinding: b,
-      confidenceAdvisories: [], gmxNetEdgeAdvisories: [],
+      confidenceAdvisories: [], gmxNetEdgeAdvisories: [], aggressiveInputs: [],
     })).toMatchObject({ schemaVersion: 'INVALID', status: 'BLOCKED' });
     const unsafe = { ...b, executionAuthorized: true as never };
     const input = { shadowEnvelope: s, riskAdvisory: r, sizingAdvisory: z,
       readinessBinding: unsafe, confidenceAdvisories: [confidence(s.records[0])],
-      gmxNetEdgeAdvisories: [gmx(s.records[0])] };
+      gmxNetEdgeAdvisories: [gmx(s.records[0])], aggressiveInputs: [null] };
     const before = JSON.stringify(input);
     expect(buildStrategyDecisionExplainabilityWorkerAdvisoryWithDownstream(input))
       .toMatchObject({ schemaVersion: 'INVALID', status: 'BLOCKED' });
     expect(JSON.stringify(input)).toBe(before);
+  });
+
+  it('canonical input reference/economics tamper와 terminal 이후 input을 전체 차단한다', () => {
+    const s = shadow(); const r = risk(s); const z = workerSizing(s); const gm = gmx(s.records[0]);
+    const canonical = aggressiveInput(s.records[0], r.decisions[0], z.sizings[0], gm);
+    for (const tampered of [
+      { ...canonical, riskDecision: { ...r.decisions[0] } },
+      { ...canonical, structuralSizing: { ...z.sizings[0] } },
+      { ...canonical, netEdge: { ...gm } },
+      { ...canonical, researchResult: { ...s.records[0].netEdgeResearch! } },
+      { ...canonical, signal: { ...canonical.signal, confidence: 84 } },
+    ]) {
+      expect(buildStrategyDecisionExplainabilityWorkerAdvisoryWithDownstream({
+        shadowEnvelope: s, riskAdvisory: r, sizingAdvisory: z,
+        readinessBinding: readiness(s.expectedSymbols), confidenceAdvisories: [confidence(s.records[0])],
+        gmxNetEdgeAdvisories: [gm], aggressiveInputs: [tampered],
+      })).toMatchObject({ schemaVersion: 'INVALID', status: 'BLOCKED', envelopes: [] });
+    }
+    const rejectedRisk = risk(s, ['REJECT']); const rejectedSizing = workerSizing(s, ['REJECT']);
+    expect(buildStrategyDecisionExplainabilityWorkerAdvisoryWithDownstream({
+      shadowEnvelope: s, riskAdvisory: rejectedRisk, sizingAdvisory: rejectedSizing,
+      readinessBinding: readiness(s.expectedSymbols), confidenceAdvisories: [null],
+      gmxNetEdgeAdvisories: [null], aggressiveInputs: [canonical],
+    })).toMatchObject({ schemaVersion: 'INVALID', status: 'BLOCKED' });
+  });
+
+  it('internally evaluated conservative input은 NOT_APPLICABLE이며 base chain은 EVALUATED다', () => {
+    const s = shadow(); const r = risk(s); const z = workerSizing(s); const gm = gmx(s.records[0]);
+    const research = s.records[0].netEdgeResearch!;
+    gm.grossExpectedEdgeUsd = research.expectedGrossEdge!.usd;
+    gm.grossExpectedEdgeBps = research.expectedGrossEdge!.bps;
+    gm.roundTripCostUsd = research.expectedRoundTripCost!.usd;
+    gm.roundTripCostBps = research.expectedRoundTripCost!.bps;
+    gm.costAdjustedNetEdgeUsd = research.expectedNetEdge!.usd + research.turnoverPenalty!.usd;
+    gm.costAdjustedNetEdgeBps = research.expectedNetEdge!.bps + research.turnoverPenalty!.bps;
+    const result = buildStrategyDecisionExplainabilityWorkerAdvisoryWithDownstream({
+      shadowEnvelope: s, riskAdvisory: r, sizingAdvisory: z,
+      readinessBinding: readiness(s.expectedSymbols), confidenceAdvisories: [confidence(s.records[0])],
+      gmxNetEdgeAdvisories: [gm],
+      aggressiveInputs: [aggressiveInput(s.records[0], r.decisions[0], z.sizings[0], gm, 'conservative')],
+    });
+    expect(result).toMatchObject({ status: 'EVALUATED', summary: { evaluated: 1 },
+      envelopes: [{ status: 'EVALUATED', stages: { aggressive: {
+        status: 'NOT_EVALUATED', applicability: 'NOT_APPLICABLE',
+      } } }], executionAuthorized: false, approvalCreationAllowed: false,
+      paperPositionMutationAllowed: false, livePositionMutationAllowed: false });
   });
 });
 
@@ -286,15 +410,24 @@ describe('Strategy decision explainability DB-free runtime selector', () => {
   });
 
   it('이미 계산된 동일-generation bundle만 downstream bridge에 전달한다', () => {
-    const s = shadow();
+    const s = shadow(); const r = risk(s); const z = workerSizing(s); const gm = gmx(s.records[0]);
+    gm.grossExpectedEdgeUsd = s.records[0].netEdgeResearch!.expectedGrossEdge!.usd;
+    gm.grossExpectedEdgeBps = s.records[0].netEdgeResearch!.expectedGrossEdge!.bps;
+    gm.roundTripCostUsd = s.records[0].netEdgeResearch!.expectedRoundTripCost!.usd;
+    gm.roundTripCostBps = s.records[0].netEdgeResearch!.expectedRoundTripCost!.bps;
+    gm.costAdjustedNetEdgeUsd = s.records[0].netEdgeResearch!.expectedNetEdge!.usd
+      + s.records[0].netEdgeResearch!.turnoverPenalty!.usd;
+    gm.costAdjustedNetEdgeBps = s.records[0].netEdgeResearch!.expectedNetEdge!.bps
+      + s.records[0].netEdgeResearch!.turnoverPenalty!.bps;
     const result = buildStrategyDecisionExplainabilityRuntimeAdvisory({
       shadowEnvelope: s,
-      riskAdvisory: risk(s),
+      riskAdvisory: r,
       downstreamEvidence: {
-        sizingAdvisory: workerSizing(s),
+        sizingAdvisory: z,
         readinessBinding: readiness(s.expectedSymbols),
         confidenceAdvisories: [confidence(s.records[0])],
-        gmxNetEdgeAdvisories: [gmx(s.records[0])],
+        gmxNetEdgeAdvisories: [gm],
+        aggressiveInputs: [aggressiveInput(s.records[0], r.decisions[0], z.sizings[0], gm)],
       },
     });
     expect(result).toMatchObject({
@@ -316,7 +449,7 @@ describe('Strategy decision explainability DB-free runtime selector', () => {
         sizingAdvisory: workerSizing(s),
         readinessBinding: readiness(s.expectedSymbols, 7),
         confidenceAdvisories: [confidence(s.records[0])],
-        gmxNetEdgeAdvisories: [gmx(s.records[0], 8)],
+        gmxNetEdgeAdvisories: [gmx(s.records[0], 8)], aggressiveInputs: [null],
       },
     })).toMatchObject({ schemaVersion: 'INVALID', status: 'BLOCKED', envelopes: [] });
   });

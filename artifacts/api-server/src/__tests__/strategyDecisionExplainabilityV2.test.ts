@@ -6,6 +6,7 @@ import {
   type StrategyDecisionExplainabilityInput,
 } from '../intel/strategyDecisionExplainabilityV2';
 import type { StrategyGmxContextNetEdgeAdvisory } from '../intel/strategyGmxContextNetEdgeV2';
+import type { StrategyAggressiveNetEdgeAdvisory } from '../intel/strategyAggressiveNetEdgeV2';
 import type { StrategyRiskAdapterDecision } from '../intel/strategyRiskAdapterV2';
 import type { StrategyShadowRecord } from '../intel/strategyShadowAdapterV2';
 import type { StrategyStructuralSizingAdvisory } from '../intel/strategyStructuralSizingV2';
@@ -60,9 +61,18 @@ StrategyGmxContextNetEdgeAdvisory => ({
   authority: 'ADVISORY_ONLY', externalReadStarted: false, executionAuthorized: false,
   approvalCreationAllowed: false, paperPositionMutationAllowed: false, livePositionMutationAllowed: false,
 });
+const aggressive = (): StrategyAggressiveNetEdgeAdvisory => ({
+  schemaVersion: 'strategy-aggressive-net-edge/v1', advisoryId: 'signal-1:AGGRESSIVE_NET_EDGE',
+  signalId: 'signal-1', symbol: 'BTC', status: 'ELIGIBLE', applicability: 'APPLICABLE',
+  direction: 'LONG', confidence: 75, expectedNetRR: 2, notionalUsd: 17.5,
+  structuralStopRiskUsd: 0.35, maxProfileRiskUsd: 1, structuralStopRiskPctOfCapital: 0.035,
+  grossEdgeToCostRatio: 3.75, costAdjustedNetEdgeUsd: 0.385, roundTripCostUsd: 0.14,
+  immutableCostCapUsd: 0.4, reasons: [], authority: 'ADVISORY_ONLY', executionAuthorized: false,
+  approvalCreationAllowed: false, paperPositionMutationAllowed: false, livePositionMutationAllowed: false,
+});
 const input = (): StrategyDecisionExplainabilityInput => ({
   shadowRecord: shadow(), riskDecision: risk(), sizingAdvisory: sizing(),
-  confidenceAdvisory: confidence(), gmxNetEdgeAdvisory: gmx(),
+  confidenceAdvisory: confidence(), gmxNetEdgeAdvisory: gmx(), aggressiveAdvisory: aggressive(),
 });
 
 describe('Strategy decision read-only explainability envelope', () => {
@@ -84,27 +94,27 @@ describe('Strategy decision read-only explainability envelope', () => {
 
   it('Risk REJECT는 downstream 없이 정상 terminal REJECTED다', () => {
     const value = input(); value.riskDecision = risk('REJECT');
-    value.sizingAdvisory = null; value.confidenceAdvisory = null; value.gmxNetEdgeAdvisory = null;
+    value.sizingAdvisory = null; value.confidenceAdvisory = null; value.gmxNetEdgeAdvisory = null; value.aggressiveAdvisory = null;
     expect(buildStrategyDecisionExplainabilityEnvelope(value)).toMatchObject({
       status: 'REJECTED', finalAdvisoryNotionalUsd: 0,
     });
   });
 
   it('중간 stage 결측은 NOT_EVALUATED이며 비용·명목을 추정하지 않는다', () => {
-    const value = input(); value.confidenceAdvisory = null; value.gmxNetEdgeAdvisory = null;
+    const value = input(); value.confidenceAdvisory = null; value.gmxNetEdgeAdvisory = null; value.aggressiveAdvisory = null;
     expect(buildStrategyDecisionExplainabilityEnvelope(value)).toMatchObject({
       status: 'NOT_EVALUATED', finalAdvisoryNotionalUsd: 0, stages: { confidence: null, gmxNetEdge: null },
     });
   });
 
   it('Sizing·Confidence·GMX 거부를 terminal REJECTED로 보존한다', () => {
-    const sizeRejected = input(); sizeRejected.sizingAdvisory = sizing('REJECTED');
+    const sizeRejected = input(); sizeRejected.sizingAdvisory = sizing('REJECTED'); sizeRejected.aggressiveAdvisory = null;
     sizeRejected.confidenceAdvisory = null; sizeRejected.gmxNetEdgeAdvisory = null;
     expect(buildStrategyDecisionExplainabilityEnvelope(sizeRejected).status).toBe('REJECTED');
-    const confidenceRejected = input(); confidenceRejected.confidenceAdvisory = confidence('REJECTED');
+    const confidenceRejected = input(); confidenceRejected.confidenceAdvisory = confidence('REJECTED'); confidenceRejected.aggressiveAdvisory = null;
     confidenceRejected.gmxNetEdgeAdvisory = null;
     expect(buildStrategyDecisionExplainabilityEnvelope(confidenceRejected).status).toBe('REJECTED');
-    const gmxRejected = input(); gmxRejected.gmxNetEdgeAdvisory = gmx('REJECTED');
+    const gmxRejected = input(); gmxRejected.gmxNetEdgeAdvisory = gmx('REJECTED'); gmxRejected.aggressiveAdvisory = null;
     expect(buildStrategyDecisionExplainabilityEnvelope(gmxRejected).status).toBe('REJECTED');
   });
 
@@ -132,5 +142,30 @@ describe('Strategy decision read-only explainability envelope', () => {
     expect(buildStrategyDecisionExplainabilityEnvelope(value))
       .toEqual(buildStrategyDecisionExplainabilityEnvelope(value));
     expect(JSON.stringify(value)).toBe(before);
+  });
+
+  it('forged aggressive identity/economics/authority를 모두 INVALID/BLOCKED 처리한다', () => {
+    for (const forged of [
+      { advisoryId: 'forged' },
+      { costAdjustedNetEdgeUsd: 0.384 },
+      { roundTripCostUsd: 0.13 },
+      { immutableCostCapUsd: 0.5 },
+      { notionalUsd: 17.4 },
+      { executionAuthorized: true as never },
+    ]) {
+      const value = input();
+      value.aggressiveAdvisory = { ...aggressive(), ...forged };
+      expect(buildStrategyDecisionExplainabilityEnvelope(value)).toMatchObject({
+        schemaVersion: 'INVALID', status: 'BLOCKED',
+      });
+    }
+  });
+
+  it('production Worker 외 직접 입력도 upstream terminal 뒤 aggressive 배치를 차단한다', () => {
+    const value = input();
+    value.riskDecision = risk('REJECT');
+    expect(buildStrategyDecisionExplainabilityEnvelope(value)).toMatchObject({
+      schemaVersion: 'INVALID', status: 'BLOCKED',
+    });
   });
 });
