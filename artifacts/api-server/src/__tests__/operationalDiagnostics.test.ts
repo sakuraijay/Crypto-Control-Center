@@ -10,6 +10,7 @@ import type { ReleaseIdentity } from '../lib/releaseIdentity';
 const SHA = 'a'.repeat(40);
 const TREE = 'b'.repeat(40);
 const MANUAL_CANARY_PATH = resolve(import.meta.dirname, '../../docs/manual-canary.md');
+const API_ARTIFACT_PATH = resolve(import.meta.dirname, '../../.replit-artifact/artifact.toml');
 
 const DOCUMENTED_TARGET_BINDINGS = {
   WORKER_ENGINE_MODE: 'engineMode',
@@ -131,11 +132,15 @@ describe('operational build/approved/effective diagnostics', () => {
 
   it('keeps the approved target bound to the checked-in Production overrides', () => {
     const replitConfig = readFileSync(resolve(import.meta.dirname, '../../../../.replit'), 'utf8');
+    const apiArtifactConfig = readFileSync(API_ARTIFACT_PATH, 'utf8');
     const sharedSection = replitConfig
       .split('[userenv.shared]')[1]
       ?.split(/\n\s*\[/)[0] ?? '';
     const productionSection = replitConfig
       .split('[userenv.production]')[1]
+      ?.split(/\n\s*\[/)[0] ?? '';
+    const productionBuildSection = apiArtifactConfig
+      .split('[services.production.build.env]')[1]
       ?.split(/\n\s*\[/)[0] ?? '';
     expect(sharedSection).toContain('WORKER_ENGINE_MODE = "PAPER"');
     expect(sharedSection).toContain('AUTO_WORKER_LIVE_ENABLED = "false"');
@@ -145,6 +150,14 @@ describe('operational build/approved/effective diagnostics', () => {
     expect(productionSection).toContain('GMX_RELAY_SUBMISSION_ENABLED = "false"');
     expect(productionSection).toContain('GMX_RELAY_NETWORK_ENABLED = "false"');
     expect(productionSection).toContain('GMX_RELAY_MODE = "DISABLED"');
+    expect(productionBuildSection).toContain('WORKER_ENGINE_MODE = "PAPER"');
+    expect(productionBuildSection).toContain('AUTO_WORKER_LIVE_ENABLED = "false"');
+    expect(productionBuildSection).toContain('DELEGATED_SIGNER_ENABLED = "true"');
+    expect(productionBuildSection).toContain('GMX_API_ORDER_SUBMISSION_ENABLED = "true"');
+    expect(productionBuildSection).toContain('LIVE_TEST_EXECUTION_LOCKED = "false"');
+    expect(productionBuildSection).toContain('GMX_RELAY_SUBMISSION_ENABLED = "false"');
+    expect(productionBuildSection).toContain('GMX_RELAY_NETWORK_ENABLED = "false"');
+    expect(productionBuildSection).toContain('GMX_RELAY_MODE = "DISABLED"');
     expect(APPROVED_PRODUCTION_SAFETY_TARGET.engineMode).toBe('PAPER');
     expect(APPROVED_PRODUCTION_SAFETY_TARGET.autoWorkerLiveEnabled).toBe(false);
     expect(APPROVED_PRODUCTION_SAFETY_TARGET.relaySubmissionEnabled).toBe(false);
