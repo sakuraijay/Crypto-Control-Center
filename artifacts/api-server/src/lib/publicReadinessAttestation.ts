@@ -108,6 +108,7 @@ export function buildPublicReadinessAttestation(input: {
   nowMs: number;
   paper: PaperRuntimeReadinessView;
   stop: StopExecutionCapabilitySnapshot;
+  canaryReady: boolean;
 }): PublicReadinessAttestation {
   const costs = {
     BTC: projectCost(input.paper.costs.BTC, 'BTC'),
@@ -116,25 +117,26 @@ export function buildPublicReadinessAttestation(input: {
   const stopBlockerIds = input.stop.available
     ? []
     : ['PUBLIC_STOP_CAPABILITY_UNAVAILABLE'];
-  const canaryBlockerIds = [
+  const diagnosticCanaryBlockerIds = [
     ...(input.paper.paperMode ? ['PUBLIC_CANARY_PAPER_MODE'] : []),
     ...costs.BTC.blockerIds,
     ...costs.ETH.blockerIds,
     ...stopBlockerIds,
   ];
+  const canaryBlockerIds = input.canaryReady
+    ? []
+    : diagnosticCanaryBlockerIds.length > 0
+      ? diagnosticCanaryBlockerIds
+      : ['PUBLIC_CANARY_DETAILED_READINESS_BLOCKED'];
 
   return {
     boundary: 'SANITIZED_READ_ONLY_NOT_EXECUTION_AUTHORIZATION',
     observedAt: new Date(input.nowMs).toISOString(),
     costs,
     canary: {
-      // A public PAPER attestation can never authorize a Controlled Canary.
-      ready: false,
-      blockerIds: [...new Set(
-        canaryBlockerIds.length > 0
-          ? canaryBlockerIds
-          : ['PUBLIC_CANARY_AUTHENTICATED_GATES_REQUIRED'],
-      )],
+      // Observational parity only: this never grants execution authorization.
+      ready: input.canaryReady,
+      blockerIds: [...new Set(canaryBlockerIds)],
     },
     stop: {
       ready: input.stop.available,

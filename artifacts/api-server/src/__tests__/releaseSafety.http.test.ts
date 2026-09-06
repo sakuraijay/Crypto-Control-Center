@@ -10,7 +10,7 @@ const mocks = vi.hoisted(() => ({
   relayFlags: vi.fn(),
   validateManifest: vi.fn(),
   stop: vi.fn(),
-  paperReadiness: vi.fn(),
+  gmxStatus: vi.fn(),
 }));
 
 vi.mock('../lib/releaseIdentity', () => ({ getReleaseIdentity: mocks.identity }));
@@ -26,8 +26,8 @@ vi.mock('../lib/gmxDeploymentManifest', () => ({
 vi.mock('../lib/stopExecutionCapabilityState', () => ({
   getStopExecutionCapability: mocks.stop,
 }));
-vi.mock('../lib/paperRuntimeReadiness', () => ({
-  getPaperRuntimeReadinessSnapshot: mocks.paperReadiness,
+vi.mock('../routes/gmxapi', () => ({
+  buildGmxApiStatusSnapshot: mocks.gmxStatus,
 }));
 
 import releaseRouter from '../routes/release';
@@ -93,37 +93,53 @@ beforeEach(() => {
     delegatedSignerEnabled: false,
   });
   mocks.stop.mockReturnValue({ available: false, reasons: ['locked'], evaluatedAt: null });
-  const cost = (symbol: 'BTC' | 'ETH') => ({
-    state: 'verified',
-    attemptedAtMs: 1_788_000_000_000,
-    observedAtMs: 1_788_000_000_000,
-    ageMs: 1_000,
-    fresh: true,
-    failureId: null,
-    detail: null,
-    evidenceRole: 'OBSERVATIONAL_READ_ONLY',
-    observationalFresh: true,
-    symbol,
-    direction: 'LONG',
-    notionalUsd: 20,
-    holdingHours: 1,
-    capUsd: 0.4,
-    effectiveRoundTripCostUsd: symbol === 'BTC' ? 0.31 : 0.41,
-    withinCap: symbol === 'BTC',
-    executionSnapshot: {
-      fresh: true,
-      eligible: false,
-      authorized: false,
-      maxAgeMs: 60_000,
-      failureId: null,
-      blockReason: null,
+  mocks.gmxStatus.mockResolvedValue({
+    readyForControlledCanary: false,
+    publicReadiness: {
+      boundary: 'SANITIZED_READ_ONLY_NOT_EXECUTION_AUTHORIZATION',
+      observedAt: '2026-08-28T10:01:30.000Z',
+      costs: {
+        BTC: {
+          symbol: 'BTC',
+          direction: 'LONG',
+          exactNotionalUsd: 20,
+          holdingHours: 1,
+          effectiveRoundTripCostUsd: 0.31,
+          observedAt: '2026-08-28T10:01:29.000Z',
+          ageMs: 1_000,
+          fresh: true,
+          capUsd: 0.4,
+          withinCap: true,
+          blockerIds: [],
+        },
+        ETH: {
+          symbol: 'ETH',
+          direction: 'LONG',
+          exactNotionalUsd: 20,
+          holdingHours: 1,
+          effectiveRoundTripCostUsd: 0.41,
+          observedAt: '2026-08-28T10:01:29.000Z',
+          ageMs: 1_000,
+          fresh: true,
+          capUsd: 0.4,
+          withinCap: false,
+          blockerIds: ['PUBLIC_COST_ETH_CAP_EXCEEDED'],
+        },
+      },
+      canary: {
+        ready: false,
+        blockerIds: [
+          'PUBLIC_CANARY_PAPER_MODE',
+          'PUBLIC_COST_ETH_CAP_EXCEEDED',
+          'PUBLIC_STOP_CAPABILITY_UNAVAILABLE',
+        ],
+      },
+      stop: {
+        ready: false,
+        evaluatedAt: null,
+        blockerIds: ['PUBLIC_STOP_CAPABILITY_UNAVAILABLE'],
+      },
     },
-  });
-  mocks.paperReadiness.mockReturnValue({
-    boundary: 'READ_ONLY_NOT_EXECUTION_AUTHORIZATION',
-    paperMode: true,
-    readonlyEnabled: true,
-    costs: { BTC: cost('BTC'), ETH: cost('ETH') },
   });
   mocks.dbEvidence.mockResolvedValue({
     observedAt: '2026-08-28T10:01:00.000Z',
@@ -228,29 +244,32 @@ describe('read-only release attestation routes', () => {
       /privateKey|DATABASE_URL|RPC_URL|SESSION_SECRET|positionId|tradeId|lastCycleResult|pid|nodeEnv/,
     );
     expect(mocks.dbEvidence).toHaveBeenCalledTimes(1);
-    expect(mocks.paperReadiness).toHaveBeenCalledTimes(1);
+    expect(mocks.gmxStatus).toHaveBeenCalledTimes(1);
     expect(mocks.stop).toHaveBeenCalledTimes(1);
   });
 
   it('nulls unavailable or stale cost values and exposes only stable blocker IDs', async () => {
-    const current = mocks.paperReadiness();
-    mocks.paperReadiness.mockReturnValue({
+    const current = await mocks.gmxStatus();
+    mocks.gmxStatus.mockResolvedValue({
       ...current,
-      costs: {
-        BTC: {
-          ...current.costs.BTC,
-          state: 'failed',
-          observedAtMs: null,
-          effectiveRoundTripCostUsd: 0.12,
-          withinCap: true,
-        },
-        ETH: {
-          ...current.costs.ETH,
-          fresh: false,
-          observationalFresh: false,
-          executionSnapshot: { ...current.costs.ETH.executionSnapshot, fresh: false },
-          effectiveRoundTripCostUsd: 0.18,
-          withinCap: true,
+      publicReadiness: {
+        ...current.publicReadiness,
+        costs: {
+          BTC: {
+            ...current.publicReadiness.costs.BTC,
+            effectiveRoundTripCostUsd: null,
+            observedAt: null,
+            fresh: false,
+            withinCap: null,
+            blockerIds: ['PUBLIC_COST_BTC_UNAVAILABLE'],
+          },
+          ETH: {
+            ...current.publicReadiness.costs.ETH,
+            effectiveRoundTripCostUsd: null,
+            fresh: false,
+            withinCap: null,
+            blockerIds: ['PUBLIC_COST_ETH_STALE'],
+          },
         },
       },
     });
@@ -271,6 +290,33 @@ describe('read-only release attestation routes', () => {
       withinCap: null,
       blockerIds: ['PUBLIC_COST_ETH_STALE'],
     });
+  });
+
+  it.each([
+    ['eligible', true],
+    ['blocked', false],
+  ] as const)('preserves authenticated %s Canary readiness parity', async (_case, ready) => {
+    const current = await mocks.gmxStatus();
+    const detailedStatus = {
+      ...current,
+      readyForControlledCanary: ready,
+      publicReadiness: {
+        ...current.publicReadiness,
+        canary: {
+          ready,
+          blockerIds: ready ? [] : ['PUBLIC_CANARY_DETAILED_READINESS_BLOCKED'],
+        },
+      },
+    };
+    mocks.gmxStatus.mockResolvedValue(detailedStatus);
+
+    const response = await request(app()).get('/api/release/safety');
+
+    expect(response.status).toBe(200);
+    expect(response.body.publicReadiness.canary.ready).toBe(ready);
+    expect(response.body.publicReadiness.canary.ready).toBe(
+      detailedStatus.readyForControlledCanary,
+    );
   });
 
   it('keeps build-time observations distinct from current runtime and reports source provenance drift', async () => {

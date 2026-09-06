@@ -7,8 +7,7 @@ import { readRuntimeDbSafetyEvidence } from '../lib/runtimeSafetyEvidence';
 import { getStopExecutionCapability } from '../lib/stopExecutionCapabilityState';
 import { getExecutorStatus } from '../workers/internalExecutor';
 import { deriveOperationalDiagnostics } from '../lib/operationalDiagnostics';
-import { getPaperRuntimeReadinessSnapshot } from '../lib/paperRuntimeReadiness';
-import { buildPublicReadinessAttestation } from '../lib/publicReadinessAttestation';
+import { buildGmxApiStatusSnapshot } from './gmxapi';
 
 const router = Router();
 
@@ -44,13 +43,8 @@ router.get('/release/safety', async (_req, res) => {
     liveExecutionLocked: executor.liveExecutionLocked,
     relayFlags,
   }, identity);
-  const nowMs = Date.now();
   const stopCapability = getStopExecutionCapability();
-  const publicReadiness = buildPublicReadinessAttestation({
-    nowMs,
-    paper: getPaperRuntimeReadinessSnapshot(nowMs, process.env),
-    stop: stopCapability,
-  });
+  const publicReadiness = (await buildGmxApiStatusSnapshot()).publicReadiness;
   return res.json({
     ok: true,
     identity,

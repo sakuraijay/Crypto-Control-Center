@@ -111,7 +111,7 @@ function transport(): GmxApiTransport {
 }
 
 /** GMX API v2 상태 스냅샷 조립 — 외부 호출 0회 (DB read + 메모리 getter만) */
-async function buildGmxApiStatusSnapshot() {
+export async function buildGmxApiStatusSnapshot() {
   const env = process.env;
   const nowMs = Date.now();
   const paperMode = env.WORKER_ENGINE_MODE === 'PAPER';
@@ -293,11 +293,6 @@ async function buildGmxApiStatusSnapshot() {
   // ── 6H-2B §12 — 보호 주문(durable protection) 관측값 (조회 전용) ────────────
   const stopCapability = getStopExecutionCapability();
   const paperStopReadinessEvidence = getPaperStopReadinessEvidence(Date.now(), env);
-  const publicReadiness = buildPublicReadinessAttestation({
-    nowMs,
-    paper: paperRuntimeReadiness,
-    stop: stopCapability,
-  });
   let protectionCounts: Record<string, number> | null = null;
   let blockingProtectionCount: number | null = null;
   let staleStopCount: number | null = null;
@@ -413,6 +408,12 @@ async function buildGmxApiStatusSnapshot() {
     protectionReconciliationBlocksNewOpens: protectionRecon.blockNewOpens,
     protectionReconciliationAmbiguousCount: protectionRecon.ambiguousCount,
     requiredActions: actionBudget.requiredActions,
+  });
+  const publicReadiness = buildPublicReadinessAttestation({
+    nowMs,
+    paper: paperRuntimeReadiness,
+    stop: stopCapability,
+    canaryReady: readyForControlledCanary,
   });
 
   const paperRelayEvidence = paperMode
