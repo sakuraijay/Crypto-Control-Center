@@ -9,6 +9,7 @@ import { Shell } from '@/components/shell';
 import { AuthOverlay } from '@/components/auth/AuthOverlay';
 import { OnboardingOverlay } from '@/components/onboarding/OnboardingOverlay';
 import { RiskAlertMonitor } from '@/components/trading/RiskAlertMonitor';
+import { OperatorSnapshotStrip } from '@/components/dashboard/OperatorSnapshotStrip';
 
 import Dashboard from '@/pages/dashboard';
 import Positions from '@/pages/positions';
@@ -44,12 +45,21 @@ function EmergencyBanner() {
   );
 }
 
+function OverviewPage() {
+  return (
+    <div className="flex flex-col gap-5">
+      <OperatorSnapshotStrip />
+      <Dashboard />
+    </div>
+  );
+}
+
 export function AppRouter() {
   return (
     <RoutedErrorBoundary>
       <Shell>
         <Switch>
-          <Route path="/" component={Dashboard} />
+          <Route path="/" component={OverviewPage} />
           <Route path="/positions" component={Positions} />
           <Route path="/watchlist" component={Watchlist} />
           <Route path="/strategy" component={Strategy} />

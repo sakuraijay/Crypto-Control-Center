@@ -1,19 +1,36 @@
 import { useEffect, useState } from 'react';
 import { useLocation } from 'wouter';
-import { FlaskConical, Lock } from 'lucide-react';
+import { Activity, FlaskConical, Lock, Wifi, WifiOff } from 'lucide-react';
+import { cn } from '@/lib/utils';
 
-/**
- * 활성 모드 배지 — **서버 executor 상태**가 유일한 근거.
- * 브라우저 설정값(liveTestMode 등)만으로 LIVE TEST를 표시하지 않는다.
- *  - engineMode=PAPER            → PAPER
- *  - engineMode=LIVE + 잠금       → LIVE LOCKED
- *  - engineMode=LIVE + 잠금해제 + liveTestMode → LIVE TEST
- *  - 상태 조회 실패               → MODE UNKNOWN (추정 금지)
- */
 type ServerMode = 'PAPER' | 'LIVE_LOCKED' | 'LIVE_TEST' | 'LIVE' | 'UNKNOWN';
 
-function useServerMode(): ServerMode {
-  const [mode, setMode] = useState<ServerMode>('UNKNOWN');
+interface ServerStatus {
+  mode: ServerMode;
+  gmxConnected: boolean | null;
+  networkChainId: number | null;
+}
+
+const UNKNOWN_STATUS: ServerStatus = {
+  mode: 'UNKNOWN',
+  gmxConnected: null,
+  networkChainId: null,
+};
+
+function deriveMode(payload: {
+  engineMode?: unknown;
+  liveExecutionLocked?: unknown;
+  liveTestMode?: unknown;
+}): ServerMode {
+  if (payload.engineMode !== 'PAPER' && payload.engineMode !== 'LIVE') return 'UNKNOWN';
+  if (payload.engineMode === 'PAPER') return 'PAPER';
+  if (payload.liveExecutionLocked !== false) return 'LIVE_LOCKED';
+  if (payload.liveTestMode === true) return 'LIVE_TEST';
+  return 'LIVE';
+}
+
+function useServerStatus(): ServerStatus {
+  const [status, setStatus] = useState<ServerStatus>(UNKNOWN_STATUS);
 
   useEffect(() => {
     let cancelled = false;
@@ -21,92 +38,118 @@ function useServerMode(): ServerMode {
       try {
         const res = await fetch('/api/executor/status', { signal: AbortSignal.timeout(8_000) });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const s = await res.json() as {
-          engineMode?: 'PAPER' | 'LIVE';
-          liveExecutionLocked?: boolean;
-          liveTestMode?: boolean;
+        const payload = await res.json() as {
+          ok?: boolean;
+          engineMode?: unknown;
+          liveExecutionLocked?: unknown;
+          liveTestMode?: unknown;
+          gmxConnected?: unknown;
+          networkChainId?: unknown;
         };
-        if (cancelled) return;
-        // engineMode가 인식 가능한 값이 아니면 PAPER로 추정하지 않는다
-        // (executor 라우트의 예외 fallback은 engineMode 없이 200을 반환할 수 있음)
-        if (s.engineMode !== 'PAPER' && s.engineMode !== 'LIVE') setMode('UNKNOWN');
-        else if (s.engineMode === 'PAPER') setMode('PAPER');
-        else if (s.liveExecutionLocked !== false) setMode('LIVE_LOCKED');
-        else if (s.liveTestMode) setMode('LIVE_TEST');
-        else setMode('LIVE');
+        if (cancelled || payload.ok === false) return;
+        setStatus({
+          mode: deriveMode(payload),
+          gmxConnected: typeof payload.gmxConnected === 'boolean' ? payload.gmxConnected : null,
+          networkChainId: typeof payload.networkChainId === 'number' && Number.isFinite(payload.networkChainId)
+            ? payload.networkChainId
+            : null,
+        });
       } catch {
-        if (!cancelled) setMode('UNKNOWN');
+        if (!cancelled) setStatus(UNKNOWN_STATUS);
       }
     };
     void poll();
-    const id = setInterval(poll, 30_000);
+    const id = setInterval(() => void poll(), 30_000);
     return () => { cancelled = true; clearInterval(id); };
   }, []);
 
-  return mode;
+  return status;
 }
 
 function ModeBadge({ mode }: { mode: ServerMode }) {
+  const common = 'flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-bold tracking-[0.08em]';
   switch (mode) {
     case 'PAPER':
       return (
-        <div className="px-3 py-1 rounded-full bg-accent/10 border border-accent/20 text-accent text-xs font-bold tracking-widest uppercase">
-          PAPER
+        <div className={cn(common, 'border-[#1b2636] bg-[#0d1d19] text-[#37d99a]')}>
+          <Activity className="h-3 w-3" /> PAPER
         </div>
       );
     case 'LIVE_LOCKED':
       return (
-        <div className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-muted border border-border text-muted-foreground text-xs font-bold tracking-widest uppercase">
-          <Lock className="w-3 h-3" />
-          LIVE LOCKED
+        <div className={cn(common, 'border-[#1b2636] bg-[#251218] text-[#ff5c76]')}>
+          <Lock className="h-3 w-3" /> LIVE LOCKED
         </div>
       );
     case 'LIVE_TEST':
       return (
-        <div className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-400 text-xs font-bold tracking-widest uppercase">
-          <FlaskConical className="w-3 h-3" />
-          LIVE TEST
+        <div className={cn(common, 'border-[#1b2636] bg-[#241c0e] text-[#ffb648]')}>
+          <FlaskConical className="h-3 w-3" /> LIVE TEST
         </div>
       );
     case 'LIVE':
       return (
-        <div className="px-3 py-1 rounded-full bg-red-500/10 border border-red-500/30 text-red-400 text-xs font-bold tracking-widest uppercase">
+        <div className={cn(common, 'border-[#1b2636] bg-[#251218] text-[#ff5c76]')}>
           LIVE
         </div>
       );
     default:
       return (
-        <div className="px-3 py-1 rounded-full bg-muted border border-border text-muted-foreground text-xs font-bold tracking-widest uppercase">
+        <div className={cn(common, 'border-[#1b2636] bg-[#0d131e] text-[#8e9aaf]')}>
           MODE UNKNOWN
         </div>
       );
   }
 }
 
+function RpcBadge({ connected, chainId }: { connected: boolean | null; chainId: number | null }) {
+  if (connected === true) {
+    return (
+      <div className="flex items-center gap-1.5 rounded-full border border-[#1b2636] bg-[#0d1d19] px-2.5 py-1 text-[10px] font-semibold text-[#37d99a]">
+        <Wifi className="h-3 w-3" /> GMX RPC Healthy{chainId ? ` · ${chainId}` : ''}
+      </div>
+    );
+  }
+  if (connected === false) {
+    return (
+      <div className="flex items-center gap-1.5 rounded-full border border-[#1b2636] bg-[#251218] px-2.5 py-1 text-[10px] font-semibold text-[#ff5c76]">
+        <WifiOff className="h-3 w-3" /> GMX RPC Offline
+      </div>
+    );
+  }
+  return (
+    <div className="flex items-center gap-1.5 rounded-full border border-[#1b2636] bg-[#0d131e] px-2.5 py-1 text-[10px] font-semibold text-[#8e9aaf]">
+      <WifiOff className="h-3 w-3" /> GMX RPC Unknown
+    </div>
+  );
+}
+
+const PAGE_META: Record<string, { title: string; subtitle: string }> = {
+  '/': { title: 'Overview', subtitle: 'AI-driven market monitoring and execution safety' },
+  '/positions': { title: 'Positions', subtitle: 'PAPER positions and authoritative GMX read-only account state' },
+  '/watchlist': { title: 'Market Watch', subtitle: 'Opportunity ranking and market condition monitoring' },
+  '/strategy': { title: 'Strategy', subtitle: 'Regime-aware strategy controls and bounded risk profiles' },
+  '/ai-log': { title: 'AI Decisions', subtitle: 'Decision rationale, shadow strategy evidence and execution gates' },
+  '/history': { title: 'History', subtitle: 'Trading events, settlements and system audit trail' },
+  '/backtest': { title: 'Backtest', subtitle: 'Offline validation, walk-forward evidence and sensitivity checks' },
+  '/settings': { title: 'Settings', subtitle: 'Advanced configuration and protected execution readiness controls' },
+};
+
 export function TopBar() {
   const [location] = useLocation();
-  const serverMode = useServerMode();
-
-  const getPageTitle = () => {
-    switch (location) {
-      case '/': return 'Dashboard';
-      case '/positions': return 'Positions';
-      case '/watchlist': return 'Watchlist';
-      case '/strategy': return 'Strategy Controls';
-      case '/history': return 'History & Logs';
-      case '/settings': return 'Advanced Settings';
-      default: return '';
-    }
-  };
+  const server = useServerStatus();
+  const meta = PAGE_META[location] ?? { title: '', subtitle: '' };
 
   return (
-    <div className="h-16 flex items-center justify-between px-8 border-b border-border bg-background sticky top-0 z-30">
-      <h1 className="text-xl font-semibold tracking-tight text-foreground">
-        {getPageTitle()}
-      </h1>
-      <div className="flex items-center gap-4">
-        <ModeBadge mode={serverMode} />
+    <header className="sticky top-0 z-30 flex h-[72px] items-center justify-between gap-4 border-b border-[#1b2636] bg-[#070b12]/95 px-6 backdrop-blur">
+      <div className="min-w-0">
+        <h1 className="truncate text-[20px] font-semibold tracking-tight text-[#f4f7fb]">{meta.title}</h1>
+        <p className="mt-0.5 truncate text-[10px] text-[#8e9aaf]">{meta.subtitle}</p>
       </div>
-    </div>
+      <div className="flex shrink-0 items-center gap-2">
+        <RpcBadge connected={server.gmxConnected} chainId={server.networkChainId} />
+        <ModeBadge mode={server.mode} />
+      </div>
+    </header>
   );
 }
