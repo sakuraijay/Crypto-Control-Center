@@ -388,6 +388,11 @@ describe('GET /api/executor/gmx-api/status', () => {
     expect(s.actionBudget.remainingActions).toBeNull();
     expect(s.readyForControlledCanary).toBe(false);
     expect(s.stopExecutionAvailable).toBe(false);
+    expect(s.publicReadiness.canary.ready).toBe(s.readyForControlledCanary);
+    expect(s.publicReadiness.stop.ready).toBe(s.stopExecutionAvailable);
+    expect(s.publicReadiness.boundary).toBe(
+      'SANITIZED_READ_ONLY_NOT_EXECUTION_AUTHORIZATION',
+    );
     expect(s.executionEligibleCostEvidence).toEqual({ fresh: false, evidence: null });
     expect(s.paperEpochPreflight.boundaries).toMatchObject({
       engineMode: 'PAPER',

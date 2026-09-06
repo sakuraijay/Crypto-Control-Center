@@ -70,6 +70,7 @@ import { deriveCanaryDecimalsReadiness } from '../lib/canaryDecimalsReadiness';
 import { getPaperRuntimeReadinessSnapshot } from '../lib/paperRuntimeReadiness';
 import { runGmxApiReadinessRefresh } from '../lib/gmxApiReadinessCoordinator';
 import { getPaperStopReadinessEvidence } from '../lib/paperStopReadinessEvidence';
+import { buildPublicReadinessAttestation } from '../lib/publicReadinessAttestation';
 import { buildPaperRelayEvidence } from '../lib/paperRelayEvidence';
 import {
   deriveControlledCanaryReadiness,
@@ -292,6 +293,11 @@ async function buildGmxApiStatusSnapshot() {
   // ── 6H-2B §12 — 보호 주문(durable protection) 관측값 (조회 전용) ────────────
   const stopCapability = getStopExecutionCapability();
   const paperStopReadinessEvidence = getPaperStopReadinessEvidence(Date.now(), env);
+  const publicReadiness = buildPublicReadinessAttestation({
+    nowMs,
+    paper: paperRuntimeReadiness,
+    stop: stopCapability,
+  });
   let protectionCounts: Record<string, number> | null = null;
   let blockingProtectionCount: number | null = null;
   let staleStopCount: number | null = null;
@@ -570,6 +576,7 @@ async function buildGmxApiStatusSnapshot() {
     manualCanaryPosture,
     executionEligibleCostEvidence: executionCostEvidence,
     paperRuntimeReadiness,
+    publicReadiness,
     paperRelayEvidence,
     paperEpochPreflight,
     activePaperEpoch,

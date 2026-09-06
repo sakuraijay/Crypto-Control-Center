@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   relayFlags: vi.fn(),
   validateManifest: vi.fn(),
   stop: vi.fn(),
+  paperReadiness: vi.fn(),
 }));
 
 vi.mock('../lib/releaseIdentity', () => ({ getReleaseIdentity: mocks.identity }));
@@ -24,6 +25,9 @@ vi.mock('../lib/gmxDeploymentManifest', () => ({
 }));
 vi.mock('../lib/stopExecutionCapabilityState', () => ({
   getStopExecutionCapability: mocks.stop,
+}));
+vi.mock('../lib/paperRuntimeReadiness', () => ({
+  getPaperRuntimeReadinessSnapshot: mocks.paperReadiness,
 }));
 
 import releaseRouter from '../routes/release';
@@ -89,6 +93,38 @@ beforeEach(() => {
     delegatedSignerEnabled: false,
   });
   mocks.stop.mockReturnValue({ available: false, reasons: ['locked'], evaluatedAt: null });
+  const cost = (symbol: 'BTC' | 'ETH') => ({
+    state: 'verified',
+    attemptedAtMs: 1_788_000_000_000,
+    observedAtMs: 1_788_000_000_000,
+    ageMs: 1_000,
+    fresh: true,
+    failureId: null,
+    detail: null,
+    evidenceRole: 'OBSERVATIONAL_READ_ONLY',
+    observationalFresh: true,
+    symbol,
+    direction: 'LONG',
+    notionalUsd: 20,
+    holdingHours: 1,
+    capUsd: 0.4,
+    effectiveRoundTripCostUsd: symbol === 'BTC' ? 0.31 : 0.41,
+    withinCap: symbol === 'BTC',
+    executionSnapshot: {
+      fresh: true,
+      eligible: false,
+      authorized: false,
+      maxAgeMs: 60_000,
+      failureId: null,
+      blockReason: null,
+    },
+  });
+  mocks.paperReadiness.mockReturnValue({
+    boundary: 'READ_ONLY_NOT_EXECUTION_AUTHORIZATION',
+    paperMode: true,
+    readonlyEnabled: true,
+    costs: { BTC: cost('BTC'), ETH: cost('ETH') },
+  });
   mocks.dbEvidence.mockResolvedValue({
     observedAt: '2026-08-28T10:01:00.000Z',
     complete: true,
@@ -135,6 +171,39 @@ describe('read-only release attestation routes', () => {
       stopExecution: { available: false },
     });
     expect(response.body.database).toMatchObject({ complete: true, blockingIntentCount: 0 });
+    expect(response.body.publicReadiness).toMatchObject({
+      boundary: 'SANITIZED_READ_ONLY_NOT_EXECUTION_AUTHORIZATION',
+      costs: {
+        BTC: {
+          exactNotionalUsd: 20,
+          effectiveRoundTripCostUsd: 0.31,
+          fresh: true,
+          capUsd: 0.4,
+          withinCap: true,
+          blockerIds: [],
+        },
+        ETH: {
+          exactNotionalUsd: 20,
+          effectiveRoundTripCostUsd: 0.41,
+          fresh: true,
+          capUsd: 0.4,
+          withinCap: false,
+          blockerIds: ['PUBLIC_COST_ETH_CAP_EXCEEDED'],
+        },
+      },
+      canary: {
+        ready: false,
+        blockerIds: expect.arrayContaining([
+          'PUBLIC_CANARY_PAPER_MODE',
+          'PUBLIC_COST_ETH_CAP_EXCEEDED',
+          'PUBLIC_STOP_CAPABILITY_UNAVAILABLE',
+        ]),
+      },
+      stop: {
+        ready: false,
+        blockerIds: ['PUBLIC_STOP_CAPABILITY_UNAVAILABLE'],
+      },
+    });
     expect(response.body.operationalDiagnostics).toMatchObject({
       schemaVersion: 2,
       flags: {
@@ -159,6 +228,49 @@ describe('read-only release attestation routes', () => {
       /privateKey|DATABASE_URL|RPC_URL|SESSION_SECRET|positionId|tradeId|lastCycleResult|pid|nodeEnv/,
     );
     expect(mocks.dbEvidence).toHaveBeenCalledTimes(1);
+    expect(mocks.paperReadiness).toHaveBeenCalledTimes(1);
+    expect(mocks.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it('nulls unavailable or stale cost values and exposes only stable blocker IDs', async () => {
+    const current = mocks.paperReadiness();
+    mocks.paperReadiness.mockReturnValue({
+      ...current,
+      costs: {
+        BTC: {
+          ...current.costs.BTC,
+          state: 'failed',
+          observedAtMs: null,
+          effectiveRoundTripCostUsd: 0.12,
+          withinCap: true,
+        },
+        ETH: {
+          ...current.costs.ETH,
+          fresh: false,
+          observationalFresh: false,
+          executionSnapshot: { ...current.costs.ETH.executionSnapshot, fresh: false },
+          effectiveRoundTripCostUsd: 0.18,
+          withinCap: true,
+        },
+      },
+    });
+
+    const response = await request(app()).get('/api/release/safety');
+
+    expect(response.status).toBe(200);
+    expect(response.body.publicReadiness.costs.BTC).toMatchObject({
+      effectiveRoundTripCostUsd: null,
+      observedAt: null,
+      fresh: false,
+      withinCap: null,
+      blockerIds: ['PUBLIC_COST_BTC_UNAVAILABLE'],
+    });
+    expect(response.body.publicReadiness.costs.ETH).toMatchObject({
+      effectiveRoundTripCostUsd: null,
+      fresh: false,
+      withinCap: null,
+      blockerIds: ['PUBLIC_COST_ETH_STALE'],
+    });
   });
 
   it('keeps build-time observations distinct from current runtime and reports source provenance drift', async () => {
