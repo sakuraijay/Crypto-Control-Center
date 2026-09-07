@@ -1,5 +1,11 @@
 name: Post-publish fail-closed attestation
 
+# Canonical note (2026-09-07): GitHub Actions scheduled workflows execute from the
+# repository default branch. This file currently lives on codex/handover-20260820;
+# therefore do not treat the schedule below as an active Production attestation
+# source until an owner-approved normal PR/merge flow places the workflow on the
+# default branch. workflow_dispatch/deployment_status behavior is unchanged.
+
 on:
   deployment_status:
   workflow_dispatch:
