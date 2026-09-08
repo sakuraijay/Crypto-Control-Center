@@ -5,7 +5,7 @@
 **Canonical branch:** `codex/handover-20260820`  
 **Canonical PR:** #1
 
-**Latest milestone revision:** 2026-09-09 — see section 12 for the owner's 2026-09-15 12:00 Asia/Manila dashboard + real 400 USDC automated-trading beta target. This is a development target, not a runtime activation or a scheduled financial action.
+**Latest milestone revision:** 2026-09-09 — the owner has confirmed **2026-09-15 12:00 Asia/Manila** as the fixed beta schedule, not a tentative target. Dashboard acceptance and real 400 USDC automated trading remain the required scope. See section 12 for the fixed deadline, earlier internal delivery gates and unchanged financial approval boundaries. A fixed schedule is not evidence of readiness, runtime activation or a scheduled financial action.
 
 ## 1. Authority and precedence
 
@@ -18,9 +18,9 @@
    4. historical PR comments, task trackers, handoff notes and old sessions.
 4. Live status values such as HEAD SHA, CI run, deployment SHA, scheduler cycle, wallet balance, readiness and positions are **not** frozen into this policy. They must be freshly read from authoritative sources.
 
-## 2. Delivery target
+## 2. Delivery schedule
 
-- Nearest beta target: **2026-09-15 12:00 Asia/Manila (UTC+08:00)** — functioning dashboard and real automated-trading test with **400 USDC beta capital**; scope, acceptance gates and approval boundaries are in section 12.
+- **Fixed beta schedule: 2026-09-15 12:00 Asia/Manila (UTC+08:00).** This is owner-confirmed and must not be described as tentative or unilaterally postponed. Required scope: functioning dashboard and real automated-trading test with **400 USDC beta capital**. See section 12 for acceptance gates and approval boundaries.
 - Official V1.0 launch target remains **2026-10-01** unless the owner explicitly changes it.
 - The existing master plan states a contractual **US$100/day delay penalty after 2026-10-01**; therefore P0/P1 launch work has priority over nonessential polish.
 - Schedule pressure must never be used to remove Stop, idempotency, duplicate-order protection, settlement/reconciliation, drawdown/loss protection or other capital-loss P0 controls.
@@ -193,16 +193,19 @@ The 2026-09-01 Master Plan remains useful for architecture, launch scope and his
 
 Any status snapshot embedded in older documents is historical only. Current status must come from GitHub/Replit/runtime evidence.
 
-## 12. September 15 beta — dashboard and 400 USDC automated-trading target
+## 12. September 15 fixed beta deadline — dashboard and 400 USDC automated trading
 
-### Owner-confirmed scope
+### Owner-confirmed schedule and scope
 
 The owner specified: “9월 15일 오후12시 베타 테스트 진행 예정. 테스트 범위 - 대시보드 정상 동작, 실제 400usdc로 자동 매매 목표.”
 
-- Target start: **2026-09-15T12:00:00+08:00**, noon in Asia/Manila; **2026-09-15T04:00:00Z**.
+The owner then explicitly confirmed: “9월 15일 베타 테스트는 이미 확정 스케쥴이니 반드시 일정 준수 할것”. This supersedes the earlier tentative wording for the beta schedule.
+
+- **Fixed beta start: 2026-09-15T12:00:00+08:00**, noon in Asia/Manila; **2026-09-15T04:00:00Z**.
 - Deliverable A: a functioning Production dashboard, including the approved Figma first-release UI and accurate runtime/capital/position/PnL/risk information.
 - Deliverable B: a controlled real-money automated-trading beta using **400 USDC of dedicated beta capital**. PAPER alone does not satisfy this real-money deliverable.
-- This near-term beta milestone does not replace the separate October 1 V1.0 target or prove sustainable profitability.
+- Do not unilaterally reschedule, substitute a PAPER-only demonstration, or reduce the agreed beta scope. Any proposed schedule/scope change requires explicit owner decision.
+- This fixed beta milestone does not replace the separate October 1 V1.0 target or prove sustainable profitability.
 
 ### Capital meaning and unchanged safety boundary
 
@@ -222,16 +225,27 @@ B. Automated execution: eligible signal → existing Risk/cost gates → confirm
 
 All current cost/Owner Approval/canonical delegation/action-budget/Stop/Risk/release/GMX gates must pass. Keep the $0.40 cost cap; do not loosen it, raise leverage or force an uneconomic order to demonstrate activity at noon. If there is no valid signal, record NO_TRADE and mark the actual-trade lifecycle UNVERIFIED rather than inventing a pass. A profitable short beta is not proof of long-term positive expectancy.
 
-### Proposed preparation checkpoints — targets, not completion claims
+### Internal delivery gates — working deadlines, not completion claims or installed jobs
 
-- September 9–10: audit existing implementation; reconcile source/runtime evidence; complete and batch the necessary Figma dashboard release; specify/test the 400-USDC beta-capital binding without Production mutation.
-- September 11–12: isolated PAPER/replay tests for risk, costs, open/protect/close/settle, restart and duplicate suppression; use existing modules rather than creating parallel engines.
-- September 13–14: exact-source release candidate and one meaningful PAPER deployment batch; browser acceptance and runtime smoke; final blocker matrix with evidence. Freeze non-beta-essential work.
-- September 15, 11:00–11:30 PHT: fresh readiness and deployment checks. September 15, 11:30–12:00: final Go/No-Go and any still-required user-controlled approval. These are planning checkpoints, not installed scheduler jobs.
-- September 15, 12:00 PHT: target beta start only within verified and explicitly authorized bounds. A failed real-money gate keeps that deliverable blocked; report the dashboard result and the unfulfilled live objective separately instead of silently redefining the beta as PAPER-only.
+The following internal workback deadlines replace the previous broad preparation windows. All times are Asia/Manila (UTC+08:00). These deadlines do not claim that a worker/job has been started or that delivery is already assured.
+
+- **September 10, 18:00:** complete the existing-source/runtime discrepancy assessment and minimal remaining implementation scope; identify beta-blocking code, deployment, cost, risk, signer/authorization and operator-action dependencies. Confirm the path to a scoped 400-USDC beta-capital binding without Production mutation. Reuse existing code and tests.
+- **September 12, 18:00:** finish beta-essential code and isolated PAPER/replay/regression validation for the dashboard, 400-USDC capital semantics, costs, entry/protection/close/settlement, restart and duplicate suppression. Obtain exact-source CI evidence for the release candidate. Missing evidence is not a PASS.
+- **September 13, 18:00:** complete the necessary single-batch PAPER Production deployment of the validated candidate, actual browser acceptance, release-source parity and runtime smoke within existing permissions. Do not defer a complete beta release indefinitely to collect unrelated features.
+- **September 14, 18:00:** complete the readiness rehearsal and report both deliverables' gate matrix; freeze non-blocking code changes. Prepare the exact bounded activation request and any user-only prerequisites early. Time-bound Owner Approval is obtained/revalidated close enough to the beta to remain valid; do not repeatedly request signatures that expire while code work is unfinished.
+- **September 15, 11:00–12:00:** final fresh runtime/cost/authorization/Stop/Risk checks and required user-controlled activation decision. Do not leave known development or deployment blockers until this window.
+- **September 15, 12:00:** fixed beta session start. Real-money execution is permitted only within verified, explicitly authorized bounds. If a mandatory financial gate is still failed or unknown, do not execute through it; report the live-scope non-delivery candidly rather than claiming that a dashboard/PAPER-only result satisfied the agreed beta.
+
+### Critical-path priority and early escalation
+
+- Until beta, work only on the agreed dashboard/400-USDC automated-trading delivery path and capital-loss-prevention defects. TradingAgents integration, extra paid agents, infrastructure migration, unrelated strategies and cosmetic expansion remain frozen.
+- Reuse existing validated functions; do not create new diagnostics or documentation-only tasks unless they directly unblock this beta, prevent unsafe execution or correct a material requirement conflict.
+- During each actual development/reporting run, include the next internal deadline, achieved acceptance evidence and remaining blocker. Unknown runtime evidence must remain UNKNOWN and be assigned a concrete verification path, not copied as healthy from an old report.
+- If a blocker threatens an internal deadline, flag **SCHEDULE_AT_RISK** in that run's report with the issue, evidence/time, dependency/owner, recovery action, estimated work and any single required user action. Do not wait until September 15 to disclose a known delay. An estimate is not a guarantee or an authorization to buy extra credits.
+- Document changes do not count as implementation, deployment, actual trading or profitability progress. Do not use ungrounded completion percentages to imply beta readiness.
 
 ### Cost, priority and reporting
 
-Retain the Codex/GitHub → GitHub Actions → Replit final-publish workflow and the existing Figma source. No TradingAgents integration, extra paid research agents, infrastructure migration, cosmetic expansion or duplicate full-suite/deploy loops for this beta.
+Retain the Codex/GitHub → GitHub Actions → Replit final-publish workflow and the existing Figma source. No TradingAgents integration, extra paid research agents, infrastructure migration, cosmetic expansion or duplicate full-suite/deploy loops for this beta. Deadline pressure does not override the existing Agent-spend controls or authorize extra paid credits.
 
-On a subsequent canonical run, read this same policy path and report the beta target plus each acceptance gate as PASS / FAIL / UNKNOWN / DEFERRED_USER_ACTION with source/time/version. Reading or updating this document is not proof that another conversation or scheduler has executed it. Do not claim an automatic launch, hourly push delivery, completed deployment, current GMX state or profitability without corresponding execution evidence.
+On a subsequent canonical run, read this same policy path and report the **fixed September 15 12:00 beta deadline** plus each acceptance gate as PASS / FAIL / UNKNOWN / DEFERRED_USER_ACTION with source/time/version. Reading or updating this document is not proof that another conversation or scheduler has executed it. Do not claim an automatic launch, hourly push delivery, completed deployment, current GMX state or profitability without corresponding execution evidence.
