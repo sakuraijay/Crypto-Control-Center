@@ -5,6 +5,8 @@
 **Canonical branch:** `codex/handover-20260820`  
 **Canonical PR:** #1
 
+**Latest milestone revision:** 2026-09-09 — see section 12 for the owner's 2026-09-15 12:00 Asia/Manila dashboard + real 400 USDC automated-trading beta target. This is a development target, not a runtime activation or a scheduled financial action.
+
 ## 1. Authority and precedence
 
 1. The **current ChatGPT conversation** is the only canonical CCC development and reporting session.
@@ -18,6 +20,7 @@
 
 ## 2. Delivery target
 
+- Nearest beta target: **2026-09-15 12:00 Asia/Manila (UTC+08:00)** — functioning dashboard and real automated-trading test with **400 USDC beta capital**; scope, acceptance gates and approval boundaries are in section 12.
 - Official V1.0 launch target remains **2026-10-01** unless the owner explicitly changes it.
 - The existing master plan states a contractual **US$100/day delay penalty after 2026-10-01**; therefore P0/P1 launch work has priority over nonessential polish.
 - Schedule pressure must never be used to remove Stop, idempotency, duplicate-order protection, settlement/reconciliation, drawdown/loss protection or other capital-loss P0 controls.
@@ -189,3 +192,46 @@ Hourly Korean report should include:
 The 2026-09-01 Master Plan remains useful for architecture, launch scope and historical constraints, but sections that say **Replit Agent is the primary implementer or should automatically start work whenever paused** are superseded by this 2026-09-07 low-cost policy.
 
 Any status snapshot embedded in older documents is historical only. Current status must come from GitHub/Replit/runtime evidence.
+
+## 12. September 15 beta — dashboard and 400 USDC automated-trading target
+
+### Owner-confirmed scope
+
+The owner specified: “9월 15일 오후12시 베타 테스트 진행 예정. 테스트 범위 - 대시보드 정상 동작, 실제 400usdc로 자동 매매 목표.”
+
+- Target start: **2026-09-15T12:00:00+08:00**, noon in Asia/Manila; **2026-09-15T04:00:00Z**.
+- Deliverable A: a functioning Production dashboard, including the approved Figma first-release UI and accurate runtime/capital/position/PnL/risk information.
+- Deliverable B: a controlled real-money automated-trading beta using **400 USDC of dedicated beta capital**. PAPER alone does not satisfy this real-money deliverable.
+- This near-term beta milestone does not replace the separate October 1 V1.0 target or prove sustainable profitability.
+
+### Capital meaning and unchanged safety boundary
+
+- 400 USDC is the beta trading-capital budget, not a required single-order notional, not a profit target, and not permission to lose the entire 400 USDC.
+- Planned Seed remains 10,000 USDC. The existing 1,000 → 2,500 → 5,000 → 10,000 post-beta capital ladder remains separate; there is no automatic promotion or wallet top-up.
+- Develop and test a scoped beta-capital binding that distinguishes 400 USDC from legacy 1,000-USDC policy baselines, historical HWM/equity and actual available wallet collateral. Do not substitute a fake wallet balance or bypass capital-drift checks.
+- Do not reset existing HARD_STOP/HWM, change Production DB/trading capital/Secrets, create a new signer, sign, authorize a subaccount, enable Relay/AUTO LIVE or submit orders merely because this milestone exists or its date arrives.
+- Section 8 execution locks remain in force. Actual financial activation requires fresh preflight and separate explicit bounded activation approval, with the authorized markets, exposure/leverage, stop policy, loss budgets, authorization lifetime/action budget, test end/renewal and emergency procedure resolved.
+- The latest owner directive does not specify an end time, test duration or full-capital loss tolerance. Do not infer an eight-hour session, a 20:00 end, or permission for a 400-USDC loss from an assistant suggestion or summary.
+- Preserve existing percentage-based risk constraints until any separate change is explicitly approved. For planning only, 0.25–0.5% of 400 is 1–2 USDC per trade and 1% is 4 USDC per day; these calculations do not themselves change runtime configuration or guarantee a maximum realized loss.
+
+### Acceptance evidence — report A and B separately
+
+A. Dashboard: deployed source matches the exact CI-passing source; actual browser rendering and navigation pass; capital/wallet/PAPER/LIVE/unknown data are unambiguous; market freshness, AI decisions, order/position state, PnL/costs and safety controls reflect authoritative data; reconnect and stale/error paths do not display false READY or fake zero balances.
+
+B. Automated execution: eligible signal → existing Risk/cost gates → confirmed GMX entry → confirmed protection → position management → confirmed close → residual order cleanup → settlement/readback are evidenced. Price movement alone, an API acknowledgement, a signer-ready flag or a PAPER trade is not proof of a completed live lifecycle. Duplicate submissions and unresolved settlements must not be hidden. Browser closure must not stop server-side protection.
+
+All current cost/Owner Approval/canonical delegation/action-budget/Stop/Risk/release/GMX gates must pass. Keep the $0.40 cost cap; do not loosen it, raise leverage or force an uneconomic order to demonstrate activity at noon. If there is no valid signal, record NO_TRADE and mark the actual-trade lifecycle UNVERIFIED rather than inventing a pass. A profitable short beta is not proof of long-term positive expectancy.
+
+### Proposed preparation checkpoints — targets, not completion claims
+
+- September 9–10: audit existing implementation; reconcile source/runtime evidence; complete and batch the necessary Figma dashboard release; specify/test the 400-USDC beta-capital binding without Production mutation.
+- September 11–12: isolated PAPER/replay tests for risk, costs, open/protect/close/settle, restart and duplicate suppression; use existing modules rather than creating parallel engines.
+- September 13–14: exact-source release candidate and one meaningful PAPER deployment batch; browser acceptance and runtime smoke; final blocker matrix with evidence. Freeze non-beta-essential work.
+- September 15, 11:00–11:30 PHT: fresh readiness and deployment checks. September 15, 11:30–12:00: final Go/No-Go and any still-required user-controlled approval. These are planning checkpoints, not installed scheduler jobs.
+- September 15, 12:00 PHT: target beta start only within verified and explicitly authorized bounds. A failed real-money gate keeps that deliverable blocked; report the dashboard result and the unfulfilled live objective separately instead of silently redefining the beta as PAPER-only.
+
+### Cost, priority and reporting
+
+Retain the Codex/GitHub → GitHub Actions → Replit final-publish workflow and the existing Figma source. No TradingAgents integration, extra paid research agents, infrastructure migration, cosmetic expansion or duplicate full-suite/deploy loops for this beta.
+
+On a subsequent canonical run, read this same policy path and report the beta target plus each acceptance gate as PASS / FAIL / UNKNOWN / DEFERRED_USER_ACTION with source/time/version. Reading or updating this document is not proof that another conversation or scheduler has executed it. Do not claim an automatic launch, hourly push delivery, completed deployment, current GMX state or profitability without corresponding execution evidence.
