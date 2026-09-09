@@ -65,6 +65,14 @@ export interface RiskEvaluationInput {
   newHardStopEvaluationAllowed?: boolean;
   /** false gate의 운영 진단 사유. 영속 lock으로 승격하지 않고 비고정 fail-closed 차단에만 사용. */
   activeCapitalConfigurationDriftReason?: string | null;
+  /**
+   * 선택된 Active Capital context가 명시적으로 결속한 HARD_STOP equity/reference pair.
+   * 둘 다 생략하면 legacy standard policy($920/$1,000)를 사용한다.
+   * 둘 중 하나만 있거나 값이 유효하지 않으면 sticky lock을 만들지 않고 fail-closed한다.
+   * 명시 pair를 사용할 때는 newHardStopEvaluationAllowed=true가 반드시 함께 와야 한다.
+   */
+  hardStopPolicyEquityUsd?: number;
+  hardStopPolicyReferenceCapitalUsd?: number;
   /** authoritative 실현 순수익 (오늘, Manila) — null = 산출 불가 */
   dailyRealizedNetPnlUsd: number | null;
   /** 보수적 손실 게이트 PnL (오늘) — null = 산출 불가 */
@@ -166,9 +174,44 @@ export function evaluateRiskState(input: RiskEvaluationInput): RiskEvaluationRes
     // 운영 설정이 올바르게 복구되면 다음 평가에서 해소 가능하지만 entry는 현재 fail-closed다.
     return blocked('NORMAL');
   }
-  if (input.currentEquityUsd !== null && input.currentEquityUsd <= p.hardStopEquityUsd) {
+
+  const explicitHardStopBinding =
+    input.hardStopPolicyEquityUsd !== undefined
+    || input.hardStopPolicyReferenceCapitalUsd !== undefined;
+  if (explicitHardStopBinding && input.newHardStopEvaluationAllowed !== true) {
+    blockReasons.push(
+      'HARD_STOP_POLICY_BINDING_REQUIRES_EXPLICIT_GATE — 명시 threshold는 Active Capital 정합성 gate=true일 때만 평가 가능',
+    );
+    return blocked('NORMAL');
+  }
+
+  const hardStopEquityUsd = explicitHardStopBinding
+    ? input.hardStopPolicyEquityUsd
+    : p.hardStopEquityUsd;
+  const hardStopReferenceCapitalUsd = explicitHardStopBinding
+    ? input.hardStopPolicyReferenceCapitalUsd
+    : p.initialCapitalUsd;
+  if (
+    typeof hardStopEquityUsd !== 'number'
+    || !Number.isFinite(hardStopEquityUsd)
+    || hardStopEquityUsd <= 0
+    || typeof hardStopReferenceCapitalUsd !== 'number'
+    || !Number.isFinite(hardStopReferenceCapitalUsd)
+    || hardStopReferenceCapitalUsd <= 0
+    || hardStopEquityUsd >= hardStopReferenceCapitalUsd
+  ) {
+    blockReasons.push(
+      'HARD_STOP_POLICY_BINDING_INVALID — threshold/reference pair 불완전·비정상, 신규 HARD_STOP 평가 및 신규 진입 차단',
+    );
+    return blocked('NORMAL');
+  }
+
+  if (input.currentEquityUsd !== null && input.currentEquityUsd <= hardStopEquityUsd) {
+    const hardStopDrawdownPercent =
+      (hardStopReferenceCapitalUsd - hardStopEquityUsd) / hardStopReferenceCapitalUsd * 100;
     locks.hardStopReason =
-      `equity $${input.currentEquityUsd.toFixed(2)} ≤ hard stop $${p.hardStopEquityUsd} (현재 Active $${p.initialCapitalUsd} 대비 -8%)`;
+      `equity $${input.currentEquityUsd.toFixed(2)} ≤ hard stop $${hardStopEquityUsd} ` +
+      `(현재 Active $${hardStopReferenceCapitalUsd} 대비 -${hardStopDrawdownPercent.toFixed(2)}%)`;
     actions.push('CLOSE_ALL_POSITIONS', 'CANCEL_ALL_ORDERS');
     blockReasons.push(locks.hardStopReason);
     return blocked('HARD_STOPPED');
