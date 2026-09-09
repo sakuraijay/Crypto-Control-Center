@@ -249,3 +249,40 @@ The following internal workback deadlines replace the previous broad preparation
 Retain the Codex/GitHub → GitHub Actions → Replit final-publish workflow and the existing Figma source. No TradingAgents integration, extra paid research agents, infrastructure migration, cosmetic expansion or duplicate full-suite/deploy loops for this beta. Deadline pressure does not override the existing Agent-spend controls or authorize extra paid credits.
 
 On a subsequent canonical run, read this same policy path and report the **fixed September 15 12:00 beta deadline** plus each acceptance gate as PASS / FAIL / UNKNOWN / DEFERRED_USER_ACTION with source/time/version. Reading or updating this document is not proof that another conversation or scheduler has executed it. Do not claim an automatic launch, hourly push delivery, completed deployment, current GMX state or profitability without corresponding execution evidence.
+
+## 13. Post-launch roadmap — user-selectable exchanges and reward comparison
+
+**Roadmap item:** `RM-EXCHANGE-REWARDS-01`  
+**Recorded:** 2026-09-09  
+**Status:** `BACKLOG_ONLY` — owner-requested roadmap inclusion; implementation not started or scheduled.
+
+### User rationale and scope
+
+The owner clarified that exchange choice is not only about fees or familiarity: normal trading activity may qualify for exchange rewards, points or airdrops, and these benefits can be part of the user's selection criteria. The owner explicitly said this is not required immediately and requested roadmap inclusion.
+
+- Extend the future user-selectable-exchange roadmap to compare execution quality, total costs, account eligibility and official rewards together.
+- This is a post-beta/post-V1 expansion candidate. It must not displace the fixed September 15 12:00 dashboard + 400-USDC beta or October 1 V1.0 work. No new delivery date, paid service, venue migration or multi-user SaaS scope is approved by recording this item.
+- The purpose is to help the user choose where to conduct independently justified trading, not to maximize turnover or manufacture activity for rewards.
+
+### Proposed comparison and tracking requirements
+
+1. **Execution and costs:** compare the same instrument exposure, order size, holding period and risk assumptions across eligible venues. Include commissions, funding/borrowing, spread/slippage/price impact, execution/cancel/retry fees and applicable transfer/conversion costs. Label estimates and missing data; do not infer venue compatibility or savings from a headline fee.
+2. **Official campaign evidence:** record venue, campaign/season, official source URL, last verification time, terms version, start/end/snapshot/claim dates, reward type, allocation rule, caps, vesting/lockup and cancellation/clawback conditions. Distinguish announced, active, ended and unverified programs; a points program is not automatically a confirmed token distribution.
+3. **Account and API eligibility:** verify residency/KYC/product restrictions and whether API/bot/third-party-interface trades count. Check relevant market/order type, subaccount versus wallet attribution, registration/opt-in/referral conditions and eligible volume exclusions. Unknown eligibility remains UNKNOWN, not eligible by default. Never bypass account or jurisdiction restrictions.
+4. **Reward ledger:** separate trading net PnL, fee rebates/discounts, credited cash rewards, claimable but unreceived rewards, received token inventory and speculative points/possible airdrops. Points without a verified conversion are tracked as units and assigned zero in base-case realized PnL, usable capital and execution-cost gating. Indicative token valuations or optional scenarios are not realized cash and must show assumptions. Do not count a rebate twice when already reflected in net fees.
+5. **User controls:** show fee-only and reward-aware comparisons separately, including a conservative scenario with no speculative airdrop. Let the user prefer lower cost, stronger execution or eligible rewards only among venues meeting mandatory safety requirements. Expose freshness/eligibility/uncertainty rather than presenting one unsupported guaranteed-return score.
+
+### Safety and economic guardrails
+
+- Existing Risk Engine, Stop/emergency-close, loss/exposure limits, authorization and settlement/reconciliation controls remain authoritative. Rewards never override a failed trading or safety gate. The current $0.40 cost cap is unchanged; uncertain rewards cannot be deducted to create a PASS.
+- No forced extra trades, wash/self trading, artificial volume, sybil/self-referral abuse, leverage escalation or longer holding solely to farm points. Evaluate incremental costs and risks against collectible benefits without assuming a future token price or entitlement.
+- Campaign expiry or unavailable reward data removes the reward assumption; it must not stop protection of existing positions. An initial venue switch requires no open positions, live orders or unresolved settlements, and account/venue-bound records remain intact.
+- Selecting a venue is not authorization to transfer, bridge, convert, stake, claim rewards, sign, connect new financial permissions or activate LIVE. Those actions remain separately approved; initial scope is comparison/selection, not autonomous cross-venue routing or fund movement.
+
+### Staged implementation proposal — no work has been queued
+
+- **Stage A:** after beta/V1 stabilization and reprioritization, build or reuse a read-only comparison for a small number of candidates. First verify that CCC's intended API activity qualifies; estimate development and ongoing data/maintenance cost before adding an adapter.
+- **Stage B:** add one owner-selected venue only if execution safety and conservative net benefits justify the integration. Reuse existing strategy/Risk boundaries and validate account reads, PAPER behavior and a separately approved bounded live lifecycle.
+- **Stage C:** reconcile official eligible activity, awarded rewards and actual trading/AI/infra costs; expand only with measured value. A short-lived promotion alone does not justify a large irreversible integration.
+
+When future canonical runs read this file, retain this item as deferred roadmap work, not a beta blocker or permission to start implementation. This documentation update does not prove that another chat or scheduler has read it.
