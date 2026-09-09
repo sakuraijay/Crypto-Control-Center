@@ -50,6 +50,28 @@ export type WorkerCapitalPolicySelection =
       blockNewEntries: true;
     };
 
+export type ValidWorkerCapitalPolicySelection = Extract<
+  WorkerCapitalPolicySelection,
+  { ok: true }
+>;
+
+export type WorkerCapitalExecutionDomain =
+  | {
+      ok: true;
+      selection: ValidWorkerCapitalPolicySelection;
+      configuredTradingCapitalUsd: number;
+      effectiveTradingCapitalUsd: number;
+      blockNewEntries: false;
+    }
+  | {
+      ok: false;
+      reason:
+        | 'WORKER_CAPITAL_POLICY_CONTEXT_INVALID'
+        | 'WORKER_CONFIGURED_TRADING_CAPITAL_INVALID'
+        | 'WORKER_FIXED_BETA_CAPITAL_UNDERSIZED';
+      blockNewEntries: true;
+    };
+
 /**
  * Default is the existing Standard Active path only when no selector was supplied.
  * Any supplied but unknown/blank/malformed token is fail-closed rather than silently
@@ -96,5 +118,57 @@ export function resolveWorkerCapitalPolicySelection(
     ok: false,
     reason: 'WORKER_CAPITAL_POLICY_CONTEXT_INVALID',
     blockNewEntries: true,
+  };
+}
+
+/**
+ * Resolve the single capital domain the worker should consume after policy selection.
+ *
+ * This is intentionally still pure/non-persistent: the configured value is supplied by
+ * the caller, never rewritten. STANDARD_ACTIVE keeps that value unchanged. FIXED_BETA_400
+ * only scopes execution calculations down to 400 USDC and fails closed if the configured
+ * Active Capital is smaller than the beta scope, so this helper can never increase capital.
+ *
+ * The returned beta selection remains capital semantics only; it does not authorize LIVE,
+ * signing, Relay, order submission, fund movement, or any Production mutation.
+ */
+export function resolveWorkerCapitalExecutionDomain(
+  rawPolicyContext: unknown,
+  configuredTradingCapitalUsd: unknown,
+): WorkerCapitalExecutionDomain {
+  const selection = resolveWorkerCapitalPolicySelection(rawPolicyContext);
+  if (!selection.ok) return selection;
+
+  if (
+    typeof configuredTradingCapitalUsd !== 'number'
+    || !Number.isFinite(configuredTradingCapitalUsd)
+    || configuredTradingCapitalUsd <= 0
+  ) {
+    return {
+      ok: false,
+      reason: 'WORKER_CONFIGURED_TRADING_CAPITAL_INVALID',
+      blockNewEntries: true,
+    };
+  }
+
+  if (
+    selection.betaRequested
+    && configuredTradingCapitalUsd + 0.005 < selection.effectiveTradingCapitalUsd
+  ) {
+    return {
+      ok: false,
+      reason: 'WORKER_FIXED_BETA_CAPITAL_UNDERSIZED',
+      blockNewEntries: true,
+    };
+  }
+
+  return {
+    ok: true,
+    selection,
+    configuredTradingCapitalUsd,
+    effectiveTradingCapitalUsd: selection.betaRequested
+      ? selection.effectiveTradingCapitalUsd
+      : configuredTradingCapitalUsd,
+    blockNewEntries: false,
   };
 }
