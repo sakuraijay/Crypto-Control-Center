@@ -20,8 +20,15 @@ import { privateKeyToAccount } from 'viem/accounts';
 // ── in-memory subaccount_approval_sessions store ─────────────────────────────
 
 interface FakeRow { [k: string]: unknown }
-const store: { rows: FakeRow[]; failInsert: boolean; failUpdate: boolean; txCalls: number } = {
-  rows: [], failInsert: false, failUpdate: false, txCalls: 0,
+const store: {
+  rows: FakeRow[];
+  failInsert: boolean;
+  failSelect: boolean;
+  failUpdate: boolean;
+  selectCalls: number;
+  txCalls: number;
+} = {
+  rows: [], failInsert: false, failSelect: false, failUpdate: false, selectCalls: 0, txCalls: 0,
 };
 
 vi.mock('@workspace/db', () => {
@@ -29,9 +36,12 @@ vi.mock('@workspace/db', () => {
   // 테스트 시나리오에 필요한 의미(id/status 매칭)만 재현한다.
   const table = { __name: 'subaccount_approval_sessions' };
   const db = {
-    select: () => ({
-      from: () => ({
+    select: () => {
+      store.selectCalls += 1;
+      return {
+        from: () => ({
         where: (cond: unknown) => {
+          if (store.failSelect) throw new Error('select fail');
           const matched = filterRows(cond);
           const chain = {
             limit: async (_n: number) => matched.slice(0, _n),
@@ -39,8 +49,9 @@ vi.mock('@workspace/db', () => {
           };
           return chain;
         },
-      }),
-    }),
+        }),
+      };
+    },
     insert: () => ({
       values: async (v: FakeRow) => {
         if (store.failInsert) throw new Error('insert fail');
@@ -103,6 +114,10 @@ function filterRows(cond: unknown): FakeRow[] {
 
 import {
   prepareApprovalSession, submitApprovalSignature, getActiveReadySession,
+  recoverActiveReadySession,
+  warmOwnerApprovalRecoveryCache,
+  getVerifiedOwnerApprovalCapability,
+  __resetOwnerApprovalRecoveryCacheForTests,
   getConfiguredMainAccount, APPROVAL_LIMITS, SESSION_STATUS, DEFAULT_INTEGRATION_ID,
 } from '../lib/ownerApprovalSession';
 import { encryptSensitiveHex, decryptSensitiveHex } from '../lib/delegatedSigner';
@@ -139,7 +154,14 @@ afterAll(() => {
     if (v === undefined) delete process.env[k]; else process.env[k] = v;
   }
 });
-beforeEach(() => { store.rows = []; store.failInsert = false; store.failUpdate = false; });
+beforeEach(() => {
+  store.rows = [];
+  store.failInsert = false;
+  store.failSelect = false;
+  store.failUpdate = false;
+  store.selectCalls = 0;
+  __resetOwnerApprovalRecoveryCacheForTests();
+});
 
 async function prepare(nonce = 5n) {
   return prepareApprovalSession({
@@ -323,7 +345,8 @@ describe('submitApprovalSignature', () => {
     expect(ok.ok).toBe(true);
     store.rows[0].maxAllowedCount = '2';   // READY 상태의 레거시 값 시뮬레이션
     const active = await getActiveReadySession({
-      expectedOwner: owner.address, expectedSubaccount: signer.address, canonicalNonce: 5n,
+      expectedOwner: owner.address, expectedSubaccount: signer.address,
+      expectedVerifyingContract: ROUTER, canonicalNonce: 5n,
     });
     expect(active).toBeNull();
     expect(store.rows[0].status).toBe(SESSION_STATUS.INVALIDATED);
@@ -529,7 +552,8 @@ describe('getActiveReadySession — account/signer/nonce 변경 시 무효', () 
   it('일치 → 요약 반환 (서명·암호문 미포함)', async () => {
     await makeReady();
     const s = await getActiveReadySession({
-      expectedOwner: owner.address, expectedSubaccount: signer.address, canonicalNonce: 5n,
+      expectedOwner: owner.address, expectedSubaccount: signer.address,
+      expectedVerifyingContract: ROUTER, canonicalNonce: 5n,
     });
     expect(s).toMatchObject({ status: SESSION_STATUS.OWNER_SIGNATURE_READY, approvalNonce: '5' });
     expect(JSON.stringify(s)).not.toContain('ignature');   // signature/encryptedSignature 키 없음
@@ -538,34 +562,268 @@ describe('getActiveReadySession — account/signer/nonce 변경 시 무효', () 
   it('nonce 변경 → null + INVALIDATED', async () => {
     await makeReady();
     expect(await getActiveReadySession({
-      expectedOwner: owner.address, expectedSubaccount: signer.address, canonicalNonce: 6n,
+      expectedOwner: owner.address, expectedSubaccount: signer.address,
+      expectedVerifyingContract: ROUTER, canonicalNonce: 6n,
     })).toBeNull();
     expect(store.rows[0].status).toBe(SESSION_STATUS.INVALIDATED);
   });
 
-  it('main account 변경 → null + INVALIDATED', async () => {
+  it('main account 변경 → null + durable evidence 보존, READY 합성 금지', async () => {
     await makeReady();
     expect(await getActiveReadySession({
-      expectedOwner: other.address, expectedSubaccount: signer.address, canonicalNonce: 5n,
+      expectedOwner: other.address, expectedSubaccount: signer.address,
+      expectedVerifyingContract: ROUTER, canonicalNonce: 5n,
     })).toBeNull();
-    expect(store.rows[0].status).toBe(SESSION_STATUS.INVALIDATED);
+    expect(store.rows[0].status).toBe(SESSION_STATUS.OWNER_SIGNATURE_READY);
   });
 
   it('signer 변경 → null + INVALIDATED', async () => {
     await makeReady();
     expect(await getActiveReadySession({
-      expectedOwner: owner.address, expectedSubaccount: other.address, canonicalNonce: 5n,
+      expectedOwner: owner.address, expectedSubaccount: other.address,
+      expectedVerifyingContract: ROUTER, canonicalNonce: 5n,
     })).toBeNull();
     expect(store.rows[0].status).toBe(SESSION_STATUS.INVALIDATED);
   });
 
-  it('canonical 미확인(null nonce) → 무효화하지 않고 요약 반환', async () => {
+  it('canonical 미확인(null nonce) → READY 합성 없이 null, DB는 변경하지 않음', async () => {
     await makeReady();
     const s = await getActiveReadySession({
-      expectedOwner: owner.address, expectedSubaccount: signer.address, canonicalNonce: null,
+      expectedOwner: owner.address, expectedSubaccount: signer.address,
+      expectedVerifyingContract: ROUTER, canonicalNonce: null,
     });
-    expect(s).not.toBeNull();
+    expect(s).toBeNull();
     expect(store.rows[0].status).toBe(SESSION_STATUS.OWNER_SIGNATURE_READY);
+  });
+
+  it('만료 READY → null이지만 DB 상태는 변경하지 않음', async () => {
+    await makeReady();
+    store.rows[0].expiresAt = '1';
+    const s = await getActiveReadySession({
+      expectedOwner: owner.address,
+      expectedSubaccount: signer.address,
+      expectedVerifyingContract: ROUTER,
+      canonicalNonce: 5n,
+      persistInvalidation: false,
+    });
+    expect(s).toBeNull();
+    expect(store.rows[0].status).toBe(SESSION_STATUS.OWNER_SIGNATURE_READY);
+    expect(store.rows[0].invalidReason).toBeNull();
+  });
+
+  it('read-only 상태 조회 옵션은 불일치도 null 처리하되 DB를 변경하지 않음', async () => {
+    await makeReady();
+    const s = await getActiveReadySession({
+      expectedOwner: other.address,
+      expectedSubaccount: signer.address,
+      expectedVerifyingContract: ROUTER,
+      canonicalNonce: 5n,
+      persistInvalidation: false,
+    });
+    expect(s).toBeNull();
+    expect(store.rows[0].status).toBe(SESSION_STATUS.OWNER_SIGNATURE_READY);
+    expect(store.rows[0].invalidReason).toBeNull();
+  });
+
+  it('재시작 상당 DB-only 재조회에서도 완전한 durable evidence만 READY로 복원', async () => {
+    await makeReady();
+    __resetOwnerApprovalRecoveryCacheForTests();
+    const warmed = await warmOwnerApprovalRecoveryCache({
+      expectedOwner: owner.address,
+      expectedSubaccount: signer.address,
+      expectedVerifyingContract: ROUTER,
+      nowSec: NOW + 1n,
+    });
+    expect(warmed).toMatchObject({ ok: true, code: 'READY_VERIFIED' });
+    const recovered = await recoverActiveReadySession({
+      expectedOwner: owner.address,
+      expectedSubaccount: signer.address,
+      expectedVerifyingContract: ROUTER,
+      canonicalNonce: 5n,
+      persistInvalidation: false,
+      nowSec: NOW + 1n,
+    });
+    expect(recovered).toMatchObject({
+      ok: true,
+      code: 'READY_VERIFIED',
+      session: {
+        status: SESSION_STATUS.OWNER_SIGNATURE_READY,
+        approvalNonce: '5',
+      },
+    });
+    expect(JSON.stringify(recovered)).not.toContain(String(store.rows[0].encryptedSignature));
+  });
+
+  it('submit capability는 강한 검증과 같은 DB snapshot에서 반환되어 재조회 TOCTOU가 없음', async () => {
+    await makeReady();
+    __resetOwnerApprovalRecoveryCacheForTests();
+    store.selectCalls = 0;
+    const result = await getVerifiedOwnerApprovalCapability({
+      expectedOwner: owner.address,
+      expectedSubaccount: signer.address,
+      expectedVerifyingContract: ROUTER,
+      canonicalNonce: 5n,
+      nowSec: NOW + 1n,
+    });
+    expect(result.ok).toBe(true);
+    expect(store.selectCalls).toBe(1);
+    if (!result.ok) return;
+    const verifiedSignature = result.capability.approval.signature;
+    store.rows[0].encryptedSignature = encryptSensitiveHex(`0x${'ab'.repeat(65)}`);
+    expect(result.capability.approval.signature).toBe(verifiedSignature);
+    expect(result.capability.approval.nonce).toBe('5');
+    expect(result.capability.sessionId).toBe(store.rows[0].id);
+  });
+
+  it('public-status 모드는 cache miss에서 암호문을 복호화하지 않고 차단', async () => {
+    await makeReady();
+    __resetOwnerApprovalRecoveryCacheForTests();
+    store.rows[0].encryptedSignature = 'not-valid-ciphertext';
+    const recovered = await recoverActiveReadySession({
+      expectedOwner: owner.address,
+      expectedSubaccount: signer.address,
+      expectedVerifyingContract: ROUTER,
+      canonicalNonce: 5n,
+      persistInvalidation: false,
+      nowSec: NOW + 1n,
+      verifyEncryptedSignature: false,
+    });
+    expect(recovered).toMatchObject({
+      ok: false,
+      code: 'SIGNATURE_NOT_VERIFIED_AFTER_STARTUP',
+    });
+  });
+
+  it('암호화 서명 누락 READY 행은 절대 복원하지 않고 정확한 원인을 반환', async () => {
+    await makeReady();
+    store.rows[0].encryptedSignature = null;
+    const recovered = await recoverActiveReadySession({
+      expectedOwner: owner.address,
+      expectedSubaccount: signer.address,
+      expectedVerifyingContract: ROUTER,
+      canonicalNonce: 5n,
+      persistInvalidation: false,
+      nowSec: NOW + 1n,
+    });
+    expect(recovered).toMatchObject({ ok: false, code: 'ENCRYPTED_SIGNATURE_MISSING' });
+    expect(store.rows[0].status).toBe(SESSION_STATUS.OWNER_SIGNATURE_READY);
+  });
+
+  it('READY durable evidence DB 조회 실패는 READY를 합성하지 않음', async () => {
+    store.failSelect = true;
+    const recovered = await recoverActiveReadySession({
+      expectedOwner: owner.address,
+      expectedSubaccount: signer.address,
+      expectedVerifyingContract: ROUTER,
+      canonicalNonce: 5n,
+      persistInvalidation: false,
+      nowSec: NOW + 1n,
+    });
+    expect(recovered).toMatchObject({ ok: false, code: 'DB_READ_FAILED' });
+  });
+
+  it('READY durable evidence 누락은 명시적 NO_DURABLE_READY_SESSION', async () => {
+    const recovered = await recoverActiveReadySession({
+      expectedOwner: owner.address,
+      expectedSubaccount: signer.address,
+      expectedVerifyingContract: ROUTER,
+      canonicalNonce: 5n,
+      persistInvalidation: false,
+      nowSec: NOW + 1n,
+    });
+    expect(recovered).toMatchObject({ ok: false, code: 'NO_DURABLE_READY_SESSION' });
+  });
+
+  it('stale READY 세션은 expiry/deadline 원인을 노출하고 DB를 변경하지 않음', async () => {
+    await makeReady();
+    const recovered = await recoverActiveReadySession({
+      expectedOwner: owner.address,
+      expectedSubaccount: signer.address,
+      expectedVerifyingContract: ROUTER,
+      canonicalNonce: 5n,
+      persistInvalidation: false,
+      nowSec: NOW + 3_601n,
+    });
+    expect(recovered).toMatchObject({ ok: false, code: 'SESSION_TIMESTAMP_INVALID_OR_EXPIRED' });
+    if (!recovered.ok) {
+      expect(recovered.reason).toContain('approval expiry 만료');
+      expect(recovered.reason).toContain('signature deadline 만료');
+    }
+    expect(store.rows[0].status).toBe(SESSION_STATUS.OWNER_SIGNATURE_READY);
+  });
+
+  it('canonical signer 변경은 기존 durable evidence를 보존하면서 READY 복원 차단', async () => {
+    await makeReady();
+    const recovered = await recoverActiveReadySession({
+      expectedOwner: owner.address,
+      expectedSubaccount: other.address,
+      expectedVerifyingContract: ROUTER,
+      canonicalNonce: 5n,
+      persistInvalidation: false,
+      nowSec: NOW + 1n,
+    });
+    expect(recovered).toMatchObject({ ok: false, code: 'SIGNER_BINDING_MISMATCH' });
+    expect(store.rows[0].status).toBe(SESSION_STATUS.OWNER_SIGNATURE_READY);
+  });
+
+  it('SESSION_SECRET 변경으로 복호화할 수 없는 durable evidence는 READY로 복원하지 않음', async () => {
+    await makeReady();
+    __resetOwnerApprovalRecoveryCacheForTests();
+    const saved = process.env.SESSION_SECRET;
+    process.env.SESSION_SECRET = 'different-session-secret-0123456789abcdef';
+    try {
+      const recovered = await recoverActiveReadySession({
+        expectedOwner: owner.address,
+        expectedSubaccount: signer.address,
+        expectedVerifyingContract: ROUTER,
+        canonicalNonce: 5n,
+        persistInvalidation: false,
+        nowSec: NOW + 1n,
+        verifyEncryptedSignature: true,
+      });
+      expect(recovered).toMatchObject({ ok: false, code: 'SIGNATURE_DECRYPT_FAILED' });
+      expect(store.rows[0].status).toBe(SESSION_STATUS.OWNER_SIGNATURE_READY);
+    } finally {
+      process.env.SESSION_SECRET = saved;
+    }
+  });
+
+  it.each([
+    ['chain 변경', { chainId: '1' }, 'CHAIN_BINDING_MISMATCH'],
+    ['router 변경', { verifyingContract: other.address }, 'ROUTER_BINDING_MISMATCH'],
+    ['digest 손상', { typedDataDigest: `0x${'00'.repeat(32)}` }, 'DIGEST_BINDING_MISMATCH'],
+    ['message 손상', { shouldAdd: false }, 'MESSAGE_BINDING_MISMATCH'],
+  ])('%s durable evidence는 fail-closed', async (_label, patch, code) => {
+    await makeReady();
+    Object.assign(store.rows[0], patch);
+    const recovered = await recoverActiveReadySession({
+      expectedOwner: owner.address,
+      expectedSubaccount: signer.address,
+      expectedVerifyingContract: ROUTER,
+      canonicalNonce: 5n,
+      persistInvalidation: false,
+      nowSec: NOW + 1n,
+    });
+    expect(recovered).toMatchObject({ ok: false, code });
+    expect(store.rows[0].status).toBe(SESSION_STATUS.OWNER_SIGNATURE_READY);
+  });
+
+  it('동일 owner READY 행 중복은 다중 프로세스/손상 상태로 간주해 복원 차단', async () => {
+    await makeReady();
+    store.rows.push({
+      ...store.rows[0],
+      id: 'duplicate-ready',
+      createdAt: new Date(Date.now() + 1),
+    });
+    const recovered = await recoverActiveReadySession({
+      expectedOwner: owner.address,
+      expectedSubaccount: signer.address,
+      expectedVerifyingContract: ROUTER,
+      canonicalNonce: 5n,
+      persistInvalidation: false,
+      nowSec: NOW + 1n,
+    });
+    expect(recovered).toMatchObject({ ok: false, code: 'MULTIPLE_READY_SESSIONS' });
   });
 });
 

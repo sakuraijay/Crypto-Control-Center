@@ -50,6 +50,8 @@ export interface SizingInput {
   tierNotionalCapUsd: number;
   /** true면 absoluteMaxRiskUsd까지 허용 (기본은 baseRiskUsd) */
   useAbsoluteMaxRisk?: boolean;
+  /** 프로필이 허용한 거래당 위험 %. 절대 1% 정책 상한과 교차한다. */
+  riskBudgetPct?: number;
   /** Defensive Mode — 명목 50% 축소, 레버리지 2x */
   defensiveMode?: boolean;
 }
@@ -98,7 +100,15 @@ export function computePositionSize(input: SizingInput): SizingResult {
   const allowedLeverage = Math.min(input.requestedLeverage, maxLev);
 
   const { baseRiskUsd, absoluteMaxRiskUsd } = deriveTradeRiskUsd(cap);
-  const allowedRiskUsd = input.useAbsoluteMaxRisk ? absoluteMaxRiskUsd : baseRiskUsd;
+  const requestedRiskPct = input.riskBudgetPct;
+  const profileRiskUsd =
+    typeof requestedRiskPct === 'number' && Number.isFinite(requestedRiskPct)
+      ? cap * Math.max(0, Math.min(requestedRiskPct, RISK_POLICY.maxRiskPerTradePercent)) / 100
+      : null;
+  const allowedRiskUsd = Math.min(
+    absoluteMaxRiskUsd,
+    profileRiskUsd ?? (input.useAbsoluteMaxRisk ? absoluteMaxRiskUsd : baseRiskUsd),
+  );
 
   const effectiveStopLossFraction =
     input.stopDistanceFraction

@@ -16,7 +16,7 @@
  *  - PAPER 경로는 이 모듈을 호출하지 않는다 (LIVE 실행 경로 전용).
  */
 
-import { db, executionIntentsTable } from '@workspace/db';
+import { db, executionIntentsTable, tradesTable } from '@workspace/db';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 
 export type IntentStatus =
@@ -37,6 +37,36 @@ export interface NewIntent {
   isLong:        boolean;
   sizeUsd:       number;
   collateralUsd: number;
+  riskProfileSnapshot?: import('../workers/serverTypes').AppliedRiskProfileSnapshot;
+}
+
+/**
+ * CLOSE 포지션 정확 결속 데이터 (0030).
+ * PositionReader에서 직접 읽은 canonical 식별자와 크기 — 추정값 사용 금지.
+ */
+export interface ClosePositionBinding {
+  /** GMX main wallet 주소 (소문자 정규화) */
+  account:            string;
+  /** GMX 마켓 토큰 주소 (소문자 정규화) */
+  marketAddress:      string;
+  /** 담보 토큰 주소 (소문자 정규화) */
+  collateralToken:    string;
+  /** keccak256(account || market || collateralToken || isLong) — PositionReader canonical key */
+  positionKey:        string;
+  /** CLOSE 직전 온체인 포지션 크기 (USD, numeric string in DB) */
+  preSizeUsd:         number;
+  /** PositionReader exact sizeInUsd (1e30 integer string). */
+  preSizeUsd30:       string;
+  /** 이 주문이 요청한 감소 크기 (USD, numeric string in DB) */
+  requestedReductionUsd: number;
+  /** GMX prepare exact sizeDeltaUsd (1e30 integer string). */
+  requestedReductionUsd30: string;
+}
+
+/** CLOSE 전용 intent — NewIntent + 필수 포지션 결속 */
+export interface NewCloseIntent extends NewIntent {
+  orderType: 'close';
+  closeBinding: ClosePositionBinding;
 }
 
 export type CreateIntentResult = 'created' | 'duplicate' | 'error';
@@ -47,6 +77,14 @@ export function buildIntentId(decisionId: string, orderType: 'open' | 'close'): 
 }
 
 /**
+ * CLOSE 정산 거래 행의 결정적 id — `settlement:close:<intentId>`.
+ * 재시작 후에도 동일 id를 참조하므로 중복 INSERT를 PK 충돌로 차단한다.
+ */
+export function buildCloseSettlementTradeId(intentId: string): string {
+  return `settlement:close:${intentId}`;
+}
+
+/**
  * PREPARED intent 저장. 성공('created')일 때만 온체인 제출이 허용된다.
  *
  * 충돌 → 'duplicate' (0행 반환): 두 경우 모두 차단 대상이다.
@@ -54,8 +92,17 @@ export function buildIntentId(decisionId: string, orderType: 'open' | 'close'): 
  *  - 단일 활성 intent 부분 유니크 인덱스 충돌 (migration 0011):
  *    다른 차단 상태 intent가 이미 존재 — check-then-insert 경합도 DB가 차단
  * 그 외 모든 실패는 'error' (fail-closed).
+ *
+ * CLOSE intent(NewCloseIntent)의 경우, PREPARED intent와 미결산(UNSETTLED) 정산 거래 행을
+ * 동일 DB 트랜잭션에서 원자적으로 INSERT한다.
+ * 어느 쪽 INSERT라도 실패하면 전체가 롤백되고 'error'가 반환되어 제출이 차단된다.
  */
 export async function createPreparedIntent(intent: NewIntent): Promise<CreateIntentResult> {
+  // CLOSE intent: 원자적 쌍 INSERT (intent + 정산 거래 행)
+  if (intent.orderType === 'close' && 'closeBinding' in intent) {
+    return createPreparedCloseIntent(intent as NewCloseIntent);
+  }
+  // OPEN/기타 — 기존 단일 INSERT 경로
   try {
     const inserted = await db.insert(executionIntentsTable)
       .values({
@@ -70,12 +117,110 @@ export async function createPreparedIntent(intent: NewIntent): Promise<CreateInt
         txHash:        null,
         status:        'PREPARED',
         error:         null,
+        riskProfileSnapshot: intent.riskProfileSnapshot ?? null,
       })
       .onConflictDoNothing() // 대상 미지정: PK 충돌 + 단일 활성 intent 인덱스 충돌 모두 0행 처리
       .returning({ id: executionIntentsTable.id });
     return inserted.length > 0 ? 'created' : 'duplicate';
   } catch (e) {
     console.error('[ExecutionIntents] PREPARED intent 저장 실패 — 온체인 제출 차단 (fail-closed):', e);
+    return 'error';
+  }
+}
+
+/** 내부 sentinel: tx.rollback()이 아닌 중복(0행) 원인 롤백을 구별 */
+const DUPLICATE_SENTINEL = Symbol('duplicate-insert');
+
+/**
+ * CLOSE intent + UNSETTLED 정산 거래 행을 단일 DB 트랜잭션에서 원자적으로 INSERT.
+ *
+ * 규칙:
+ *  - 두 INSERT 모두 성공해야 'created' 반환 — 어느 쪽 실패도 전체 롤백 + 'error'/'duplicate'.
+ *  - intent PK 충돌 → onConflictDoNothing → 0행 → 'duplicate'.
+ *  - 정산 거래 PK 충돌(settlement_intent_id 동일 재시도) → onConflictDoNothing → 0행 → 'duplicate'.
+ *  - 제출은 'created' 반환 시에만 허용된다.
+ */
+async function createPreparedCloseIntent(intent: NewCloseIntent): Promise<CreateIntentResult> {
+  const { closeBinding: b } = intent;
+  const settlementTradeId = buildCloseSettlementTradeId(intent.id);
+  try {
+    await db.transaction(async (tx) => {
+      // 1) PREPARED execution intent INSERT
+      const intentRows = await tx.insert(executionIntentsTable)
+        .values({
+          id:            intent.id,
+          decisionId:    intent.decisionId,
+          cycleNumber:   intent.cycleNumber,
+          symbol:        intent.symbol,
+          orderType:     'close',
+          isLong:        intent.isLong,
+          sizeUsd:       String(intent.sizeUsd),
+          collateralUsd: String(intent.collateralUsd),
+          txHash:        null,
+          status:        'PREPARED',
+          error:         null,
+          riskProfileSnapshot: intent.riskProfileSnapshot ?? null,
+          // CLOSE 결속 필드 (0030)
+          closeAccount:              b.account.toLowerCase(),
+          closeMarketAddress:        b.marketAddress.toLowerCase(),
+          closeCollateralToken:      b.collateralToken.toLowerCase(),
+          closePositionKey:          b.positionKey,
+          closePreSizeUsd:           String(b.preSizeUsd),
+          closePreSizeUsd30:         b.preSizeUsd30,
+          closeRequestedReductionUsd: String(b.requestedReductionUsd),
+          closeRequestedReductionUsd30: b.requestedReductionUsd30,
+          closeSettlementTradeId:    settlementTradeId,
+        })
+        .onConflictDoNothing()
+        .returning({ id: executionIntentsTable.id });
+      if (intentRows.length === 0) {
+        // PK 또는 단일-활성 인덱스 충돌 — sentinel throw로 트랜잭션 중단
+        throw DUPLICATE_SENTINEL;
+      }
+
+      // 2) UNSETTLED 정산 거래 행 INSERT (action=CLOSE, settlementStatus=UNSETTLED)
+      const tradeRows = await tx.insert(tradesTable)
+        .values({
+          id:                        settlementTradeId,
+          symbol:                    intent.symbol,
+          side:                      intent.isLong ? 'LONG' : 'SHORT',
+          action:                    'CLOSE',
+          size:                      String(b.requestedReductionUsd),
+          price:                     '0',           // 체결가는 정산 시점에 채워진다
+          pnl:                       '0',
+          strategy:                  'SERVER',
+          timestamp:                 new Date(),
+          closeTime:                 0,
+          testMode:                  true,
+          settlementStatus:          'UNSETTLED',
+          riskProfileSnapshot:       intent.riskProfileSnapshot ?? null,
+          // CLOSE 결속 필드 (0030)
+          settlementAccount:         b.account.toLowerCase(),
+          settlementMarketAddress:   b.marketAddress.toLowerCase(),
+          settlementCollateralToken: b.collateralToken.toLowerCase(),
+          settlementPositionKey:     b.positionKey,
+          preCloseSizeUsd:           String(b.preSizeUsd),
+          preCloseSizeUsd30:         b.preSizeUsd30,
+          requestedReductionUsd:     String(b.requestedReductionUsd),
+          requestedReductionUsd30:   b.requestedReductionUsd30,
+          settlementIntentId:        intent.id,
+        })
+        .onConflictDoNothing()
+        .returning({ id: tradesTable.id });
+      if (tradeRows.length === 0) {
+        throw DUPLICATE_SENTINEL;
+      }
+    });
+    return 'created';
+  } catch (e) {
+    if (e === DUPLICATE_SENTINEL) {
+      // onConflictDoNothing → 0행 — 중복 제출 시도 (트랜잭션은 자동 롤백됨)
+      return 'duplicate';
+    }
+    console.error(
+      '[ExecutionIntents] CLOSE intent+settlement trade 원자적 INSERT 실패 — 온체인 제출 차단 (fail-closed):',
+      e,
+    );
     return 'error';
   }
 }
@@ -289,6 +434,19 @@ export async function listRecentIntents(limit = 50): Promise<
       .limit(limit);
   } catch (e) {
     console.error('[ExecutionIntents] intent 목록 조회 실패:', e);
+    return null;
+  }
+}
+
+/** 단일 intent 권위 행 조회. 조회 실패/부재는 null로 fail-closed 처리한다. */
+export async function getExecutionIntent(id: string): Promise<
+  typeof executionIntentsTable.$inferSelect | null
+> {
+  try {
+    const rows = await db.select().from(executionIntentsTable)
+      .where(eq(executionIntentsTable.id, id)).limit(1);
+    return rows[0] ?? null;
+  } catch {
     return null;
   }
 }

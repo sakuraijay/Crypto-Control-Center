@@ -57,6 +57,13 @@ vi.mock('../workers/internalExecutor', () => ({
 }));
 
 vi.mock('../workers/aiWorker', () => ({
+  applyPaperEpochInMemory: vi.fn(),
+  isWorkerCycleInProgress: vi.fn(() => false),
+  getWorkerStatus: vi.fn(() => ({
+    workerRunning: false, lastCycleAt: null, cycleCount: 0, equityHwm: null,
+    lastLimitsUsed: null, liveTestMode: false, liveTestVetoReason: null,
+    liveTestAccumLossUsd: 0, liveTestDbOk: true,
+  })),
   workerManager: {
     start: vi.fn(), stop: vi.fn(),
     getStatus: vi.fn(() => ({

@@ -35,6 +35,7 @@ import {
   isValidEvmAddress,
   type RawLog,
 } from './gmxOrderEvents';
+import { EVIDENCE_CONFIRMATION_DEPTH } from './protectionEvidence';
 
 // RPC 오류 로그 새니타이즈 — db-free 모듈로 분리 (기존 import 경로 호환을 위해 re-export)
 export { sanitizeRpcError } from './rpcErrorSanitize';
@@ -54,6 +55,8 @@ export interface OnchainClient {
   getTransactionReceipt(txHash: string): Promise<ReceiptResult | null>;
   /** EventEmitter(허용 주소 집합)에서 orderKey에 대한 실행/취소/동결 이벤트 로그 조회 */
   getOrderResolutionLogs(orderKey: string, fromBlock: string | null, emitters: string[]): Promise<RawLog[]>;
+  /** 최신 블록. 미구현/조회 실패는 finality 미확인으로 취급한다. */
+  getLatestBlockNumber?(): Promise<bigint | null>;
 }
 
 /** 실제 RPC 클라이언트 — GMX_RPC_URL 필수 (없으면 throw → 차단 유지) */
@@ -108,6 +111,9 @@ export function createViemOnchainClient(): OnchainClient {
         transactionHash: l.transactionHash ?? null,
         blockNumber:     l.blockNumber ? String(BigInt(l.blockNumber)) : null,
       }));
+    },
+    async getLatestBlockNumber() {
+      try { return await client.getBlockNumber(); } catch { return null; }
     },
   };
 }
@@ -269,6 +275,17 @@ async function reconcileSingleIntent(
     await updateIntentEvidence(intent.id, {
       resolutionReason: `OrderFrozen 이벤트 확인 (tx ${resolution.txHash ?? '?'}) — 판정 불가, 차단 유지`,
     });
+    return null;
+  }
+
+  // 실행/취소 terminal 전이는 보수적 15-block finality 이후에만 허용한다.
+  // 최신 블록 조회 실패·이벤트 block 부재·미충족은 상태를 그대로 차단 유지한다.
+  if (!resolution.blockNumber || !client.getLatestBlockNumber) return null;
+  const latest = await client.getLatestBlockNumber();
+  if (latest === null) return null;
+  const resolutionBlock = BigInt(resolution.blockNumber);
+  if (latest < resolutionBlock
+      || latest - resolutionBlock < BigInt(EVIDENCE_CONFIRMATION_DEPTH)) {
     return null;
   }
 

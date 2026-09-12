@@ -7,7 +7,8 @@
  *
  * 기본값은 ready=true — supertest처럼 index.ts를 거치지 않고 app을
  * 직접 사용하는 테스트가 게이트에 걸리지 않도록 하기 위함이다.
- * 실제 서버 기동 경로(index.ts)에서만 markNotReady() → markReady()를 호출한다.
+ * 실제 서버 기동 경로(index.ts/startup.ts)에서만 markNotReady()를 호출하고,
+ * migration 및 startup safety barrier가 모두 완료된 뒤 markReady()로 전환한다.
  */
 let ready = true;
 

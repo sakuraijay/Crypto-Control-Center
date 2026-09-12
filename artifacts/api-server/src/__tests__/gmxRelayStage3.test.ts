@@ -503,7 +503,12 @@ describe('revokeSession — prepare·서명·변조 거부', () => {
     // REVOKE READY를 APPROVAL 조회가 선택하지 않음
     const sig = await ownerAccount.sign({ hash: p.digest });
     await submitRevokeSignature({ sessionId: p.sessionId, signature: sig, expectedOwner: OWNER, nowSec: 1_800_000_100n });
-    const ready = await getActiveReadySession({ expectedOwner: OWNER, expectedSubaccount: SUBACCOUNT, canonicalNonce: 99n });
+    const ready = await getActiveReadySession({
+      expectedOwner: OWNER,
+      expectedSubaccount: SUBACCOUNT,
+      expectedVerifyingContract: ROUTER,
+      canonicalNonce: 99n,
+    });
     expect(ready?.sessionId).not.toBe(p.sessionId);
     expect(revokeRow.status).toBe('OWNER_SIGNATURE_READY'); // markInvalid 안 됨
     // APPROVAL 서명 제출 경로가 REVOKE 세션을 받지 않음

@@ -3,8 +3,8 @@
  *
  * 확정 authoritative 정책:
  *   운용 기준 자본 = min(startOfDayEquity, $1,000)
- *   일일 1차 목표 = +5% ($1,000 기준 $50)
- *   절대 수익 상한 = +10% ($1,000 기준 $100)
+ *   일일 1차 과열 경계 = +5% ($1,000 기준 $50)
+ *   절대 과열 상한 = +10% ($1,000 기준 $100)
  *
  * dailyTargetUSDT(soft KPI)는 정책 상한을 초과해 저장·노출될 수 없고,
  * legacy 저장값($500 등)은 읽기/쓰기 경로 모두에서 클램프된다.
@@ -20,13 +20,13 @@ import {
 } from '../lib/riskPolicy';
 
 describe('deriveDailyTargets — authoritative 파생값 (RiskEngine 불변)', () => {
-  it('$1,000 기준 → 1차 목표 $50 · 절대 상한 $100 · 일일 최대손실 $30 · floor $35', () => {
+  it('$1,000 Active 기준 → 과열 $50/$100 · 일일 최대손실 $10 · floor $35', () => {
     const t = deriveDailyTargets(1_000);
     expect(t.primaryProfitTargetUsd).toBe(50);
     expect(t.absoluteProfitCapUsd).toBe(100);
-    expect(t.dailyMaxLossUsd).toBe(30);
+    expect(t.dailyMaxLossUsd).toBe(10);
     expect(t.protectedProfitFloorUsd).toBe(35);
-    expect(t.defensiveModeLossUsd).toBe(20);
+    expect(t.defensiveModeLossUsd).toBe(5);
   });
 
   it('$900 기준 → $45 / $90', () => {

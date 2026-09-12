@@ -2,8 +2,7 @@
  * #135 — Manual Controlled Canary 기본 의존성 배선 (production 구현).
  *
  * 전부 기존 검증된 모듈을 재사용한다. preflight 경로는 read-only만 —
- * 주문·서명·키 복호화·설정 변경을 유발하는 함수는 executeOrder/closePosition/
- * runEmergencyClose 3개뿐이며, 이는 execute 단계에서만 호출된다.
+ * 주문·서명·키 복호화·설정 변경을 유발하는 함수는 실행 단계에서만 호출된다.
  * Secret/PIN/키/RPC URL은 어떤 반환값에도 포함되지 않는다.
  */
 import { db, workerStateTable } from '@workspace/db';
@@ -14,77 +13,43 @@ import type { ManualCanaryDeps, CheckOutcome } from './manualCanary';
 import { __canaryStateAccess } from './manualCanary';
 import { verifySdkRouterPin } from './gmxLivePreflight';
 import { getDeploymentVerificationState, getCanonicalSnapshot } from './relayActivationStatus';
-import { getActiveReadySession } from './ownerApprovalSession';
 import { getUsdcAllowanceForSpender } from './gmxSubaccount';
 import { resolveSdkSyntheticsRouter, EXPECTED_CANARY_SIGNER, CANARY_ALLOWANCE_AMOUNT_UNITS } from './canaryAllowanceInfo';
 import { countBlockingIntentsOrNull, listRecentIntents } from './executionIntents';
 import { countOpenRelayTasksOrNull, listUnresolvedTasks } from './relayLifecycle';
 import {
-  fetchLiveCostSnapshot,
-  recordExecutionEligibleCostEvidence,
-  validateExecutionEligibleSnapshot,
-  type FetchedCostFields,
+  type CostSnapshot,
+  type CostSnapshotExpectation,
 } from './costSnapshot';
-import { resolveIndexTokenDecimals } from './indexTokenDecimals';
+import { activateManualCanaryExecutionEvidence } from './manualCanaryExecutionEvidence';
 import { MARKET_BY_SYMBOL_SERVER } from './gmxMarkets';
 import { isLiveTestExecutionLocked } from './liveTestGate';
 import { getStoredPublicSignerAddress, isManualCanarySignerRestoreAllowed } from './delegatedSigner';
 import {
   executeLiveTestOrder, closeLiveTestPosition, fetchAuthoritativeOpenPositions,
-  getStopExecutionCapability, fetchOnchainErc20Decimals,
+  evaluateManualCanaryStopCapability, refreshStopExecutionCapability, isStopExecutionAvailable,
+  countInFlightReservedActions,
 } from '../workers/liveTestExecutor';
 import { runEmergencyClose } from '../workers/protectionExecutor';
 import { workerManager } from '../workers/aiWorker';
 import { db as _db, executionIntentsTable, protectionOrdersTable, tradesTable } from '@workspace/db';
-import { buildFreshExecutionCostBreakdown } from './manualCanaryCostFetcher';
+import { checkManualCanaryOwnerApproval } from './manualCanaryOwnerApproval';
+import { checkGitHubCiAttestation } from './githubCiAttestation';
+import {
+  fetchManualCanaryReadonlyCost,
+  MANUAL_CANARY_READONLY_SYMBOLS,
+  resolveCanarySymbolDecimals,
+} from './manualCanaryReadonlyEvidence';
+import { evaluateManualCanaryCanonicalAuthorization } from './manualCanaryCanonicalAuthorization';
+export {
+  __setManualCanaryCostFetcherForTests,
+  fetchManualCanaryReadonlyCost,
+  refreshManualCanaryReadonlyEvidence,
+} from './manualCanaryReadonlyEvidence';
 
 const ARBITRUM_CHAIN_ID = 42161;
 
 function outcome(ok: boolean, detail: string): CheckOutcome { return { ok, detail }; }
-
-let injectedCostFetcher: ((args: {
-  market: string; symbol: string; isLong: boolean; notionalUsd: number;
-}) => Promise<FetchedCostFields>) | null = null;
-
-export function __setManualCanaryCostFetcherForTests(
-  fetcher: typeof injectedCostFetcher,
-): void {
-  injectedCostFetcher = fetcher;
-}
-
-async function fetchMeasuredCanaryCosts(args: {
-  market: string; symbol: string; isLong: boolean; notionalUsd: number;
-}): Promise<FetchedCostFields> {
-  if (injectedCostFetcher) return injectedCostFetcher(args);
-  const c = await buildFreshExecutionCostBreakdown({
-    marketToken: args.market,
-    symbol: args.symbol,
-    isLong: args.isLong,
-    notionalUsd: args.notionalUsd,
-    holdingHours: 1,
-  });
-  const d = c?.impactDetail;
-  const required = [
-    c?.entryFeeUsd, c?.estimatedExitFeeUsd, c?.fundingCostUsd,
-    c?.borrowingCostUsd, c?.gasExecutionFeeUsd, c?.costSnapshotFetchedAtMs,
-  ];
-  if (!c || !d || required.some((v) => typeof v !== 'number' || !Number.isFinite(v))) {
-    throw new Error('공식 GMX 비용 성분 일부 미확보 — 실행 적격 스냅샷 생성 금지');
-  }
-  return {
-    positionFeeUsd: c.entryFeeUsd!,
-    executionFeeUsd: c.gasExecutionFeeUsd!,
-    estimatedPriceImpactUsd: Math.max(0, -d.entryImpactUsd),
-    fundingFeeUsd: c.fundingCostUsd!,
-    borrowingFeeUsd: c.borrowingCostUsd!,
-    estimatedExitFeeUsd: c.estimatedExitFeeUsd!,
-    estimatedExitPriceImpactUsd: Math.max(0, -d.exitImpactUsd),
-    fundingRatePerHourFraction: c.fundingCostUsd! / args.notionalUsd,
-    borrowingRatePerHourFraction: c.borrowingCostUsd! / args.notionalUsd,
-    blockNumber: null,
-    apiTimestamp: new Date(c.costSnapshotFetchedAtMs!).toISOString(),
-  };
-}
 
 export function buildDefaultCanaryDeps(): ManualCanaryDeps {
   return {
@@ -126,27 +91,11 @@ export function buildDefaultCanaryDeps(): ManualCanaryDeps {
     },
 
     ownerApproval: async (nowMs: number) => {
-      try {
-        const owner = process.env.GMX_WALLET_ADDRESS ?? null;
-        const session = await getActiveReadySession({
-          expectedOwner: owner ? getAddress(owner) : null,
-          expectedSubaccount: getAddress(EXPECTED_CANARY_SIGNER),
-          canonicalNonce: null,
-        });
-        if (!session) return outcome(false, 'READY Owner Approval 없음 — 새 Prepare+MetaMask 서명 필요');
-        if (session.maxAllowedCount !== '8') return outcome(false, `maxAllowedCount ${session.maxAllowedCount} ≠ 8`);
-        const deadlineMs = Number(session.deadline) * 1000;
-        if (!Number.isFinite(deadlineMs) || deadlineMs <= nowMs) {
-          return outcome(false, 'Owner Approval deadline 만료 — 자동 사용 금지, 새 Prepare+서명 필요');
-        }
-        const expiresMs = Number(session.expiresAt) * 1000;
-        if (!Number.isFinite(expiresMs) || expiresMs <= nowMs) {
-          return outcome(false, 'Owner Approval expiresAt 경과 — 새 Prepare+서명 필요');
-        }
-        return outcome(true, `READY 세션 유효 (nonce ${session.approvalNonce}, deadline까지 ${Math.floor((deadlineMs - nowMs) / 1000)}s)`);
-      } catch {
-        return outcome(false, 'Owner Approval 조회 실패 (fail-closed)');
-      }
+      return checkManualCanaryOwnerApproval(
+        nowMs,
+        process.env.GMX_WALLET_ADDRESS ?? null,
+        getCanonicalSnapshot(),
+      );
     },
 
     allowance: async () => {
@@ -175,6 +124,16 @@ export function buildDefaultCanaryDeps(): ManualCanaryDeps {
       return outcome(snap.confirmed, snap.confirmed ? 'canonical readback 확인' : (snap.reason ?? 'RPC 미확인'));
     },
 
+    canonicalAuthorization: async (nowMs: number) => {
+      const snapshot = getCanonicalSnapshot();
+      const inFlightReservedActions = await countInFlightReservedActions();
+      return evaluateManualCanaryCanonicalAuthorization(
+        snapshot,
+        nowMs,
+        inFlightReservedActions,
+      );
+    },
+
     reconciliationClean: async () => {
       const intents = await countBlockingIntentsOrNull();
       const tasks = await countOpenRelayTasksOrNull();
@@ -198,52 +157,48 @@ export function buildDefaultCanaryDeps(): ManualCanaryDeps {
       return positions === null ? null : positions.length;
     },
 
-    // close 크기 결속용 — authoritative 온체인 포지션 실측 (실패=null, fail-closed)
+    // close 결속용 — authoritative 온체인 포지션 실측, full identity 포함 (실패=null, fail-closed)
     openPositions: async () => {
       const positions = await fetchAuthoritativeOpenPositions();
-      return positions === null ? null
-        : positions.map(p => ({ marketAddress: p.marketAddress, isLong: p.isLong, sizeUsd: p.sizeUsd }));
+      if (positions === null) return null;
+      if (positions.some((p) =>
+        typeof p.positionKey !== 'string'
+        || typeof p.accountAddress !== 'string'
+        || typeof p.collateralToken !== 'string'
+        || typeof p.sizeUsd30 !== 'string'
+      )) return null;
+      return positions.map(p => ({
+        positionKey:     p.positionKey,
+        accountAddress:  p.accountAddress,
+        marketAddress:   p.marketAddress,
+        collateralToken: p.collateralToken,
+        isLong:          p.isLong,
+        sizeUsd:         p.sizeUsd,
+        sizeUsd30:       p.sizeUsd30,
+      })) as Array<{
+        positionKey: string; accountAddress: string; marketAddress: string;
+        collateralToken: string; isLong: boolean; sizeUsd: number; sizeUsd30: string;
+      }>;
     },
 
-    costSnapshot: async ({ symbol, isLong, notionalUsd }) => {
-      const market = MARKET_BY_SYMBOL_SERVER.get(symbol);
-      if (!market) return { ok: false, reason: '시장 미확인' };
-      const res = await fetchLiveCostSnapshot(
-        { market: market.marketToken, isLong, orderType: 'MarketIncrease', notionalUsd, now: new Date() },
-        {
-          readonlyEnabled: process.env.GMX_API_READONLY_ENABLED === 'true',
-          fetchCosts: ({ market: marketAddress, isLong: side, notionalUsd: size }) =>
-            fetchMeasuredCanaryCosts({ market: marketAddress, symbol, isLong: side, notionalUsd: size }),
-        },
+    /**
+     * #142: read-only costSnapshot — preflight 경로는 recordExecutionEligibleCostEvidence
+     * 를 호출하지 않는다. 실행 직전 비용 증거 기록은 recordCostEvidenceForExecution 전용.
+     */
+    costSnapshot: fetchManualCanaryReadonlyCost,
+
+    canaryDecimalsReady: async () => {
+      const results = await Promise.all(
+        MANUAL_CANARY_READONLY_SYMBOLS.map(resolveCanarySymbolDecimals),
       );
-      if (!res.ok) return { ok: false, reason: res.reason };
-      const expected = { market: market.marketToken, isLong, orderType: 'MarketIncrease' as const, notionalUsd };
-      const v = validateExecutionEligibleSnapshot(
-        res.snapshot,
-        expected,
-        Date.now(),
-      );
-      if (!v.ok) return { ok: false, reason: v.reason };
-      recordExecutionEligibleCostEvidence(res.snapshot, expected, Date.now());
-      return { ok: true, snapshot: res.snapshot, roundTripCostUsd: v.effectiveRoundTripCostUsd };
+      const failed = results.filter((r) => !r.ok);
+      return failed.length === 0
+        ? outcome(true, 'BTC+ETH SDK+온체인 교차검증 완료')
+        : outcome(false, failed.map((r) => r.detail).join('; '));
     },
 
-    decimalsReady: async (symbol: string) => {
-      const market = MARKET_BY_SYMBOL_SERVER.get(symbol);
-      if (!market) return outcome(false, '시장 미확인');
-      try {
-        const r = await resolveIndexTokenDecimals({
-          chainId: ARBITRUM_CHAIN_ID, marketAddress: market.marketToken,
-          fetchOnchainDecimals: fetchOnchainErc20Decimals,
-        });
-        return r.ok ? outcome(true, 'SDK+온체인 교차검증 완료') : outcome(false, r.reason);
-      } catch {
-        return outcome(false, 'decimals 검증 실패 (fail-closed)');
-      }
-    },
-
-    stopCapability: async () => {
-      const cap = getStopExecutionCapability();
+    stopCapability: async ({ freshCostSnapshotAvailable }) => {
+      const cap = await evaluateManualCanaryStopCapability(freshCostSnapshotAvailable);
       return outcome(cap.available, cap.available ? 'stop 실행 능력 확인' : (cap.reasons[0] ?? 'stop 실행 능력 없음'));
     },
 
@@ -275,6 +230,12 @@ export function buildDefaultCanaryDeps(): ManualCanaryDeps {
     mainAddress: () => process.env.GMX_WALLET_ADDRESS ?? '',
     liveTestMode: () => isManualCanarySignerRestoreAllowed(process.env).allowed,
 
+    /**
+     * #142/#143: build-bound public Actions attestation. No GitHub credential is
+     * read; unavailable/mismatch/timeout remains UNATTESTED fail-closed.
+     */
+    githubCiAttestation: () => checkGitHubCiAttestation(),
+
     envSubmissionState: () => {
       const locked = isLiveTestExecutionLocked();
       const manual = isManualCanarySignerRestoreAllowed(process.env);
@@ -287,6 +248,22 @@ export function buildDefaultCanaryDeps(): ManualCanaryDeps {
             ? '수동 GMX API Canary 제출 활성 (Worker PAPER·AUTO LIVE 비활성)'
             : `수동 Canary 제출 조건 미충족: ${manual.missing.join(', ')}`,
       };
+    },
+
+    /**
+     * #142: 실행 직전 전용 비용 증거 기록 — executeOrder 바로 직전에만 호출.
+     * preflight costSnapshot 경로(read-only)와 분리되어 구조적으로 독립.
+     * 기록 실패 시 호출자(executeManualCanaryOpen)가 fail-closed (제출 0회).
+     */
+    recordCostEvidenceForExecution: async (
+      snapshot: CostSnapshot,
+      args: CostSnapshotExpectation,
+      nowMs: number,
+    ): Promise<boolean> => {
+      return activateManualCanaryExecutionEvidence(snapshot, args, nowMs, {
+        refreshStopCapability: refreshStopExecutionCapability,
+        isStopCapabilityAvailable: isStopExecutionAvailable,
+      });
     },
 
     executeOrder: executeLiveTestOrder,
@@ -304,6 +281,7 @@ export function buildDefaultCanaryDeps(): ManualCanaryDeps {
           parentOpenIntentId: openIntentId, positionKey,
           symbol: p.marketAddress, marketAddress: p.marketAddress, isLong: p.isLong,
           fullSizeUsd: p.sizeUsd, reason: '#135 manual canary emergency close (운영자 요청)',
+          manualCanary: true,
         });
         return outcome(r.ok, r.ok ? 'emergency close 제출' : (('reason' in r && r.reason) || 'emergency close 실패'));
       } catch {
@@ -332,25 +310,3 @@ export function buildDefaultCanaryDeps(): ManualCanaryDeps {
     casState: __canaryStateAccess.casWorkerState,
   };
 }
-
-/** readiness/refresh 전용 — decimals와 30초 비용 증거만 read-only로 갱신한다. */
-export async function refreshManualCanaryReadonlyEvidence(): Promise<{
-  decimals: Record<string, CheckOutcome>;
-  costs: Record<string, { ok: boolean; reason: string | null }>;
-}> {
-  const deps = buildDefaultCanaryDeps();
-  const decimals: Record<string, CheckOutcome> = {};
-  const costs: Record<string, { ok: boolean; reason: string | null }> = {};
-  for (const symbol of MANUAL_CANARY_REFRESH_SYMBOLS) {
-    decimals[symbol] = await deps.decimalsReady(symbol);
-    const cost = await deps.costSnapshot({
-      symbol,
-      isLong: true,
-      notionalUsd: 20,
-    });
-    costs[symbol] = { ok: cost.ok, reason: cost.ok ? null : cost.reason };
-  }
-  return { decimals, costs };
-}
-
-const MANUAL_CANARY_REFRESH_SYMBOLS = ['BTC', 'ETH'] as const;

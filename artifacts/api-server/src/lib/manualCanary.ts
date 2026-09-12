@@ -6,35 +6,34 @@
  *
  * 원칙 (docs/manual-canary.md):
  *  - 하드캡은 서버에서 강제하며 요청 입력으로 확대 불가 (초과=거부, clamp 없음 — 명시 거부).
- *  - preflight는 read-only (주문·서명·키 복호화·설정 변경 0회).
+ *  - GET preflight/status는 DB write까지 포함해 엄격한 read-only.
+ *    durable preflightId 발급은 명시적 POST preflight에서만 수행.
  *  - 실행은 2단계: preflightId(120s TTL) + confirm 문구 + 실행 직전 전 조건 재평가.
  *  - 일일 1회 예산은 durable CAS claim을 제출 **이전**에 수행 (fail-closed).
  *  - deterministic decisionId → 기존 execution_intents PK/unique로 중복 제출 구조 차단.
  *  - timeout/모호 응답 = UNRESOLVED (기존 계층), 자동 재제출 금지.
  *  - PIN·서명·암호문·개인키·RPC URL은 어떤 출력에도 미포함.
+ *
+ * #142 — ManualCanaryPreflightDeps: preflight/evaluate 경로에는 실행 능력이
+ *  구조적으로 없다 (executeOrder·closePosition·runEmergencyClose 등 완전 부재).
+ *  PREFLIGHT_OPERATION_ALLOWLIST: 동결 allowlist — POST preflight의 readonly
+ *  check와 preflight-token CAS만 포함. GET preflight는 ManualCanaryCheckDeps로
+ *  CAS/random capability 자체가 없다. GITHUB_CI는 빌드에 결속된 PR-head SHA의 공개 Actions 결과를
+ *  자격증명 없이 제한 시간 내 재검증하며, 불명/실패는 UNATTESTED fail-closed.
  */
 import { db, workerStateTable } from '@workspace/db';
 import { and, eq } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 
 import type { LiveOrderParams, LiveOrderResult } from '../workers/liveTestExecutor';
+import type { ClosePositionBinding } from './executionIntents';
 import type { CostSnapshot } from '../lib/costSnapshot';
 import { computeStopTrigger } from './stopLossPlan';
 import { manilaDayKey } from './profitProtection';
+import { MANUAL_CANARY_CAPS } from './manualCanaryCaps';
 
 // ── 하드캡 (동결 — UI/요청 입력으로 확대 불가) ────────────────────────────────
-export const MANUAL_CANARY_CAPS = Object.freeze({
-  maxCollateralUsd: 10,
-  maxLeverage: 2,
-  maxNotionalUsd: 20,
-  maxOpenPositions: 1,
-  maxAccumLossUsd: 3,
-  maxOrdersPerDay: 1,
-  maxRoundTripCostUsd: 0.4,       // RiskEngine보다 엄격한 왕복 비용 상한
-  maxPriceDriftFraction: 0.005,   // preflight 대비 실행 시 0.5% — 시장가 추격 방지
-  allowedSymbols: ['BTC', 'ETH'] as readonly string[],
-  preflightTtlMs: 120_000,
-});
+export { MANUAL_CANARY_CAPS } from './manualCanaryCaps';
 
 export const CANARY_CONFIRM_OPEN = 'EXECUTE-CANARY-OPEN';
 export const CANARY_CONFIRM_CLOSE = 'EXECUTE-CANARY-CLOSE';
@@ -42,13 +41,107 @@ export const CANARY_CONFIRM_CLOSE = 'EXECUTE-CANARY-CLOSE';
 const STATE_KEY_PREFLIGHT = 'manualCanaryPreflight';
 const STATE_KEY_DAILY = 'manualCanaryDaily';
 
+// ── #142: Preflight Operation Allowlist (동결 — 실행 능력 진입 불가) ──────────
+/**
+ * Preflight 단계에서 허용되는 연산의 안정 ID 목록.
+ * 카테고리:
+ *  - readonly: 부작용 없는 읽기 전용 검사
+ *  - cas_preflight_token: preflight 토큰 durable 저장 (preflightId 발급 전제)
+ * 금지: executeOrder, closePosition, runEmergencyClose, nonce 읽기,
+ *       서명, relay task, 자금, signer record mutation, intent submit 등.
+ */
+export const PREFLIGHT_OPERATION_ALLOWLIST = Object.freeze({
+  readonly: Object.freeze([
+    'clock',
+    'random_id',
+    'deployment',
+    'router_pin',
+    'signer_binding',
+    'owner_approval',
+    'allowance',
+    'gmx_api',
+    'rpc',
+    'canonical_authorization',
+    'reconciliation',
+    'open_positions',
+    'decimals',
+    'stop_capability',
+    'cost_snapshot',
+    'accum_loss',
+    'daily_budget',
+    'env_submission',
+    'price',
+    'github_ci',
+    'preflight_token_read',
+  ] as readonly string[]),
+  /** preflight CAS — preflightId 토큰 저장만. daily claim CAS는 실행 단계 전용. */
+  cas_preflight_token: Object.freeze(['manualCanaryPreflight'] as readonly string[]),
+} as const);
+
+export const CANARY_PREFLIGHT_FORBIDDEN_OPERATIONS = Object.freeze([
+  'owner_approval_prepare',
+  'metamask_sign',
+  'delegated_signer_sign',
+  'gmx_prepare',
+  'gmx_submit',
+  'nonce_create',
+  'relay_task_create',
+  'execution_intent_create',
+  'protection_order_create',
+  'signer_record_mutate',
+  'fund_transfer',
+] as const);
+
+export type PreflightOperationKind = keyof typeof PREFLIGHT_OPERATION_ALLOWLIST;
+
+/**
+ * Every preflight/status dependency call must pass through this runtime gate.
+ * Unknown operations are rejected before the callback can run.
+ */
+export async function runAllowedPreflightOperation<T>(
+  kind: PreflightOperationKind,
+  operation: string,
+  callback: () => T | Promise<T>,
+): Promise<T> {
+  const allowed = PREFLIGHT_OPERATION_ALLOWLIST[kind] as readonly string[];
+  if (!allowed.includes(operation)) {
+    throw new Error(`CANARY_PREFLIGHT_OPERATION_DENIED:${kind}:${operation}`);
+  }
+  return await callback();
+}
+
+export const CANARY_STATUS_OPERATION_ALLOWLIST = Object.freeze([
+  'clock',
+  'daily_state',
+  'intent_status',
+  'initial_stop_status',
+  'position_readback',
+  'loss_readback',
+  'preflight_check_evaluation',
+] as const);
+
+/**
+ * Status has its own read-only capability boundary. It cannot reuse execution
+ * operations merely because the caller happens to hold ManualCanaryDeps.
+ */
+export async function runAllowedCanaryStatusOperation<T>(
+  operation: string,
+  callback: () => T | Promise<T>,
+): Promise<T> {
+  if (!(CANARY_STATUS_OPERATION_ALLOWLIST as readonly string[]).includes(operation)) {
+    throw new Error(`CANARY_STATUS_OPERATION_DENIED:${operation}`);
+  }
+  return await callback();
+}
+
 // ── 타입 ─────────────────────────────────────────────────────────────────────
 export interface PreflightItem { id: string; label: string; ok: boolean; detail: string }
 
 export interface PreflightResult {
   ok: boolean;
   atMs: number;
-  preflightId: string | null; // ok=true일 때만 발급
+  /** GET inspection은 항상 null, POST issuance가 성공한 경우에만 non-null */
+  preflightId: string | null;
   items: PreflightItem[];
   /** 실행 시 드리프트 검증용 — preflight 시점 가격 */
   priceUsd: number | null;
@@ -71,15 +164,73 @@ export interface DailyCanaryState {
     symbol: string; direction: 'LONG' | 'SHORT';
     collateralUsd: number; leverage: number; requestedSizeUsd: number;
   } | null;
+  /**
+   * OPEN launch ownership reservation. A request must win this durable CAS
+   * before it may publish process-global execution cost evidence.
+   */
+  launchReservation?: {
+    id: string;
+    openIntentId: string;
+    reservedAt: string;
+    open: NonNullable<DailyCanaryState['open']>;
+  } | null;
 }
 
 export interface CheckOutcome { ok: boolean; detail: string }
 
-/** 전 의존성 주입 — 장애주입 테스트 및 read-only 보장을 위해 함수 단위로 분리 */
-export interface ManualCanaryDeps {
+// ── #142: Sanitized blocker categories ─────────────────────────────────────
+/**
+ * Canary launch blocker categories with stable IDs and sanitized messages.
+ * No secret values, raw env values, RPC URLs, addresses, signatures, or raw errors.
+ */
+export const CANARY_BLOCKER_CATEGORIES = Object.freeze({
+  CODE: Object.freeze({
+    id: 'CODE' as const,
+    stableMessage: '코드/배포 검증 실패 — 배포 manifest·SDK router pin 불일치',
+  }),
+  CONFIGURATION: Object.freeze({
+    id: 'CONFIGURATION' as const,
+    stableMessage: '설정 미충족 — signer 결속·allowance·환경 플래그·비용 상한 조건 위반',
+  }),
+  OPERATOR_MANUAL_ACTION: Object.freeze({
+    id: 'OPERATOR_MANUAL_ACTION' as const,
+    stableMessage: '운영자 조치 필요 — Owner Approval 갱신·reconciliation 수동 처리·preflight 재수행',
+  }),
+  GITHUB_CI: Object.freeze({
+    id: 'GITHUB_CI' as const,
+    /**
+     * GITHUB_CI는 앱 측 GitHub 자격증명 없이 UNATTESTED fail-closed.
+     * CI 인증 상태는 외부에서 주입되지 않으며, 미확인 = 차단.
+     */
+    stableMessage: 'GITHUB_CI: CI 인증 미확인 (UNATTESTED) — 앱 측 GitHub 자격증명 없음, fail-closed',
+    attestedStatus: 'UNATTESTED' as const,
+  }),
+} as const);
+
+export type CanaryBlockerCategoryId = keyof typeof CANARY_BLOCKER_CATEGORIES;
+
+export interface CanaryBlocker {
+  category: CanaryBlockerCategoryId;
+  /** Stable machine identifier; intentionally contains no runtime values. */
+  id: CanaryBlockerCategoryId;
+  /** Stable sanitized operator message; intentionally contains no raw details. */
+  message: string;
+  blocking: true;
+  /** 실패한 preflight check ID 목록 (sanitized — raw 값 미포함) */
+  failedCheckIds: readonly string[];
+}
+
+// ── #142: ManualCanaryPreflightDeps (narrow capability type) ────────────────
+/**
+ * Preflight 및 evaluateAllChecks 전용 의존성 타입.
+ * 실행 능력(executeOrder, closePosition, runEmergencyClose, nonce, relay task,
+ * intent submit, signer record mutation, 자금)이 구조적으로 부재.
+ * 테스트에서 forbidden 능력 0회 호출/접근을 구조적으로 보장.
+ */
+export interface ManualCanaryPreflightDeps {
   now(): Date;
   randomId(): string;
-  // read-only preflight 소스들
+  // read-only preflight 소스들 (실행 능력 완전 부재)
   routerPin(): CheckOutcome;
   deploymentVerified(): CheckOutcome;
   signerBinding(): Promise<CheckOutcome>;          // 암호문/공개주소 존재+결속만, 복호화 0회
@@ -87,34 +238,75 @@ export interface ManualCanaryDeps {
   allowance(): Promise<CheckOutcome>;
   gmxApiReadonly(): CheckOutcome;
   rpcHealthy(): Promise<CheckOutcome>;
+  /** 최신 저장 canonical API v2 readback + 기존 OPEN action-budget 정책만 평가한다. */
+  canonicalAuthorization(nowMs: number): Promise<CheckOutcome>;
   reconciliationClean(): Promise<CheckOutcome>;    // blocking intents/tasks/protections=0 + startup reconcile
   openPositionCount(): Promise<number | null>;     // authoritative readback, 실패=null
-  /** authoritative 열린 포지션 목록 (close 크기 결속용) — 조회 실패=null (fail-closed) */
-  openPositions(): Promise<Array<{ marketAddress: string; isLong: boolean; sizeUsd: number }> | null>;
+  openPositions(): Promise<Array<{
+    positionKey: string;
+    accountAddress: string;
+    marketAddress: string;
+    collateralToken: string;
+    isLong: boolean;
+    sizeUsd: number;
+    sizeUsd30: string;
+  }> | null>;
+  /** read-only preflight 전용 costSnapshot — recordExecutionEligibleCostEvidence 호출 금지 */
   costSnapshot(args: { symbol: string; isLong: boolean; notionalUsd: number }): Promise<
     { ok: true; snapshot: CostSnapshot; roundTripCostUsd: number | null } | { ok: false; reason: string }>;
-  decimalsReady(symbol: string): Promise<CheckOutcome>;
-  stopCapability(): Promise<CheckOutcome>;
+  /** BTC와 ETH 모두의 fresh SDK+onchain decimals 증거가 있어야 한다. */
+  canaryDecimalsReady(): Promise<CheckOutcome>;
+  stopCapability(args: { freshCostSnapshotAvailable: boolean }): Promise<CheckOutcome>;
   currentPriceUsd(symbol: string): Promise<number | null>;
   accumCanaryLossUsd(): Promise<{ ok: boolean; lossUsd: number | null }>;
   marketAddress(symbol: string): string | null;
   mainAddress(): string;
   liveTestMode(): boolean;
   envSubmissionState(): { locked: boolean; submissionEnabled: boolean; detail: string };
+  /**
+   * #142/#143: GITHUB_CI attestation check — 앱 측 GitHub 자격증명 없이
+   * 빌드 결속 SHA의 공개 Actions 성공을 검증한다. 네트워크/응답/결속 불명은
+   * UNATTESTED fail-closed. 테스트에서는 주입 결과로 계약을 검증한다.
+   */
+  githubCiAttestation(): CheckOutcome | Promise<CheckOutcome>;
+  // durable state — preflight token CAS만 허용 (daily claim CAS는 실행 단계 전용)
+  loadState(key: string): Promise<string | null>;
+  casState(key: string, prevRaw: string | null, nextRaw: string): Promise<boolean>;
+}
+
+/** preflight/status 공용 check 읽기 — token ID 생성/CAS 쓰기 capability 제외 */
+export type ManualCanaryCheckDeps = Omit<ManualCanaryPreflightDeps, 'randomId' | 'casState'>;
+
+/** status 단계에 필요한 읽기 전용 capability */
+export interface ManualCanaryStatusDeps extends ManualCanaryCheckDeps {
+  // 상태 판독 (온체인 증거 기반 — API 수락만으로 성공 처리 금지)
+  intentStatus(intentId: string): Promise<{ status: string; orderKey: string | null; txHash: string | null } | null>;
+  initialStopStatus(openIntentId: string): Promise<{ status: string | null; orderKey: string | null }>;
+}
+
+/** 전체 의존성 주입 — 실행 단계 포함 */
+export interface ManualCanaryDeps extends ManualCanaryPreflightDeps {
+  // 상태 판독 (온체인 증거 기반 — API 수락만으로 성공 처리 금지)
+  intentStatus(intentId: string): Promise<{ status: string; orderKey: string | null; txHash: string | null } | null>;
+  initialStopStatus(openIntentId: string): Promise<{ status: string | null; orderKey: string | null }>;
   // 실행 (기존 durable 경로 재사용 — 자동 재제출 없음)
   executeOrder(params: LiveOrderParams): Promise<LiveOrderResult>;
   closePosition(params: {
     decisionId: string; cycleNumber: number; symbol: string; marketAddress: string;
     isLong: boolean; sizeUsd: number; currentPriceUsd: number; mainAddress: string;
     accumLossUsd: number; dbOk: boolean; liveTestMode: boolean; manualCanary?: true;
+    /** 0030: exact 포지션 결속 — manualCanary 경로는 반드시 제공해야 한다 */
+    exactPosition?: ClosePositionBinding | null;
   }): Promise<LiveOrderResult>;
   runEmergencyClose(openIntentId: string): Promise<CheckOutcome>;
-  // 상태 판독 (온체인 증거 기반 — API 수락만으로 성공 처리 금지)
-  intentStatus(intentId: string): Promise<{ status: string; orderKey: string | null; txHash: string | null } | null>;
-  initialStopStatus(openIntentId: string): Promise<{ status: string | null; orderKey: string | null }>;
-  // durable state (worker_state CAS)
-  loadState(key: string): Promise<string | null>;
-  casState(key: string, prevRaw: string | null, nextRaw: string): Promise<boolean>;
+  /**
+   * #142: 실행 직전 전용 비용 증거 기록 + stop capability 원자적 재평가.
+   * 실행 증거/stop gate 갱신 불가 시 fail-closed (제출 0회).
+   * preflight costSnapshot 경로에는 이 메서드가 구조적으로 부재.
+   */
+  recordCostEvidenceForExecution(snapshot: CostSnapshot, args: {
+    market: string; isLong: boolean; orderType: 'MarketIncrease' | 'MarketDecrease'; notionalUsd: number;
+  }, nowMs: number): Promise<boolean>; // execution-only — structurally unavailable in preflight/status
 }
 
 // ── worker_state CAS 기본 구현 ────────────────────────────────────────────────
@@ -156,33 +348,62 @@ export function validateCanaryRequest(symbol: unknown, direction: unknown):
   return { ok: true, symbol, direction };
 }
 
+/**
+ * #142: evaluateAllChecks는 ManualCanaryPreflightDeps만 사용.
+ * 실행 능력(executeOrder 등)은 구조적으로 접근 불가.
+ */
 async function evaluateAllChecks(
-  deps: ManualCanaryDeps, symbol: string, direction: 'LONG' | 'SHORT',
+  deps: ManualCanaryCheckDeps, symbol: string, direction: 'LONG' | 'SHORT',
 ): Promise<{ items: PreflightItem[]; priceUsd: number | null; costSnapshot: CostSnapshot | null }> {
   const items: PreflightItem[] = [];
   const push = (id: string, label: string, o: CheckOutcome) =>
     items.push({ id, label, ok: o.ok, detail: o.detail });
-  const nowMs = deps.now().getTime();
+  const now = await runAllowedPreflightOperation('readonly', 'clock', () => deps.now());
+  const nowMs = now.getTime();
 
-  push('deployment', '배포 코드/manifest 검증', deps.deploymentVerified());
-  push('router_pin', 'SDK router pin 대조', deps.routerPin());
-  push('signer_binding', 'signer 암호문+공개주소 결속(복호화 0회)', await deps.signerBinding());
-  push('owner_approval', 'fresh Owner Approval (8회·nonce·deadline)', await deps.ownerApproval(nowMs));
-  push('allowance', 'USDC allowance 15', await deps.allowance());
-  push('gmx_api', 'GMX API read-only', deps.gmxApiReadonly());
-  push('rpc', 'RPC 정상', await deps.rpcHealthy());
-  push('reconciliation', 'reconciliation 완료·미종결 0', await deps.reconciliationClean());
+  push('deployment', '배포 코드/manifest 검증',
+    await runAllowedPreflightOperation('readonly', 'deployment', () => deps.deploymentVerified()));
+  push('router_pin', 'SDK router pin 대조',
+    await runAllowedPreflightOperation('readonly', 'router_pin', () => deps.routerPin()));
+  push('signer_binding', 'signer 암호문+공개주소 결속(복호화 0회)',
+    await runAllowedPreflightOperation('readonly', 'signer_binding', () => deps.signerBinding()));
+  push('owner_approval', 'fresh Owner Approval (8회·nonce·deadline)',
+    await runAllowedPreflightOperation('readonly', 'owner_approval', () => deps.ownerApproval(nowMs)));
+  push('allowance', 'USDC allowance 15',
+    await runAllowedPreflightOperation('readonly', 'allowance', () => deps.allowance()));
+  push('gmx_api', 'GMX API read-only',
+    await runAllowedPreflightOperation('readonly', 'gmx_api', () => deps.gmxApiReadonly()));
+  push('rpc', 'RPC 정상',
+    await runAllowedPreflightOperation('readonly', 'rpc', () => deps.rpcHealthy()));
+  push('canonical_authorization', 'canonical API v2 delegated authorization·OPEN action budget',
+    await runAllowedPreflightOperation(
+      'readonly',
+      'canonical_authorization',
+      () => deps.canonicalAuthorization(nowMs),
+    ));
+  push('reconciliation', 'reconciliation 완료·미종결 0',
+    await runAllowedPreflightOperation('readonly', 'reconciliation', () => deps.reconciliationClean()));
 
-  const posCount = await deps.openPositionCount();
+  const posCount = await runAllowedPreflightOperation(
+    'readonly', 'open_positions', () => deps.openPositionCount(),
+  );
   push('open_positions', '열린 포지션 0', posCount === null
     ? { ok: false, detail: 'authoritative 포지션 조회 실패 (fail-closed)' }
     : posCount === 0 ? { ok: true, detail: '0건' }
     : { ok: false, detail: `${posCount}건 — 동시 ${MANUAL_CANARY_CAPS.maxOpenPositions}개 캡 위반` });
 
-  push('decimals', 'index token decimals 검증', await deps.decimalsReady(symbol));
-  push('stop_capability', 'Stop 실행 능력', await deps.stopCapability());
+  push('decimals', 'BTC+ETH index token decimals 검증',
+    await runAllowedPreflightOperation('readonly', 'decimals', () => deps.canaryDecimalsReady()));
 
-  const cost = await deps.costSnapshot({ symbol, isLong: direction === 'LONG', notionalUsd: MANUAL_CANARY_CAPS.maxNotionalUsd });
+  const cost = await runAllowedPreflightOperation(
+    'readonly',
+    'cost_snapshot',
+    () => deps.costSnapshot({
+      symbol,
+      isLong: direction === 'LONG',
+      notionalUsd: MANUAL_CANARY_CAPS.maxNotionalUsd,
+    }),
+  );
   let costSnapshot: CostSnapshot | null = null;
   if (!cost.ok) {
     push('cost_snapshot', 'fresh cost snapshot', { ok: false, detail: cost.reason });
@@ -199,15 +420,26 @@ async function evaluateAllChecks(
     push('cost_snapshot', 'fresh cost snapshot', { ok: true, detail: `왕복 비용 $${cost.roundTripCostUsd.toFixed(3)}` });
   }
 
-  const loss = await deps.accumCanaryLossUsd();
+  push('stop_capability', 'Stop 실행 능력',
+    await runAllowedPreflightOperation(
+      'readonly',
+      'stop_capability',
+      () => deps.stopCapability({ freshCostSnapshotAvailable: costSnapshot !== null }),
+    ));
+
+  const loss = await runAllowedPreflightOperation(
+    'readonly', 'accum_loss', () => deps.accumCanaryLossUsd(),
+  );
   push('accum_loss', `누적 손실 < $${MANUAL_CANARY_CAPS.maxAccumLossUsd}`, !loss.ok || loss.lossUsd === null
     ? { ok: false, detail: '누적 손실 조회 실패 (fail-closed)' }
     : loss.lossUsd >= MANUAL_CANARY_CAPS.maxAccumLossUsd
       ? { ok: false, detail: `누적 손실 $${loss.lossUsd.toFixed(2)} ≥ 상한` }
       : { ok: true, detail: `$${loss.lossUsd.toFixed(2)}` });
 
-  const dailyRes = await loadDailyState(deps);
-  const dayKey = manilaDayKey(deps.now());
+  const dailyRes = await runAllowedPreflightOperation(
+    'readonly', 'daily_budget', () => loadDailyState(deps),
+  );
+  const dayKey = manilaDayKey(now);
   if (dailyRes.corrupt) {
     // 영속 상태 손상 = 해석 불가 → fail-closed (null로 위장해 새 claim 허용 금지)
     push('daily_budget', `일일 주문 ${MANUAL_CANARY_CAPS.maxOrdersPerDay}회`,
@@ -215,54 +447,112 @@ async function evaluateAllChecks(
   } else {
     const daily = dailyRes.state;
     const used = daily && daily.dayKey === dayKey ? daily.opens : 0;
-    push('daily_budget', `일일 주문 ${MANUAL_CANARY_CAPS.maxOrdersPerDay}회`, used >= MANUAL_CANARY_CAPS.maxOrdersPerDay
-      ? { ok: false, detail: `오늘(${dayKey}) 이미 ${used}회 사용` }
-      : { ok: true, detail: `잔여 ${MANUAL_CANARY_CAPS.maxOrdersPerDay - used}회` });
+    // 날짜가 달라도 미해결 launch owner는 새 preflight를 차단한다.
+    const reserved = Boolean(daily?.launchReservation);
+    push('daily_budget', `일일 주문 ${MANUAL_CANARY_CAPS.maxOrdersPerDay}회`,
+      used >= MANUAL_CANARY_CAPS.maxOrdersPerDay
+        ? { ok: false, detail: `오늘(${dayKey}) 이미 ${used}회 사용` }
+        : reserved
+          ? { ok: false, detail: 'Canary 실행 예약 진행/조사 필요 — 새 실행 금지 (fail-closed)' }
+          : { ok: true, detail: `잔여 ${MANUAL_CANARY_CAPS.maxOrdersPerDay - used}회` });
   }
 
-  const env = deps.envSubmissionState();
+  const env = await runAllowedPreflightOperation(
+    'readonly', 'env_submission', () => deps.envSubmissionState(),
+  );
   push('env_submission', '제출 플래그/잠금 상태', env.locked || !env.submissionEnabled
     ? { ok: false, detail: env.detail }
     : { ok: true, detail: env.detail });
 
-  const priceUsd = await deps.currentPriceUsd(symbol);
+  const priceUsd = await runAllowedPreflightOperation(
+    'readonly', 'price', () => deps.currentPriceUsd(symbol),
+  );
   push('price', '현재가 확보', priceUsd !== null && priceUsd > 0
     ? { ok: true, detail: `$${priceUsd.toFixed(2)}` }
     : { ok: false, detail: '가격 조회 실패' });
 
+  // #142/#143: build-bound public GitHub Actions attestation (credential-free)
+  // 비밀값·raw 환경값·RPC URL·주소·서명·raw 오류 미포함
+  // 네트워크/응답/배포 SHA 결속이 불명확하면 UNATTESTED fail-closed.
+  push('github_ci', 'GitHub CI 인증 상태',
+    await runAllowedPreflightOperation('readonly', 'github_ci', () => deps.githubCiAttestation()));
+
   return { items, priceUsd: priceUsd !== null && priceUsd > 0 ? priceUsd : null, costSnapshot };
 }
 
-export async function runCanaryPreflight(
-  deps: ManualCanaryDeps, symbolRaw: unknown, directionRaw: unknown,
+/**
+ * GET /preflight 전용 inspection. Check dependency만 사용하므로 DB mutation,
+ * random token 발급, 실행 능력에 구조적으로 접근할 수 없다.
+ */
+export async function inspectCanaryPreflight(
+  deps: ManualCanaryCheckDeps,
+  symbolRaw: unknown,
+  directionRaw: unknown,
 ): Promise<PreflightResult> {
-  const atMs = deps.now().getTime();
+  const atMs = (await runAllowedPreflightOperation('readonly', 'clock', () => deps.now())).getTime();
   const req = validateCanaryRequest(symbolRaw, directionRaw);
   if (!req.ok) {
     return { ok: false, atMs, preflightId: null, priceUsd: null, items: [{ id: 'request', label: '요청 검증', ok: false, detail: req.reason }] };
   }
   const { items, priceUsd } = await evaluateAllChecks(deps, req.symbol, req.direction);
   const ok = items.every(i => i.ok);
-  let preflightId: string | null = null;
-  if (ok) {
-    preflightId = deps.randomId();
-    const stored: StoredPreflight = { id: preflightId, atMs, ok, symbol: req.symbol, direction: req.direction, priceUsd };
-    const prev = await deps.loadState(STATE_KEY_PREFLIGHT);
-    const casOk = await deps.casState(STATE_KEY_PREFLIGHT, prev, JSON.stringify(stored));
-    if (!casOk) {
-      // durable 저장 미확정 = 유효 preflightId 발급 금지 (best-effort 전환 금지)
-      return {
-        ok: false, atMs, preflightId: null, priceUsd,
-        items: [...items, { id: 'persist', label: 'preflight durable 저장', ok: false, detail: 'CAS 경합/실패 — preflight 재수행 필요 (fail-closed)' }],
-      };
-    }
+  return { ok, atMs, preflightId: null, items, priceUsd };
+}
+
+/**
+ * POST /preflight 전용 durable token 발급. 검사 로직은 GET inspection과
+ * 동일하며, 모든 검사가 통과한 경우에만 기존 CAS token을 발급한다.
+ */
+export async function runCanaryPreflight(
+  deps: ManualCanaryPreflightDeps,
+  symbolRaw: unknown,
+  directionRaw: unknown,
+): Promise<PreflightResult> {
+  const inspected = await inspectCanaryPreflight(deps, symbolRaw, directionRaw);
+  if (!inspected.ok) return inspected;
+
+  const preflightId = await runAllowedPreflightOperation(
+    'readonly', 'random_id', () => deps.randomId(),
+  );
+  const req = validateCanaryRequest(symbolRaw, directionRaw);
+  if (!req.ok) return inspected;
+  const stored: StoredPreflight = {
+    id: preflightId,
+    atMs: inspected.atMs,
+    ok: true,
+    symbol: req.symbol,
+    direction: req.direction,
+    priceUsd: inspected.priceUsd,
+  };
+  const prev = await runAllowedPreflightOperation(
+    'readonly', 'preflight_token_read', () => deps.loadState(STATE_KEY_PREFLIGHT),
+  );
+  const casOk = await runAllowedPreflightOperation(
+    'cas_preflight_token',
+    STATE_KEY_PREFLIGHT,
+    () => deps.casState(STATE_KEY_PREFLIGHT, prev, JSON.stringify(stored)),
+  );
+  if (!casOk) {
+    return {
+      ...inspected,
+      ok: false,
+      items: [
+        ...inspected.items,
+        {
+          id: 'persist',
+          label: 'preflight durable 저장',
+          ok: false,
+          detail: 'CAS 경합/실패 — preflight 재수행 필요 (fail-closed)',
+        },
+      ],
+    };
   }
-  return { ok, atMs, preflightId, items, priceUsd };
+  return { ...inspected, preflightId };
 }
 
 // ── Daily durable claim ──────────────────────────────────────────────────────
 /** 손상(파싱 실패)은 null과 구분 — 손상 시 어떤 실행 경로도 진행 금지 (fail-closed) */
-async function loadDailyState(deps: ManualCanaryDeps): Promise<
+async function loadDailyState(deps: Pick<ManualCanaryPreflightDeps, 'loadState'>): Promise<
   { corrupt: false; state: DailyCanaryState | null; raw: string | null } | { corrupt: true; state: null; raw: string | null }
 > {
   const raw = await deps.loadState(STATE_KEY_DAILY);
@@ -276,28 +566,129 @@ async function loadDailyState(deps: ManualCanaryDeps): Promise<
   } catch { return { corrupt: true, state: null, raw }; }
 }
 
-/** 제출 전 durable claim — CAS 실패/예산 소진/상태 손상 = fail-closed */
-export async function claimDailyBudget(
-  deps: ManualCanaryDeps, openIntentId: string,
-  openBinding: DailyCanaryState['open'] = null,
-): Promise<{ ok: true } | { ok: false; reason: string }> {
+type DailyClaimResult = { ok: true } | { ok: false; reason: string };
+
+function emptyDailyState(dayKey: string): DailyCanaryState {
+  return {
+    dayKey,
+    opens: 0,
+    openIntentId: null,
+    closeIntentId: null,
+    emergencyCloseUsed: false,
+    openedAt: null,
+    open: null,
+    launchReservation: null,
+  };
+}
+
+/**
+ * Durable launch-owner reservation. Only the CAS winner may record the
+ * process-global execution evidence used by OPEN and initial-stop handoff.
+ */
+async function reserveDailyLaunch(
+  deps: ManualCanaryDeps,
+  reservationId: string,
+  openIntentId: string,
+  openBinding: NonNullable<DailyCanaryState['open']>,
+): Promise<DailyClaimResult> {
   const dayKey = manilaDayKey(deps.now());
   const loaded = await loadDailyState(deps);
-  if (loaded.corrupt) return { ok: false, reason: '일일 상태 레코드 손상 — 새 claim 금지 (fail-closed)' };
+  if (loaded.corrupt) return { ok: false, reason: '일일 상태 레코드 손상 — 새 예약 금지 (fail-closed)' };
   const prev = loaded.state;
   const prevRaw = loaded.raw;
+  // 날짜가 바뀌어도 unresolved reservation을 절대 덮어쓰지 않는다.
+  // 기존 owner가 release/resolve하기 전까지 모든 새 launch를 차단한다.
+  if (prev?.launchReservation) {
+    return { ok: false, reason: '다른 Canary 실행 예약 진행/조사 필요 — 제출 0회 (fail-closed)' };
+  }
   if (prev && prev.dayKey === dayKey && prev.opens >= MANUAL_CANARY_CAPS.maxOrdersPerDay) {
     return { ok: false, reason: `일일 ${MANUAL_CANARY_CAPS.maxOrdersPerDay}회 소진 (${dayKey})` };
   }
+  const base = prev && prev.dayKey === dayKey ? prev : emptyDailyState(dayKey);
   const next: DailyCanaryState = {
-    dayKey, opens: (prev && prev.dayKey === dayKey ? prev.opens : 0) + 1,
-    openIntentId, closeIntentId: null, emergencyCloseUsed: false,
-    openedAt: deps.now().toISOString(),
-    open: openBinding,
+    ...base,
+    launchReservation: {
+      id: reservationId,
+      openIntentId,
+      reservedAt: deps.now().toISOString(),
+      open: openBinding,
+    },
   };
   const casOk = await deps.casState(STATE_KEY_DAILY, prevRaw, JSON.stringify(next));
-  if (!casOk) return { ok: false, reason: '일일 예산 durable claim 경합/실패 — 제출 0회 (fail-closed)' };
+  if (!casOk) return { ok: false, reason: 'Canary 실행 예약 CAS 경합/실패 — 제출 0회 (fail-closed)' };
   return { ok: true };
+}
+
+async function commitDailyLaunch(
+  deps: ManualCanaryDeps,
+  reservationId: string,
+): Promise<DailyClaimResult> {
+  const dayKey = manilaDayKey(deps.now());
+  const loaded = await loadDailyState(deps);
+  if (loaded.corrupt || !loaded.state || loaded.state.dayKey !== dayKey) {
+    return { ok: false, reason: 'Canary 실행 예약 상태 조회 실패 — 제출 0회 (fail-closed)' };
+  }
+  const current = loaded.state;
+  const reservation = current.launchReservation;
+  if (!reservation || reservation.id !== reservationId) {
+    return { ok: false, reason: 'Canary 실행 예약 소유권 불일치 — 제출 0회 (fail-closed)' };
+  }
+  if (current.opens >= MANUAL_CANARY_CAPS.maxOrdersPerDay) {
+    return { ok: false, reason: `일일 ${MANUAL_CANARY_CAPS.maxOrdersPerDay}회 소진 (${dayKey})` };
+  }
+  const next: DailyCanaryState = {
+    ...current,
+    opens: current.opens + 1,
+    openIntentId: reservation.openIntentId,
+    closeIntentId: null,
+    emergencyCloseUsed: false,
+    openedAt: deps.now().toISOString(),
+    open: reservation.open,
+    launchReservation: null,
+  };
+  const casOk = await deps.casState(STATE_KEY_DAILY, loaded.raw, JSON.stringify(next));
+  if (!casOk) return { ok: false, reason: 'Canary 실행 예약 commit 경합/실패 — 제출 0회 (fail-closed)' };
+  return { ok: true };
+}
+
+async function releaseDailyLaunch(
+  deps: ManualCanaryDeps,
+  reservationId: string,
+): Promise<boolean> {
+  const loaded = await loadDailyState(deps);
+  if (loaded.corrupt || !loaded.state) return false;
+  const current = loaded.state;
+  if (!current.launchReservation || current.launchReservation.id !== reservationId) return false;
+  const next: DailyCanaryState = {
+    ...current,
+    launchReservation: null,
+    ...(current.opens === 0
+      ? { openIntentId: null, openedAt: null, open: null }
+      : {}),
+  };
+  return deps.casState(STATE_KEY_DAILY, loaded.raw, JSON.stringify(next));
+}
+
+/** 제출 전 durable claim — reservation+commit CAS, 실패/예산 소진/손상 = fail-closed */
+export async function claimDailyBudget(
+  deps: ManualCanaryDeps, openIntentId: string,
+  openBinding: DailyCanaryState['open'] = null,
+): Promise<DailyClaimResult> {
+  const binding = openBinding ?? {
+    symbol: 'BTC',
+    direction: 'LONG' as const,
+    collateralUsd: MANUAL_CANARY_CAPS.maxCollateralUsd,
+    leverage: MANUAL_CANARY_CAPS.maxLeverage,
+    requestedSizeUsd: MANUAL_CANARY_CAPS.maxNotionalUsd,
+  };
+  const reservationId = `claim:${deps.randomId()}`;
+  const reserved = await reserveDailyLaunch(deps, reservationId, openIntentId, binding);
+  if (!reserved.ok) return reserved;
+  const committed = await commitDailyLaunch(deps, reservationId);
+  if (!committed.ok) {
+    await releaseDailyLaunch(deps, reservationId).catch(() => false);
+  }
+  return committed;
 }
 
 // ── Execute (2단계) ──────────────────────────────────────────────────────────
@@ -378,11 +769,43 @@ export async function executeManualCanaryOpen(deps: ManualCanaryDeps, body: {
     return reject(`최종 크기 왕복 비용 $${cost.roundTripCostUsd.toFixed(3)} > 상한 $${MANUAL_CANARY_CAPS.maxRoundTripCostUsd} — 명시 거부`);
   }
 
-  // durable claim 먼저 (제출 전) — 실패 시 제출 0회. OPEN 요청 결속 함께 영속.
-  const claim = await claimDailyBudget(deps, intentId, {
+  // durable claim 및 execute 직전 BTC+ETH 권위 decimals를 다시 확인한다.
+  // 선택 심볼만 통과하거나 preflight 시점의 UI 상태만 믿는 경로를 금지한다.
+  const finalDecimals = await deps.canaryDecimalsReady();
+  if (!finalDecimals.ok) {
+    return reject(`실행 직전 BTC+ETH decimals 재검증 실패 — ${finalDecimals.detail} (제출 0회)`);
+  }
+
+  const openBinding: NonNullable<DailyCanaryState['open']> = {
     symbol: req.symbol, direction: req.direction, collateralUsd, leverage, requestedSizeUsd: sizeUsd,
-  });
-  if (!claim.ok) return reject(claim.reason);
+  };
+  const reservationId = `launch:${deps.randomId()}`;
+  const reserved = await reserveDailyLaunch(deps, reservationId, intentId, openBinding);
+  if (!reserved.ok) return reject(reserved.reason);
+
+  // Durable reservation owner만 전역 실행 증거를 갱신한다. 실패/throw는 예약을
+  // 해제하고 일일 opens를 0으로 유지한다.
+  let evidenceRecorded = false;
+  try {
+    evidenceRecorded = await deps.recordCostEvidenceForExecution(
+      cost.snapshot,
+      { market: marketAddress, isLong, orderType: 'MarketIncrease', notionalUsd: sizeUsd },
+      deps.now().getTime(),
+    );
+  } catch {
+    evidenceRecorded = false;
+  }
+  if (!evidenceRecorded) {
+    await releaseDailyLaunch(deps, reservationId).catch(() => false);
+    return reject('실행 직전 비용 증거/stop capability 갱신 실패 — 제출 0회 (fail-closed)');
+  }
+
+  // Evidence가 준비된 동일 reservation owner만 일일 1회 claim을 확정한다.
+  const committed = await commitDailyLaunch(deps, reservationId);
+  if (!committed.ok) {
+    await releaseDailyLaunch(deps, reservationId).catch(() => false);
+    return reject(committed.reason);
+  }
 
   const result = await deps.executeOrder({
     decisionId,
@@ -462,11 +885,30 @@ export async function executeManualCanaryClose(deps: ManualCanaryDeps, body: {
   const price = await deps.currentPriceUsd(sym);
   if (!marketAddress || price === null) return reject('시장/가격 확인 불가 — 제출 0회');
 
-  // close 크기 = authoritative 온체인 포지션 실측 (요청/고정값 사용 금지)
+  // close 크기 및 exact 포지션 결속 = authoritative 온체인 포지션 실측 (요청/고정값 사용 금지)
+  // positionKey + collateralToken을 포함한 full identity를 lower 계층에 넘겨
+  // closeLiveTestPosition 내 re-read가 다른 포지션을 대체하지 못하도록 한다.
   const positions = await deps.openPositions();
   if (positions === null) return reject('온체인 포지션 조회 실패 — 제출 0회 (fail-closed)');
-  const pos = positions.find(p => p.marketAddress.toLowerCase() === marketAddress.toLowerCase() && p.isLong === isLong);
+  const matched = positions.filter(p =>
+    p.marketAddress.toLowerCase() === marketAddress.toLowerCase()
+    && p.isLong === isLong
+    && p.accountAddress.toLowerCase() === deps.mainAddress().toLowerCase()
+  );
+  const pos = matched.length === 1 ? matched[0] : null;
   if (!pos || !(pos.sizeUsd > 0)) return reject('결속된 canary 포지션을 온체인에서 확인 불가 — 제출 0회');
+
+  // exact 포지션 결속: positionKey와 collateralToken은 PositionReader canonical 값 (0030)
+  const exactPosition: ClosePositionBinding = {
+    account:               deps.mainAddress().toLowerCase(),
+    marketAddress:         pos.marketAddress.toLowerCase(),
+    collateralToken:       pos.collateralToken.toLowerCase(),
+    positionKey:           pos.positionKey,
+    preSizeUsd:            pos.sizeUsd,
+    preSizeUsd30:          pos.sizeUsd30,
+    requestedReductionUsd: pos.sizeUsd,  // 전량 청산 — CLOSE는 항상 full
+    requestedReductionUsd30: pos.sizeUsd30,
+  };
 
   const loss = await deps.accumCanaryLossUsd();
   if (!loss.ok || loss.lossUsd === null) return reject('누적 손실 조회 실패 — 제출 0회');
@@ -481,6 +923,7 @@ export async function executeManualCanaryClose(deps: ManualCanaryDeps, body: {
     sizeUsd: pos.sizeUsd, currentPriceUsd: price,
     mainAddress: deps.mainAddress(), accumLossUsd: loss.lossUsd, dbOk: true,
     liveTestMode: deps.liveTestMode(), manualCanary: true,
+    exactPosition,  // 0030: exact 포지션 결속 — lower re-read 대체 금지
   });
   if (result.simulated) return { ok: false, phase: 'SIMULATED', reason: 'LIVE 잠금 — 시뮬레이션', intentId: closeIntentId, failures: [] };
   if (result.ok) return { ok: true, phase: 'SUBMITTED', reason: null, intentId: closeIntentId, failures: [] };
@@ -488,6 +931,66 @@ export async function executeManualCanaryClose(deps: ManualCanaryDeps, body: {
 }
 
 // ── Status (단계별 — 온체인 증거 기반) ───────────────────────────────────────
+
+/**
+ * #142: Sanitized blocker analysis for CanaryStageStatus.
+ * No secret values, raw env values, RPC URLs, addresses, signatures, raw errors.
+ */
+function deriveCanaryBlockers(failedItems: PreflightItem[]): CanaryBlocker[] {
+  const blockers: CanaryBlocker[] = [];
+  const ids = new Set(failedItems.map(i => i.id));
+
+  const codeChecks = new Set(['deployment', 'router_pin']);
+  const configChecks = new Set(['allowance', 'gmx_api', 'env_submission', 'cost_snapshot', 'signer_binding']);
+  const operatorChecks = new Set(['owner_approval', 'canonical_authorization', 'reconciliation', 'rpc', 'open_positions', 'decimals', 'stop_capability', 'accum_loss', 'daily_budget', 'price', 'persist']);
+
+  const codeIds = failedItems.filter(i => codeChecks.has(i.id)).map(i => i.id);
+  if (codeIds.length > 0) {
+    blockers.push({
+      category: 'CODE',
+      id: 'CODE',
+      message: CANARY_BLOCKER_CATEGORIES.CODE.stableMessage,
+      blocking: true,
+      failedCheckIds: codeIds,
+    });
+  }
+
+  const configIds = failedItems.filter(i => configChecks.has(i.id)).map(i => i.id);
+  if (configIds.length > 0) {
+    blockers.push({
+      category: 'CONFIGURATION',
+      id: 'CONFIGURATION',
+      message: CANARY_BLOCKER_CATEGORIES.CONFIGURATION.stableMessage,
+      blocking: true,
+      failedCheckIds: configIds,
+    });
+  }
+
+  const operatorIds = failedItems.filter(i => operatorChecks.has(i.id)).map(i => i.id);
+  if (operatorIds.length > 0) {
+    blockers.push({
+      category: 'OPERATOR_MANUAL_ACTION',
+      id: 'OPERATOR_MANUAL_ACTION',
+      message: CANARY_BLOCKER_CATEGORIES.OPERATOR_MANUAL_ACTION.stableMessage,
+      blocking: true,
+      failedCheckIds: operatorIds,
+    });
+  }
+
+  // GITHUB_CI always fails closed as UNATTESTED — no app-side credentials
+  if (ids.has('github_ci')) {
+    blockers.push({
+      category: 'GITHUB_CI',
+      id: 'GITHUB_CI',
+      message: CANARY_BLOCKER_CATEGORIES.GITHUB_CI.stableMessage,
+      blocking: true,
+      failedCheckIds: ['github_ci'],
+    });
+  }
+
+  return blockers;
+}
+
 export interface CanaryStageStatus {
   caps: typeof MANUAL_CANARY_CAPS;
   dayKey: string;
@@ -499,11 +1002,16 @@ export interface CanaryStageStatus {
     confirmed: { status: string; detail: string };
     readback: { status: string; detail: string };
   };
+  /** #142: Sanitized blocker categories — no secret/raw values */
+  blockers: CanaryBlocker[];
 }
 
-export async function getCanaryStatus(deps: ManualCanaryDeps): Promise<CanaryStageStatus> {
-  const dayKey = manilaDayKey(deps.now());
-  const loaded = await loadDailyState(deps);
+export async function getCanaryStatus(deps: ManualCanaryStatusDeps): Promise<CanaryStageStatus> {
+  const now = await runAllowedCanaryStatusOperation('clock', () => deps.now());
+  const dayKey = manilaDayKey(now);
+  const loaded = await runAllowedCanaryStatusOperation(
+    'daily_state', () => loadDailyState(deps),
+  );
   const daily = loaded.corrupt ? null : loaded.state;
   const pending = { status: 'PENDING', detail: '대기' };
   const stages: CanaryStageStatus['stages'] = {
@@ -511,30 +1019,66 @@ export async function getCanaryStatus(deps: ManualCanaryDeps): Promise<CanarySta
     confirmed: { ...pending }, readback: { ...pending },
   };
   if (daily?.openIntentId) {
-    const open = await deps.intentStatus(daily.openIntentId);
+    const open = await runAllowedCanaryStatusOperation(
+      'intent_status', () => deps.intentStatus(daily.openIntentId as string),
+    );
     stages.open = !open
       ? { status: 'UNKNOWN', detail: 'intent 조회 실패' }
       : { status: open.status, detail: open.status === 'CONFIRMED' ? `온체인 확정 (orderKey ${open.orderKey ? '확보' : '없음'})` : open.status };
     if (open?.status === 'CONFIRMED') {
-      const stop = await deps.initialStopStatus(daily.openIntentId);
+      const stop = await runAllowedCanaryStatusOperation(
+        'initial_stop_status',
+        () => deps.initialStopStatus(daily.openIntentId as string),
+      );
       stages.stop = stop.status === 'ACTIVE' && stop.orderKey
         ? { status: 'ACTIVE', detail: '온체인 orderKey 증거 확인' }
         : { status: stop.status ?? 'MISSING', detail: stop.status ? `미확정 (${stop.status}) — 신규 주문 금지, emergency close만` : 'stop 없음 — emergency close만' };
     }
   }
   if (daily?.closeIntentId) {
-    const close = await deps.intentStatus(daily.closeIntentId);
+    const close = await runAllowedCanaryStatusOperation(
+      'intent_status', () => deps.intentStatus(daily.closeIntentId as string),
+    );
     stages.close = close ? { status: close.status, detail: close.status } : { status: 'UNKNOWN', detail: 'intent 조회 실패' };
     if (close?.status === 'CONFIRMED') {
       stages.confirmed = { status: 'CONFIRMED', detail: '온체인 확정' };
-      const posCount = await deps.openPositionCount();
-      const loss = await deps.accumCanaryLossUsd();
+      const posCount = await runAllowedCanaryStatusOperation(
+        'position_readback', () => deps.openPositionCount(),
+      );
+      const loss = await runAllowedCanaryStatusOperation(
+        'loss_readback', () => deps.accumCanaryLossUsd(),
+      );
       stages.readback = posCount === 0 && loss.ok
         ? { status: 'DONE', detail: `포지션 0 · 누적 손실 $${(loss.lossUsd ?? 0).toFixed(2)}` }
         : { status: 'PENDING', detail: posCount === null ? '포지션 조회 실패' : `포지션 ${posCount}건 / PnL readback ${loss.ok ? '완료' : '실패'}` };
     }
   }
-  return { caps: MANUAL_CANARY_CAPS, dayKey, daily, stages };
+
+  // #142: derive sanitized blockers from current preflight state
+  // Run a minimal evaluation to identify active blockers for status display
+  // (read-only, no execution capability)
+  const blockers: CanaryBlocker[] = [];
+  try {
+    const sym = daily?.open?.symbol ?? MANUAL_CANARY_CAPS.allowedSymbols[0]!;
+    const dir = (daily?.open?.direction ?? 'LONG') as 'LONG' | 'SHORT';
+    const eval_ = await runAllowedCanaryStatusOperation(
+      'preflight_check_evaluation',
+      () => evaluateAllChecks(deps, sym, dir),
+    );
+    const failedItems = eval_.items.filter(i => !i.ok);
+    blockers.push(...deriveCanaryBlockers(failedItems));
+  } catch {
+    // fail-closed: status evaluation error → report OPERATOR_MANUAL_ACTION
+    blockers.push({
+      category: 'OPERATOR_MANUAL_ACTION',
+      id: 'OPERATOR_MANUAL_ACTION',
+      message: CANARY_BLOCKER_CATEGORIES.OPERATOR_MANUAL_ACTION.stableMessage,
+      blocking: true,
+      failedCheckIds: ['status_evaluation_error'],
+    });
+  }
+
+  return { caps: MANUAL_CANARY_CAPS, dayKey, daily, stages, blockers };
 }
 
 export const __defaultIdFactory = { randomUUID };

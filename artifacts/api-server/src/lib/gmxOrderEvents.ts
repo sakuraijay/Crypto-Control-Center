@@ -160,8 +160,39 @@ export const EVENT_LOG_2_ABI: AbiEvent = {
   ],
 } as unknown as AbiEvent;
 
+/**
+ * EventEmitter.EventLog1 공식 ABI. PositionDecrease / PositionFeesCollected /
+ * KeeperExecutionFee는 topic1 하나만 쓰는 EventLog1으로 방출된다.
+ */
+export const EVENT_LOG_1_ABI: AbiEvent = {
+  type: 'event',
+  name: 'EventLog1',
+  inputs: [
+    { type: 'address', name: 'msgSender', indexed: false },
+    { type: 'string',  name: 'eventName', indexed: false },
+    { type: 'string',  name: 'eventNameHash', indexed: true },
+    { type: 'bytes32', name: 'topic1', indexed: true },
+    {
+      type: 'tuple',
+      name: 'eventData',
+      indexed: false,
+      components: [
+        { ...itemsTuple('address'), name: 'addressItems' },
+        { ...itemsTuple('uint256'), name: 'uintItems' },
+        { ...itemsTuple('int256'),  name: 'intItems' },
+        { ...itemsTuple('bool'),    name: 'boolItems' },
+        { ...itemsTuple('bytes32'), name: 'bytes32Items' },
+        { ...itemsTuple('bytes'),   name: 'bytesItems' },
+        { ...itemsTuple('string'),  name: 'stringItems' },
+      ],
+    },
+  ],
+} as unknown as AbiEvent;
+
 /** EventLog2 signature hash (topic0) — ABI에서 계산, 절대 손으로 하드코딩하지 않음 */
 export const EVENT_LOG_2_TOPIC0 = toEventSelector(EVENT_LOG_2_ABI);
+/** EventLog1 signature hash — ABI에서 계산, 하드코딩 금지 */
+export const EVENT_LOG_1_TOPIC0 = toEventSelector(EVENT_LOG_1_ABI);
 
 /** eventNameHash = keccak256(utf8 bytes of event name) — indexed string topic 규칙 */
 export const ORDER_EVENT_NAME_HASH = {
@@ -185,6 +216,7 @@ export interface RawLog {
 export interface DecodedEventData {
   addressItems: Map<string, string>;
   uintItems:    Map<string, bigint>;
+  intItems:     Map<string, bigint>;
   boolItems:    Map<string, boolean>;
   bytes32Items: Map<string, string>;
   addressArrayItems: Map<string, string[]>;
@@ -207,11 +239,11 @@ function intoMap<T>(items: readonly { key: string; value: T }[], dups: string[])
  * EventLog2 로그의 eventData(EventUtils.EventLogData)를 공식 ABI로 디코딩.
  * data 부재/디코딩 실패 = null — 호출측은 "검증 불가 = 성공 가정 금지"로 처리해야 한다.
  */
-export function decodeEventLog2Data(log: RawLog): DecodedEventData | null {
+function decodeKnownEventLogData(log: RawLog, abi: AbiEvent): DecodedEventData | null {
   if (!log.data || log.data === '0x') return null;
   try {
     const decoded = decodeEventLog({
-      abi: [EVENT_LOG_2_ABI],
+      abi: [abi],
       data: log.data as `0x${string}`,
       topics: log.topics as [`0x${string}`, ...`0x${string}`[]],
     });
@@ -220,11 +252,13 @@ export function decodeEventLog2Data(log: RawLog): DecodedEventData | null {
     const dups: string[] = [];
     const addr = ev.addressItems as ItemsShape<string> | undefined;
     const uint = ev.uintItems as ItemsShape<bigint> | undefined;
+    const int  = ev.intItems as ItemsShape<bigint> | undefined;
     const bool = ev.boolItems as ItemsShape<boolean> | undefined;
     const b32  = ev.bytes32Items as ItemsShape<string> | undefined;
     return {
       addressItems: intoMap(addr?.items ?? [], dups),
       uintItems:    intoMap(uint?.items ?? [], dups),
+      intItems:     intoMap(int?.items ?? [], dups),
       boolItems:    intoMap(bool?.items ?? [], dups),
       bytes32Items: intoMap(b32?.items ?? [], dups),
       addressArrayItems: intoMap(
@@ -233,6 +267,17 @@ export function decodeEventLog2Data(log: RawLog): DecodedEventData | null {
       duplicateKeys: dups,
     };
   } catch { return null; }
+}
+
+export function decodeEventLog2Data(log: RawLog): DecodedEventData | null {
+  if (log.topics?.[0]?.toLowerCase() !== EVENT_LOG_2_TOPIC0.toLowerCase()) return null;
+  return decodeKnownEventLogData(log, EVENT_LOG_2_ABI);
+}
+
+/** EventLog1 전용 디코더 — exact signature가 아니면 null. */
+export function decodeEventLog1Data(log: RawLog): DecodedEventData | null {
+  if (log.topics?.[0]?.toLowerCase() !== EVENT_LOG_1_TOPIC0.toLowerCase()) return null;
+  return decodeKnownEventLogData(log, EVENT_LOG_1_ABI);
 }
 
 /** topic2 (= account) 위치: topics[3] — [sig, eventNameHash, topic1(key), topic2(account)] */
@@ -295,7 +340,12 @@ export function extractOrderKeyFromReceiptLogs(
 }
 
 export type OrderResolution =
-  | { kind: 'executed' | 'cancelled' | 'frozen'; txHash: string | null; blockNumber: string | null }
+  | {
+      kind: 'executed' | 'cancelled' | 'frozen';
+      txHash: string | null;
+      blockNumber: string | null;
+      emitterAddress: string;
+    }
   | null;
 
 /**
@@ -330,5 +380,6 @@ export function classifyOrderResolutionLogs(
     kind:        found.kind,
     txHash:      found.log.transactionHash ?? null,
     blockNumber: bn == null ? null : String(bn),
+    emitterAddress: found.log.address,
   };
 }

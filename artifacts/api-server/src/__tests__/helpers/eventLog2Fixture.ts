@@ -4,8 +4,12 @@
  * decodeEventLog2Data(프로덕션 디코더)가 실제 온체인 로그와 동일하게 해석한다.
  * 실 RPC 0회 — 전부 로컬 인코딩.
  */
-import { encodeAbiParameters, pad, type AbiParameter } from 'viem';
-import { EVENT_LOG_2_ABI, EVENT_LOG_2_TOPIC0, ORDER_EVENT_NAME_HASH, type RawLog } from '../../lib/gmxOrderEvents';
+import { encodeAbiParameters, keccak256, pad, toHex, type AbiParameter } from 'viem';
+import {
+  EVENT_LOG_1_ABI, EVENT_LOG_1_TOPIC0,
+  EVENT_LOG_2_ABI, EVENT_LOG_2_TOPIC0,
+  ORDER_EVENT_NAME_HASH, type RawLog,
+} from '../../lib/gmxOrderEvents';
 
 type KV<T> = { key: string; value: T };
 type Items<T> = { items: KV<T>[]; arrayItems: { key: string; value: T[] }[] };
@@ -16,6 +20,7 @@ export interface EventDataFields {
   addressItems?: KV<`0x${string}`>[];
   addressArrayItems?: { key: string; value: `0x${string}`[] }[];
   uintItems?: KV<bigint>[];
+  intItems?: KV<bigint>[];
   boolItems?: KV<boolean>[];
   bytes32Items?: KV<`0x${string}`>[];
 }
@@ -30,7 +35,7 @@ export function encodeEventLog2Data(eventName: string, fields: EventDataFields):
       arrayItems: fields.addressArrayItems ?? [],
     },
     uintItems: { items: fields.uintItems ?? [], arrayItems: [] },
-    intItems: emptyItems<bigint>(),
+    intItems: { items: fields.intItems ?? [], arrayItems: [] },
     boolItems: { items: fields.boolItems ?? [], arrayItems: [] },
     bytes32Items: { items: fields.bytes32Items ?? [], arrayItems: [] },
     bytesItems: emptyItems<`0x${string}`>(),
@@ -41,6 +46,50 @@ export function encodeEventLog2Data(eventName: string, fields: EventDataFields):
     eventName,
     eventData,
   ]);
+}
+
+/** EventLog1 비인덱스 파라미터(msgSender, eventName, eventData) ABI 인코딩 */
+export function encodeEventLog1Data(eventName: string, fields: EventDataFields): `0x${string}` {
+  const nonIndexed = (EVENT_LOG_1_ABI.inputs as readonly (AbiParameter & { indexed?: boolean })[])
+    .filter(i => !i.indexed);
+  const eventData = {
+    addressItems: {
+      items: fields.addressItems ?? [],
+      arrayItems: fields.addressArrayItems ?? [],
+    },
+    uintItems: { items: fields.uintItems ?? [], arrayItems: [] },
+    intItems: { items: fields.intItems ?? [], arrayItems: [] },
+    boolItems: { items: fields.boolItems ?? [], arrayItems: [] },
+    bytes32Items: { items: fields.bytes32Items ?? [], arrayItems: [] },
+    bytesItems: emptyItems<`0x${string}`>(),
+    stringItems: emptyItems<string>(),
+  };
+  return encodeAbiParameters(nonIndexed, [
+    '0x' + '11'.repeat(20) as `0x${string}`,
+    eventName,
+    eventData,
+  ]);
+}
+
+export function mkEventLog1(args: {
+  name: string;
+  topic1: string;
+  emitter: string;
+  txHash: string;
+  blockNumber: string;
+  fields: EventDataFields;
+}): RawLog {
+  return {
+    address: args.emitter,
+    topics: [
+      EVENT_LOG_1_TOPIC0,
+      keccak256(toHex(args.name)),
+      args.topic1,
+    ],
+    transactionHash: args.txHash,
+    blockNumber: args.blockNumber,
+    data: encodeEventLog1Data(args.name, args.fields),
+  };
 }
 
 export interface VerifiedLogArgs {

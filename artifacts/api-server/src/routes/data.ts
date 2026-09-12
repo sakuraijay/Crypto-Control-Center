@@ -12,8 +12,15 @@ import { Router } from "express";
 import { db, tradesTable, strategyConfigTable, workerStateTable } from "@workspace/db";
 import { and, desc, eq } from "drizzle-orm";
 import { getPaperCostBinding } from "../lib/paperCostCache";
-import { clampDailyTargetUSDT } from "../lib/riskPolicy";
+import { RISK_POLICY, clampDailyTargetUSDT } from "../lib/riskPolicy";
 import { accrueHoldingCostsFromEntryRates, computePaperNetPnl } from "../lib/holdingCosts";
+import { requireOperatorAuth } from "../lib/operatorAuthGuard";
+import {
+  getRiskProfileStatus,
+  parseRiskProfileName,
+  profileBaseLimits,
+  requestRiskProfile,
+} from "../lib/riskProfiles";
 
 const router = Router();
 
@@ -378,6 +385,36 @@ router.put("/data/strategy", async (req, res) => {
   }
 });
 
+/** GET /api/data/risk-profile — 권위 프로필의 desired/applied/pending 상태 */
+router.get("/data/risk-profile", async (_req, res) => {
+  try {
+    const rows = await db.select({ limits: strategyConfigTable.limits })
+      .from(strategyConfigTable).limit(1);
+    res.json(await getRiskProfileStatus(profileBaseLimits(rows[0]?.limits)));
+  } catch {
+    res.status(503).json({ error: "Risk profile status unavailable (fail-closed)" });
+  }
+});
+
+/**
+ * PUT /api/data/risk-profile — 프로필 변경 요청만 기록한다.
+ * 실제 적용은 Worker가 열린 포지션/승인/intent/close가 없는 안전 사이클 경계에서 수행한다.
+ */
+router.put("/data/risk-profile", requireOperatorAuth, async (req, res) => {
+  const name = parseRiskProfileName(req.body?.profile);
+  if (!name) {
+    return res.status(400).json({ error: "profile must be conservative or aggressive" });
+  }
+  try {
+    await requestRiskProfile(name);
+    const rows = await db.select({ limits: strategyConfigTable.limits })
+      .from(strategyConfigTable).limit(1);
+    return res.json(await getRiskProfileStatus(profileBaseLimits(rows[0]?.limits)));
+  } catch {
+    return res.status(503).json({ error: "Risk profile request could not be persisted" });
+  }
+});
+
 /**
  * safeNum — parse any value to a finite number.
  * Returns the parsed value if finite, undefined otherwise.
@@ -400,19 +437,19 @@ function clampRiskLimits(limits: unknown): unknown {
   const lim     = limits as Record<string, unknown>;
   const clamped: Record<string, unknown> = { ...lim };
 
-  // maxDrawdownPercent: 1% ≤ x ≤ 50% — above 50% is unsafe, below 1% blocks all trades
+  // maxDrawdownPercent: 기존 값이 더 엄격하면 보존, 완화는 8%에서 차단
   if ('maxDrawdownPercent' in clamped) {
     const v = safeNum(clamped.maxDrawdownPercent);
-    clamped.maxDrawdownPercent = v !== undefined ? Math.min(50, Math.max(1, v)) : undefined;
+    clamped.maxDrawdownPercent = v !== undefined ? Math.min(8, Math.max(1, v)) : undefined;
   }
 
   // ── 6H-1 $1,000 최종 정책 하드캡 ────────────────────────────────────────
   // UI에서 어떤 값을 보내도 서버가 정책 상한으로 강제 클램프한다.
 
-  // dailyLossLimitUSDT: $10 ≤ x ≤ $30 (risk capital $1,000 × 3%)
+  // dailyLossLimitUSDT: 최대 $10 (현재 Active $1,000 × 1%)
   if ('dailyLossLimitUSDT' in clamped) {
     const v = safeNum(clamped.dailyLossLimitUSDT);
-    clamped.dailyLossLimitUSDT = v !== undefined ? Math.min(30, Math.max(10, v)) : undefined;
+    clamped.dailyLossLimitUSDT = v !== undefined ? Math.min(10, Math.max(0, v)) : undefined;
   }
 
   // weeklyLossLimitUSDT: $10 ≤ x ≤ $80 (risk capital $1,000 × 8%)
@@ -425,6 +462,14 @@ function clampRiskLimits(limits: unknown): unknown {
   if ('maxLeverage' in clamped) {
     const v = safeNum(clamped.maxLeverage);
     clamped.maxLeverage = v !== undefined ? Math.min(3, Math.max(1, v)) : undefined;
+  }
+
+  // maxMarginPerTrade: 현재 Active 단계의 보수적 절대 상한 $334
+  if ('maxMarginPerTrade' in clamped) {
+    const v = safeNum(clamped.maxMarginPerTrade);
+    clamped.maxMarginPerTrade = v !== undefined
+      ? Math.min(RISK_POLICY.maxMarginPerTradeUsd, Math.max(0, v))
+      : undefined;
   }
 
   // tradingCapital: $10 ≤ x ≤ $1,000 — 초과 자본은 위험 산정에서 제외 (복리 금지)

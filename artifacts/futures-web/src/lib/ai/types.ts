@@ -146,6 +146,12 @@ export interface AiEngineDecision {
   // ── LIVE TEST MODE ─────────────────────────────────
   /** True when this decision was produced while LIVE TEST MODE was active */
   testMode?: boolean;
+
+  // ── Strategy Ensemble SHADOW explainability ───────────────────────────────
+  /** Persisted display-only evidence. It never grants Risk or execution authority. */
+  strategyEnsembleShadow?: unknown;
+  /** Persisted read-only Risk projection. It never grants execution authority. */
+  strategyRiskAdvisory?: unknown;
 }
 
 export interface AiEngineStats {

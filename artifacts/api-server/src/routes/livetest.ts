@@ -21,6 +21,7 @@ import {
   prepareApprovalSession,
   submitApprovalSignature,
   getActiveReadySession,
+  recoverActiveReadySession,
   getConfiguredMainAccount,
   APPROVAL_LIMITS,
 } from '../lib/ownerApprovalSession';
@@ -212,13 +213,19 @@ router.get('/executor/subaccount-auth', async (_req, res) => {
       nowSec,
     });
 
-    // READY 세션 조회 — canonical nonce와 불일치 시 내부에서 즉시 무효화됨.
-    // canonical 미확인이면 nonce 판단 보류(null).
-    const readySession = await getActiveReadySession({
+    // READY 세션 조회는 read-only: 만료/불일치 세션은 논리적으로만 무효 처리한다.
+    // Persistent cleanup은 명시적 operator action 전용이다.
+    const readyRecovery = await recoverActiveReadySession({
       expectedOwner: mainAccount,
       expectedSubaccount: (signerAddress as Address | null),
+      expectedVerifyingContract: relay.ok && relay.config
+        ? relay.config.subaccountGelatoRelayRouter as Address
+        : null,
       canonicalNonce: canonical.onchain ? canonical.onchain.approvalNonce : null,
+      persistInvalidation: false,
+      verifyEncryptedSignature: false,
     });
+    const readySession = readyRecovery.ok ? readyRecovery.session : null;
 
     // 상태 표시 규칙: 서명만 저장된 경우(canonical 미등록) OWNER_SIGNATURE_READY 노출.
     // AUTHORIZED는 canonical 확인으로만 도달 — 세션 존재가 상태를 승격시키지 않는다.
@@ -256,6 +263,11 @@ router.get('/executor/subaccount-auth', async (_req, res) => {
       expiresAt: oc ? oc.expiresAt.toString() : null,
       remainingActions: oc ? oc.remaining.toString() : null,
       readySession,          // 서명·암호문 절대 미포함 (요약만)
+      ownerApprovalRecovery: {
+        ready: readyRecovery.ok,
+        code: readyRecovery.code,
+        reason: readyRecovery.reason,
+      },
       // #125 리뷰 지적 — authEligible(순수 canonical 판정)과 liveEligible(실제 서명 능력 포함)을 구분.
       // stored_public 경로는 서명 능력이 없으므로 canonical이 AUTHORIZED여도 LIVE 부적격.
       authEligible: isAuthStateLiveEligible(state),
@@ -455,12 +467,20 @@ router.get('/executor/livetest/status', async (req, res) => {
           checkDelegationStatus(mainAddress, signerAddress),
           getSignerEthBalance(rpcUrl),
         ]);
-        usdcAllowance = (await getUsdcAllowance(mainAddress)).toString();
+        // API v2 Canary의 실제 spender는 SDK-pinned SyntheticsRouter다.
+        // legacy direct SubaccountRouter allowance를 현재 readiness에 섞지 않는다.
+        const sdkRouter = resolveSdkSyntheticsRouter();
+        if (sdkRouter) {
+          const allowance = await getUsdcAllowanceForSpender(mainAddress, sdkRouter);
+          if (allowance !== null) usdcAllowance = allowance.toString();
+        }
         if (delegation) timeRemaining = delegationTimeRemainingSeconds(delegation);
       } catch { /* non-fatal */ }
     }
 
-    const subaccountRouterConfigured = Boolean(process.env.GMX_SUBACCOUNT_ROUTER_ADDRESS?.trim());
+    // API v2 readiness는 DataStore + SubaccountGelatoRelayRouter 계약을 사용한다.
+    // legacy GMX_SUBACCOUNT_ROUTER_ADDRESS 존재 여부를 현재 실행 적격성으로 표시하지 않는다.
+    const subaccountRouterConfigured = resolveGmxLiveRelayConfig().ok;
     const orderVaultConfigured       = Boolean(process.env.GMX_ORDER_VAULT_ADDRESS?.trim());
 
     return res.json({
@@ -478,6 +498,7 @@ router.get('/executor/livetest/status', async (req, res) => {
       usdcAllowanceWei:      usdcAllowance,
       usdcApproved:          BigInt(usdcAllowance) >= 15_000_000n, // ≥ 15 USDC
       delegation,
+      delegationSource:      'GMX_API_V2_DATA_STORE',
       delegationTimeRemainingSeconds: timeRemaining,
       subaccountRouterConfigured,
       orderVaultConfigured,

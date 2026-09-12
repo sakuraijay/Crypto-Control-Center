@@ -120,6 +120,24 @@ export interface RiskLimits {
   readonly testMaxPositions?: 1;
 }
 
+export interface AppliedRiskProfileSnapshot {
+  name: 'conservative' | 'aggressive';
+  version: 'risk-profile/v1';
+  appliedAt: string;
+  derivedLimits: {
+    immediateEntryThreshold: number;
+    maxRiskPerTradePct: number;
+    reserveCashPct: number;
+    maxMarginPerTradeUsd: number;
+    maxConcurrentPositions: number;
+    cooldownMinutes: number;
+    maxLeverage: number;
+    maxTotalExposureUsd: number;
+    allocatedTradingCapitalUsd: number;
+    maxRiskPerTradeUsd: number;
+  };
+}
+
 /** Full AI decision record produced by one engine cycle. */
 export interface ServerAiDecision {
   id: string;
@@ -156,4 +174,12 @@ export interface ServerAiDecision {
   source: 'server_worker';
   /** True when this decision was produced while LIVE TEST MODE was active */
   testMode?: boolean;
+  /** 사이클 시작에 확정된 불변 프로필/파생 한도 감사 스냅샷 */
+  riskProfile: AppliedRiskProfileSnapshot;
+  /** Regime-Aware Strategy Ensemble v2의 주문 불가 SHADOW explainability 봉투 */
+  strategyEnsembleShadow: import('../intel/strategyShadowWorkerEnvelopeV2').StrategyShadowWorkerEnvelope;
+  /** 기존 Risk Engine 결과의 read-only advisory projection. 실행 입력으로 사용 금지. */
+  strategyRiskAdvisory?: import('../intel/strategyRiskWorkerBridgeV2').StrategyRiskWorkerAdvisory;
+  /** SHADOW→Risk terminal 상태의 read-only 직렬화. 실행 입력으로 사용 금지. */
+  strategyDecisionExplainability?: import('../intel/strategyDecisionExplainabilityWorkerBridgeV2').StrategyDecisionExplainabilityWorkerAdvisory;
 }

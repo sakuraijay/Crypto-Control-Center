@@ -274,6 +274,9 @@ export function createProductionFetchers(deps: {
           const symbolRaw = (m['indexTokenSymbol'] ?? m['name'] ?? '') as string;
           const symbol = String(symbolRaw).split('/')[0].trim();
           const tick = ticks?.find(t => t.tokenSymbol === symbol) ?? null;
+          const tickObservedAt = tick && Number.isFinite(tick.updatedAt) && (tick.updatedAt ?? 0) > 0
+            ? tick.updatedAt as number
+            : null;
           const marketToken = String(m['marketToken'] ?? '');
           // 1e30 문자열 → BigInt 합산 → 1회 변환 (usd30.ts). 실패=null (0 위장 금지)
           // 주의: 이 endpoint의 rate 필드는 공식 SDK 계약과 불일치 (6I-4 실측) — 비용 입력 사용 금지.
@@ -287,8 +290,8 @@ export function createProductionFetchers(deps: {
             isDisabled: m['isDisabled'] === true,
             liquidityUsd,
             openInterestUsd,
-            lastPriceAtMs: tick ? (tick.updatedAt ?? nowMs) : null,
-            impactDataAvailable: tick !== null,
+            lastPriceAtMs: tickObservedAt,
+            impactDataAvailable: tick !== null && tickObservedAt !== null,
           };
         });
         const value = { rows, complete: true, failureReason: null };
@@ -305,7 +308,8 @@ export function createProductionFetchers(deps: {
       const ticks = deps.getCachedPrices();
       const t = ticks?.find(x => x.tokenSymbol === symbol);
       if (!t || !Number.isFinite(t.priceUsd) || t.priceUsd <= 0) return null;
-      return { price: t.priceUsd, observedAtMs: t.updatedAt ?? now() };
+      if (!Number.isFinite(t.updatedAt) || (t.updatedAt ?? 0) <= 0) return null;
+      return { price: t.priceUsd, observedAtMs: t.updatedAt as number };
     },
 
     async fetch24hChange(symbol) {

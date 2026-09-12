@@ -6,7 +6,7 @@ import { Switch } from '@/components/ui/switch';
 import { Button } from '@/components/ui/button';
 import { Activity, ShieldAlert, RotateCcw, Target, TrendingUp, Cpu, Info, Lock, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { useCallback, useEffect } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 function Stepper({ value, onChange, min = 0, max = 1000, step = 1 }: {
   value: number; onChange: (v: number) => void; min?: number; max?: number; step?: number;
@@ -29,8 +29,44 @@ function Stepper({ value, onChange, min = 0, max = 1000, step = 1 }: {
 }
 
 export default function Strategy() {
-  const { indicators, limits, updateIndicator, updateLimit, resetToDefaults, syncStatus, syncError } = useStrategyContext();
+  const { indicators, limits, updateIndicator, updateLimit, resetToDefaults, syncStatus, syncError, riskProfile, requestRiskProfile } = useStrategyContext();
   const { address, usdcBalance } = useWallet();
+
+  const [profileDialogOpen, setProfileDialogOpen] = useState(false);
+  const [selectedTargetProfile, setSelectedTargetProfile] = useState<'conservative' | 'aggressive' | null>(null);
+  const [pin, setPin] = useState('');
+  const [pinError, setPinError] = useState('');
+  const [profileLoading, setProfileLoading] = useState(false);
+
+  const handleRequestProfile = async () => {
+    if (!selectedTargetProfile || !pin) return;
+    setProfileLoading(true);
+    setPinError('');
+    try {
+      await requestRiskProfile(selectedTargetProfile, pin);
+      setProfileDialogOpen(false);
+      setPin('');
+    } catch (e: any) {
+      setPinError(e.message || 'Failed to update profile');
+    } finally {
+      setPin('');
+      setProfileLoading(false);
+    }
+  };
+
+  const closeProfileDialog = () => {
+    setProfileDialogOpen(false);
+    setSelectedTargetProfile(null);
+    setPin('');
+    setPinError('');
+  };
+
+  const openProfileDialog = (profile: 'conservative' | 'aggressive') => {
+    setSelectedTargetProfile(profile);
+    setPin('');
+    setPinError('');
+    setProfileDialogOpen(true);
+  };
 
   const combined = indicators.find(i => i.id === 'combined');
   const minScore = (combined?.params.minScore as number) ?? 60;
@@ -75,6 +111,58 @@ export default function Strategy() {
 
   return (
     <div className="animate-in fade-in duration-500 flex flex-col gap-6">
+      {profileDialogOpen && (
+        <div className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm flex items-center justify-center p-4" role="presentation">
+          <form
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="risk-profile-dialog-title"
+            onSubmit={event => {
+              event.preventDefault();
+              void handleRequestProfile();
+            }}
+            className="bg-popover text-popover-foreground border border-border rounded-xl shadow-lg w-full max-w-md p-6 flex flex-col gap-4 animate-in zoom-in-95 duration-200"
+          >
+            <div className="flex flex-col gap-1.5">
+              <h3 id="risk-profile-dialog-title" className="font-semibold text-lg leading-none tracking-tight">Confirm Profile Change</h3>
+              <p className="text-sm text-muted-foreground">
+                You are about to switch the operational risk profile to <strong className="uppercase text-foreground">{selectedTargetProfile}</strong>.
+                {selectedTargetProfile === 'aggressive' && (
+                  <span className="block mt-2 text-destructive font-medium">
+                    Warning: Aggressive mode significantly increases market exposure and reduces safety margins.
+                  </span>
+                )}
+              </p>
+            </div>
+            <div className="flex flex-col gap-2">
+              <label htmlFor="risk-profile-pin" className="text-xs font-semibold text-foreground">Operator PIN</label>
+              <input
+                id="risk-profile-pin"
+                type="password"
+                autoComplete="one-time-code"
+                inputMode="numeric"
+                value={pin}
+                onChange={e => setPin(e.target.value)}
+                placeholder="Enter operator PIN (6+ digits)"
+                className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring font-mono"
+              />
+              {pinError && <p className="text-[10px] text-destructive">{pinError}</p>}
+            </div>
+            <div className="flex justify-end gap-2 mt-2">
+              <Button type="button" variant="outline" onClick={closeProfileDialog} disabled={profileLoading}>Cancel</Button>
+              <Button
+                type="submit"
+                variant={selectedTargetProfile === 'aggressive' ? 'destructive' : 'default'}
+                disabled={!pin || profileLoading}
+              >
+                {profileLoading ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
+                Confirm
+              </Button>
+            </div>
+          </form>
+        </div>
+      )}
+
       <div className="flex items-center justify-between gap-3">
         <p className="text-muted-foreground text-sm">Configure signal thresholds, indicator logic, and risk guards.</p>
         <div className="flex items-center gap-2 shrink-0">
@@ -97,6 +185,103 @@ export default function Strategy() {
           <Button variant="outline" size="sm" onClick={resetToDefaults} className="h-8 text-xs">
             <RotateCcw className="w-3 h-3 mr-2" /> Reset Defaults
           </Button>
+        </div>
+      </div>
+
+      {/* ── Risk Profile Mode ── */}
+      <div className="flex flex-col gap-4">
+        <div className="flex items-center justify-between border-b border-border pb-2">
+          <h2 className="font-semibold flex items-center gap-2 text-sm">
+            <ShieldAlert className="w-4 h-4 text-primary" /> Operational Risk Profile
+          </h2>
+          {riskProfile?.pending && (
+            <span className="text-[10px] flex items-center gap-1 text-amber-400 bg-amber-500/10 px-2 py-1 rounded">
+              <Loader2 className="w-3 h-3 animate-spin" /> Pending Verification
+            </span>
+          )}
+        </div>
+
+        {riskProfile && (
+          <div className="grid gap-2 rounded-lg border border-border bg-muted/20 p-3 text-xs sm:grid-cols-3">
+            <div>
+              <span className="text-muted-foreground">Applied</span>
+              <div className="font-semibold capitalize">{riskProfile.applied.name} · {riskProfile.applied.version}</div>
+            </div>
+            <div>
+              <span className="text-muted-foreground">Requested</span>
+              <div className="font-semibold capitalize">{riskProfile.desired.name} · {riskProfile.desired.version}</div>
+            </div>
+            <div>
+              <span className="text-muted-foreground">Cycle boundary</span>
+              <div className={cn("font-semibold", riskProfile.safeBoundary ? "text-emerald-500" : "text-amber-400")}>
+                {riskProfile.safeBoundary ? "Ready" : riskProfile.reason ?? "Waiting for a safe boundary"}
+              </div>
+            </div>
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          <Card className={cn("p-4 flex flex-col gap-3 relative overflow-hidden transition-colors", riskProfile?.applied.name === 'conservative' || !riskProfile ? 'border-primary/50 bg-primary/5' : 'bg-card/50')}>
+            {(riskProfile?.applied.name === 'conservative' || !riskProfile) && <div className="absolute top-0 right-0 px-2 py-1 bg-primary text-primary-foreground text-[9px] font-bold uppercase rounded-bl">Active</div>}
+            {riskProfile?.desired.name === 'conservative' && riskProfile?.pending && <div className="absolute top-0 right-0 px-2 py-1 bg-amber-500 text-amber-950 text-[9px] font-bold uppercase rounded-bl">Pending</div>}
+            <div className="font-semibold flex items-center gap-2">
+              Conservative <span className="text-[10px] font-normal text-muted-foreground">(Default)</span>
+            </div>
+            <div className="text-[10px] text-muted-foreground flex-1 flex flex-col gap-1">
+              <div>Current strategy values stay unchanged; the existing server safety policy remains authoritative.</div>
+              <ul className="mt-1 space-y-0.5 opacity-80 list-disc list-inside ml-1">
+                <li>Signal Threshold: 80</li>
+                <li>Max Risk: 0.25% base / 0.5% absolute per trade</li>
+                <li>Reserve Cash: {limits.reserveCashPct}%</li>
+                <li>Max Margin: ${limits.maxMarginPerTrade.toLocaleString()}</li>
+                <li>Max Positions: 1</li>
+                <li>Cooldown: {limits.cooldownMinutes}m</li>
+                <li>Max Leverage: ≤{Math.min(limits.maxLeverage, 3)}x</li>
+                <li>Exposure: ${Math.min(limits.maxTotalExposureUSDT, 3000).toLocaleString()}</li>
+              </ul>
+              <div className="mt-2 p-2 bg-background border border-border rounded text-[10px] leading-relaxed">
+                 <span className="font-semibold text-foreground">Active capital:</span> ${limits.tradingCapital.toLocaleString()} allows <strong className="text-foreground">${(limits.tradingCapital * 0.0025).toLocaleString()}</strong> base / <strong className="text-foreground">${(limits.tradingCapital * 0.005).toLocaleString()}</strong> absolute loss risk per trade.
+              </div>
+            </div>
+            <Button
+              variant={(riskProfile?.applied.name === 'conservative' || !riskProfile) ? 'secondary' : 'outline'}
+              size="sm"
+              disabled={(riskProfile?.applied.name === 'conservative' || !riskProfile) || riskProfile?.pending}
+              onClick={() => openProfileDialog('conservative')}
+            >
+              {(riskProfile?.applied.name === 'conservative' || !riskProfile) ? 'Current Profile' : 'Switch to Conservative'}
+            </Button>
+          </Card>
+
+          <Card className={cn("p-4 flex flex-col gap-3 relative overflow-hidden transition-colors", riskProfile?.applied.name === 'aggressive' ? 'border-destructive/50 bg-destructive/5' : 'bg-card/50')}>
+            {riskProfile?.applied.name === 'aggressive' && <div className="absolute top-0 right-0 px-2 py-1 bg-destructive text-destructive-foreground text-[9px] font-bold uppercase rounded-bl">Active</div>}
+            {riskProfile?.desired.name === 'aggressive' && riskProfile?.pending && <div className="absolute top-0 right-0 px-2 py-1 bg-amber-500 text-amber-950 text-[9px] font-bold uppercase rounded-bl">Pending</div>}
+            <div className="font-semibold text-destructive">Aggressive</div>
+            <div className="text-[10px] text-muted-foreground flex-1 flex flex-col gap-1">
+              <div>Higher entry rates and scaled exposure. Use only in strong trending markets.</div>
+              <ul className="mt-1 space-y-0.5 opacity-80 list-disc list-inside ml-1">
+                <li>Signal Threshold: 80 (완화 금지)</li>
+                <li>Max Risk: 0.5% per trade</li>
+                <li>Reserve Cash: ≥20%</li>
+                <li>Max Margin: 기존 보수 한도 유지</li>
+                <li>Max Positions: 1</li>
+                <li>Cooldown: ≥30m</li>
+                <li>Max Leverage: ≤3x</li>
+                <li>Exposure: Min(Capital × 3, $3,000) = ${Math.min(limits.tradingCapital * 3, 3000).toLocaleString()}</li>
+              </ul>
+              <div className="mt-2 p-2 bg-background border border-border rounded text-[10px] leading-relaxed">
+                 <span className="font-semibold text-foreground">Capital Impact:</span> At ${limits.tradingCapital.toLocaleString()} Active Capital, the absolute 0.5% cap allows <strong className="text-foreground">${((limits.tradingCapital * 0.5) / 100).toLocaleString()}</strong> loss risk per trade.
+              </div>
+            </div>
+            <Button
+              variant={riskProfile?.applied.name === 'aggressive' ? 'secondary' : 'destructive'}
+              size="sm"
+              disabled={riskProfile?.applied.name === 'aggressive' || riskProfile?.pending}
+              onClick={() => openProfileDialog('aggressive')}
+            >
+              {riskProfile?.applied.name === 'aggressive' ? 'Current Profile' : 'Switch to Aggressive'}
+            </Button>
+          </Card>
         </div>
       </div>
 
@@ -209,13 +394,13 @@ export default function Strategy() {
               <TrendingUp className="w-4 h-4 text-[var(--color-long)]" /> Trading Capital &amp; KPI
             </h2>
             <p className="text-[10px] text-muted-foreground mt-2 leading-relaxed">
-              <span className="text-foreground font-medium">Trading Capital</span>은 실제 지갑 USDC 잔고를 초과할 수 없습니다.
-              일일 PnL KPI는 모니터링 전용 — AI 진입 결정과 무관합니다.
+               Planned Seed $10,000은 계획 기준일 뿐입니다. <span className="text-foreground font-medium">Approved Active Stage</span>는 현재 $1,000이며, 아래 Current Risk Sizing Capital 및 실제 지갑 USDC 잔고와 별도입니다.
+               일일 5~10%는 수익 목표가 아닌 과열 상한이고, 월 1~3%는 평가 참고치일 뿐입니다.
             </p>
           </div>
           <Card className="p-0 overflow-hidden divide-y divide-border">
             {([
-              { key: 'tradingCapital',   label: 'Trading Capital (시드머니)', prefix: '$', step: 1000, max: 1_000_000 },
+               { key: 'tradingCapital',   label: 'Current Risk Sizing Capital (Approved Active $1,000 이하)', prefix: '$', step: 1000, max: 1_000 },
               { key: 'dailyTargetUSDT',  label: '일일 PnL KPI (소프트 목표)', prefix: '$', step: 10,   max: 100 },
             ] as const).map(item => (
               <div key={item.key} className="flex flex-col px-4 py-3 hover:bg-muted/30 transition-colors gap-1.5">
@@ -285,7 +470,7 @@ export default function Strategy() {
                     </div>
                     <div className="flex items-start gap-1 text-[9px] text-muted-foreground/70">
                       <Info className="w-2.5 h-2.5 shrink-0 mt-0.5" />
-                      확정 RiskPolicy 파생값(읽기 전용): 1차 목표 +5% = ${POLICY_DAILY_TARGET_USD} · 절대 상한 +10% = ${POLICY_DAILY_TARGET_CAP_USD} — 이 상한을 초과해 저장할 수 없습니다
+                       확정 RiskPolicy 파생값(읽기 전용): 과열 경계 +5% = ${POLICY_DAILY_TARGET_USD} · 절대 과열 상한 +10% = ${POLICY_DAILY_TARGET_CAP_USD} — 강제 수익 목표가 아닙니다
                     </div>
                   </div>
                 )}

@@ -10,7 +10,7 @@
  *  §3 CASH 전환: requestServerPaperCloseAll → pendingClose 최우선 전량 청산 → 키 해제
  *  §4 RISK_CLOSE_ALL 사유 결속
  *  §5 재시작 복구: 상태 리셋 후 loadPendingCloseFromDb + DB open 행만으로 틱이 청산 완수
- *  §6 중복 진입 차단: 동일 decisionId·동시 포지션 게이트 (OPEN 1건 초과 0건)
+ *  §6 프로필별 진입 차단: 보수적 1개, aggressive는 서로 다른 심볼 슬롯 2개
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -20,6 +20,7 @@ interface Store {
   workerState: Map<string, string>;
 }
 const store: Store = { trades: [], workerState: new Map() };
+let forceOpenUpdateZero = false;
 
 /** where 인자(드리즐 SQL 객체)를 순환 안전하게 평탄화해 포함된 문자열 수집 */
 function flatStrings(x: unknown, out: string[] = [], seen = new Set<unknown>()): string[] {
@@ -48,7 +49,7 @@ vi.mock('@workspace/db', () => {
   function chain(exec: (op: { where?: unknown; values?: unknown; set?: unknown }) => unknown) {
     const op: { where?: unknown; values?: unknown; set?: unknown } = {};
     const c: Record<string, unknown> = {};
-    for (const m of ['from', 'limit', 'offset', 'orderBy', 'onConflictDoNothing', 'onConflictDoUpdate', 'returning']) c[m] = () => c;
+    for (const m of ['from', 'limit', 'offset', 'orderBy', 'onConflictDoNothing', 'onConflictDoUpdate', 'returning', 'for']) c[m] = () => c;
     c['where'] = (arg: unknown) => { op.where = arg; return c; };
     c['values'] = (arg: unknown) => { op.values = arg; return c; };
     c['set'] = (arg: unknown) => { op.set = arg; return c; };
@@ -56,17 +57,31 @@ vi.mock('@workspace/db', () => {
       (resolve, reject) => Promise.resolve().then(() => exec(op)).then(resolve, reject);
     return c;
   }
-  return { db: {
+  const database: Record<string, unknown> = {
     select: vi.fn(() => chain((op) => globalThis.__e2eExec('select', op))),
     insert: vi.fn(() => chain((op) => globalThis.__e2eExec('insert', op))),
     update: vi.fn(() => chain((op) => globalThis.__e2eExec('update', op))),
     delete: vi.fn(() => chain((op) => globalThis.__e2eExec('delete', op))),
-  }, tradesTable, workerStateTable };
+  };
+  database['transaction'] = vi.fn(async (fn: (tx: unknown) => unknown) => {
+    const snapshot = globalThis.__e2eSnapshot();
+    try {
+      return await fn(database);
+    } catch (err) {
+      globalThis.__e2eRestore(snapshot);
+      throw err;
+    }
+  });
+  return { db: database, tradesTable, workerStateTable };
 });
 
 declare global {
   // eslint-disable-next-line no-var
   var __e2eExec: (kind: string, op: { where?: unknown; values?: unknown; set?: unknown }) => unknown;
+  // eslint-disable-next-line no-var
+  var __e2eSnapshot: () => unknown;
+  // eslint-disable-next-line no-var
+  var __e2eRestore: (snapshot: unknown) => void;
 }
 
 const WS_KEYS = ['serverPaperPendingClose', 'pendingClose'];
@@ -90,12 +105,16 @@ globalThis.__e2eExec = (kind, op) => {
   // trades
   if (kind === 'insert') {
     const v = op.values as Record<string, unknown>;
-    // unique 강제: openDecisionId(OPEN)·closesTradeId(FULL CLOSE)·SERVER 단일 미청산
+    // unique 강제: openDecisionId(OPEN)·closesTradeId(FULL CLOSE)·SERVER slot/symbol
     if (v['action'] === 'OPEN') {
       if (store.trades.some((r) => r['action'] === 'OPEN' && r['openDecisionId'] === v['openDecisionId']))
         throw new Error('duplicate key value violates unique constraint "trades_open_decision_uq"');
-      if (store.trades.some((r) => r['action'] === 'OPEN' && r['managedBy'] === 'SERVER' && r['closeTime'] === 0))
-        throw new Error('duplicate key value violates unique constraint "trades_server_single_open_uq"');
+      if (store.trades.some((r) => r['action'] === 'OPEN' && r['managedBy'] === 'SERVER'
+        && r['closeTime'] === 0 && r['paperPositionSlot'] === v['paperPositionSlot']))
+        throw new Error('duplicate key value violates unique constraint "trades_server_open_slot_uq"');
+      if (store.trades.some((r) => r['action'] === 'OPEN' && r['managedBy'] === 'SERVER'
+        && r['closeTime'] === 0 && String(r['symbol']).toUpperCase() === String(v['symbol']).toUpperCase()))
+        throw new Error('duplicate key value violates unique constraint "trades_server_open_symbol_uq"');
     }
     if (v['action'] === 'CLOSE' && v['closeKind'] === 'FULL') {
       if (store.trades.some((r) => r['action'] === 'CLOSE' && r['closeKind'] === 'FULL' && r['closesTradeId'] === v['closesTradeId']))
@@ -116,6 +135,10 @@ globalThis.__e2eExec = (kind, op) => {
   if (kind === 'update') {
     const target = store.trades.find((r) => strs.includes(r['id'] as string));
     if (target) {
+      if (forceOpenUpdateZero && target['action'] === 'OPEN'
+        && Object.hasOwn(op.set as object, 'closeTime')) {
+        return [];
+      }
       // 조건부 UPDATE: closeTime=0 조건 존중 (이미 닫힌 행 재청산 금지)
       if (strs.includes('closeTime') && target['closeTime'] !== 0) return [];
       Object.assign(target, op.set as Record<string, unknown>);
@@ -123,6 +146,17 @@ globalThis.__e2eExec = (kind, op) => {
     return [];
   }
   return [];
+};
+
+globalThis.__e2eSnapshot = () => ({
+  trades: structuredClone(store.trades),
+  workerState: new Map(store.workerState),
+});
+
+globalThis.__e2eRestore = (snapshot) => {
+  const saved = snapshot as Store;
+  store.trades = saved.trades;
+  store.workerState = saved.workerState;
 };
 
 vi.mock('../lib/paperCostCache', () => ({ getPaperCostBinding: vi.fn(() => null) }));
@@ -143,12 +177,24 @@ const BINDING = {
 
 const T0 = Date.now();
 const H = 3_600_000;
+const CONSERVATIVE_PROFILE = {
+  name: 'conservative' as const,
+  version: 'risk-profile/v1' as const,
+  appliedAt: '2026-08-21T00:00:00.000Z',
+  derivedLimits: {
+    immediateEntryThreshold: 80, maxRiskPerTradePct: 0.25, reserveCashPct: 20,
+    maxMarginPerTradeUsd: 334, maxConcurrentPositions: 1, cooldownMinutes: 30,
+    maxLeverage: 3, maxTotalExposureUsd: 3_000,
+    allocatedTradingCapitalUsd: 1_000, maxRiskPerTradeUsd: 2.5,
+  },
+};
 
 async function openBtcLong(nowMs = T0, decisionId = 'dec-e2e-1') {
   return openServerPaperPosition({
     decisionId, symbol: 'BTC', side: 'LONG', sizeUsd: 300, leverage: 3,
     quote: { priceUsd: 50_000, ageMs: 5_000 }, tpPriceUsd: 52_000,
-    openPositionCount: 0, entriesManilaDay: 0, nowMs,
+    openPositionCount: 0, entriesManilaDay: 0,
+    riskProfileSnapshot: CONSERVATIVE_PROFILE, nowMs,
   });
 }
 
@@ -163,6 +209,7 @@ beforeEach(() => {
   __resetServerPaperStateForTests();
   store.trades = [];
   store.workerState.clear();
+  forceOpenUpdateZero = false;
   vi.mocked(getPaperCostBinding).mockReturnValue(BINDING as ReturnType<typeof getPaperCostBinding>);
 });
 
@@ -195,6 +242,18 @@ describe('E2E §1 — OPEN → SL 터치 → net settlement → 중복 0건', ()
     await manageServerPaperTick(quoteFn(49_400), T0 + H + 10_000);
     await manageServerPaperTick(quoteFn(49_400), T0 + H + 20_000);
     expect(closeRows()).toHaveLength(1);
+  });
+
+  it('CLOSE insert 후 OPEN 조건부 갱신 실패는 transaction 전체를 rollback한다', async () => {
+    await openBtcLong();
+    const open = store.trades[0]!;
+    forceOpenUpdateZero = true;
+
+    await manageServerPaperTick(quoteFn(49_400), T0 + H);
+
+    expect(closeRows()).toHaveLength(0);
+    expect(open['closeTime']).toBe(0);
+    expect(getServerPaperStatus().unresolved).toContain('조건부 갱신 0건');
   });
 });
 
@@ -273,10 +332,55 @@ describe('E2E §6 — 중복 진입 차단', () => {
     expect(store.trades.filter((r) => r['action'] === 'OPEN')).toHaveLength(1);
   });
 
-  it('SERVER 미청산 존재 중 다른 결정의 OPEN도 단일 미청산 unique로 차단', async () => {
+  it('보수적 기본은 SERVER 미청산 1개에서 다른 결정도 차단', async () => {
     await openBtcLong(T0, 'dec-a');
     const r2 = await openBtcLong(T0 + 1_000, 'dec-b');
     expect(r2.ok).toBe(false);
     expect(store.trades.filter((r) => r['action'] === 'OPEN')).toHaveLength(1);
+  });
+
+  it('aggressive 이름을 선택해도 동시 포지션 1개 한도는 완화되지 않는다', async () => {
+    const profile = {
+      name: 'aggressive' as const,
+      version: 'risk-profile/v1' as const,
+      appliedAt: new Date(T0).toISOString(),
+      derivedLimits: {
+        immediateEntryThreshold: 80, maxRiskPerTradePct: 0.5, reserveCashPct: 20,
+        maxMarginPerTradeUsd: 334, maxConcurrentPositions: 1, cooldownMinutes: 30,
+        maxLeverage: 3, maxTotalExposureUsd: 3_000,
+        allocatedTradingCapitalUsd: 1_000, maxRiskPerTradeUsd: 5,
+      },
+    };
+    const first = await openServerPaperPosition({
+      decisionId: 'dec-slot-1', symbol: 'BTC', side: 'LONG', sizeUsd: 300, leverage: 3,
+      quote: { priceUsd: 50_000, ageMs: 5_000 }, tpPriceUsd: null,
+      openPositionCount: 0, maxConcurrentPositions: 1, entriesManilaDay: 0,
+      riskProfileSnapshot: profile, nowMs: T0,
+    });
+    const second = await openServerPaperPosition({
+      decisionId: 'dec-slot-2', symbol: 'ETH', side: 'SHORT', sizeUsd: 300, leverage: 3,
+      quote: { priceUsd: 3_000, ageMs: 5_000 }, tpPriceUsd: null,
+      openPositionCount: 1, maxConcurrentPositions: 1, entriesManilaDay: 1,
+      riskProfileSnapshot: profile, nowMs: T0 + 1,
+    });
+    const third = await openServerPaperPosition({
+      decisionId: 'dec-slot-3', symbol: 'SOL', side: 'LONG', sizeUsd: 300, leverage: 3,
+      quote: { priceUsd: 150, ageMs: 5_000 }, tpPriceUsd: null,
+      openPositionCount: 2, maxConcurrentPositions: 1, entriesManilaDay: 2,
+      riskProfileSnapshot: profile, nowMs: T0 + 2,
+    });
+    const duplicate = await openServerPaperPosition({
+      decisionId: 'dec-slot-4', symbol: 'BTC', side: 'LONG', sizeUsd: 300, leverage: 3,
+      quote: { priceUsd: 50_000, ageMs: 5_000 }, tpPriceUsd: null,
+      openPositionCount: 1, maxConcurrentPositions: 1, entriesManilaDay: 2,
+      riskProfileSnapshot: profile, nowMs: T0 + 3,
+    });
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(false);
+    expect(third.ok).toBe(false);
+    expect(duplicate.ok).toBe(false);
+    const opens = store.trades.filter((r) => r['action'] === 'OPEN');
+    expect(opens.map(row => row['paperPositionSlot'])).toEqual([1]);
+    expect(opens.every(row => row['riskProfileSnapshot'] === profile)).toBe(true);
   });
 });

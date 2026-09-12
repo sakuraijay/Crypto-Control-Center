@@ -101,13 +101,19 @@ beforeEach(() => {
 
 describe('§11-11 70% 축소 orchestration', () => {
   it('포지션 size의 정확히 70%(보수적 내림)로 부분 청산 1회 제출', async () => {
+    const legacyInsertSpy = vi.spyOn(wm, 'recordLiveTradeUnsettled');
     authoritativePositions = [{ marketAddress: ETH_MARKET, isLong: true, sizeUsd: 100 }];
-    await wm.executeProfitProtectReduction(decision, paperState, limits, 7, '0xMain', analyses);
-    expect(closeMock).toHaveBeenCalledTimes(1); // §11-20: submit 최대 1회
-    const arg = closeMock.mock.calls[0][0] as { sizeUsd: number; symbol: string; isLong: boolean };
-    expect(arg.sizeUsd).toBeCloseTo(70, 6);
-    expect(arg.sizeUsd).toBeLessThanOrEqual(100 * 0.7 + 1e-9); // 70% 초과 절대 금지
-    expect(arg.symbol).toBe('ETH');
+    try {
+      await wm.executeProfitProtectReduction(decision, paperState, limits, 7, '0xMain', analyses);
+      expect(closeMock).toHaveBeenCalledTimes(1); // §11-20: submit 최대 1회
+      const arg = closeMock.mock.calls[0][0] as { sizeUsd: number; symbol: string; isLong: boolean };
+      expect(arg.sizeUsd).toBeCloseTo(70, 6);
+      expect(arg.sizeUsd).toBeLessThanOrEqual(100 * 0.7 + 1e-9); // 70% 초과 절대 금지
+      expect(arg.symbol).toBe('ETH');
+      expect(legacyInsertSpy).not.toHaveBeenCalled();
+    } finally {
+      legacyInsertSpy.mockRestore();
+    }
   });
 
   it('잔여 30%가 최소 포지션 미만이면 100% 종료로 전환', async () => {
@@ -160,38 +166,51 @@ describe('§11-11 70% 축소 orchestration', () => {
 
 describe('CASH 청산 — authoritative snapshot 기반 exact-size close', () => {
   it('CASH + 포지션 존재 → 고정 $15가 아닌 실제 포지션 크기·방향으로 전수 청산', async () => {
+    const savedAuto = process.env.AUTO_WORKER_LIVE_ENABLED;
+    process.env.AUTO_WORKER_LIVE_ENABLED = 'true';
     authoritativePositions = [
       { marketAddress: ETH_MARKET, isLong: false, sizeUsd: 8.37 },
       { marketAddress: BTC_MARKET, isLong: true, sizeUsd: 22.5 },
     ];
     const cashDecision = { ...decision, operatingState: 'CASH', primarySymbol: null };
-    await wm.tryLiveTestExecution(
-      cashDecision, analyses, { positionCount: 2 }, paperState, limits, 9,
-      { closeAllRequested: false, reduce70Requested: false },
-    );
-    expect(closeMock).toHaveBeenCalledTimes(2);
-    const sizes = closeMock.mock.calls.map(c => (c[0] as { sizeUsd: number }).sizeUsd).sort((a, b) => a - b);
-    expect(sizes[0]).toBeCloseTo(8.37, 6);
-    expect(sizes[1]).toBeCloseTo(22.5, 6);
-    const dirs = closeMock.mock.calls.map(c => (c[0] as { isLong: boolean; symbol: string }));
-    expect(dirs.find(d => d.symbol === 'ETH')!.isLong).toBe(false);
-    expect(dirs.find(d => d.symbol === 'BTC')!.isLong).toBe(true);
+    try {
+      await wm.tryLiveTestExecution(
+        cashDecision, analyses, { positionCount: 2 }, paperState, limits, 9,
+        { closeAllRequested: false, reduce70Requested: false },
+      );
+      expect(closeMock).toHaveBeenCalledTimes(2);
+      const sizes = closeMock.mock.calls.map(c => (c[0] as { sizeUsd: number }).sizeUsd).sort((a, b) => a - b);
+      expect(sizes[0]).toBeCloseTo(8.37, 6);
+      expect(sizes[1]).toBeCloseTo(22.5, 6);
+      const dirs = closeMock.mock.calls.map(c => (c[0] as { isLong: boolean; symbol: string }));
+      expect(dirs.find(d => d.symbol === 'ETH')!.isLong).toBe(false);
+      expect(dirs.find(d => d.symbol === 'BTC')!.isLong).toBe(true);
+    } finally {
+      if (savedAuto === undefined) delete process.env.AUTO_WORKER_LIVE_ENABLED;
+      else process.env.AUTO_WORKER_LIVE_ENABLED = savedAuto;
+    }
   });
 });
 
 describe('§11-14~19 close-all orchestration', () => {
   it('포지션 2건 전수 청산 — 포지션별 정확히 1회 제출, 전부 제출 수락 시에도 SUBMITTED(잠금 유지)', async () => {
+    const legacyInsertSpy = vi.spyOn(wm, 'recordLiveTradeUnsettled');
     authoritativePositions = [
       { marketAddress: ETH_MARKET, isLong: true, sizeUsd: 10 },
       { marketAddress: BTC_MARKET, isLong: false, sizeUsd: 12 },
     ];
-    await wm.executeCloseAllPositions(decision, paperState, limits, 8, '0xMain', analyses);
-    expect(closeMock).toHaveBeenCalledTimes(2); // §11-20: 포지션당 최대 1회
-    const summary = wm.lastCloseAllSummary!;
-    expect(summary.total).toBe(2);
-    // SUBMITTED는 온체인 확정 전 — allConfirmed=false, lockRequired=true 유지
-    expect(summary.allConfirmed).toBe(false);
-    expect(summary.lockRequired).toBe(true);
+    try {
+      await wm.executeCloseAllPositions(decision, paperState, limits, 8, '0xMain', analyses);
+      expect(closeMock).toHaveBeenCalledTimes(2); // §11-20: 포지션당 최대 1회
+      expect(legacyInsertSpy).not.toHaveBeenCalled();
+      const summary = wm.lastCloseAllSummary!;
+      expect(summary.total).toBe(2);
+      // SUBMITTED는 온체인 확정 전 — allConfirmed=false, lockRequired=true 유지
+      expect(summary.allConfirmed).toBe(false);
+      expect(summary.lockRequired).toBe(true);
+    } finally {
+      legacyInsertSpy.mockRestore();
+    }
   });
 
   it('19. 시뮬레이션(잠금) 결과는 PENDING — CASH 표시만으로 완료 처리 금지', async () => {

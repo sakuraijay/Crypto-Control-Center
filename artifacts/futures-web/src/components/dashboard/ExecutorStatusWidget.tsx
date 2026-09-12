@@ -334,7 +334,7 @@ export function ExecutorStatusWidget() {
         <Button asChild variant="ghost" size="sm" className="h-7 text-xs text-muted-foreground hover:text-foreground w-full justify-start">
           <Link href="/settings">
             <ExternalLink className="w-3 h-3 mr-1.5" />
-            Engine Settings
+            Advanced Settings
           </Link>
         </Button>
       </div>

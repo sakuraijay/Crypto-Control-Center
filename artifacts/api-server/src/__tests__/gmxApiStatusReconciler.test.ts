@@ -23,6 +23,7 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 const dbState = vi.hoisted(() => ({
   rows: [] as Record<string, unknown>[],
   selectFail: false,
+  updateCount: 1,
 }));
 vi.mock('@workspace/db', () => {
   const limit = vi.fn(async () => {
@@ -34,7 +35,16 @@ vi.mock('@workspace/db', () => {
   return {
     db: {
       select: vi.fn(() => ({ from })),
-      update: vi.fn(() => ({ set: vi.fn(() => ({ where: vi.fn(async () => []) })) })),
+      update: vi.fn(() => ({
+        set: vi.fn(() => ({
+          where: vi.fn(() => ({
+            returning: vi.fn(async () => Array.from(
+              { length: dbState.updateCount },
+              () => ({ id: 't1' }),
+            )),
+          })),
+        })),
+      })),
     },
     relayTasksTable: {},
   };
@@ -55,7 +65,12 @@ vi.mock('../lib/executionIntents', async (importOriginal) => {
   return { ...actual, resolveIntentTerminal: resolveIntentSpy };
 });
 const eventsState = vi.hoisted(() => ({
-  classify: null as null | { kind: 'executed' | 'cancelled' | 'frozen' },
+  classify: null as null | {
+    kind: 'executed' | 'cancelled' | 'frozen';
+    txHash: string;
+    blockNumber: string;
+    emitterAddress: string;
+  },
   extract: { ok: true, orderKey: '0x' + 'a'.repeat(64), emitterAddress: '0xE' } as
     { ok: true; orderKey: string; emitterAddress: string } | { ok: false; reason: 'not_found' | 'ambiguous' },
 }));
@@ -68,7 +83,9 @@ vi.mock('../lib/intentReconciler', () => ({
   createViemOnchainClient: vi.fn(() => { throw new Error('no rpc in tests'); }),
 }));
 
-import { reconcileGmxApiTasks, fetchGmxApiOrderStatus } from '../lib/gmxApiStatusReconciler';
+import {
+  reconcileGmxApiTasks, reconcileOneGmxApiTask, fetchGmxApiOrderStatus, setConfirmedOpenHandoff,
+} from '../lib/gmxApiStatusReconciler';
 import type { GmxApiTransport } from '../lib/gmxApiTransport';
 
 const ORDER_KEY = '0x' + 'a'.repeat(64);
@@ -102,14 +119,15 @@ function row(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   };
 }
 
-const receiptSuccess = { status: 'success' as const, logs: [] };
-const receiptReverted = { status: 'reverted' as const, logs: [] };
+const receiptSuccess = { status: 'success' as const, blockNumber: '100', logs: [] };
+const receiptReverted = { status: 'reverted' as const, blockNumber: '100', logs: [] };
 
 function makeOnchain(receipt: unknown) {
   return {
     getChainId: async () => 42161,
     getTransactionReceipt: vi.fn(async () => receipt),
     getOrderResolutionLogs: vi.fn(async () => []),
+    getLatestBlockNumber: vi.fn(async () => 115n),
   } as never;
 }
 
@@ -119,14 +137,48 @@ const deps = (transport: GmxApiTransport, onchain: unknown = null) =>
 beforeEach(() => {
   dbState.rows = [];
   dbState.selectFail = false;
+  dbState.updateCount = 1;
   transitionSpy.mockClear();
   transitionSpy.mockResolvedValue({ ok: true } as never);
   resolveIntentSpy.mockClear();
   eventsState.classify = null;
   eventsState.extract = { ok: true, orderKey: ORDER_KEY, emitterAddress: '0xE' };
+  setConfirmedOpenHandoff(async () => ({ handled: true, basis: 'test durable handoff' }));
 });
 
 describe('reconcileGmxApiTasks — 게이트/스캔', () => {
+  it('단일 GMX_API_V2 조사만 수행하고 legacy/unknown task는 미접촉한다', async () => {
+    const t = makeTransport(() => ({ status: 'relay_pending', requestId: 'req-1' }));
+    const current = await reconcileOneGmxApiTask(row() as never, deps(t));
+    expect(current.scanned).toBe(1);
+    expect(t.calls).toEqual([{ path: '/orders/txns/status', body: { requestId: 'req-1' } }]);
+
+    const legacy = await reconcileOneGmxApiTask(
+      row({ transportGen: 'legacy-digital' }) as never,
+      deps(t),
+    );
+    expect(legacy.scanned).toBe(0);
+    expect(t.calls).toHaveLength(1);
+  });
+
+  it('단일 GMX_API_V2 조사에서 readonly 비활성은 외부 호출·전이 0회다', async () => {
+    const t = makeTransport(() => ({}), { readonlyEnabled: false });
+    const summary = await reconcileOneGmxApiTask(
+      row({ status: 'UNRESOLVED' }) as never,
+      deps(t),
+    );
+    expect(summary).toMatchObject({ scanned: 0, skippedTransient: 1, errors: 0 });
+    expect(t.calls).toHaveLength(0);
+    expect(transitionSpy).not.toHaveBeenCalled();
+  });
+
+  it('단일 GMX_API_V2 evidence UPDATE 0행은 errors=1로 fail-closed다', async () => {
+    dbState.updateCount = 0;
+    const t = makeTransport(() => ({ status: 'relay_pending', requestId: 'req-1' }));
+    const summary = await reconcileOneGmxApiTask(row() as never, deps(t));
+    expect(summary).toMatchObject({ scanned: 1, errors: 1 });
+  });
+
   it('readonly 플래그 꺼짐 → 외부 호출 0회, 전이 0회', async () => {
     dbState.rows = [row()];
     const t = makeTransport(() => ({}), { readonlyEnabled: false });
@@ -213,12 +265,97 @@ describe('status 매핑 — blocking/일시 장애', () => {
 describe('executed — 온체인 교차검증 후에만 CONFIRMED', () => {
   it('executed + receipt success + OrderExecuted → CONFIRMED + intent 해소', async () => {
     dbState.rows = [row()];
-    eventsState.classify = { kind: 'executed' };
+    eventsState.classify = {
+      kind: 'executed', txHash: TX, blockNumber: '100',
+      emitterAddress: '0x' + 'e'.repeat(40),
+    };
     const t = makeTransport(() => ({ status: 'executed', requestId: 'req-1', executionTxHash: TX, orderKeys: [ORDER_KEY] }));
     const s = await reconcileGmxApiTasks(deps(t, makeOnchain(receiptSuccess)));
     expect(s.transitioned).toBe(1);
     expect(transitionSpy.mock.calls[0][0]).toMatchObject({ to: 'CONFIRMED', patch: { txHash: TX, orderKey: ORDER_KEY } });
     expect(resolveIntentSpy).toHaveBeenCalledWith('intent:open:d1', 'CONFIRMED', expect.objectContaining({ resolutionTxHash: TX, orderKey: ORDER_KEY }));
+  });
+
+  it('OrderExecuted finality depth 미충족 → handoff/CONFIRMED 모두 보류', async () => {
+    dbState.rows = [row()];
+    eventsState.classify = {
+      kind: 'executed', txHash: TX, blockNumber: '100',
+      emitterAddress: '0x' + 'e'.repeat(40),
+    };
+    const handoff = vi.fn(async () => ({ handled: true as const, basis: 'unexpected' }));
+    setConfirmedOpenHandoff(handoff);
+    const chain = makeOnchain(receiptSuccess);
+    (chain as unknown as {
+      getLatestBlockNumber: ReturnType<typeof vi.fn>;
+    }).getLatestBlockNumber.mockResolvedValue(114n);
+    const t = makeTransport(() => ({
+      status: 'executed', requestId: 'req-1', executionTxHash: TX, orderKeys: [ORDER_KEY],
+    }));
+    const s = await reconcileGmxApiTasks(deps(t, chain));
+    expect(s.transitioned).toBe(0);
+    expect(handoff).not.toHaveBeenCalled();
+    expect(transitionSpy).not.toHaveBeenCalled();
+  });
+
+  it('final OPEN은 injected handoff를 정확히 1회 호출한 뒤 terminal 전이', async () => {
+    dbState.rows = [row()];
+    eventsState.classify = {
+      kind: 'executed', txHash: TX, blockNumber: '100',
+      emitterAddress: '0x' + 'e'.repeat(40),
+    };
+    const handoff = vi.fn(async () => ({ handled: true as const, basis: 'stop durable' }));
+    setConfirmedOpenHandoff(handoff);
+    const t = makeTransport(() => ({
+      status: 'executed', requestId: 'req-1', executionTxHash: TX, orderKeys: [ORDER_KEY],
+    }));
+    await reconcileGmxApiTasks(deps(t, makeOnchain(receiptSuccess)));
+    expect(handoff).toHaveBeenCalledTimes(1);
+    expect(handoff).toHaveBeenCalledWith(expect.objectContaining({
+      intentId: 'intent:open:d1',
+      orderKey: ORDER_KEY,
+      executionTxHash: TX,
+      confirmations: 15,
+    }));
+    expect(transitionSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('일반 UUID intent도 prefix 분류 없이 handoff한 뒤에만 terminal 전이', async () => {
+    const intentId = 'intent:open:ai/9dc4036f-9083-4670-b28a-e69dfce5fdc3';
+    dbState.rows = [row({ intentId })];
+    eventsState.classify = {
+      kind: 'executed', txHash: TX, blockNumber: '100',
+      emitterAddress: '0x' + 'e'.repeat(40),
+    };
+    const handoff = vi.fn(async () => ({ handled: true as const, basis: 'general stop durable' }));
+    setConfirmedOpenHandoff(handoff);
+    const t = makeTransport(() => ({
+      status: 'executed', requestId: 'req-1', executionTxHash: TX, orderKeys: [ORDER_KEY],
+    }));
+    const s = await reconcileGmxApiTasks(deps(t, makeOnchain(receiptSuccess)));
+    expect(s.transitioned).toBe(1);
+    expect(handoff).toHaveBeenCalledTimes(1);
+    expect(handoff).toHaveBeenCalledWith(expect.objectContaining({ intentId }));
+    expect(resolveIntentSpy).toHaveBeenCalledWith(
+      intentId,
+      'CONFIRMED',
+      expect.objectContaining({ orderKey: ORDER_KEY }),
+    );
+  });
+
+  it('handoff 미처리/실패 → OPEN task와 intent를 terminal로 풀지 않음', async () => {
+    dbState.rows = [row()];
+    eventsState.classify = {
+      kind: 'executed', txHash: TX, blockNumber: '100',
+      emitterAddress: '0x' + 'e'.repeat(40),
+    };
+    setConfirmedOpenHandoff(async () => ({ handled: false, reason: 'position missing' }));
+    const t = makeTransport(() => ({
+      status: 'executed', requestId: 'req-1', executionTxHash: TX, orderKeys: [ORDER_KEY],
+    }));
+    const s = await reconcileGmxApiTasks(deps(t, makeOnchain(receiptSuccess)));
+    expect(s.transitioned).toBe(0);
+    expect(transitionSpy).not.toHaveBeenCalled();
+    expect(resolveIntentSpy).not.toHaveBeenCalled();
   });
 
   it('executed 보고 + 온체인 OrderExecuted 부재 → UNRESOLVED (status만으로 CONFIRMED 금지)', async () => {
@@ -291,7 +428,10 @@ describe('relay_reverted / cancelled', () => {
 
   it('cancelled + 온체인 OrderCancelled → CANCELLED', async () => {
     dbState.rows = [row()];
-    eventsState.classify = { kind: 'cancelled' };
+    eventsState.classify = {
+      kind: 'cancelled', txHash: TX, blockNumber: '100',
+      emitterAddress: '0x' + 'e'.repeat(40),
+    };
     const t = makeTransport(() => ({ status: 'cancelled', requestId: 'req-1', executionTxHash: TX, orderKeys: [ORDER_KEY] }));
     const s = await reconcileGmxApiTasks(deps(t, makeOnchain(receiptSuccess)));
     expect(s.transitioned).toBe(1);

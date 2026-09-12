@@ -9,6 +9,8 @@
  *  - CI/db-free 규칙: @workspace/db는 반드시 지연 import
  */
 
+import { EVIDENCE_CONFIRMATION_DEPTH } from './protectionEvidence';
+
 const fin = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
 
 /**
@@ -34,6 +36,14 @@ export interface SettlementInput {
   settledAt: Date;
   /** 사전 추정 순 PnL — 실제와의 차이 감사 기록용 (없으면 null) */
   estimatedNetPnlUsd?: number | null;
+  intentId?: string;
+  relayTaskId?: string;
+  orderKey?: string;
+  emitterAddress?: string;
+  resolutionBlock?: string;
+  latestBlock?: string;
+  confirmations?: number;
+  evidenceBasis?: string;
 }
 
 export type SettlementResult =
@@ -70,47 +80,150 @@ export async function recordTradeSettlement(input: SettlementInput): Promise<Set
   if (!input.evidenceTxHash || !/^0x[0-9a-fA-F]{64}$/.test(input.evidenceTxHash)) {
     return { ok: false, reason: 'evidenceTxHash 형식 비정상 — 온체인 증거 없이 SETTLED 전환 금지' };
   }
+  if (!input.intentId || !input.relayTaskId
+      || !input.orderKey || !/^0x[0-9a-fA-F]{64}$/.test(input.orderKey)
+      || !input.emitterAddress || !/^0x[0-9a-fA-F]{40}$/.test(input.emitterAddress)
+      || !input.resolutionBlock || !input.latestBlock
+      || !Number.isSafeInteger(input.confirmations)
+      || (input.confirmations as number) < EVIDENCE_CONFIRMATION_DEPTH
+      || !input.evidenceBasis) {
+    return { ok: false, reason: '검증된 CLOSE linkage/finality metadata 부재 — SETTLED 전환 금지' };
+  }
+  const intentId = input.intentId;
+  const relayTaskId = input.relayTaskId;
+  const orderKey = input.orderKey;
+  const emitterAddress = input.emitterAddress;
+  const resolutionBlockText = input.resolutionBlock;
+  const latestBlockText = input.latestBlock;
+  const confirmations = input.confirmations as number;
+  const evidenceBasis = input.evidenceBasis;
   try {
-    const { db, tradesTable } = await import('@workspace/db');
-    const { eq, and, ne } = await import('drizzle-orm');
-
-    // 동일 증거 이중 정산 사전 확인 (인덱스가 최종 방어)
-    const dup = await db.select({ id: tradesTable.id }).from(tradesTable)
-      .where(eq(tradesTable.evidenceTxHash, input.evidenceTxHash)).limit(1);
-    if (dup.length > 0 && dup[0].id !== input.tradeId) {
-      return { ok: false, reason: `evidenceTxHash 이미 다른 trade(${dup[0].id})에 정산됨 — 이중 정산 금지` };
+    const resolutionBlock = BigInt(resolutionBlockText);
+    const latestBlock = BigInt(latestBlockText);
+    const depth = latestBlock - resolutionBlock;
+    if (depth < BigInt(EVIDENCE_CONFIRMATION_DEPTH)
+        || Number(depth) !== confirmations) {
+      return { ok: false, reason: 'CLOSE finality block/confirmation 결속 불일치' };
     }
+  } catch {
+    return { ok: false, reason: 'CLOSE finality block 디코딩 실패' };
+  }
 
-    // 조건부 UPDATE — 이미 SETTLED면 전환 금지
-    const updated = await db.update(tradesTable)
-      .set({
-        grossPnlUsd: String(input.grossPnlUsd),
-        positionFeeUsd: String(input.positionFeeUsd),
-        executionFeeUsd: String(input.executionFeeUsd),
-        priceImpactUsd: String(input.priceImpactUsd),
-        fundingFeeUsd: String(input.fundingFeeUsd),
-        borrowingFeeUsd: String(input.borrowingFeeUsd),
-        netPnlUsd: String(net.netPnlUsd),
-        pnl: String(net.netPnlUsd), // 기존 집계 경로도 실제 순 PnL로 정정
-        settlementStatus: 'SETTLED',
-        settledAt: input.settledAt,
-        evidenceTxHash: input.evidenceTxHash,
-      })
-      .where(and(eq(tradesTable.id, input.tradeId), ne(tradesTable.settlementStatus, 'SETTLED')))
-      .returning({ id: tradesTable.id });
-    if (updated.length === 0) {
-      return { ok: false, reason: `trade ${input.tradeId} 미존재 또는 이미 SETTLED — 재정산 금지` };
-    }
+  try {
+    const { db, tradesTable, executionIntentsTable, relayTasksTable } = await import('@workspace/db');
+    const { eq, and, isNotNull } = await import('drizzle-orm');
 
-    const delta = fin(input.estimatedNetPnlUsd)
-      ? net.netPnlUsd - (input.estimatedNetPnlUsd as number)
-      : null;
-    if (delta !== null && Math.abs(delta) > 0.005) {
-      console.warn(`[Settlement] trade=${input.tradeId} 추정-실제 순PnL 차이 $${delta.toFixed(4)} (추정 $${(input.estimatedNetPnlUsd as number).toFixed(4)} → 실제 $${net.netPnlUsd.toFixed(4)})`);
-    }
-    return { ok: true, netPnlUsd: net.netPnlUsd, estimateDeltaUsd: delta };
-  } catch (err) {
-    return { ok: false, reason: `정산 저장 실패 — UNSETTLED 유지 (fail-closed): ${(err as Error).message}` };
+    return await db.transaction(async (tx) => {
+      const tradeRows = await tx.select().from(tradesTable)
+        .where(eq(tradesTable.id, input.tradeId)).limit(2);
+      if (tradeRows.length !== 1) {
+        return { ok: false as const, reason: 'CLOSE trade 단일 행 결속 실패' };
+      }
+      const trade = tradeRows[0];
+      if (trade.action !== 'CLOSE' || trade.testMode !== true
+          || trade.settlementStatus !== 'UNSETTLED'
+          || trade.settlementIntentId !== intentId
+          || !trade.settlementAccount || !trade.settlementMarketAddress
+          || !trade.settlementCollateralToken || !trade.settlementPositionKey
+          || !trade.preCloseSizeUsd30 || !trade.requestedReductionUsd30) {
+        return { ok: false as const, reason: 'UNSETTLED LIVE CLOSE durable binding 불일치' };
+      }
+
+      const intentRows = await tx.select().from(executionIntentsTable)
+        .where(eq(executionIntentsTable.id, intentId)).limit(2);
+      if (intentRows.length !== 1) {
+        return { ok: false as const, reason: 'CLOSE intent 단일 행 결속 실패' };
+      }
+      const intent = intentRows[0];
+      if (intent.orderType !== 'close' || intent.status !== 'CONFIRMED'
+          || intent.receiptStatus !== 'success'
+          || intent.closeSettlementTradeId !== trade.id
+          || intent.orderKey?.toLowerCase() !== orderKey.toLowerCase()
+          || intent.resolutionTxHash?.toLowerCase() !== input.evidenceTxHash.toLowerCase()
+          || intent.resolutionBlock !== resolutionBlockText
+          || intent.orderEmitterAddress?.toLowerCase() !== emitterAddress.toLowerCase()
+          || intent.closeAccount?.toLowerCase() !== trade.settlementAccount.toLowerCase()
+          || intent.closeMarketAddress?.toLowerCase() !== trade.settlementMarketAddress.toLowerCase()
+          || intent.closeCollateralToken?.toLowerCase() !== trade.settlementCollateralToken.toLowerCase()
+          || intent.closePositionKey?.toLowerCase() !== trade.settlementPositionKey.toLowerCase()
+          || intent.closePreSizeUsd30 !== trade.preCloseSizeUsd30
+          || intent.closeRequestedReductionUsd30 !== trade.requestedReductionUsd30) {
+        return { ok: false as const, reason: 'CLOSE trade ↔ confirmed intent 증거 결속 불일치' };
+      }
+
+      const taskRows = await tx.select().from(relayTasksTable)
+        .where(eq(relayTasksTable.id, relayTaskId)).limit(2);
+      if (taskRows.length !== 1) {
+        return { ok: false as const, reason: 'CLOSE relay task 단일 행 결속 실패' };
+      }
+      const task = taskRows[0];
+      let taskOrderKeys: unknown = null;
+      try {
+        taskOrderKeys = task.gmxOrderKeys ? JSON.parse(task.gmxOrderKeys) : null;
+      } catch {
+        taskOrderKeys = null;
+      }
+      if (task.kind !== 'CLOSE' || task.status !== 'CONFIRMED'
+          || task.intentId !== intentId
+          || task.gmxExecutionTxHash?.toLowerCase() !== input.evidenceTxHash.toLowerCase()
+          || !Array.isArray(taskOrderKeys) || taskOrderKeys.length !== 1
+          || typeof taskOrderKeys[0] !== 'string'
+          || taskOrderKeys[0].toLowerCase() !== orderKey.toLowerCase()) {
+        return { ok: false as const, reason: 'CLOSE relay task terminal 증거 결속 불일치' };
+      }
+
+      const dup = await tx.select({ id: tradesTable.id }).from(tradesTable)
+        .where(eq(tradesTable.evidenceTxHash, input.evidenceTxHash)).limit(1);
+      if (dup.length > 0 && dup[0].id !== input.tradeId) {
+        return { ok: false as const, reason: `evidenceTxHash 이미 다른 trade(${dup[0].id})에 정산됨 — 이중 정산 금지` };
+      }
+
+      const updated = await tx.update(tradesTable)
+        .set({
+          grossPnlUsd: String(input.grossPnlUsd),
+          positionFeeUsd: String(input.positionFeeUsd),
+          executionFeeUsd: String(input.executionFeeUsd),
+          priceImpactUsd: String(input.priceImpactUsd),
+          fundingFeeUsd: String(input.fundingFeeUsd),
+          borrowingFeeUsd: String(input.borrowingFeeUsd),
+          netPnlUsd: String(net.netPnlUsd),
+          pnl: String(net.netPnlUsd),
+          settlementStatus: 'SETTLED',
+          settledAt: input.settledAt,
+          evidenceTxHash: input.evidenceTxHash,
+          settlementRelayTaskId: relayTaskId,
+          settlementOrderKey: orderKey,
+          settlementEmitterAddress: emitterAddress,
+          settlementBlockNumber: resolutionBlockText,
+          settlementLatestBlock: latestBlockText,
+          settlementConfirmations: confirmations,
+          settlementEvidenceBasis: evidenceBasis,
+          settlementEvidenceAt: input.settledAt,
+        })
+        .where(and(
+          eq(tradesTable.id, input.tradeId),
+          eq(tradesTable.action, 'CLOSE'),
+          eq(tradesTable.testMode, true),
+          eq(tradesTable.settlementStatus, 'UNSETTLED'),
+          eq(tradesTable.settlementIntentId, intentId),
+          isNotNull(tradesTable.preCloseSizeUsd30),
+          isNotNull(tradesTable.requestedReductionUsd30),
+        ))
+        .returning({ id: tradesTable.id });
+      if (updated.length === 0) {
+        return { ok: false as const, reason: `trade ${input.tradeId} 미존재/경합/이미 정산됨 — 재정산 금지` };
+      }
+
+      const delta = fin(input.estimatedNetPnlUsd)
+        ? net.netPnlUsd - (input.estimatedNetPnlUsd as number)
+        : null;
+      if (delta !== null && Math.abs(delta) > 0.005) {
+        console.warn(`[Settlement] trade=${input.tradeId} 추정-실제 순PnL 차이 $${delta.toFixed(4)} (추정 $${(input.estimatedNetPnlUsd as number).toFixed(4)} → 실제 $${net.netPnlUsd.toFixed(4)})`);
+      }
+      return { ok: true as const, netPnlUsd: net.netPnlUsd, estimateDeltaUsd: delta };
+    });
+  } catch {
+    return { ok: false, reason: '정산 저장 실패 — UNSETTLED 유지 (fail-closed)' };
   }
 }
 
@@ -152,14 +265,25 @@ export function pnlForTargets(rows: {
 
 // ── LIVE 정산 reconciliation (6H-2A §5) ─────────────────────────────────────
 
-/** 정산 증거 조회 fetcher — 주입식 (이번 단계 실제 네트워크 경로 미구성) */
+export type SettlementEvidence = {
+  grossPnlUsd: number; positionFeeUsd: number; executionFeeUsd: number;
+  priceImpactUsd: number; fundingFeeUsd: number; borrowingFeeUsd: number;
+  evidenceTxHash: string; settledAt: Date;
+  intentId: string; relayTaskId: string; orderKey: string; emitterAddress: string;
+  resolutionBlock: string; latestBlock: string; confirmations: number;
+  evidenceBasis: string;
+};
+
+export type SettlementEvidenceFetchResult =
+  | SettlementEvidence
+  | { ok: true; evidence: SettlementEvidence }
+  | { ok: false; reason: string }
+  | null;
+
+/** 정산 증거 조회 fetcher — production은 read-only RPC/API/PositionReader만 사용 */
 export interface SettlementEvidenceFetcher {
   /** trade에 대한 온체인 정산 증거 전체 확보 시도 — 부분 확보 금지 */
-  fetchEvidence?: (args: { tradeId: string; symbol: string }) => Promise<{
-    grossPnlUsd: number; positionFeeUsd: number; executionFeeUsd: number;
-    priceImpactUsd: number; fundingFeeUsd: number; borrowingFeeUsd: number;
-    evidenceTxHash: string; settledAt: Date;
-  } | null>;
+  fetchEvidence?: (args: { tradeId: string; symbol: string }) => Promise<SettlementEvidenceFetchResult>;
 }
 
 export interface ReconcileResult {
@@ -202,11 +326,16 @@ export async function reconcileLiveSettlements(fetcher: SettlementEvidenceFetche
     let settledNow = 0;
     for (const row of rows) {
       try {
-        const ev = await fetcher.fetchEvidence({ tradeId: row.id, symbol: row.symbol });
-        if (!ev) {
+        const fetched = await fetcher.fetchEvidence({ tradeId: row.id, symbol: row.symbol });
+        if (!fetched) {
           reasons.push(`${LIVE_SETTLEMENT_INCOMPLETE}: trade=${row.id} 증거 미확보`);
           continue;
         }
+        if ('ok' in fetched && fetched.ok === false) {
+          reasons.push(`${LIVE_SETTLEMENT_INCOMPLETE}: trade=${row.id} ${fetched.reason}`);
+          continue;
+        }
+        const ev = 'ok' in fetched ? fetched.evidence : fetched;
         const rec = await recordTradeSettlement({ tradeId: row.id, ...ev });
         if (rec.ok) settledNow++;
         else reasons.push(`${LIVE_SETTLEMENT_INCOMPLETE}: trade=${row.id} ${rec.reason}`);

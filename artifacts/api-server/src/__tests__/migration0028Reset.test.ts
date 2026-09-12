@@ -13,7 +13,7 @@ describe('0028_paper_reset_1000 guarded migration 계약', () => {
     const src = readFileSync(resolve(__dirname, '../../../../lib/db/src/index.ts'), 'utf8');
     const start = src.indexOf('"0028_paper_reset_1000"');
     expect(start).toBeGreaterThan(-1);
-    const end = src.indexOf('// Add future migrations here', start);
+    const end = src.indexOf('"0029_server_paper_executor"', start);
     sql = src.slice(start, end);
   });
 
