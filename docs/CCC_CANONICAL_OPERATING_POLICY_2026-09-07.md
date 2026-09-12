@@ -5,7 +5,7 @@
 **Canonical branch:** `codex/handover-20260820`  
 **Canonical PR:** #1
 
-**Latest milestone revision:** 2026-09-11 — the owner corrected the schedule to **September 15 ALPHA / October 1 BETA**. The September 15 start remains **2026-09-15 12:00 Asia/Manila**, with the same real **400 USDC** capital and dashboard scope. The alpha must demonstrate easy setup and autonomous trading without routine human trade decisions or per-order approvals during an explicitly authorized bounded session. October 1 is now beta, not an asserted final V1.0 launch; final-release timing is not specified. See sections 12 and 14. This requirement update does not activate LIVE, create financial permissions, or prove readiness.
+**Latest milestone revision:** 2026-09-13 — the owner explicitly changed the fixed ALPHA start from noon to **2026-09-15 13:00 Asia/Manila (05:00 UTC)**: “반드시 15일 오후 1시부터 알파 테스트 가능하도록 진행할것.” The same real **400 USDC**, easy-use dashboard and autonomous-trading scope remain. **October 1 is BETA**, not final V1.0 release. Preparation deadlines are not automatically extended by the one-hour start-time change. See sections 12 and 14. This requirement update does not activate LIVE, create financial permissions, or prove readiness.
 
 ## 1. Authority and precedence
 
@@ -20,7 +20,7 @@
 
 ## 2. Delivery schedule
 
-- **Fixed ALPHA schedule: 2026-09-15 12:00 Asia/Manila (UTC+08:00).** Required scope: an easy-to-use functioning dashboard and real autonomous trading with **400 USDC alpha capital**. The relabeling does not postpone the session or reduce its agreed scope. See section 12.
+- **Fixed ALPHA schedule: 2026-09-15 13:00 Asia/Manila (UTC+08:00).** Required scope: an easy-to-use functioning dashboard and real autonomous trading with **400 USDC alpha capital**. The owner explicitly replaced the previous 12:00 start; the date and agreed scope are unchanged. See section 12.
 - **BETA date: 2026-10-01, Asia/Manila.** This replaces the older October 1 final V1.0-release description. Beta start time, capital, duration and participant scope have not been specified; do not infer them. See section 14.
 - **Final V1.0/public release date: not specified by the revised instruction.** Do not report October 1 as both beta and a completed final launch.
 - Historical master-plan wording about a US$100/day delay penalty is not verified or amended by this engineering milestone correction. Do not infer a contractual waiver, extension or confirmed liability from changing alpha/beta labels.
@@ -178,7 +178,7 @@ Every hourly run must be low-cost and delta-oriented:
 
 Hourly Korean report should include:
 
-- 기준 시각 / **9월 15일 12:00 ALPHA**, **10월 1일 BETA**까지의 일정;
+- 기준 시각 / **9월 15일 13:00 ALPHA**, **10월 1일 BETA**까지의 일정;
 - 지난 1시간 완료;
 - GitHub/Codex HEAD + CI;
 - Figma/UI progress and easy-start/no-routine-intervention acceptance status;
@@ -192,9 +192,11 @@ Hourly Korean report should include:
 - PAPER / Canary / LIVE schedule impact;
 - Replit Agent call count and Production publish count for the hour.
 
+A posted development request is not a running coding task. Verify acknowledgement/task identity and completion evidence. On a confirmed environment/permission error, mark the requested task BLOCKED, do not repeatedly submit it, and continue independent safe work where possible while requesting only the necessary owner setup action. Do not call Replit Agent or buy credits just to hide a failed Codex handoff.
+
 ## 11. Source-of-truth rule
 
-The 2026-09-01 Master Plan remains useful for architecture, launch scope and historical constraints, but sections that say **Replit Agent is the primary implementer or should automatically start work whenever paused** are superseded by this low-cost policy. Older references to **September 15 beta** and **October 1 final V1.0 release** are superseded by the 2026-09-11 owner correction to **September 15 alpha / October 1 beta**.
+The 2026-09-01 Master Plan remains useful for architecture, launch scope and historical constraints, but sections that say **Replit Agent is the primary implementer or should automatically start work whenever paused** are superseded by this low-cost policy. Older references to **September 15 beta** and **October 1 final V1.0 release** are superseded by the 2026-09-11 owner correction to **September 15 alpha / October 1 beta**. The 2026-09-13 owner instruction further replaces the alpha's **12:00** start with **13:00 Asia/Manila**.
 
 Historical instructions requiring human approval for every first LIVE-test order describe a prior test mode; they are not the acceptance definition of the September 15 autonomous alpha. They do not remove the need for the user's bounded session authorization or a separately approved preparatory manual test.
 
@@ -206,9 +208,9 @@ Any status snapshot embedded in older documents is historical only. Current stat
 
 ### Owner-confirmed schedule and scope
 
-The owner originally fixed September 15 at noon for a dashboard and real 400-USDC automated-trading test, then clarified the objective: “400 usdc로 보여줘야하는건 손쉬운 사용법, 사람의 간섭 또는 제어 없이 자동으로 매매를 보여주는게 목표”. The owner then corrected the milestone names: “9월 15일 알파 - 10월 1일 베타”.
+The owner originally fixed September 15 at noon for a dashboard and real 400-USDC automated-trading test, then clarified the objective: “400 usdc로 보여줘야하는건 손쉬운 사용법, 사람의 간섭 또는 제어 없이 자동으로 매매를 보여주는게 목표”. The owner then corrected the milestone names: “9월 15일 알파 - 10월 1일 베타”. The latest explicit start-time instruction is: “반드시 15일 오후 1시부터 알파 테스트 가능하도록 진행할것.” The earlier noon time is historical only.
 
-- **Fixed ALPHA start: 2026-09-15T12:00:00+08:00**, noon in Asia/Manila; **2026-09-15T04:00:00Z**.
+- **Fixed ALPHA start: 2026-09-15T13:00:00+08:00**, 1 PM in Asia/Manila; **2026-09-15T05:00:00Z**.
 - Deliverable A: a functioning, easy-to-use Production dashboard, including the approved Figma first-release UI and accurate runtime/capital/position/PnL/risk information.
 - Deliverable B: a controlled real-money **autonomous** trading alpha using **400 USDC of dedicated alpha capital**, without routine human trading decisions or per-order approvals once the bounded session has been properly authorized and started. PAPER alone, a manually approved trade, or a chart animation does not satisfy this deliverable.
 - Do not unilaterally reschedule, substitute a PAPER-only demonstration, or reduce the agreed scope. Relabeling beta to alpha does not waive the fixed date, real-money objective or safety gates.
@@ -240,19 +242,20 @@ A. Dashboard/ease of use: deployed source matches the exact CI-passing source; a
 
 B. Autonomous execution: eligible signal → existing Risk/cost gates → confirmed GMX entry → confirmed protection → position management → confirmed close → residual order cleanup → settlement/readback are evidenced **without routine human trading decisions or per-order confirmation after authorized Start**. Price movement alone, an API acknowledgement, a signer-ready flag, a manually executed demonstration or a PAPER trade is not proof of autonomous real-trade completion. Duplicate submissions and unresolved settlements must not be hidden. Browser closure must not stop server-side operation/protection.
 
-All current cost/Owner Approval/canonical delegation/action-budget/Stop/Risk/release/GMX gates must pass. Keep the $0.40 cost cap; do not loosen it, raise leverage or force an uneconomic order to demonstrate activity at noon. If there is no valid signal, record NO_TRADE and mark the actual-trade lifecycle UNVERIFIED rather than inventing a pass. A profitable short alpha is not proof of long-term positive expectancy.
+All current cost/Owner Approval/canonical delegation/action-budget/Stop/Risk/release/GMX gates must pass. Keep the $0.40 cost cap; do not loosen it, raise leverage or force an uneconomic order to demonstrate activity at the fixed start time. If there is no valid signal, record NO_TRADE and mark the actual-trade lifecycle UNVERIFIED rather than inventing a pass. A profitable short alpha is not proof of long-term positive expectancy.
 
 ### Internal delivery gates — working deadlines, not completion claims or installed jobs
 
-All times are Asia/Manila (UTC+08:00). Relabeling the milestone does not move these workback deadlines. They do not claim that a worker/job has been started or that delivery is already assured.
+All times are Asia/Manila (UTC+08:00). The revised 13:00 alpha start does not extend prior development/deployment deadlines. They do not claim that a worker/job has been started or that delivery is already assured.
 
 - **September 10, 18:00 (original assessment deadline):** existing-source/runtime discrepancy assessment, remaining implementation scope and user-only dependencies. If this past milestone lacks evidence, mark it unverified; do not retroactively claim PASS.
 - **September 11, 18:00:** close outstanding source/runtime evidence gaps through an authorized verification path without hourly Agent polling; confirm the existing 400-USDC modules' worker/Risk/execution wiring, easy-start flow and absence of routine per-order human gates in the intended authorized mode. Finish only missing alpha-critical connections and identify remaining user-only prerequisites. This retains the September 11 recovery checkpoint recorded in PR #1.
 - **September 12, 18:00:** finish alpha-essential code and isolated PAPER/replay/regression validation for the dashboard, 400-USDC capital semantics, costs, autonomous entry/protection/close/settlement, browser independence, restart and duplicate suppression. Obtain exact-source CI evidence for the release candidate. Missing evidence is not a PASS.
-- **September 13, 18:00:** complete the necessary single-batch PAPER Production deployment of the validated candidate, actual browser acceptance, release-source parity and runtime smoke within existing permissions. Do not defer a complete alpha release indefinitely to collect unrelated features.
+- **September 13, 18:00:** complete any outstanding alpha-critical integration/tests and the necessary single-batch PAPER Production deployment of the validated candidate, actual browser acceptance, release-source parity and runtime smoke within existing permissions. Report missed earlier milestones honestly; do not defer a complete alpha release indefinitely to collect unrelated features.
 - **September 14, 18:00:** complete the readiness rehearsal and report both deliverables' gate matrix, including routine-human-intervention evidence; freeze non-blocking code changes. Prepare the bounded activation request and user-only prerequisites early. Obtain/revalidate time-bound authorization close enough to the alpha to remain valid; do not repeatedly request signatures that expire while code work is unfinished.
-- **September 15, 11:00–12:00:** final fresh runtime/cost/authorization/Stop/Risk checks and required user-controlled bounded activation decision. Do not leave known development or deployment blockers until this window.
-- **September 15, 12:00:** fixed ALPHA session start. Real-money execution is permitted only within verified, explicitly authorized bounds. If a mandatory financial gate is still failed or unknown, do not execute through it; report live-scope non-delivery rather than claiming that dashboard/PAPER/manual-order results satisfied the autonomous alpha.
+- **September 15, 11:00–12:30:** final fresh runtime/cost/authorization/Stop/Risk checks and required user-controlled bounded activation steps. Do not leave known development or deployment blockers until this window.
+- **September 15, 12:30:** final Go/No-Go with fresh evidence and the user's required bounded authorization; this checkpoint does not itself unlock LIVE.
+- **September 15, 13:00:** fixed ALPHA session start. Real-money execution is permitted only within verified, explicitly authorized bounds. If a mandatory financial gate is still failed or unknown, do not execute through it; report live-scope non-delivery rather than claiming that dashboard/PAPER/manual-order results satisfied the autonomous alpha.
 
 ### Critical-path priority and early escalation
 
@@ -266,7 +269,7 @@ All times are Asia/Manila (UTC+08:00). Relabeling the milestone does not move th
 
 Retain the Codex/GitHub → GitHub Actions → Replit final-publish workflow and existing Figma source. No TradingAgents integration, extra paid research agents, infrastructure migration, cosmetic expansion or duplicate full-suite/deploy loops for this alpha. Deadline pressure does not override Agent-spend controls or authorize extra paid credits.
 
-On a subsequent canonical run, read this same policy path and report the **fixed September 15 12:00 ALPHA deadline** and **October 1 BETA date**, with each relevant acceptance gate as PASS / FAIL / UNKNOWN / DEFERRED_USER_ACTION and source/time/version. Reading or updating this document is not proof that another conversation or scheduler has executed it. Do not claim an automatic launch, hourly push delivery, completed deployment, current GMX state or profitability without execution evidence.
+On a subsequent canonical run, read this same policy path and report the **fixed September 15 13:00 ALPHA deadline** and **October 1 BETA date**, with each relevant acceptance gate as PASS / FAIL / UNKNOWN / DEFERRED_USER_ACTION and source/time/version. Reading or updating this document is not proof that another conversation or scheduler has executed it. Do not claim an automatic launch, hourly push delivery, completed deployment, current GMX state or profitability without execution evidence.
 
 ## 13. Post-validation roadmap — user-selectable exchanges and reward comparison
 
@@ -279,7 +282,7 @@ On a subsequent canonical run, read this same policy path and report the **fixed
 The owner clarified that exchange choice is not only about fees or familiarity: normal trading activity may qualify for exchange rewards, points or airdrops, and these benefits can be part of the user's selection criteria. The owner explicitly said this is not required immediately and requested roadmap inclusion.
 
 - Extend the future user-selectable-exchange roadmap to compare execution quality, total costs, account eligibility and official rewards together.
-- This is a post-beta-stabilization expansion candidate requiring reprioritization. It must not displace the fixed September 15 12:00 dashboard + 400-USDC ALPHA or October 1 BETA work. No new delivery date, paid service, venue migration or multi-user SaaS scope is approved by recording this item.
+- This is a post-beta-stabilization expansion candidate requiring reprioritization. It must not displace the fixed September 15 13:00 dashboard + 400-USDC ALPHA or October 1 BETA work. No new delivery date, paid service, venue migration or multi-user SaaS scope is approved by recording this item.
 - The purpose is to help the user choose where to conduct independently justified trading, not to maximize turnover or manufacture activity for rewards.
 
 ### Proposed comparison and tracking requirements
