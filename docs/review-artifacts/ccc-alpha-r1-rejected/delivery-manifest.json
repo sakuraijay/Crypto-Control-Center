@@ -1,0 +1,63 @@
+{
+  "status": "REJECTED_R1_REVIEW_ONLY_NOT_R3",
+  "baseline": "8a0757ceb7130507e69e904395c491a58d80c3ec",
+  "originalArchive": {
+    "path": "CCC-ALPHA-B50-01-R1-BLOCKED.zip",
+    "bytes": 89830,
+    "sha256": "3d9e363d32d2d61342432299db4b89e0beabf5942ac74e9aabe0daf9d723dbca"
+  },
+  "members": [
+    {
+      "archiveMember": "RESULT.md",
+      "deliveredPath": "RESULT.md.txt",
+      "bytes": 4238,
+      "sha256": "75edd5dbaa50cad1d9bddd9b34f961c84baacdef441070f66ead4eb7daa37303"
+    },
+    {
+      "archiveMember": "MANIFEST.txt",
+      "deliveredPath": "MANIFEST.txt.txt",
+      "bytes": 233,
+      "sha256": "bb202aba58ef1fba9983357ca8cd14fb80fe91f265fb55bf0797e32c75106378"
+    },
+    {
+      "archiveMember": "candidate-NOT-FOR-DEPLOYMENT.patch",
+      "deliveredPath": "candidate-NOT-FOR-DEPLOYMENT.patch.txt",
+      "bytes": 39221,
+      "sha256": "b5a23386ae5e09f0aaf932a20850c1a4d4ef5c06ad6045d2cf6c6de9c22eeaa0"
+    },
+    {
+      "archiveMember": "candidate-files/artifacts/api-server/src/__tests__/aiWorker.test.ts",
+      "deliveredPath": "candidate-files/artifacts/api-server/src/__tests__/aiWorker.test.ts.txt",
+      "bytes": 91665,
+      "sha256": "781391a2d108ee1147afaaca4ea9f29f47cbf23e7756bdadf262276b38e6cd4d"
+    },
+    {
+      "archiveMember": "candidate-files/artifacts/api-server/src/lib/riskEngineState.ts",
+      "deliveredPath": "candidate-files/artifacts/api-server/src/lib/riskEngineState.ts.txt",
+      "bytes": 7183,
+      "sha256": "fadfbdc7a7f1f017beae62c9a33860cc4c18811b30d2abe8b54c17fab7de0d33"
+    },
+    {
+      "archiveMember": "candidate-files/artifacts/api-server/src/workers/aiWorker.ts",
+      "deliveredPath": "candidate-files/artifacts/api-server/src/workers/aiWorker.ts.txt",
+      "bytes": 136436,
+      "sha256": "66bb73ed765bd38892458699c46d11415f38f26f1eefa1399d3adddf98ad1ddd"
+    },
+    {
+      "archiveMember": "candidate-files/artifacts/api-server/src/workers/serverTypes.ts",
+      "deliveredPath": "candidate-files/artifacts/api-server/src/workers/serverTypes.ts.txt",
+      "bytes": 6390,
+      "sha256": "ab914cd380080d02e27e302ca1c62b9c409525ba2d95988391f7b3268509d276"
+    },
+    {
+      "archiveMember": "candidate-files/docs/CCC_CANONICAL_OPERATING_POLICY_2026-09-07.md",
+      "deliveredPath": "candidate-files/docs/CCC_CANONICAL_OPERATING_POLICY_2026-09-07.md.txt",
+      "bytes": 35686,
+      "sha256": "c4d2f109572fd5b8f0e7b4eeb9ab0fbf8d10b66f7447146e5c371e72e79af9d0"
+    }
+  ],
+  "localByteEquality": "PASS_ALL_8_MEMBERS_AND_ZIP",
+  "secretCheck": "bounded patterns: no findings; not a comprehensive security guarantee",
+  "cost": "UNKNOWN",
+  "codeRemediationStarted": false
+}
