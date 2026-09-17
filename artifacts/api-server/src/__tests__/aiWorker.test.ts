@@ -23,35 +23,42 @@ import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 
 // ── Drizzle 체인 헬퍼 (모킹용) ──────────────────────────────────────────────
 //    vi.mock 팩토리 내에서 vi.fn()을 쓸 수 있으므로 여기서 정의
-let _dbSelectImpl: () => unknown = () => [];
+type DbSelectQuery = { table?: { __name?: string }; where?: { left?: unknown; right?: unknown } };
+let _dbSelectImpl: (query?: DbSelectQuery) => unknown = () => [];
 let _dbInsertImpl: () => unknown = () => undefined;
 let _dbUpdateImpl: () => unknown = () => 0;
 const _dbInsertTables: unknown[] = [];
 const _dbUpdateTables: unknown[] = [];
 const _dbValuesInputs: unknown[] = [];
 
-function chain(getResult: () => unknown) {
+function chain(getResult: (query?: DbSelectQuery) => unknown) {
   const c: Record<string, unknown> = {};
-  for (const m of ['from','where','limit','offset','orderBy','set',
-                   'onConflictDoNothing','onConflictDoUpdate','returning']) {
+  let query: DbSelectQuery = {};
+  for (const m of ['limit','offset','orderBy','set',
+                    'onConflictDoNothing','onConflictDoUpdate','returning','for']) {
     c[m] = () => c;
   }
+  c.from = (table: DbSelectQuery['table']) => {
+    query = { ...query, table };
+    return c;
+  };
+  c.where = (where: DbSelectQuery['where']) => {
+    query = { ...query, where };
+    return c;
+  };
   c.values = (value: unknown) => {
     _dbValuesInputs.push(value);
     return c;
   };
   (c as { then(r: (v: unknown) => unknown): Promise<unknown> }).then =
-    (resolve) => Promise.resolve(getResult()).then(resolve);
+    (resolve) => Promise.resolve(getResult(query)).then(resolve);
   return c;
 }
 
 vi.mock('@workspace/db', () => ({
   db: {
     select: vi.fn().mockImplementation(() => {
-      // Task #111 — serverPaperExecutor의 selects(pendingClose/open rows)는 틱 타이밍에 따라
-      // 비결정적으로 끼어들므로 카운터 시퀀스에서 제외 (항상 빈 결과)
-      const stack = new Error().stack ?? '';
-      if (stack.includes('serverPaperExecutor')) return chain(() => []);
+      // The executor has named module mocks; route DB reads by table/key.
       return chain(_dbSelectImpl);
     }),
     insert: vi.fn().mockImplementation((table: unknown) => {
@@ -63,16 +70,17 @@ vi.mock('@workspace/db', () => ({
       return chain(_dbUpdateImpl);
     }),
     delete: vi.fn().mockImplementation(() => chain(() => 0)),
+    transaction: vi.fn(async (callback: (tx: typeof db) => Promise<unknown>) => callback(db)),
   },
-  aiDecisionsTable:    new Proxy({}, { get: (_, k) => ({ col: String(k) }) }),
-  liveApprovalsTable:  new Proxy({}, { get: (_, k) => ({ col: String(k) }) }),
-  strategyConfigTable: new Proxy({}, { get: (_, k) => ({ col: String(k) }) }),
-  tradesTable:         new Proxy({}, { get: (_, k) => ({ col: String(k) }) }),
-  workerStateTable:    new Proxy({}, { get: (_, k) => ({ col: String(k) }) }),
+  aiDecisionsTable:    new Proxy({ __name: 'aiDecisions' }, { get: (target, k) => k === '__name' ? target.__name : ({ col: String(k) }) }),
+  liveApprovalsTable:  new Proxy({ __name: 'liveApprovals' }, { get: (target, k) => k === '__name' ? target.__name : ({ col: String(k) }) }),
+  strategyConfigTable: new Proxy({ __name: 'strategyConfig' }, { get: (target, k) => k === '__name' ? target.__name : ({ col: String(k) }) }),
+  tradesTable:         new Proxy({ __name: 'trades' }, { get: (target, k) => k === '__name' ? target.__name : ({ col: String(k) }) }),
+  workerStateTable:    new Proxy({ __name: 'workerState' }, { get: (target, k) => k === '__name' ? target.__name : ({ col: String(k) }) }),
 }));
 
 vi.mock('drizzle-orm', () => ({
-  eq:   vi.fn(() => ({})),
+  eq:   vi.fn((left, right) => ({ left, right })),
   desc: vi.fn(() => ({})),
   lt:   vi.fn(() => ({})),
   like: vi.fn(() => ({})),
@@ -283,7 +291,13 @@ import {
   reduceServerPaper70,
   requestServerPaperCloseAll,
   manageServerPaperTick,
+  loadServerOpenRows,
+  loadPendingCloseFromDb,
+  loadSubmittedReduce70FromDb,
+  reconcileStartupCloseIntent,
 } from '../workers/serverPaperExecutor';
+import { FIXED_BETA_TRADE_STRATEGY, fixedBetaLedgerBinding, isFixedBetaAccountingStateFresh, type FixedBetaAccountingStateV1 } from '../workers/fixedBetaAccountingState';
+import { manilaDayStartIso, manilaWeekStartIso } from '../lib/manilaTime';
 
 // ── 최소 유효 AI 결정 (CASH — 가장 안전한 기본값) ──────────────────────────────
 const CASH_DECISION = {
@@ -333,6 +347,9 @@ function resetWorker() {
   wm.strategyLifecycleRestoreBlocked = true;
   wm.activePaperEpochStartMs = null;
   wm.paperEpochStateOk = true;
+  wm.accountingPolicyContext = 'STANDARD_ACTIVE';
+  wm.accountingNamespaceValid = true;
+  wm.fixedBetaAccountingState = null;
   (wm.priceAtBySymbol as Map<string, number>).clear();
   (wm.lastTickUpdatedAtBySymbol as Map<string, number>).clear();
 
@@ -520,18 +537,8 @@ function makeOpenTrade(ageMs: number): unknown[] {
   }];
 }
 
-// ── 테스트 공통 DB 응답 시퀀서 ────────────────────────────────────────────────
-// 실제 select 호출 순서:
-//   start()    → (1) loadPendingApprovals (liveApprovalsTable)
-//              → (2) loadHwmFromDb        (workerStateTable)
-//              → (3) loadBaselinesFromDb  (workerStateTable — 기간 PnL 기준점)
-//              → (4) loadActivePaperEpochFromDb (workerStateTable — legacy pointer 없음)
-//              → (5) loadStrategyLifecycleSnapshotFromDb (aiDecisionsTable)
-//              → (6) loadRiskEngineState  (workerStateTable — 미수립)
-//   runCycle() → (7) loadPendingApprovals again (liveApprovalsTable)
-//              → (8) strategyConfigTable
-//              → (9) tradesTable (consecutiveLosses + cooldown 계산)
-// insert/update 호출은 별도 mock (_dbInsertImpl, _dbUpdateImpl)
+// Named table/key routing is stable across additional startup and cycle reads.
+// insert/update use separate mocks (_dbInsertImpl, _dbUpdateImpl).
 
 function setupDbSequence(opts: {
   pendingApprovals?: unknown[];
@@ -548,18 +555,18 @@ function setupDbSequence(opts: {
   const trades   = opts.trades    ?? noTradesResult;
   const inserted = opts.insertResult ?? [{ id: 'test-decision-1' }];
 
-  let selectCallN = 0;
-  _dbSelectImpl = () => {
-    selectCallN++;
-    if (selectCallN === 1) return pending;   // start(): loadPendingApprovals
-    if (selectCallN === 2) return hwm;       // start(): loadHwmFromDb
-    if (selectCallN === 3) return [];        // start(): loadBaselinesFromDb (기준점 없음)
-    if (selectCallN === 4) return [];        // start(): active PAPER epoch pointer 없음 (legacy mode)
-    if (selectCallN === 5) return lifecycle; // start(): latest lifecycle decision (없으면 legacy baseline)
-    if (selectCallN === 6) return [];        // start(): loadRiskEngineState (6H-1 — 미수립)
-    if (selectCallN === 7) return pending;   // runCycle(): loadPendingApprovals again
-    if (selectCallN === 8) return strategy;  // runCycle(): strategyConfigTable
-    if (selectCallN === 9) return trades;    // runCycle(): tradesTable (consecutiveLosses)
+  _dbSelectImpl = (query) => {
+    const table = query?.table?.__name;
+    const key = query?.where?.right;
+    if (table === 'liveApprovals') return pending;
+    if (table === 'strategyConfig') return strategy;
+    if (table === 'trades') return trades;
+    if (table === 'aiDecisions') return lifecycle;
+    if (table === 'workerState') {
+      if (key === 'worker_policy_context_v1') return []; // missing = explicit legacy Standard
+      if (key === 'equityHwm') return hwm;
+      return [];
+    }
     return [];
   };
 
@@ -679,6 +686,608 @@ describe('PAPER epoch accounting boundary', () => {
     }, 1, 42);
 
     expect(openServerPaperPosition).not.toHaveBeenCalled();
+  });
+});
+
+describe('Worker entry veto does not synthesize a close-all', () => {
+  beforeEach(() => { resetWorker(); vi.clearAllMocks(); });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('retains an existing position when an entry-only veto is encoded as CASH defensively', async () => {
+    const wm = workerManager as unknown as {
+      active: boolean;
+      lifecycleGeneration: number;
+      runServerPaperExecution(...args: unknown[]): Promise<void>;
+    };
+    wm.active = true;
+    wm.lifecycleGeneration = 901;
+    vi.mocked(loadServerOpenRows).mockResolvedValue([{ id: 'open-1', symbol: 'BTC' }] as never);
+
+    await wm.runServerPaperExecution({
+      id: 'entry-veto',
+      operatingState: 'CASH',
+      entryVeto: true,
+      riskApproved: false,
+      executionType: 'hold',
+      primarySymbol: null,
+    }, { positions: [], entriesManilaDay: 0 }, { entryAllowed: false, actions: [] }, 1, 901);
+
+    expect(requestServerPaperCloseAll).not.toHaveBeenCalled();
+    expect(closeServerPaperPosition).not.toHaveBeenCalled();
+  });
+
+  it('still sends a genuine CASH transition to durable close protection', async () => {
+    const wm = workerManager as unknown as {
+      active: boolean;
+      lifecycleGeneration: number;
+      runServerPaperExecution(...args: unknown[]): Promise<void>;
+    };
+    wm.active = true;
+    wm.lifecycleGeneration = 902;
+    vi.mocked(loadServerOpenRows).mockResolvedValue([{ id: 'open-2', symbol: 'BTC' }] as never);
+
+    await wm.runServerPaperExecution({
+      id: 'actual-cash',
+      operatingState: 'CASH',
+      riskApproved: true,
+      executionType: 'cash_exit',
+      primarySymbol: null,
+    }, { positions: [], entriesManilaDay: 0 }, { entryAllowed: true, actions: [] }, 1, 902);
+
+    expect(requestServerPaperCloseAll).toHaveBeenCalledWith(
+      'CASH_TRANSITION', expect.any(Number), expect.any(Function),
+    );
+    expect(closeServerPaperPosition).toHaveBeenCalled();
+  });
+});
+
+describe('Worker scoped alpha accounting path', () => {
+  beforeEach(() => { resetWorker(); });
+
+  it('keeps alpha and Standard realized losses/counts separate across repeated reads', async () => {
+    const now = Date.now();
+    const ledger = [
+      {
+        id: 'alpha-open', action: 'OPEN', strategy: FIXED_BETA_TRADE_STRATEGY,
+        openDecisionId: 'alpha-decision', timestamp: now - 2_000, closeTime: now - 1_000,
+        collateralUsd: 100, leverage: 1,
+        pnl: 0, sizeInUsd: 100, size: 100, price: 50_000, symbol: 'BTC', side: 'LONG',
+      },
+      {
+        id: 'alpha-close', action: 'CLOSE', strategy: FIXED_BETA_TRADE_STRATEGY,
+        closesTradeId: 'alpha-open', timestamp: now - 1_000, closeTime: now - 1_000,
+        settlementStatus: 'PAPER_ESTIMATED', netPnlEstimatedUsd: '-12.5', pnl: -1,
+        sizeInUsd: 100, size: 100, price: 49_000, symbol: 'BTC', side: 'LONG',
+      },
+      {
+        id: 'standard-close', action: 'CLOSE', strategy: 'SERVER_WORKER_AI',
+        timestamp: now - 1_000, closeTime: now - 1_000, settlementStatus: 'SETTLED',
+        pnl: -3, sizeInUsd: 100, size: 100, price: 49_000, symbol: 'ETH', side: 'LONG',
+      },
+    ];
+    _dbSelectImpl = query => query?.table?.__name === 'trades' ? ledger : [];
+    const wm = workerManager as unknown as {
+      accountingPolicyContext: string;
+      fixedBetaAccountingState: unknown;
+      loadPaperState(): Promise<{ totalRealizedPnlAllTime: number; consecutiveLosses: number; liveTestDbOk: boolean }>;
+    };
+
+    wm.accountingPolicyContext = 'FIXED_BETA_400';
+    wm.fixedBetaAccountingState = {
+      provenance: { ledgerBinding: fixedBetaLedgerBinding(ledger.filter(row => row.strategy === FIXED_BETA_TRADE_STRATEGY)) },
+      state: {
+        dayPeriodStart: manilaDayStartIso(new Date(now)),
+        weekPeriodStart: manilaWeekStartIso(new Date(now)),
+        startOfDayEquityUsd: 400, startOfWeekEquityUsd: 400,
+        dailyRealizedNetPnlUsd: -12.5, dailyLossAwareNetPnlUsd: -12.5,
+        weeklyRealizedNetPnlUsd: -12.5, dailyEntryCount: 1, consecutiveLossCount: 1,
+        riskOperatingState: 'NORMAL', locks: { ...EMPTY_LOCKS }, lastUpdatedAt: new Date(now).toISOString(),
+      },
+    };
+    const alphaFirst = await wm.loadPaperState();
+    const alphaRestart = await wm.loadPaperState();
+    expect(alphaFirst).toMatchObject({ totalRealizedPnlAllTime: -12.5, consecutiveLosses: 1, liveTestDbOk: true });
+    expect(alphaRestart).toMatchObject({ totalRealizedPnlAllTime: -12.5, consecutiveLosses: 1, liveTestDbOk: true });
+
+    wm.accountingPolicyContext = 'STANDARD_ACTIVE';
+    const standard = await wm.loadPaperState();
+    expect(standard).toMatchObject({ totalRealizedPnlAllTime: -3, consecutiveLosses: 1, liveTestDbOk: true });
+  });
+
+  it('fails closed rather than treating missing alpha net loss evidence as zero', async () => {
+    _dbSelectImpl = () => [{
+      id: 'alpha-close', action: 'CLOSE', strategy: FIXED_BETA_TRADE_STRATEGY,
+      closesTradeId: 'unknown-open', timestamp: Date.now(), settlementStatus: 'SETTLED',
+      pnl: -20, sizeInUsd: 100, size: 100, price: 49_000, symbol: 'BTC', side: 'LONG',
+    }];
+    const wm = workerManager as unknown as {
+      accountingPolicyContext: string;
+      loadPaperState(): Promise<{ totalRealizedPnlAllTime: number; liveTestDbOk: boolean }>;
+    };
+    wm.accountingPolicyContext = 'FIXED_BETA_400';
+    const state = await wm.loadPaperState();
+    expect(state.liveTestDbOk).toBe(false);
+    expect(Number.isNaN(state.totalRealizedPnlAllTime)).toBe(true);
+  });
+
+  function checkpoint(): FixedBetaAccountingStateV1 {
+    const now = new Date();
+    return {
+      schemaVersion: 1, policyContext: 'FIXED_BETA_400',
+      referenceContext: 'FIXED_BETA_REFERENCE_V1', referenceCapitalUsd: 400,
+      authoritativeHistoricalHardStopPresent: true,
+      provenance: { tradeStrategy: FIXED_BETA_TRADE_STRATEGY, checkpointId: 'immutable-source-1', checkpointedAt: now.toISOString(), ledgerBinding: fixedBetaLedgerBinding([]) },
+      state: {
+        dayPeriodStart: manilaDayStartIso(now), weekPeriodStart: manilaWeekStartIso(now),
+        startOfDayEquityUsd: 400, startOfWeekEquityUsd: 400,
+        dailyRealizedNetPnlUsd: -31.5, dailyLossAwareNetPnlUsd: -31.5,
+        weeklyRealizedNetPnlUsd: -31.5, dailyEntryCount: 2, consecutiveLossCount: 2,
+        riskOperatingState: 'HARD_STOPPED', locks: { ...EMPTY_LOCKS, hardStopReason: 'authoritative hard stop' },
+        lastUpdatedAt: now.toISOString(),
+      },
+    };
+  }
+
+  describe('PAPER protection timer accounting independence', () => {
+    let selected: 'STANDARD_ACTIVE' | 'FIXED_BETA_400' | 'INVALID';
+    let tick: () => void;
+    let pendingRecovered: boolean;
+    let protectedIds: string[];
+    const held = {
+      id: 'standard-held', action: 'OPEN', strategy: 'SERVER_WORKER_AI', managedBy: 'SERVER',
+      symbol: 'BTC', side: 'LONG', closeTime: 0, timestamp: 1_700_000_000_000,
+      price: '50000', sizeInUsd: '100', collateralUsd: '100', leverage: '1', pnl: '0',
+      slPrice: '49000', tpPrice: '52000',
+      stopPriceUsd: '49000', takeProfitPriceUsd: '52000',
+    };
+    const timerWorker = () => workerManager as unknown as {
+      serverPaperTimer: ReturnType<typeof setInterval> | null;
+      lastPriceAt: number; priceAtBySymbol: Map<string, number>;
+      priceBuffer: Map<string, number[]>;
+      accountingPolicyContext: string; accountingNamespaceValid: boolean;
+      lifecycleGeneration: number;
+      runCycle(): Promise<void>;
+      runServerPaperExecution(...args: unknown[]): Promise<void>;
+    };
+
+    beforeEach(() => {
+      vi.useFakeTimers({ now: 1_800_000_000_000 });
+      vi.clearAllMocks();
+      vi.stubEnv('WORKER_ENGINE_MODE', 'PAPER');
+      selected = 'STANDARD_ACTIVE';
+      pendingRecovered = false;
+      protectedIds = [];
+      setupDbSequence({ trades: [held] });
+      const baselineRead = _dbSelectImpl;
+      _dbSelectImpl = query => {
+        if (query?.where?.right === 'worker_policy_context_v1') return [{
+          value: selected === 'INVALID' ? '{invalid' : JSON.stringify({
+            schemaVersion: 1, policyContext: selected, approvedBy: 'OPERATOR_AUTH_V1',
+            approvedAt: new Date().toISOString(),
+          }),
+        }];
+        if (query?.where?.right === 'fixed_beta_accounting_state_v1') {
+          return [{ value: JSON.stringify(checkpoint()) }];
+        }
+        return baselineRead(query);
+      };
+      vi.mocked(runAiEngine).mockReturnValue(CASH_DECISION as unknown as ReturnType<typeof runAiEngine>);
+      vi.mocked(loadServerOpenRows).mockResolvedValue([held] as never);
+      vi.mocked(loadPendingCloseFromDb).mockImplementation(async shouldContinue => {
+        expect(shouldContinue?.()).toBe(true);
+        pendingRecovered = true;
+      });
+      vi.mocked(manageServerPaperTick).mockImplementation(async (getQuote, _now, shouldContinue) => {
+        expect(shouldContinue?.()).toBe(true);
+        expect(pendingRecovered).toBe(true);
+        // Mock management only: discover the existing server inventory and
+        // retain its pending-close/SL/TP target. Never submit a real close/OPEN.
+        const rows = await loadServerOpenRows();
+        expect(rows).toEqual([held]);
+        expect(getQuote(held.symbol)).toMatchObject({ ageMs: 0 });
+        protectedIds.push(...rows.map(row => row.id));
+      });
+      const fakeSetInterval = globalThis.setInterval;
+      vi.spyOn(globalThis, 'setInterval').mockImplementation(((callback: () => void, delay?: number) => {
+        if (delay === 15_000) tick = callback;
+        return fakeSetInterval(callback, delay);
+      }) as typeof setInterval);
+    });
+
+    afterEach(() => {
+      workerManager.stop();
+      releasePaperEpochActivationLock();
+      vi.mocked(loadPendingCloseFromDb).mockReset().mockResolvedValue(undefined);
+      vi.mocked(loadSubmittedReduce70FromDb).mockReset().mockResolvedValue(undefined);
+      vi.mocked(reconcileStartupCloseIntent).mockReset().mockResolvedValue(undefined);
+      vi.mocked(manageServerPaperTick).mockReset().mockResolvedValue(undefined);
+      vi.mocked(loadServerOpenRows).mockReset().mockResolvedValue([]);
+      vi.restoreAllMocks();
+      vi.unstubAllEnvs();
+      vi.useRealTimers();
+    });
+
+    async function managementTick() {
+      const wm = timerWorker();
+      wm.lastPriceAt = Date.now();
+      wm.priceAtBySymbol.set(held.symbol, Date.now());
+      tick();
+      // Flush mocked async inventory read and the worker in-flight finalizer.
+      for (let i = 0; i < 5; i++) await Promise.resolve();
+    }
+
+    async function assertNoEntry() {
+      const wm = timerWorker();
+      await wm.runServerPaperExecution({
+        ...CASH_DECISION, id: 'forbidden-alpha-entry', operatingState: 'LONG',
+        primarySymbol: 'BTC', executionType: 'perp_long_open', riskApproved: true,
+        sizeUsd: 100, leverage: 1,
+      }, { positions: [], entriesManilaDay: 0 }, { entryAllowed: true, actions: [] }, 1, wm.lifecycleGeneration);
+      expect(openServerPaperPosition).not.toHaveBeenCalled();
+      expect(executeLiveTestOrder).not.toHaveBeenCalled();
+    }
+
+    it('retains the same management timer and recovered pending protection across Standard → Beta → Standard', async () => {
+      await workerManager.start();
+      const wm = timerWorker();
+      const originalTimer = wm.serverPaperTimer;
+      expect(originalTimer).not.toBeNull();
+      await managementTick();
+      selected = 'FIXED_BETA_400';
+      await wm.runCycle();
+      expect(wm.accountingPolicyContext).toBe('FIXED_BETA_400');
+      expect(wm.serverPaperTimer).toBe(originalTimer);
+      await managementTick();
+      await assertNoEntry();
+      selected = 'STANDARD_ACTIVE';
+      await wm.runCycle();
+      expect(wm.accountingPolicyContext).toBe('STANDARD_ACTIVE');
+      expect(wm.serverPaperTimer).toBe(originalTimer);
+      await managementTick();
+      expect(protectedIds).toEqual([held.id, held.id, held.id]);
+      expect(loadPendingCloseFromDb).toHaveBeenCalledTimes(1);
+      expect(loadSubmittedReduce70FromDb).toHaveBeenCalledTimes(1);
+      expect(reconcileStartupCloseIntent).toHaveBeenCalledTimes(1);
+      expect(openServerPaperPosition).not.toHaveBeenCalled();
+    });
+
+    it.each(['FIXED_BETA_400', 'INVALID'] as const)(
+      'cold %s startup recovers Standard inventory protection without entry authority',
+      async context => {
+        selected = context;
+        await workerManager.start();
+        const wm = timerWorker();
+        expect(wm.serverPaperTimer).not.toBeNull();
+        expect(loadPendingCloseFromDb).toHaveBeenCalledTimes(1);
+        expect(loadSubmittedReduce70FromDb).toHaveBeenCalledTimes(1);
+        expect(reconcileStartupCloseIntent).toHaveBeenCalledTimes(1);
+        await wm.runCycle();
+        if (context === 'INVALID') expect(wm.accountingNamespaceValid).toBe(false);
+        await managementTick();
+        expect(protectedIds).toEqual([held.id]);
+        await assertNoEntry();
+        expect(closeServerPaperPosition).not.toHaveBeenCalled();
+        expect(reduceServerPaper70).not.toHaveBeenCalled();
+        expect(tryAcquirePaperEpochActivationLock()).toBe(true);
+        await managementTick();
+        expect(manageServerPaperTick).toHaveBeenCalledTimes(1);
+        releasePaperEpochActivationLock();
+        workerManager.stop();
+        await managementTick();
+        expect(manageServerPaperTick).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    async function realProtectionSeam(decision: Record<string, unknown> | null, durablePending = false) {
+      const real = await vi.importActual<typeof import('../workers/serverPaperExecutor')>('../workers/serverPaperExecutor');
+      real.__resetServerPaperStateForTests();
+      vi.mocked(reconcileStartupCloseIntent).mockImplementation(real.reconcileStartupCloseIntent);
+      vi.mocked(loadPendingCloseFromDb).mockImplementation(real.loadPendingCloseFromDb);
+      vi.mocked(loadSubmittedReduce70FromDb).mockImplementation(real.loadSubmittedReduce70FromDb);
+      const baselineRead = _dbSelectImpl;
+      _dbSelectImpl = query => {
+        if (query?.table?.__name === 'aiDecisions') return [{
+          direction: 'NO_TRADE', fullJson: decision === null ? null : JSON.stringify(decision),
+        }];
+        if (durablePending && query?.where?.right === real.PENDING_CLOSE_KEY) return [{
+          value: JSON.stringify({ reason: 'EXISTING_STANDARD_CLOSE', requestedAt: new Date().toISOString() }),
+        }];
+        return baselineRead(query);
+      };
+      return real;
+    }
+
+    it.each([
+      ['FIXED_BETA_400', 'FIXED_BETA_400', false],
+      ['INVALID', 'FIXED_BETA_400', false],
+      ['STANDARD_ACTIVE', 'FIXED_BETA_400', false],
+      ['FIXED_BETA_400', undefined, false],
+      ['INVALID', undefined, false],
+      ['STANDARD_ACTIVE', undefined, false],
+      ['STANDARD_ACTIVE', 'STANDARD_ACTIVE', true],
+      ['FIXED_BETA_400', 'STANDARD_ACTIVE', true],
+    ] as const)('REAL startup reconciliation: selector %s, durable scope %s, reconstruct=%s', async (context, scope, reconstruct) => {
+      selected = context;
+      const real = await realProtectionSeam({
+        source: 'server_worker', operatingState: 'CASH', accountingPolicyContext: scope,
+      });
+      await workerManager.start(); // real manager callback + real reconciliation + mocked DB
+      expect(reconcileStartupCloseIntent).toHaveBeenCalledTimes(1);
+      const requests = _dbValuesInputs.filter(value => (value as { key?: string }).key === real.PENDING_CLOSE_KEY);
+      expect(requests).toHaveLength(reconstruct ? 1 : 0);
+      expect(real.getServerPaperStatus().pendingClose?.reason ?? null).toBe(reconstruct ? 'STARTUP_RECONCILE' : null);
+      expect(timerWorker().serverPaperTimer).not.toBeNull();
+      expect(_dbValuesInputs.some(value => (value as { action?: string }).action === 'OPEN')).toBe(false);
+    });
+
+    it('REAL reconciliation rejects a tagged Standard entry-only CASH veto', async () => {
+      const real = await realProtectionSeam({
+        source: 'server_worker', operatingState: 'CASH', accountingPolicyContext: 'STANDARD_ACTIVE', entryVeto: true,
+      });
+      await workerManager.start();
+      expect(real.getServerPaperStatus().pendingClose).toBeNull();
+      expect(_dbValuesInputs.some(value => (value as { key?: string }).key === real.PENDING_CLOSE_KEY)).toBe(false);
+    });
+
+    it.each(['pending', 'stop'] as const)('REAL %s protection still runs for Standard inventory under an invalid selector', async kind => {
+      selected = 'INVALID';
+      const real = await realProtectionSeam({
+        source: 'server_worker', operatingState: 'CASH', accountingPolicyContext: 'FIXED_BETA_400',
+      }, kind === 'pending');
+      let management: Promise<void> = Promise.resolve();
+      vi.mocked(manageServerPaperTick).mockImplementation((...args) => {
+        management = real.manageServerPaperTick(...args);
+        return management;
+      });
+      _dbUpdateImpl = () => [{ id: held.id }];
+      await workerManager.start();
+      expect(real.getServerPaperStatus().pendingClose?.reason ?? null).toBe(kind === 'pending' ? 'EXISTING_STANDARD_CLOSE' : null);
+      if (kind === 'stop') timerWorker().priceBuffer.set(held.symbol, [48_000]);
+      await managementTick();
+      await management;
+      const close = _dbValuesInputs.find(value => (value as { action?: string }).action === 'CLOSE');
+      expect(close).toMatchObject({
+        strategy: 'SERVER_WORKER_AI', closesTradeId: held.id,
+        closeReason: kind === 'pending' ? 'EXISTING_STANDARD_CLOSE' : 'STOP_LOSS',
+      });
+      expect(real.getServerPaperStatus().lastCloseAction?.ok).toBe(true);
+      expect(_dbValuesInputs.some(value => (value as { action?: string }).action === 'OPEN')).toBe(false);
+    });
+
+    it.each(['STANDARD_ACTIVE', 'FIXED_BETA_400'] as const)('persists a server-owned %s policy tag on every new decision', async context => {
+      selected = context;
+      await workerManager.start();
+      const wm = workerManager as unknown as { persistDecision(decision: unknown): Promise<{ status: string }> };
+      const result = await wm.persistDecision({
+        ...CASH_DECISION, id: 'worker:-123:tag-proof', createdAt: new Date().toISOString(),
+        source: 'server_worker', accountingPolicyContext: 'UNTRUSTED_INPUT',
+      });
+      expect(result.status).toBe('CLAIMED');
+      const row = _dbValuesInputs.find(value => (value as { id?: number }).id === -123) as { fullJson: string };
+      expect(JSON.parse(row.fullJson).accountingPolicyContext).toBe(context);
+    });
+  });
+
+  it.each(['corrupt', 'duplicate', 'read-failed', 'null-value'])('never cold-starts Standard when the selector is %s', async failure => {
+    vi.useFakeTimers();
+    const reads: DbSelectQuery[] = [];
+    _dbSelectImpl = query => {
+      if (query) reads.push(query);
+      if (query?.where?.right !== 'worker_policy_context_v1') return [];
+      if (failure === 'read-failed') throw new Error('selector unavailable');
+      if (failure === 'duplicate') return [{ value: '{}' }, { value: '{}' }];
+      return [{ value: failure === 'null-value' ? null : '{corrupt' }];
+    };
+    const wm = workerManager as unknown as {
+      riskState: unknown; riskDbOk: boolean; accountingNamespaceValid: boolean;
+      runCycle(): Promise<void>;
+    };
+    try {
+      await workerManager.start();
+      expect(wm.riskState).toBeNull();
+      expect(wm.riskDbOk).toBe(false);
+      expect(wm.accountingNamespaceValid).toBe(false);
+      await wm.runCycle();
+      expect(reads.some(query => query.where?.right === 'riskEngineStateV1')).toBe(false);
+      expect(_dbValuesInputs).toEqual([]);
+      expect(runAiEngine).not.toHaveBeenCalled();
+      expect(openServerPaperPosition).not.toHaveBeenCalled();
+      expect(executeLiveTestOrder).not.toHaveBeenCalled();
+    } finally { workerManager.stop(); vi.useRealTimers(); }
+  });
+
+  it.each(['empty', 'partial'])('does not persist zero counters/losses over a nonzero checkpoint on an %s ledger cycle', async kind => {
+    vi.useFakeTimers();
+    const original = checkpoint();
+    const reads: DbSelectQuery[] = [];
+    _dbSelectImpl = query => {
+      if (query) reads.push(query);
+      if (query?.table?.__name === 'strategyConfig') return defaultStrategyRow;
+      if (query?.table?.__name === 'trades') return kind === 'empty' ? [] : [{
+        id: 'partial-open', action: 'OPEN', openDecisionId: 'partial-decision',
+        strategy: FIXED_BETA_TRADE_STRATEGY, timestamp: Date.now(), closeTime: 0,
+      }];
+      if (query?.where?.right === 'worker_policy_context_v1') return [{ value: JSON.stringify({
+        schemaVersion: 1, policyContext: 'FIXED_BETA_400',
+        approvedBy: 'OPERATOR_AUTH_V1', approvedAt: new Date().toISOString(),
+      }) }];
+      if (query?.where?.right === 'fixed_beta_accounting_state_v1') return [{ value: JSON.stringify(original) }];
+      return [];
+    };
+    const wm = workerManager as unknown as {
+      fixedBetaAccountingState: FixedBetaAccountingStateV1;
+      runCycle(): Promise<void>;
+    };
+    vi.mocked(runAiEngine).mockReturnValue(CASH_DECISION as never);
+    try {
+      await workerManager.start();
+      await wm.runCycle();
+      expect(wm.fixedBetaAccountingState).toEqual(original);
+      expect(runAiEngine).toHaveBeenCalled();
+      expect(_dbValuesInputs.some(value => {
+        const key = (value as { key?: string }).key;
+        return key === 'fixed_beta_accounting_state_v1' || key === 'riskEngineStateV1';
+      })).toBe(false);
+      expect(reads.some(query => query.where?.right === 'riskEngineStateV1')).toBe(false);
+      expect(openServerPaperPosition).not.toHaveBeenCalled();
+    } finally { workerManager.stop(); vi.useRealTimers(); }
+  });
+
+  it('risk persistence never refreshes the immutable source checkpoint or revives stale proof', async () => {
+    const original = checkpoint();
+    const wm = workerManager as unknown as {
+      accountingPolicyContext: string; fixedBetaAccountingState: FixedBetaAccountingStateV1;
+      saveActiveRiskState(state: FixedBetaAccountingStateV1['state']): Promise<{ ok: boolean }>;
+    };
+    wm.accountingPolicyContext = 'FIXED_BETA_400';
+    wm.fixedBetaAccountingState = original;
+    const futureMs = Date.parse(original.provenance.checkpointedAt) + 9 * 24 * 60 * 60 * 1000;
+    expect(await wm.saveActiveRiskState({ ...original.state, lastUpdatedAt: new Date(futureMs).toISOString() })).toEqual({ ok: true });
+    expect(wm.fixedBetaAccountingState.provenance).toEqual(original.provenance);
+    expect(isFixedBetaAccountingStateFresh(wm.fixedBetaAccountingState, futureMs)).toBe(false);
+    expect((_dbValuesInputs[0] as { key: string }).key).toBe('fixed_beta_accounting_state_v1');
+  });
+
+  it('blocks beta LIVE/AUTO OPEN and approval creation while retaining explicit close/reduce dispatch', async () => {
+    vi.stubEnv('WORKER_ENGINE_MODE', 'LIVE');
+    vi.stubEnv('AUTO_WORKER_LIVE_ENABLED', 'true');
+    const wm = workerManager as unknown as {
+      accountingPolicyContext: string;
+      maybeCreateApproval(decision: unknown): Promise<boolean>;
+      tryLiveTestExecution(...args: unknown[]): Promise<void>;
+      executeCloseAllPositions(...args: unknown[]): Promise<void>;
+      executeProfitProtectReduction(...args: unknown[]): Promise<void>;
+    };
+    wm.accountingPolicyContext = 'FIXED_BETA_400';
+    const close = vi.spyOn(wm, 'executeCloseAllPositions').mockResolvedValue();
+    const reduce = vi.spyOn(wm, 'executeProfitProtectReduction').mockResolvedValue();
+    const decision = { ...CASH_DECISION, operatingState: 'LONG', primarySymbol: 'BTC', riskApproved: true };
+    try {
+      expect(await wm.maybeCreateApproval(decision)).toBe(false);
+      await wm.tryLiveTestExecution(decision, [], { positionCount: 0 }, {}, {}, 1);
+      expect(executeLiveTestOrder).not.toHaveBeenCalled();
+      expect(_dbInsertTables).not.toContain(liveApprovalsTable);
+      await wm.tryLiveTestExecution(decision, [], { positionCount: 1 }, {}, {}, 1, { closeAllRequested: true, reduce70Requested: false });
+      expect(close).toHaveBeenCalledTimes(1);
+      await wm.tryLiveTestExecution(decision, [], { positionCount: 1 }, {}, {}, 1, { closeAllRequested: false, reduce70Requested: true });
+      expect(reduce).toHaveBeenCalledTimes(1);
+    } finally { close.mockRestore(); reduce.mockRestore(); vi.unstubAllEnvs(); }
+  });
+
+  function installBoundLedger(rows: Record<string, unknown>[]) {
+    const wm = workerManager as unknown as {
+      accountingPolicyContext: string;
+      fixedBetaAccountingState: FixedBetaAccountingStateV1;
+      priceBuffer: Map<string, number[]>;
+      priceAtBySymbol: Map<string, number>;
+      loadPaperState(): Promise<{
+        liveTestDbOk: boolean; totalRealizedPnlAllTime: number; totalUnrealizedPnl: number;
+        protectionInventoryComplete: boolean; accountingEvidenceError?: string;
+        positions: import('../workers/serverTypes').Position[];
+      }>;
+    };
+    wm.accountingPolicyContext = 'FIXED_BETA_400';
+    const original = checkpoint();
+    wm.fixedBetaAccountingState = {
+      ...original, authoritativeHistoricalHardStopPresent: false,
+      provenance: { ...original.provenance, ledgerBinding: fixedBetaLedgerBinding(rows) },
+      state: {
+        ...original.state, dailyRealizedNetPnlUsd: 0, dailyLossAwareNetPnlUsd: 0,
+        weeklyRealizedNetPnlUsd: 0, dailyEntryCount: 0, consecutiveLossCount: 0,
+        riskOperatingState: 'NORMAL', locks: { ...EMPTY_LOCKS },
+      },
+    };
+    _dbSelectImpl = query => query?.table?.__name === 'trades' ? rows : [];
+    wm.priceBuffer.set('ETH', [99]);
+    wm.priceAtBySymbol.set('ETH', Date.now());
+    return wm;
+  }
+
+  function oldOpen(id = 'held', side = 'LONG'): Record<string, unknown> {
+    return {
+      id, action: 'OPEN', openDecisionId: `${id}-decision`, strategy: FIXED_BETA_TRADE_STRATEGY,
+      timestamp: Date.now() - 40 * 86400_000, closeTime: 0, symbol: 'ETH', side,
+      sizeInUsd: '100', collateralUsd: '100', leverage: '1', price: '100', pnl: '0',
+    };
+  }
+
+  it.each(['old-loss', 'held'])('rejects omission of %s even with identical current-day/week aggregates', async omitted => {
+    const old = Date.now() - 30 * 86400_000;
+    const rows = [
+      oldOpen(),
+      { ...oldOpen('win-close'), action: 'CLOSE', closesTradeId: 'win-open', timestamp: old + 1000, closeTime: old + 1000, pnl: '10', settlementStatus: 'SETTLED', netPnlUsd: '10' },
+      { ...oldOpen('win-open'), closeTime: old + 1000 },
+      { ...oldOpen('old-loss'), action: 'CLOSE', closesTradeId: 'loss-open', timestamp: old, closeTime: old, pnl: '-20', settlementStatus: 'SETTLED', netPnlUsd: '-20' },
+      { ...oldOpen('loss-open'), closeTime: old },
+    ];
+    const wm = installBoundLedger(rows);
+    const complete = await wm.loadPaperState();
+    expect(complete.liveTestDbOk).toBe(true);
+    expect(complete.totalRealizedPnlAllTime).toBe(-10);
+    expect(complete.positions).toHaveLength(1);
+    const immutable = JSON.stringify(wm.fixedBetaAccountingState);
+    _dbSelectImpl = query => query?.table?.__name === 'trades' ? rows.filter(row => row.id !== omitted) : [];
+    const partial = await wm.loadPaperState();
+    expect(partial.liveTestDbOk).toBe(false);
+    expect(partial.accountingEvidenceError).toContain('FULL_LEDGER_BINDING_MISMATCH');
+    expect(partial.protectionInventoryComplete).toBe(false);
+    expect(Number.isNaN(partial.totalRealizedPnlAllTime)).toBe(true);
+    expect(Number.isNaN(partial.totalUnrealizedPnl)).toBe(true);
+    expect(JSON.stringify(wm.fixedBetaAccountingState)).toBe(immutable);
+  });
+
+  it.each([['LONG', 'missing'], ['LONG', 'stale'], ['SHORT', 'missing'], ['SHORT', 'stale']])(
+    'keeps %s protection identity but refuses %s per-symbol marks despite other fresh prices',
+    async (side, kind) => {
+      const wm = installBoundLedger([oldOpen('held', side)]);
+      wm.priceAtBySymbol.set('BTC', Date.now());
+      if (kind === 'missing') wm.priceBuffer.delete('ETH');
+      else wm.priceAtBySymbol.set('ETH', Date.now() - 120_000);
+      const state = await wm.loadPaperState();
+      expect(state.liveTestDbOk).toBe(false);
+      expect(state.accountingEvidenceError).toContain('MARK_MISSING_OR_STALE');
+      expect(state.positions).toHaveLength(1);
+      expect(state.positions[0]).toMatchObject({ symbol: 'ETH', side, sizeInUsd: 100 });
+      expect(Number.isNaN(state.positions[0].unrealizedPnl)).toBe(true);
+      expect(Number.isNaN(state.totalUnrealizedPnl)).toBe(true);
+      expect(state.protectionInventoryComplete).toBe(false);
+    },
+  );
+
+  it.each([
+    { sizeInUsd: undefined }, { sizeInUsd: '100bad' }, { price: 0 },
+    { collateralUsd: null }, { leverage: undefined }, { side: 'invalid' },
+  ])('rejects malformed alpha position fields, never filling valid defaults: %j', async invalid => {
+    const wm = installBoundLedger([{ ...oldOpen(), ...invalid }]);
+    const state = await wm.loadPaperState();
+    expect(state.liveTestDbOk).toBe(false);
+    expect(Number.isNaN(state.totalUnrealizedPnl)).toBe(true);
+    expect(state.protectionInventoryComplete).toBe(false);
+    expect(state.accountingEvidenceError).toMatch(/INVALID/);
+  });
+
+  it('continues genuine CASH/REDUCE protection dispatch with unknown alpha equity and retained held identity', async () => {
+    const wm = installBoundLedger([oldOpen()]);
+    wm.priceBuffer.delete('ETH');
+    const invalidAccounting = await wm.loadPaperState();
+    expect(invalidAccounting.liveTestDbOk).toBe(false);
+    expect(invalidAccounting.positions).toHaveLength(1);
+    const dispatch = workerManager as unknown as {
+      tryLiveTestExecution(...args: unknown[]): Promise<void>;
+      executeCloseAllPositions(...args: unknown[]): Promise<void>;
+      executeProfitProtectReduction(...args: unknown[]): Promise<void>;
+    };
+    const close = vi.spyOn(dispatch, 'executeCloseAllPositions').mockResolvedValue();
+    const reduce = vi.spyOn(dispatch, 'executeProfitProtectReduction').mockResolvedValue();
+    vi.stubEnv('AUTO_WORKER_LIVE_ENABLED', 'true');
+    try {
+      await dispatch.tryLiveTestExecution(CASH_DECISION, [], { positionCount: 1 }, invalidAccounting, {}, 1);
+      expect(close).toHaveBeenCalledTimes(1);
+      await dispatch.tryLiveTestExecution({ ...CASH_DECISION, operatingState: 'LONG' }, [], { positionCount: 1 }, invalidAccounting, {}, 1,
+        { closeAllRequested: false, reduce70Requested: true });
+      expect(reduce).toHaveBeenCalledTimes(1);
+      expect(executeLiveTestOrder).not.toHaveBeenCalled();
+    } finally { close.mockRestore(); reduce.mockRestore(); vi.unstubAllEnvs(); }
   });
 });
 
@@ -1242,12 +1851,9 @@ describe('crash-restart — HWM DB 복원', () => {
 
   it('keeps the cycle busy until the HWM durable write completes', async () => {
     vi.useFakeTimers({ now: 1_800_000_000_000 });
-    let selectCall = 0;
-    _dbSelectImpl = () => {
-      selectCall += 1;
-      if (selectCall === 1) return [];
-      if (selectCall === 2) return defaultStrategyRow;
-      if (selectCall === 3) return noTradesResult;
+    _dbSelectImpl = (query) => {
+      if (query?.table?.__name === 'strategyConfig') return defaultStrategyRow;
+      if (query?.table?.__name === 'trades') return noTradesResult;
       return [];
     };
     let releaseHwm!: (value: unknown) => void;

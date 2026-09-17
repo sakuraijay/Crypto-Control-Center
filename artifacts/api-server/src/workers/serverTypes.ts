@@ -165,6 +165,10 @@ export interface ServerAiDecision {
   reasoning: string[];
   riskApproved: boolean;
   riskVetoReason?: string;
+  /** An entry-only veto is not a synthetic CASH transition and must not close positions. */
+  entryVeto?: boolean;
+  /** Written by the server before persistence; absent legacy scope is unknown. */
+  accountingPolicyContext?: 'STANDARD_ACTIVE' | 'FIXED_BETA_400';
   profitLockStage: 0 | 1 | 2 | 3;
   /** true = 서버 권위 PAPER 실행기가 이 결정으로 실제 OPEN을 기록함 */
   paperExecuted: boolean;

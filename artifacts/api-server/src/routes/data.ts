@@ -10,7 +10,7 @@
 
 import { Router } from "express";
 import { db, tradesTable, strategyConfigTable, workerStateTable } from "@workspace/db";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, or } from "drizzle-orm";
 import { getPaperCostBinding } from "../lib/paperCostCache";
 import { RISK_POLICY, clampDailyTargetUSDT } from "../lib/riskPolicy";
 import { accrueHoldingCostsFromEntryRates, computePaperNetPnl } from "../lib/holdingCosts";
@@ -21,6 +21,16 @@ import {
   profileBaseLimits,
   requestRiskProfile,
 } from "../lib/riskProfiles";
+import {
+  WORKER_POLICY_CONTEXT_KEY,
+  WORKER_POLICY_CONTEXT_SCHEMA_VERSION,
+  containsReservedAccountingFields,
+} from '../workers/workerPolicyContext';
+import {
+  WORKER_FIXED_BETA_CONTEXT,
+  WORKER_STANDARD_ACTIVE_CONTEXT,
+} from '../workers/workerCapitalPolicy';
+import { FIXED_BETA_TRADE_STRATEGY } from '../workers/fixedBetaAccountingState';
 
 const router = Router();
 
@@ -62,13 +72,16 @@ router.post("/data/trades/batch", async (req, res) => {
       timestamp: string; closeTime?: number;
     }>;
     if (!Array.isArray(rows) || rows.length === 0) return res.json({ count: 0 });
+    if (rows.some(row => row.strategy === FIXED_BETA_TRADE_STRATEGY)) {
+      return res.status(403).json({ ok: false, code: 'RESERVED_ACCOUNTING_SCOPE', error: 'reserved alpha accounting strategy is server-only' });
+    }
 
     // ── Task #111 — 서버 권위 격리 (batch도 단건 POST와 동일한 fail-closed 가드) ──
     try {
       for (const r of rows) {
         const existing = await db.select().from(tradesTable)
           .where(eq(tradesTable.id, String(r.id ?? ""))).limit(1);
-        if (existing[0]?.managedBy === "SERVER") {
+        if (existing[0]?.managedBy === "SERVER" || existing[0]?.strategy === FIXED_BETA_TRADE_STRATEGY) {
           return res.status(409).json({
             ok: false, code: "SERVER_MANAGED_ROW",
             error: "서버 Worker가 관리하는 거래 행 포함 — batch 저장 거부",
@@ -140,13 +153,16 @@ router.post("/data/trades/batch", async (req, res) => {
 router.post("/data/trades", async (req, res) => {
   try {
     const r = req.body;
+    if (r?.strategy === FIXED_BETA_TRADE_STRATEGY) {
+      return res.status(403).json({ ok: false, code: 'RESERVED_ACCOUNTING_SCOPE', error: 'reserved alpha accounting strategy is server-only' });
+    }
 
     // ── Task #111 — 서버 권위 격리: 클라이언트 POST가 서버 관리 상태를 덮어쓸 수 없다 ──
     // 1) 동일 id의 서버 관리 행 upsert 거부
     try {
       const existing = await db.select().from(tradesTable)
         .where(eq(tradesTable.id, String(r.id ?? ""))).limit(1);
-      if (existing[0]?.managedBy === "SERVER") {
+      if (existing[0]?.managedBy === "SERVER" || existing[0]?.strategy === FIXED_BETA_TRADE_STRATEGY) {
         return res.status(409).json({
           ok: false, code: "SERVER_MANAGED_ROW",
           error: "서버 Worker가 관리하는 거래 행 — 클라이언트 수정 불가",
@@ -317,7 +333,7 @@ router.delete("/data/trades", async (_req, res) => {
     // 판정 실패도 fail-closed.
     try {
       const serverRows = await db.select().from(tradesTable)
-        .where(eq(tradesTable.managedBy, "SERVER")).limit(1);
+        .where(or(eq(tradesTable.managedBy, "SERVER"), eq(tradesTable.strategy, FIXED_BETA_TRADE_STRATEGY))).limit(1);
       if (serverRows.length > 0) {
         return res.status(409).json({
           ok: false, code: "SERVER_MANAGED_ROW",
@@ -362,6 +378,10 @@ router.get("/data/strategy", async (_req, res) => {
 /** PUT /api/data/strategy — save (upsert) strategy config */
 router.put("/data/strategy", async (req, res) => {
   try {
+    if (containsReservedAccountingFields(req.body)) {
+      res.status(403).json({ ok: false, code: 'RESERVED_ACCOUNTING_SCOPE', error: 'Accounting policy and capability fields require the dedicated operator boundary' });
+      return;
+    }
     const { indicators } = req.body;
     // Clamp risk limits (maxDrawdownPercent, dailyLossLimitUSDT, weeklyLossLimitUSDT)
     // then LIVE TEST MODE hardcaps. Both are authoritative server-side.
@@ -382,6 +402,31 @@ router.put("/data/strategy", async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: "Failed to save strategy config" });
+  }
+});
+
+/**
+ * Explicit worker accounting-domain selector.  It intentionally does not infer a
+ * domain from capital, mode, wallet, or dates.  The alpha state itself is never
+ * initialized here; an absent alpha ledger remains fail-closed in the worker.
+ */
+router.put("/data/worker-policy-context", requireOperatorAuth, async (req, res) => {
+  const policyContext = req.body?.policyContext;
+  if (policyContext !== WORKER_STANDARD_ACTIVE_CONTEXT && policyContext !== WORKER_FIXED_BETA_CONTEXT) {
+    return res.status(400).json({ ok: false, error: 'policyContext must be STANDARD_ACTIVE or FIXED_BETA_400' });
+  }
+  const value = JSON.stringify({
+    schemaVersion: WORKER_POLICY_CONTEXT_SCHEMA_VERSION,
+    policyContext,
+    approvedBy: 'OPERATOR_AUTH_V1',
+    approvedAt: new Date().toISOString(),
+  });
+  try {
+    await db.insert(workerStateTable).values({ key: WORKER_POLICY_CONTEXT_KEY, value, updatedAt: new Date() })
+      .onConflictDoUpdate({ target: workerStateTable.key, set: { value, updatedAt: new Date() } });
+    return res.json({ ok: true, policyContext });
+  } catch {
+    return res.status(503).json({ ok: false, error: 'worker policy context could not be persisted' });
   }
 });
 

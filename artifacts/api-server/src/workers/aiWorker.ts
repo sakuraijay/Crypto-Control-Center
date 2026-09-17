@@ -56,6 +56,17 @@ import {
   initialRiskEngineState, rollRiskPeriods, loadRiskEngineState, saveRiskEngineState,
   RISK_ENGINE_STATE_KEY, type PersistedRiskEngineState,
 } from "../lib/riskEngineState";
+import {
+  FIXED_BETA_ACCOUNTING_STATE_KEY,
+  FIXED_BETA_TRADE_STRATEGY,
+  fixedBetaLedgerBinding,
+  fixedBetaNumber,
+  isFixedBetaAccountingStateFresh,
+  parseFixedBetaAccountingStateV1,
+  type FixedBetaAccountingStateV1,
+} from './fixedBetaAccountingState';
+import { parseWorkerPolicyContextV1, WORKER_POLICY_CONTEXT_KEY } from './workerPolicyContext';
+import { WORKER_FIXED_BETA_CONTEXT, WORKER_STANDARD_ACTIVE_CONTEXT } from './workerCapitalPolicy';
 import { manilaDayStartIso, manilaWeekStartIso, msUntilNextManilaDay } from "../lib/manilaTime";
 import { runIntelServiceCycle, runStrategyShadowWorkerReadOnly, stopIntelService, resumeIntelService } from "../intel/intelService";
 import { buildStrategyShadowWorkerEnvelope } from "../intel/strategyShadowWorkerEnvelopeV2";
@@ -101,12 +112,18 @@ type DecisionClaimResult =
 export function evaluateWorkerRiskState(
   input: RiskEvaluationInput,
   runtimeConfiguredCapitalUsd: number | null | undefined,
+  policyContext: typeof WORKER_STANDARD_ACTIVE_CONTEXT | typeof WORKER_FIXED_BETA_CONTEXT =
+    WORKER_STANDARD_ACTIVE_CONTEXT,
 ): RiskEvaluationResult {
   const binding = buildActiveCapitalWorkerBinding({
     runtimeConfiguredCapitalUsd,
     observedWalletBalanceUsd: null,
     currentRiskEquityUsd: input.currentEquityUsd,
     historicalHardStopTriggerReason: input.locks.hardStopReason,
+    ...(policyContext === WORKER_FIXED_BETA_CONTEXT ? {
+      policyContext: WORKER_FIXED_BETA_CONTEXT,
+      hardStopThresholdBindingCapability: 'RISK_STATE_MACHINE_EXPLICIT_PAIR_V1' as const,
+    } : {}),
   });
 
   return evaluateRiskState({
@@ -423,6 +440,13 @@ class WorkerManager {
   // ── RiskEngine 상태 (6H-1 — Manila 기준, worker_state 영속) ─────────────────
   /** 영속 RiskEngine 상태. null = 미수립/로드 실패 → 신규 진입 차단 */
   private riskState: PersistedRiskEngineState | null = null;
+  /** The selector is a protected, persisted policy token; never inferred from capital. */
+  private accountingPolicyContext: typeof WORKER_STANDARD_ACTIVE_CONTEXT | typeof WORKER_FIXED_BETA_CONTEXT =
+    WORKER_STANDARD_ACTIVE_CONTEXT;
+  /** A malformed/ambiguous selector is never allowed to fall back to Standard. */
+  private accountingNamespaceValid = true;
+  /** Present only for a validated, already-provisioned alpha accounting record. */
+  private fixedBetaAccountingState: FixedBetaAccountingStateV1 | null = null;
   /** New PAPER epochs exclude historical closed-trade PnL, but never open positions. */
   private activePaperEpochStartMs: number | null = null;
   private paperEpochStateOk = true;
@@ -454,34 +478,51 @@ class WorkerManager {
     await this.loadPendingApprovals();
     if (!this.isCurrentGeneration(generation)) return;
 
-    // DB에서 equity HWM 복구 (재시작 후에도 maxDrawdown 강제 연속성 유지)
-    await this.loadHwmFromDb();
+    // Resolve the explicit authenticated selector before reading any accounting
+    // namespace.  This keeps alpha from probing legacy Standard keys.
+    const accountingReady = await this.loadAccountingNamespace();
     if (!this.isCurrentGeneration(generation)) return;
+    if (accountingReady && this.accountingPolicyContext === WORKER_STANDARD_ACTIVE_CONTEXT) {
+      // DB에서 equity HWM 복구 (재시작 후에도 maxDrawdown 강제 연속성 유지)
+      await this.loadHwmFromDb();
+      if (!this.isCurrentGeneration(generation)) return;
 
-    // DB에서 Daily/Weekly equity 기준점 복구 (재시작 후 기간 PnL 연속성 유지)
-    await this.loadBaselinesFromDb();
-    if (!this.isCurrentGeneration(generation)) return;
-    await this.loadActivePaperEpochFromDb();
-    if (!this.isCurrentGeneration(generation)) return;
+      // DB에서 Daily/Weekly equity 기준점 복구 (재시작 후 기간 PnL 연속성 유지)
+      await this.loadBaselinesFromDb();
+      if (!this.isCurrentGeneration(generation)) return;
+      await this.loadActivePaperEpochFromDb();
+      if (!this.isCurrentGeneration(generation)) return;
+    } else {
+      // Alpha does not reuse Standard PAPER epoch/HWM/baselines.
+      this.paperEpochStateOk = accountingReady;
+      this.activePaperEpochStartMs = null;
+    }
 
     // 기존 ai_decisions.fullJson만 read하여 SHADOW lifecycle 연속성을 복원한다.
     // 별도 schema/migration/write를 만들지 않으며 실패는 SHADOW 평가만 차단한다.
     await this.loadStrategyLifecycleSnapshotFromDb();
     if (!this.isCurrentGeneration(generation)) return;
 
-    // RiskEngine 영속 상태 복구 (6H-1 §11 — 잠금·카운터·Manila 기준점)
-    const riskLoad = await loadRiskEngineState();
-    if (!this.isCurrentGeneration(generation)) return;
-    if (riskLoad.ok) {
-      this.riskState = riskLoad.state; // null이면 첫 사이클에서 수립
-      this.riskDbOk = true;
-      if (riskLoad.state) {
-        console.info(`[AIWorker] RiskEngine 상태 복구 — ${riskLoad.state.riskOperatingState}, day=${riskLoad.state.dayPeriodStart}`);
+    // RiskEngine 영속 상태 복구 (6H-1 §11 — 잠금·카운터·Manila 기준점).
+    // Alpha is strictly pre-provisioned: it never falls back to or initializes
+    // riskEngineStateV1.
+    if (accountingReady && this.accountingPolicyContext === WORKER_STANDARD_ACTIVE_CONTEXT) {
+      const riskLoad = await loadRiskEngineState();
+      if (!this.isCurrentGeneration(generation)) return;
+      if (riskLoad.ok) {
+        this.riskState = riskLoad.state; // null이면 첫 사이클에서 수립
+        this.riskDbOk = true;
+        if (riskLoad.state) {
+          console.info(`[AIWorker] RiskEngine 상태 복구 — ${riskLoad.state.riskOperatingState}, day=${riskLoad.state.dayPeriodStart}`);
+        }
+      } else {
+        this.riskState = null;
+        this.riskDbOk = false; // fail-closed — 신규 진입 차단
+        console.error(`[AIWorker] ${riskLoad.reason} — 신규 진입 차단 (fail-closed)`);
       }
     } else {
-      this.riskState = null;
-      this.riskDbOk = false; // fail-closed — 신규 진입 차단
-      console.error(`[AIWorker] ${riskLoad.reason} — 신규 진입 차단 (fail-closed)`);
+      this.riskState = this.fixedBetaAccountingState?.state ?? null;
+      this.riskDbOk = accountingReady && this.riskState !== null;
     }
 
     // 가격 버퍼 폴링 시작 (10s 간격)
@@ -492,6 +533,9 @@ class WorkerManager {
 
     // ── Task #111 — 서버 권위 PAPER 관리 틱 (PAPER 모드 전용, 15s) ────────────
     // 재시작 복구: 권위 상태는 전부 DB — pendingClose 로드 후 틱이 open 행 재발견
+    // Management/recovery owns existing server PAPER inventory, not an entry
+    // accounting namespace. Keep it alive even for alpha/invalid selectors;
+    // the management-only tick cannot authorize a new OPEN.
     if (process.env.WORKER_ENGINE_MODE !== 'LIVE') {
       await loadPendingCloseFromDb(() => this.isCurrentGeneration(generation));
       if (!this.isCurrentGeneration(generation)) return;
@@ -504,7 +548,21 @@ class WorkerManager {
           if (!this.isCurrentGeneration(generation)) return null;
           const rows = await db.select().from(aiDecisionsTable)
             .orderBy(desc(aiDecisionsTable.createdAt)).limit(1);
-          return rows[0]?.direction ?? null;
+          // Global direction alone is not Standard close authority: an alpha
+          // CASH (or an entry-only veto) must never close Standard inventory.
+          // Untagged legacy decisions cannot prove their accounting scope;
+          // preserve their durable pending requests and SL/TP, but do not
+          // reconstruct a NEW missing close request from ambiguous evidence.
+          try {
+            const row = rows[0];
+            const decision = typeof row?.fullJson === 'string' ? JSON.parse(row.fullJson) : null;
+            if (decision?.source !== 'server_worker'
+              || decision.accountingPolicyContext !== WORKER_STANDARD_ACTIVE_CONTEXT
+              || decision.entryVeto === true
+              || decision.operatingState !== 'CASH'
+              || !['CASH', 'NO_TRADE', 'CLOSE'].includes(row?.direction ?? '')) return null;
+            return row.direction;
+          } catch { return null; }
         },
         () => this.isCurrentGeneration(generation),
       );
@@ -550,6 +608,75 @@ class WorkerManager {
 
   private isCurrentGeneration(generation: number): boolean {
     return this.active && this.lifecycleGeneration === generation;
+  }
+
+  /**
+   * Reads only the selected namespace.  A missing selector means legacy
+   * STANDARD_ACTIVE; malformed/duplicate selector or alpha record is fail-closed.
+   */
+  private async loadAccountingNamespace(): Promise<boolean> {
+    try {
+      const selectorRows = await db.select().from(workerStateTable)
+        .where(eq(workerStateTable.key, WORKER_POLICY_CONTEXT_KEY)).limit(2);
+      if (selectorRows.length > 1 || (selectorRows.length === 1 && typeof selectorRows[0].value !== 'string')) {
+        this.accountingNamespaceValid = false;
+        this.riskDbOk = false;
+        return false;
+      }
+      const selector = parseWorkerPolicyContextV1(selectorRows[0]?.value ?? null);
+      if (!selector.ok) {
+        this.accountingNamespaceValid = false;
+        this.riskDbOk = false;
+        return false;
+      }
+      this.accountingNamespaceValid = true;
+      this.accountingPolicyContext = selector.context?.policyContext ?? WORKER_STANDARD_ACTIVE_CONTEXT;
+      this.fixedBetaAccountingState = null;
+      if (this.accountingPolicyContext === WORKER_STANDARD_ACTIVE_CONTEXT) return true;
+
+      const rows = await db.select().from(workerStateTable)
+        .where(eq(workerStateTable.key, FIXED_BETA_ACCOUNTING_STATE_KEY)).limit(2);
+      if (rows.length !== 1) {
+        this.accountingNamespaceValid = false;
+        this.riskDbOk = false;
+        return false;
+      }
+      const parsed = parseFixedBetaAccountingStateV1(rows[0]?.value);
+      if (!parsed || !isFixedBetaAccountingStateFresh(parsed)) {
+        this.accountingNamespaceValid = false;
+        this.riskDbOk = false;
+        return false;
+      }
+      this.fixedBetaAccountingState = parsed;
+      return true;
+    } catch {
+      this.accountingNamespaceValid = false;
+      this.riskDbOk = false;
+      return false;
+    }
+  }
+
+  private async saveActiveRiskState(state: PersistedRiskEngineState): Promise<{ ok: true } | { ok: false; reason: string }> {
+    if (!this.accountingNamespaceValid) return { ok: false, reason: 'ACCOUNTING_NAMESPACE_INVALID' };
+    if (this.accountingPolicyContext === WORKER_STANDARD_ACTIVE_CONTEXT) {
+      return saveRiskEngineState(state);
+    }
+    if (!this.fixedBetaAccountingState) {
+      return { ok: false, reason: 'FIXED_BETA_ACCOUNTING_STATE_MISSING' };
+    }
+    // checkpointedAt identifies immutable source evidence.  A routine risk
+    // state write must never renew it; stale source proof remains stale.
+    const nextAlpha = { ...this.fixedBetaAccountingState, state };
+    const value = JSON.stringify(nextAlpha);
+    try {
+      await db.insert(workerStateTable)
+        .values({ key: FIXED_BETA_ACCOUNTING_STATE_KEY, value, updatedAt: new Date() })
+        .onConflictDoUpdate({ target: workerStateTable.key, set: { value, updatedAt: new Date() } });
+      this.fixedBetaAccountingState = nextAlpha;
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, reason: `Fixed Beta accounting state save failed: ${(err as Error).message}` };
+    }
   }
 
 
@@ -613,7 +740,7 @@ class WorkerManager {
     // 이어지는 경로는 구조적으로 없다.
     const wantsFlat =
       riskEval?.actions.includes('CLOSE_ALL_POSITIONS') === true ||
-      decision.operatingState === 'CASH';
+      (decision.operatingState === 'CASH' && decision.entryVeto !== true);
     if (wantsFlat && serverOpenRows.length > 0) {
       const reason = riskEval?.actions.includes('CLOSE_ALL_POSITIONS') ? 'RISK_CLOSE_ALL' : 'CASH_TRANSITION';
       await requestServerPaperCloseAll(
@@ -641,6 +768,7 @@ class WorkerManager {
       decision.riskApproved === true &&
       (decision.executionType === 'perp_long_open' || decision.executionType === 'perp_short_open');
     if (!isEntry || !decision.primarySymbol || decision.sizeUsd == null || decision.leverage == null) return;
+    if (!this.accountingNamespaceValid || this.accountingPolicyContext === WORKER_FIXED_BETA_CONTEXT) return;
     if (!this.paperEpochStateOk || riskEval?.entryAllowed !== true) return; // epoch pointer + RiskEngine final check
 
     const result = await openServerPaperPosition(
@@ -1052,6 +1180,8 @@ class WorkerManager {
       const dbIdMatch = /^worker:(-\d+):/.exec(decision.id);
       const dbId = Number(dbIdMatch?.[1]);
       if (!Number.isSafeInteger(dbId) || dbId >= 0) throw new Error("invalid deterministic worker decision id");
+      // Server-owned durable provenance, retained by later fullJson updates.
+      decision.accountingPolicyContext = this.accountingPolicyContext;
       const inserted = await db.insert(aiDecisionsTable).values({
         id:               dbId,
         ts:               new Date(decision.createdAt),
@@ -1094,6 +1224,9 @@ class WorkerManager {
   private async maybeCreateApproval(decision: ServerAiDecision): Promise<boolean> {
     // LIVE 모드 확인 (env var로 제어)
     if (process.env.WORKER_ENGINE_MODE !== "LIVE") return false;
+    // The Fixed Beta reference/accounting domain never grants an actionable
+    // approval capability, even when LIVE/AUTO environment flags are present.
+    if (this.accountingPolicyContext === WORKER_FIXED_BETA_CONTEXT || !this.accountingNamespaceValid) return false;
 
     const isActionable =
       decision.operatingState !== "CASH" &&
@@ -1216,6 +1349,9 @@ class WorkerManager {
     realizedPnLManilaWeek: number;
     /** Manila 거래일 신규 진입(OPEN) 횟수 — maxDailyEntries 강제용 */
     entriesManilaDay: number;
+    /** Alpha failure is unknown accounting/inventory, never a synthetic flat account. */
+    accountingEvidenceError?: string;
+    protectionInventoryComplete?: boolean;
   }> {
     const ZEROS = {
       realizedPnLToday: 0, realizedPnLRolling24h: 0, realizedPnLWeekly: 0,
@@ -1227,6 +1363,9 @@ class WorkerManager {
       realizedPnLManilaDay: 0, realizedPnLManilaWeek: 0, entriesManilaDay: 0,
     };
 
+    const alpha = this.accountingPolicyContext === WORKER_FIXED_BETA_CONTEXT;
+    const alphaPositions: import('./serverTypes').Position[] = [];
+    let alphaPositionError: string | null = null;
     try {
       const now = Date.now();
 
@@ -1249,11 +1388,87 @@ class WorkerManager {
         .select()
         .from(tradesTable)
         .orderBy(desc(tradesTable.timestamp));
+      // Legacy/unscoped rows remain Standard only.  Alpha accepts only its exact
+      // immutable strategy provenance and never guesses that an old row is beta.
+      const scopedTrades = alpha
+        ? allTrades.filter(t => t.strategy === FIXED_BETA_TRADE_STRATEGY)
+        : allTrades.filter(t => t.strategy !== FIXED_BETA_TRADE_STRATEGY);
+      if (alpha) {
+        // Enumerate held identities BEFORE checking ledger/mark evidence. A
+        // failed mark must not turn a known position into a synthetic flat book.
+        for (const trade of scopedTrades.filter(row => row.action === 'OPEN' && !row.closeTime)) {
+          if (typeof trade.symbol !== 'string' || !trade.symbol.trim()
+            || (trade.side !== 'LONG' && trade.side !== 'SHORT')) {
+            alphaPositionError = 'FIXED_BETA_PROTECTION_INVENTORY_INVALID';
+            continue; // unknown identity is explicitly unresolved, never guessed LONG
+          }
+          const position: import('./serverTypes').Position = {
+            symbol: trade.symbol, side: trade.side,
+            sizeInUsd: NaN, collateralUsd: NaN, entryPrice: NaN, leverage: NaN, unrealizedPnl: NaN,
+          };
+          alphaPositions.push(position);
+          try {
+            position.sizeInUsd = fixedBetaNumber(trade.sizeInUsd);
+            position.collateralUsd = fixedBetaNumber(trade.collateralUsd);
+            position.entryPrice = fixedBetaNumber(trade.price);
+            position.leverage = fixedBetaNumber(trade.leverage);
+            if (position.sizeInUsd <= 0 || position.collateralUsd <= 0
+              || position.entryPrice <= 0 || position.leverage < 1) throw new Error('FIXED_BETA_POSITION_FIELDS_INVALID');
+            const quote = this.serverPaperQuote(trade.symbol);
+            if (!quote || quote.ageMs < 0 || quote.ageMs > MAX_MANAGE_PRICE_AGE_MS) {
+              throw new Error('FIXED_BETA_POSITION_MARK_MISSING_OR_STALE');
+            }
+            position.unrealizedPnl = (position.side === 'LONG'
+              ? quote.priceUsd - position.entryPrice : position.entryPrice - quote.priceUsd)
+              * position.sizeInUsd / position.entryPrice;
+            if (!Number.isFinite(position.unrealizedPnl)) throw new Error('FIXED_BETA_POSITION_PNL_INVALID');
+          } catch (err) { alphaPositionError = (err as Error).message; }
+        }
+        const binding = this.fixedBetaAccountingState?.provenance.ledgerBinding;
+        const observed = fixedBetaLedgerBinding(scopedTrades);
+        if (!binding || binding.sha256 !== observed.sha256 || binding.rowCount !== observed.rowCount
+          || JSON.stringify(binding.openTradeIds) !== JSON.stringify(observed.openTradeIds)) {
+          throw new Error('FIXED_BETA_FULL_LEDGER_BINDING_MISMATCH — protection inventory unresolved');
+        }
+        if (alphaPositionError) throw new Error(alphaPositionError);
+        const ids = new Set<string>();
+        const openIds = new Set<string>();
+        const decisionIds = new Set<string>();
+        for (const trade of scopedTrades) {
+          if (typeof trade.id !== 'string' || !trade.id.trim() || ids.has(trade.id)) throw new Error('FIXED_BETA_TRADE_ID_DUPLICATE_OR_MISSING');
+          const timestamp = new Date(trade.timestamp as string | Date).getTime();
+          if (!Number.isFinite(timestamp) || timestamp <= 0 || timestamp > now
+            || !Number.isSafeInteger(trade.closeTime) || (trade.closeTime as number) < 0
+            || (trade.closeTime as number) > now
+            || !['OPEN', 'CLOSE', 'CLOSE_ALL'].includes(trade.action)) {
+            throw new Error('FIXED_BETA_TRADE_FIELDS_INVALID');
+          }
+          ids.add(trade.id);
+          if (trade.action === 'OPEN') {
+            if ((trade.side !== 'LONG' && trade.side !== 'SHORT') || !trade.symbol?.trim()
+              || fixedBetaNumber(trade.sizeInUsd) <= 0 || fixedBetaNumber(trade.price) <= 0
+              || fixedBetaNumber(trade.collateralUsd) <= 0 || fixedBetaNumber(trade.leverage) < 1) {
+              throw new Error('FIXED_BETA_POSITION_FIELDS_INVALID');
+            }
+            if (typeof trade.openDecisionId !== 'string' || !trade.openDecisionId.trim() || decisionIds.has(trade.openDecisionId)) {
+              throw new Error('FIXED_BETA_OPEN_PROVENANCE_INVALID');
+            }
+            openIds.add(trade.id);
+            decisionIds.add(trade.openDecisionId);
+          }
+        }
+        for (const trade of scopedTrades) {
+          if ((trade.action === 'CLOSE' || trade.action === 'CLOSE_ALL')
+            && (!trade.closesTradeId || !openIds.has(trade.closesTradeId))) {
+            throw new Error('FIXED_BETA_CLOSE_PROVENANCE_INVALID');
+          }
+        }
+      }
 
       // CLOSE 거래에서 실현 PnL 계산
-      const allCloseTrades = allTrades.filter(t => t.action === 'CLOSE' || t.action === 'CLOSE_ALL');
+      const allCloseTrades = scopedTrades.filter(t => t.action === 'CLOSE' || t.action === 'CLOSE_ALL');
       const closeTrades = allCloseTrades.filter(t =>
-        this.activePaperEpochStartMs === null
+        alpha || this.activePaperEpochStartMs === null
           || new Date(t.timestamp as string | Date).getTime() >= this.activePaperEpochStartMs,
       );
 
@@ -1273,7 +1488,8 @@ class WorkerManager {
 
       for (const t of closeTrades) {
         const ts  = new Date(t.timestamp as string | Date).getTime();
-        const pnl = parseFloat(t.pnl ?? '0') || 0;
+        const rawPnl = alpha ? fixedBetaNumber(t.pnl) : parseFloat(t.pnl ?? '0');
+        const pnl = Number.isFinite(rawPnl) ? rawPnl : 0;
         // 6H-2A §3·§5 gated PnL:
         //  - SETTLED: pnl(실제 순) 그대로
         //  - PAPER_ESTIMATED + netPnlEstimatedUsd: 추정 순 PnL 사용 (이익/손실 모두)
@@ -1281,15 +1497,29 @@ class WorkerManager {
         //    gross 손실만 즉시 반영 (보수적 비대칭 — zero-fee 이익 인정 금지)
         const st = (t as { settlementStatus?: string | null }).settlementStatus ?? 'UNSETTLED';
         const netEstRaw = (t as { netPnlEstimatedUsd?: string | null }).netPnlEstimatedUsd;
-        const netEst = netEstRaw != null ? parseFloat(netEstRaw) : NaN;
+        const netEst = netEstRaw != null ? (alpha ? fixedBetaNumber(netEstRaw) : parseFloat(netEstRaw)) : NaN;
         let gatedPnl: number;
-        if (st === 'SETTLED') gatedPnl = pnl;
+        const settledNet = alpha && st === 'SETTLED' ? fixedBetaNumber(t.netPnlUsd) : parseFloat((t as { netPnlUsd?: string | null }).netPnlUsd ?? '');
+        if (alpha && !Number.isFinite(ts)) {
+          throw new Error('FIXED_BETA_TRADE_TIMESTAMP_INVALID');
+        }
+        if (alpha && st === 'SETTLED' && !Number.isFinite(settledNet)) {
+          throw new Error('FIXED_BETA_SETTLEMENT_NET_PNL_MISSING');
+        }
+        if (alpha && st === 'PAPER_ESTIMATED' && !Number.isFinite(netEst)) {
+          throw new Error('FIXED_BETA_PAPER_COST_OR_NET_PNL_MISSING');
+        }
+        if (alpha && st !== 'SETTLED' && st !== 'PAPER_ESTIMATED') {
+          throw new Error('FIXED_BETA_SETTLEMENT_PROVENANCE_INVALID');
+        }
+        if (st === 'SETTLED') gatedPnl = alpha ? settledNet : pnl;
         else if (st === 'PAPER_ESTIMATED' && Number.isFinite(netEst)) gatedPnl = netEst;
         else gatedPnl = pnl < 0 ? pnl : 0;
-        totalRealizedPnlAllTime  += pnl;                                    // 전체 누적
-        if (ts >= todayStart.getTime())      realizedPnLToday      += pnl;
-        if (ts >= rolling24hStart.getTime()) realizedPnLRolling24h += pnl;
-        if (ts >= weekStart.getTime())       realizedPnLWeekly     += pnl;
+        const accountingPnl = alpha ? gatedPnl : pnl;
+        totalRealizedPnlAllTime  += accountingPnl;                           // 전체 누적
+        if (ts >= todayStart.getTime())      realizedPnLToday      += accountingPnl;
+        if (ts >= rolling24hStart.getTime()) realizedPnLRolling24h += accountingPnl;
+        if (ts >= weekStart.getTime())       realizedPnLWeekly     += accountingPnl;
         if (ts >= todayStart.getTime())      realizedPnLTodayGated  += gatedPnl;
         if (ts >= weekStart.getTime())       realizedPnLWeeklyGated += gatedPnl;
         if (ts >= manilaDayStartMs)          realizedPnLManilaDay  += gatedPnl;
@@ -1305,17 +1535,25 @@ class WorkerManager {
       // 연속 손실 카운트: 최신 CLOSE부터 연속 음수 PnL
       let consecutiveLosses = 0;
       for (const t of closeTrades) {
-        const pnl = parseFloat(t.pnl ?? '0') || 0;
+        const pnl = alpha
+          ? (() => {
+            const status = (t as { settlementStatus?: string | null }).settlementStatus;
+            const value = status === 'SETTLED'
+              ? parseFloat((t as { netPnlUsd?: string | null }).netPnlUsd ?? '')
+              : parseFloat((t as { netPnlEstimatedUsd?: string | null }).netPnlEstimatedUsd ?? '');
+            return value;
+          })()
+          : (parseFloat(t.pnl ?? '0') || 0);
         if (pnl < 0) consecutiveLosses++;
         else break;
       }
 
       // ── 시간당 거래 횟수 + 쿨다운 추적 ───────────────────────────────────
-      const openTrades = allTrades.filter(
+      const openTrades = scopedTrades.filter(
         t => t.action === 'OPEN' && (!t.closeTime || t.closeTime === 0),
       );
-      const allOpenActions = allTrades.filter(t => t.action === 'OPEN'
-        && (this.activePaperEpochStartMs === null
+      const allOpenActions = scopedTrades.filter(t => t.action === 'OPEN'
+        && (alpha || this.activePaperEpochStartMs === null
           || new Date(t.timestamp as string | Date).getTime() >= this.activePaperEpochStartMs));
 
       const tradesInLastHour = allOpenActions.filter(t => {
@@ -1337,6 +1575,25 @@ class WorkerManager {
         ? new Date(latestOpen.timestamp as string | Date).getTime()
         : null;
 
+      // Beta has no runtime bootstrap or mutable source ledger.  The already
+      // provisioned checkpoint must exactly match the complete scoped ledger;
+      // empty/partial reads cannot erase durable nonzero counters or losses.
+      if (alpha) {
+        const checkpoint = this.fixedBetaAccountingState?.state;
+        if (
+          !checkpoint
+          || scopedTrades.length === 0
+          || checkpoint.dayPeriodStart !== manilaDayStartIso(nowDate)
+          || checkpoint.weekPeriodStart !== manilaWeekStartIso(nowDate)
+          || checkpoint.dailyRealizedNetPnlUsd !== realizedPnLManilaDay
+          || checkpoint.weeklyRealizedNetPnlUsd !== realizedPnLManilaWeek
+          || checkpoint.dailyEntryCount !== entriesManilaDay
+          || checkpoint.consecutiveLossCount !== consecutiveLosses
+        ) {
+          throw new Error('FIXED_BETA_ACCOUNTING_CHECKPOINT_OR_LEDGER_INCOMPLETE');
+        }
+      }
+
       // ── 현재 GMX 시장가 캐시 (mark-to-market용) ─────────────────────────
       const cachedPrices = getCachedPrices();
       const priceMap = new Map<string, number>();
@@ -1349,7 +1606,7 @@ class WorkerManager {
       // ── 미청산 포지션 구성 + mark-to-market ──────────────────────────────
       let totalUnrealizedPnl = 0;
 
-      const positions: import('./serverTypes').Position[] = openTrades.map(t => {
+      const positions: import('./serverTypes').Position[] = alpha ? alphaPositions : openTrades.map(t => {
         const sizeInUsd   = parseFloat(t.sizeInUsd ?? t.size ?? '0') || 0;
         const entryPrice  = parseFloat(t.price ?? '0') || 0;
 
@@ -1382,6 +1639,7 @@ class WorkerManager {
 
         return { symbol: t.symbol, side, sizeInUsd, collateralUsd, unrealizedPnl, entryPrice, leverage };
       });
+      if (alpha) totalUnrealizedPnl = alphaPositions.reduce((sum, position) => sum + position.unrealizedPnl, 0);
 
       return {
         realizedPnLToday, realizedPnLRolling24h, realizedPnLWeekly,
@@ -1392,10 +1650,30 @@ class WorkerManager {
         liveTestAccumLossUsd,
         liveTestDbOk: true,
         realizedPnLManilaDay, realizedPnLManilaWeek, entriesManilaDay,
+        ...(alpha ? { protectionInventoryComplete: true } : {}),
       };
     } catch (err) {
-      console.warn('[AIWorker] loadPaperState 실패 — synthetic zeros 사용 (LIVE TEST fail-closed):', (err as Error).message);
-      return ZEROS;
+      console.warn('[AIWorker] loadPaperState 실패 — entry fail-closed:', (err as Error).message);
+      // Standard retains its legacy result shape.  Alpha never fabricates a
+      // zero loss/equity observation when its scoped evidence is invalid.
+      return alpha ? {
+        ...ZEROS,
+        positions: alphaPositions,
+        totalUnrealizedPnl: Number.NaN,
+        liveTestAccumLossUsd: Number.NaN,
+        consecutiveLosses: this.fixedBetaAccountingState?.state.consecutiveLossCount ?? Number.NaN,
+        entriesManilaDay: this.fixedBetaAccountingState?.state.dailyEntryCount ?? Number.NaN,
+        accountingEvidenceError: (err as Error).message,
+        protectionInventoryComplete: false,
+        realizedPnLToday: Number.NaN,
+        realizedPnLRolling24h: Number.NaN,
+        realizedPnLWeekly: Number.NaN,
+        realizedPnLTodayGated: Number.NaN,
+        realizedPnLWeeklyGated: Number.NaN,
+        totalRealizedPnlAllTime: Number.NaN,
+        realizedPnLManilaDay: Number.NaN,
+        realizedPnLManilaWeek: Number.NaN,
+      } : ZEROS;
     }
   }
 
@@ -1428,6 +1706,25 @@ class WorkerManager {
       // 사이클마다 PENDING 세트를 DB에서 재구성 — 승인/거절/만료된 항목 자동 제거
       await this.loadPendingApprovals();
       if (!this.isCurrentGeneration(capturedGeneration)) return;
+      // Context can change only through the operator-authenticated route.  Reload
+      // it at the cycle boundary, never from a wallet/mode/capital heuristic.
+      const previousAccountingContext = this.accountingPolicyContext;
+      const accountingReady = await this.loadAccountingNamespace();
+      if (!this.isCurrentGeneration(capturedGeneration)) return;
+      if (!accountingReady) {
+        this.riskDbOk = false;
+        throw new Error('ACCOUNTING_NAMESPACE_INVALID_OR_STALE — entry blocked; no accounting state writes');
+      }
+      if (this.accountingPolicyContext === WORKER_FIXED_BETA_CONTEXT) {
+        this.riskState = this.fixedBetaAccountingState?.state ?? null;
+        this.riskDbOk = accountingReady && this.riskState !== null;
+      } else if (previousAccountingContext !== WORKER_STANDARD_ACTIVE_CONTEXT) {
+        // A beta→Standard transition reads the Standard key only after the
+        // authenticated selector has explicitly selected Standard.
+        const loaded = await loadRiskEngineState();
+        this.riskState = loaded.ok ? loaded.state : null;
+        this.riskDbOk = loaded.ok;
+      }
 
       // 프로필 변경은 사이클 시작의 안전 경계에서만 승격한다. API는 desired만 기록하며
       // Worker 외 다른 경로는 applied를 변경할 수 없다.
@@ -1436,10 +1733,22 @@ class WorkerManager {
         this.loadPaperState(),
       ]);
       if (!this.isCurrentGeneration(capturedGeneration)) return;
+      if (paperState.protectionInventoryComplete === false) {
+        // Never publish terminal/flat protection on incomplete alpha evidence.
+        // LIVE close/reduce below still enumerates authoritative positions.
+        this.lastCloseAllSummary = {
+          total: Math.max(1, paperState.positions.length), confirmed: 0, terminalFailed: 0,
+          unresolved: Math.max(1, paperState.positions.length), pending: 0,
+          allTerminal: false, allConfirmed: false, lockRequired: true, rolloverAllowed: false,
+        };
+      }
       const riskProfileStatus = await promoteRiskProfileAtSafeBoundary(baseLimits);
       if (!this.isCurrentGeneration(capturedGeneration)) return;
       const riskProfile = riskProfileStatus.applied;
-      const limits = applyRiskProfileToLimits(baseLimits, riskProfile);
+      const limits = {
+        ...applyRiskProfileToLimits(baseLimits, riskProfile),
+        ...(this.accountingPolicyContext === WORKER_FIXED_BETA_CONTEXT ? { tradingCapital: 400 } : {}),
+      };
       this.lastLimitsUsed = limits;
 
       const analyses = this.buildAnalyses();
@@ -1467,14 +1776,14 @@ class WorkerManager {
       // ⚠️ 반드시 cooldown/거래한도 게이트보다 먼저 수행 — 게이트 조기 반환 시에도
       //    PnL이 매 사이클 갱신되어 stale 값이 노출되지 않는다.
       // paperState가 DB 실패로 synthetic zeros면 가짜 PnL을 만들지 않도록 스킵(fail-closed).
-      if (paperState.liveTestDbOk) {
+      if (paperState.liveTestDbOk && this.accountingPolicyContext === WORKER_STANDARD_ACTIVE_CONTEXT) {
         const equityNow =
           limits.tradingCapital
           + paperState.totalRealizedPnlAllTime
           + paperState.totalUnrealizedPnl;
         await this.updatePeriodPnl(equityNow, paperState.realizedPnLToday, paperState.realizedPnLWeekly);
         if (!this.isCurrentGeneration(capturedGeneration)) return;
-      } else {
+      } else if (this.accountingPolicyContext === WORKER_STANDARD_ACTIVE_CONTEXT) {
         this.clearPeriodPnl();
       }
 
@@ -1521,7 +1830,8 @@ class WorkerManager {
 
       // HWM 갱신: 첫 사이클은 현재 equity로 초기화.
       // DB에 저장해 서버 재시작 후에도 maxDrawdown 강제가 연속성을 갖도록 함.
-      if (this.equityHighWaterMark === null || currentEquity > this.equityHighWaterMark) {
+      if (this.accountingPolicyContext === WORKER_STANDARD_ACTIVE_CONTEXT
+        && (this.equityHighWaterMark === null || currentEquity > this.equityHighWaterMark)) {
         this.equityHighWaterMark = currentEquity;
         await this.saveHwmToDb(currentEquity);
         if (!this.isCurrentGeneration(capturedGeneration)) return;
@@ -1529,7 +1839,8 @@ class WorkerManager {
 
       // HWM 대비 드로다운 % (HWM > 0이고 현재 equity < HWM일 때만 의미 있음)
       const accountDrawdownPct =
-        this.equityHighWaterMark !== null && this.equityHighWaterMark > 0
+        this.accountingPolicyContext === WORKER_STANDARD_ACTIVE_CONTEXT
+          && this.equityHighWaterMark !== null && this.equityHighWaterMark > 0
           ? Math.max(0, (this.equityHighWaterMark - currentEquity) / this.equityHighWaterMark * 100)
           : undefined;
 
@@ -1539,13 +1850,19 @@ class WorkerManager {
       const nowRisk = new Date();
       // 상태 미수립이면 현재 equity로 수립 (첫 실행)
       if (this.riskState === null && this.riskDbOk) {
-        this.riskState = initialRiskEngineState(nowRisk, currentEquity);
+        if (this.accountingPolicyContext === WORKER_STANDARD_ACTIVE_CONTEXT) {
+          this.riskState = initialRiskEngineState(nowRisk, currentEquity);
+        }
       }
       let riskEval: RiskEvaluationResult | null = null;
       if (this.riskState) {
         // Manila 기간 롤오버 (daily reset은 weekly/hard 잠금을 해제하지 않음)
-        const rolled = rollRiskPeriods(this.riskState, nowRisk, currentEquity);
-        this.riskState = rolled.state;
+        // Alpha period baselines require new authoritative evidence, never a
+        // synthetic wallet/equity inferred from a failed or incomplete ledger.
+        if (this.accountingPolicyContext === WORKER_STANDARD_ACTIVE_CONTEXT) {
+          const rolled = rollRiskPeriods(this.riskState, nowRisk, currentEquity);
+          this.riskState = rolled.state;
+        }
 
         // 기준점 관측 시각 = 기간 시작. maxAge = 8일 (주간 기준점도 유효해야 함)
         const RISK_OBS_MAX_AGE_MS = 8 * 24 * 60 * 60 * 1000;
@@ -1578,15 +1895,15 @@ class WorkerManager {
           dailyLossAwareNetPnlUsd: lossAware,
           estimatedExitNetPnlUsd:  estimatedExit,
           weeklyRealizedNetPnlUsd: weeklyRealizedNet,
-          dailyEntryCount:      paperState.entriesManilaDay,
-          consecutiveLossCount: paperState.consecutiveLosses,
+          dailyEntryCount:      paperState.liveTestDbOk ? paperState.entriesManilaDay : this.riskState.dailyEntryCount,
+          consecutiveLossCount: paperState.liveTestDbOk ? paperState.consecutiveLosses : this.riskState.consecutiveLossCount,
           openPositionCount:    paperState.positions.length,
           maxConcurrentPositions: riskProfile.derivedLimits.maxConcurrentPositions,
           dbOk:                 this.riskDbOk && paperState.liveTestDbOk,
           feeDataOk:            true,  // PAPER: 수수료 0 정의. LIVE 실행 경로는 별도 fee 게이트.
           marketDataFresh:      dataFreshMs < 120_000,
           locks: this.riskState.locks,
-        }, limits.tradingCapital);
+        }, limits.tradingCapital, this.accountingPolicyContext);
 
         // 평가 결과 영속화 — 저장 실패 시 다음 사이클 fail-closed
         this.riskState = {
@@ -1594,13 +1911,15 @@ class WorkerManager {
           dailyRealizedNetPnlUsd:  dailyRealizedNet ?? this.riskState.dailyRealizedNetPnlUsd,
           dailyLossAwareNetPnlUsd: lossAware ?? this.riskState.dailyLossAwareNetPnlUsd,
           weeklyRealizedNetPnlUsd: weeklyRealizedNet ?? this.riskState.weeklyRealizedNetPnlUsd,
-          dailyEntryCount:      paperState.entriesManilaDay,
-          consecutiveLossCount: paperState.consecutiveLosses,
+          dailyEntryCount:      paperState.liveTestDbOk ? paperState.entriesManilaDay : this.riskState.dailyEntryCount,
+          consecutiveLossCount: paperState.liveTestDbOk ? paperState.consecutiveLosses : this.riskState.consecutiveLossCount,
           riskOperatingState:   riskEval.state,
           locks:                riskEval.locks,
           lastUpdatedAt:        nowRisk.toISOString(),
         };
-        const saved = await saveRiskEngineState(this.riskState);
+        const saved = this.accountingPolicyContext === WORKER_FIXED_BETA_CONTEXT && !paperState.liveTestDbOk
+          ? { ok: true as const }
+          : await this.saveActiveRiskState(this.riskState);
         if (!this.isCurrentGeneration(capturedGeneration)) return;
         if (!saved.ok) {
           this.riskDbOk = false; // fail-closed — 이번+다음 사이클 진입 차단
@@ -1629,10 +1948,10 @@ class WorkerManager {
         analyses,
         positions:        paperState.positions,
         account: {
-          balance:          limits.tradingCapital,
+          balance:          paperState.accountingEvidenceError ? Number.NaN : limits.tradingCapital,
           // reserveCash 차감은 stateEngine 내부에서 한 번만 수행됩니다.
           // 여기서 미리 차감하면 stateEngine이 다시 차감해 이중 공제가 됩니다.
-          availableBalance: limits.tradingCapital,
+          availableBalance: paperState.accountingEvidenceError ? Number.NaN : limits.tradingCapital,
           unrealizedPnl:    paperState.totalUnrealizedPnl,
           // §5 (6H-2): UNSETTLED 이익은 엔진 손익 입력에서 제외 — 미정산 이익이
           // 손실을 상쇄해 일일 손실 한도 발동을 지연시키는 것을 방지 (보수적).
@@ -1702,7 +2021,7 @@ class WorkerManager {
       if (engineResult.operatingState === 'LONG' || engineResult.operatingState === 'SHORT') {
         if (!riskEntryAllowed) {
           const reasons = riskEval?.blockReasons.join('; ') ?? 'RiskEngine 상태 미수립 (fail-closed)';
-          engineResult.operatingState = 'CASH';
+          engineResult.entryVeto = true;
           engineResult.riskApproved = false;
           engineResult.riskVetoReason = `[RISK_ENGINE] ${reasons}`;
           engineResult.sizeUsd = undefined;
@@ -1748,7 +2067,7 @@ class WorkerManager {
                 clamped: false, clampDetails: [], estimatedRoundTripCostUsd: null,
                 costSource: null,
               };
-              engineResult.operatingState = 'CASH';
+              engineResult.entryVeto = true;
               engineResult.riskApproved = false;
               engineResult.riskVetoReason = `[RISK_ENGINE] NO_TRADE: ${COST_DATA_UNAVAILABLE} — ${paperCostRes.reason}`;
               engineResult.sizeUsd = undefined;
@@ -1801,7 +2120,7 @@ class WorkerManager {
                 clamped: false, clampDetails: [], estimatedRoundTripCostUsd: null,
                 costSource: paperCostRes.snapshot.source,
               };
-              engineResult.operatingState = 'CASH';
+              engineResult.entryVeto = true;
               engineResult.riskApproved = false;
               engineResult.riskVetoReason = `[RISK_ENGINE] 사이징 거부 — ${paperEnf.reason}`;
               engineResult.sizeUsd = undefined;
@@ -2006,7 +2325,11 @@ class WorkerManager {
       }
 
       // ── Task #111 — 서버 권위 PAPER 실행 (PAPER 모드 전용, LIVE/승인 경로와 분리) ──
-      if (!isLiveMode && !testModeActive) {
+      // Fixed Beta is an accounting/protection domain only.  Its explicit
+      // contract keeps betaExecutionAuthorized:false, so it cannot create a
+      // PAPER order through the Standard executor.
+      if (!isLiveMode && !testModeActive
+        && this.accountingPolicyContext === WORKER_STANDARD_ACTIVE_CONTEXT) {
         try {
           await this.runServerPaperExecution(decision, paperState, riskEval, cycleNum, capturedGeneration);
           if (!this.isCurrentGeneration(capturedGeneration)) return;
@@ -2062,8 +2385,9 @@ class WorkerManager {
         confidence:      decision.confidence,
         analysesCount:   analyses.length,
         approvalCreated,
+        ...(paperState.accountingEvidenceError ? { error: paperState.accountingEvidenceError } : {}),
       };
-      cycleOutcome = 'SUCCESS';
+      cycleOutcome = paperState.accountingEvidenceError ? 'ERROR' : 'SUCCESS';
 
       console.info(
         `[AIWorker] 사이클 #${cycleNum} 완료 — ` +
@@ -2152,6 +2476,13 @@ class WorkerManager {
         await this.executeCloseAllPositions(decision, paperState, limits, cycleNum, mainAddress, analyses, generation);
         return;
       }
+
+      // Keep CLOSE/REDUCE protection above this guard.  Fixed Beta may never
+      // submit an OPEN, regardless of LIVE/AUTO environment configuration.
+      if (
+        (this.accountingPolicyContext === WORKER_FIXED_BETA_CONTEXT || !this.accountingNamespaceValid)
+        && (operatingState === 'LONG' || operatingState === 'SHORT')
+      ) return;
 
       if (!primarySymbol) return;
 
