@@ -3,16 +3,20 @@ import {
   buildVirtualPaper400Session,
   deriveVirtualPaper400Ledger,
   parseVirtualPaper400Session,
-  VIRTUAL_PAPER_400_STRATEGY,
+  type VirtualPaper400SessionV1,
+  virtualPaper400StrategyTag,
 } from '../workers/virtualPaper400Ledger';
 
 const START = new Date('2026-09-20T00:00:00.000Z');
 
-function settlement(overrides: Partial<Parameters<typeof deriveVirtualPaper400Ledger>[1][number]> = {}) {
+function settlement(
+  session: VirtualPaper400SessionV1,
+  overrides: Partial<Parameters<typeof deriveVirtualPaper400Ledger>[1][number]> = {},
+) {
   return {
     id: 'close-1',
     action: 'CLOSE',
-    strategy: VIRTUAL_PAPER_400_STRATEGY,
+    strategy: session.strategyTag,
     settlementStatus: 'PAPER_ESTIMATED',
     costSource: 'PAPER_GMX_ESTIMATE',
     pnl: '10.00',
@@ -34,7 +38,7 @@ describe('virtual PAPER 400 ledger core', () => {
       startedAt: '2026-09-20T00:00:00.000Z',
       startedAtMs: START.getTime(),
       initialEquityUsd: 400,
-      strategyTag: VIRTUAL_PAPER_400_STRATEGY,
+      strategyTag: 'SERVER_WORKER_AI_VIRTUAL_400_V1:alpha-virtual-400',
       realFundsUsed: false,
     });
     expect(parseVirtualPaper400Session(JSON.stringify(session))).toEqual({ ok: true, value: session });
@@ -48,11 +52,20 @@ describe('virtual PAPER 400 ledger core', () => {
     });
   });
 
+  it('binds the strategy namespace to the exact virtual session identity', () => {
+    const session = buildVirtualPaper400Session('alpha-virtual-400', START);
+    expect(session.strategyTag).toBe(virtualPaper400StrategyTag(session.sessionId));
+    expect(parseVirtualPaper400Session({
+      ...session,
+      strategyTag: virtualPaper400StrategyTag('another-session'),
+    })).toEqual({ ok: false, reason: 'VIRTUAL_SESSION_VALUES_INVALID' });
+  });
+
   it('derives realized equity from isolated virtual settlements including modeled costs', () => {
     const session = buildVirtualPaper400Session('alpha-virtual-400', START);
     const result = deriveVirtualPaper400Ledger(session, [
-      settlement(),
-      settlement({
+      settlement(session),
+      settlement(session, {
         id: 'close-2',
         pnl: '-20.00',
         netPnlEstimatedUsd: '-20.25',
@@ -74,7 +87,7 @@ describe('virtual PAPER 400 ledger core', () => {
 
   it('preserves a real modeled loss instead of clamping bad outcomes to zero', () => {
     const session = buildVirtualPaper400Session('loss-case', START);
-    const result = deriveVirtualPaper400Ledger(session, [settlement({
+    const result = deriveVirtualPaper400Ledger(session, [settlement(session, {
       pnl: '-500',
       netPnlEstimatedUsd: '-500',
       estEntryCostUsd: '0',
@@ -87,7 +100,17 @@ describe('virtual PAPER 400 ledger core', () => {
 
   it('fails closed when Standard PAPER rows are mixed into the virtual 400 ledger', () => {
     const session = buildVirtualPaper400Session('scope-case', START);
-    expect(deriveVirtualPaper400Ledger(session, [settlement({ strategy: 'SERVER_WORKER_AI' })])).toEqual({
+    expect(deriveVirtualPaper400Ledger(session, [settlement(session, { strategy: 'SERVER_WORKER_AI' })])).toEqual({
+      ok: false,
+      reason: 'VIRTUAL_SETTLEMENT_SCOPE_MISMATCH',
+    });
+  });
+
+  it('fails closed when another virtual session row is mixed into this session ledger', () => {
+    const session = buildVirtualPaper400Session('scope-case', START);
+    expect(deriveVirtualPaper400Ledger(session, [settlement(session, {
+      strategy: virtualPaper400StrategyTag('another-session'),
+    })])).toEqual({
       ok: false,
       reason: 'VIRTUAL_SETTLEMENT_SCOPE_MISMATCH',
     });
@@ -95,7 +118,7 @@ describe('virtual PAPER 400 ledger core', () => {
 
   it('fails closed when net PnL is missing instead of substituting zero', () => {
     const session = buildVirtualPaper400Session('missing-net', START);
-    expect(deriveVirtualPaper400Ledger(session, [settlement({ netPnlEstimatedUsd: null })])).toEqual({
+    expect(deriveVirtualPaper400Ledger(session, [settlement(session, { netPnlEstimatedUsd: null })])).toEqual({
       ok: false,
       reason: 'VIRTUAL_SETTLEMENT_NUMERIC_INVALID',
     });
@@ -103,7 +126,7 @@ describe('virtual PAPER 400 ledger core', () => {
 
   it('rejects duplicate settlement rows so restart/replay cannot double count PnL', () => {
     const session = buildVirtualPaper400Session('duplicate-case', START);
-    expect(deriveVirtualPaper400Ledger(session, [settlement(), settlement()])).toEqual({
+    expect(deriveVirtualPaper400Ledger(session, [settlement(session), settlement(session)])).toEqual({
       ok: false,
       reason: 'VIRTUAL_SETTLEMENT_DUPLICATE',
     });
@@ -111,7 +134,7 @@ describe('virtual PAPER 400 ledger core', () => {
 
   it('rejects a settlement whose recorded net does not match gross minus modeled costs', () => {
     const session = buildVirtualPaper400Session('mismatch-case', START);
-    expect(deriveVirtualPaper400Ledger(session, [settlement({ netPnlEstimatedUsd: '10.00' })])).toEqual({
+    expect(deriveVirtualPaper400Ledger(session, [settlement(session, { netPnlEstimatedUsd: '10.00' })])).toEqual({
       ok: false,
       reason: 'VIRTUAL_SETTLEMENT_NET_MISMATCH',
     });

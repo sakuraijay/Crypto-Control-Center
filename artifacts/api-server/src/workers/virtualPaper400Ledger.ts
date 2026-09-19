@@ -1,7 +1,7 @@
 export const VIRTUAL_PAPER_400_SCHEMA_VERSION = 1 as const;
 export const VIRTUAL_PAPER_400_INITIAL_EQUITY_USD = 400 as const;
 export const VIRTUAL_PAPER_400_MODE = 'VIRTUAL_PAPER_400' as const;
-export const VIRTUAL_PAPER_400_STRATEGY = 'SERVER_WORKER_AI_VIRTUAL_400_V1' as const;
+export const VIRTUAL_PAPER_400_STRATEGY_PREFIX = 'SERVER_WORKER_AI_VIRTUAL_400_V1' as const;
 
 const SESSION_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
 const COST_TOLERANCE_USD = 0.01;
@@ -13,7 +13,7 @@ export interface VirtualPaper400SessionV1 {
   startedAt: string;
   startedAtMs: number;
   initialEquityUsd: 400;
-  strategyTag: typeof VIRTUAL_PAPER_400_STRATEGY;
+  strategyTag: string;
   realFundsUsed: false;
 }
 
@@ -67,11 +67,16 @@ function stableTradeId(value: string | number): string | null {
   return normalized.length > 0 && normalized.length <= 160 ? normalized : null;
 }
 
+export function virtualPaper400StrategyTag(sessionId: string): string {
+  if (!SESSION_ID_RE.test(sessionId)) throw new Error('VIRTUAL_SESSION_ID_INVALID');
+  return `${VIRTUAL_PAPER_400_STRATEGY_PREFIX}:${sessionId}`;
+}
+
 export function buildVirtualPaper400Session(
   sessionId: string,
   startedAt: Date,
 ): VirtualPaper400SessionV1 {
-  if (!SESSION_ID_RE.test(sessionId)) throw new Error('VIRTUAL_SESSION_ID_INVALID');
+  const strategyTag = virtualPaper400StrategyTag(sessionId);
   const startedAtMs = startedAt.getTime();
   if (!Number.isSafeInteger(startedAtMs) || startedAtMs <= 0) {
     throw new Error('VIRTUAL_SESSION_STARTED_AT_INVALID');
@@ -83,7 +88,7 @@ export function buildVirtualPaper400Session(
     startedAt: startedAt.toISOString(),
     startedAtMs,
     initialEquityUsd: VIRTUAL_PAPER_400_INITIAL_EQUITY_USD,
-    strategyTag: VIRTUAL_PAPER_400_STRATEGY,
+    strategyTag,
     realFundsUsed: false,
   };
 }
@@ -101,6 +106,9 @@ export function parseVirtualPaper400Session(raw: unknown): ParseResult<VirtualPa
     'initialEquityUsd', 'strategyTag', 'realFundsUsed',
   ])) return { ok: false, reason: 'VIRTUAL_SESSION_KEYS_INVALID' };
   const parsedStartedAt = typeof value.startedAt === 'string' ? Date.parse(value.startedAt) : NaN;
+  const expectedStrategy = typeof value.sessionId === 'string' && SESSION_ID_RE.test(value.sessionId)
+    ? virtualPaper400StrategyTag(value.sessionId)
+    : null;
   if (value.schemaVersion !== VIRTUAL_PAPER_400_SCHEMA_VERSION
     || value.mode !== VIRTUAL_PAPER_400_MODE
     || typeof value.sessionId !== 'string' || !SESSION_ID_RE.test(value.sessionId)
@@ -108,7 +116,7 @@ export function parseVirtualPaper400Session(raw: unknown): ParseResult<VirtualPa
     || value.startedAtMs <= 0 || parsedStartedAt !== value.startedAtMs
     || new Date(value.startedAtMs).toISOString() !== value.startedAt
     || value.initialEquityUsd !== VIRTUAL_PAPER_400_INITIAL_EQUITY_USD
-    || value.strategyTag !== VIRTUAL_PAPER_400_STRATEGY
+    || value.strategyTag !== expectedStrategy
     || value.realFundsUsed !== false) {
     return { ok: false, reason: 'VIRTUAL_SESSION_VALUES_INVALID' };
   }
@@ -133,7 +141,7 @@ export function deriveVirtualPaper400Ledger(
     if (seen.has(id)) return { ok: false, reason: 'VIRTUAL_SETTLEMENT_DUPLICATE' };
     seen.add(id);
 
-    if (row.action !== 'CLOSE' || row.strategy !== VIRTUAL_PAPER_400_STRATEGY) {
+    if (row.action !== 'CLOSE' || row.strategy !== session.strategyTag) {
       return { ok: false, reason: 'VIRTUAL_SETTLEMENT_SCOPE_MISMATCH' };
     }
     if (row.settlementStatus !== 'PAPER_ESTIMATED' || row.costSource !== 'PAPER_GMX_ESTIMATE') {
