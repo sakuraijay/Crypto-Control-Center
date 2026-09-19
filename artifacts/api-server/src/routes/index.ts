@@ -16,6 +16,7 @@ import canaryRouter from "./canary";
 import signerReadinessRouter from "./signer-readiness";
 import offlineBacktestRouter from "./offline-backtest";
 import releaseRouter from "./release";
+import { requireOperatorAuth } from "../lib/operatorAuthGuard";
 
 const router: IRouter = Router();
 
@@ -27,6 +28,9 @@ router.use(approvalsRouter);
 router.use(executorRouter);
 router.use(walletDiagnosticRouter);
 router.use(notificationsRouter);
+// Manual Emergency Stop is a persistent operator mutation. Keep internal Risk/Stop
+// behavior unchanged, but require the existing operator contract on its public HTTP seam.
+router.post("/executor/emergency-stop", requireOperatorAuth);
 router.use(livetestRouter);
 router.use(relayRouter);
 router.use(gmxapiRouter);
