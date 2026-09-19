@@ -2,6 +2,45 @@
 
 > **운영 주의:** 이 문서는 실시간 상태 스냅샷이 아니다. 현재 HEAD/CI/배포/PAPER/GMX/Owner Approval/Canary readiness 값은 매 실행마다 authoritative source에서 새로 읽어야 한다. 과거 이 파일에 기록되어 있던 진행률, 배포 SHA, 플래그 기본값, 테스트 개수, readiness 상태는 역사 기록일 뿐 현재 상태로 사용하지 않는다.
 
+
+## 최신 테스트 모드 전환 지시 — 2026-09-20
+
+**지시 ID: CCC-OWNER-VIRTUAL-ALPHA-BETA-20261001**  
+**상태: 사용자 승인 반영. 기존 10월 1일 최종 시험 기한은 유지하되, 그 기한의 필수 시험은 실자금이 아닌 가상자본/PAPER 기반으로 전환한다.**
+
+사용자 최신 지시 취지:
+- 10월 1일 알파/베타에서 실제 자금을 넣지 않고 가상의 머니 또는 가상 매매를 구현할 수 있는지 확인한다.
+- 실제 자금 투입이 일정의 허들이라면 실제 자금 자동매매 시연은 과감히 뒤로 미룬다.
+
+### 확정 적용
+
+- **2026-10-01 18:00 Asia/Manila까지 실시해야 하는 알파/베타 테스트의 필수 자본은 400 USDC의 가상자본(VIRTUAL/PAPER)으로 전환한다.**
+- 10월 1일 테스트 성공에 실제 USDC 입금, 실제 GMX 주문, MetaMask/서브계정 금융 권한 갱신, LIVE/AUTO LIVE 활성화 또는 실제 자금 이동을 요구하지 않는다. 해당 항목은 10월 1일 일정의 차단 요소에서 제외한다.
+- **실제 400 USDC 자동매매 시연은 10월 1일 이후의 별도 Real-Money Canary 단계로 연기한다.** 날짜는 이번 지시에서 새로 확정하지 않는다. 사용자가 별도로 Start/필요 지갑 권한을 수행하고, 소프트웨어·Stop·비용·정산·권한 조건을 재검증한 뒤 진행한다.
+- 과거에 사용자가 실제 400 USDC 사용을 승인한 기록은 철회된 것으로 취급하지 않는다. 다만 그 승인은 10월 1일 시험의 필수조건이 아니며, 자동으로 LIVE를 활성화하지 않는다.
+
+### 10월 1일 가상 알파/베타의 의미 있는 합격 기준
+
+가상매매가 단순 차트 애니메이션이나 임의 숫자 변경이 되지 않도록 **실제 운영 코드 경로를 최대한 동일하게 사용하고 execution adapter만 PAPER/virtual로 분리**한다.
+
+1. **가상자본 초기값 400 USDC**를 실제 지갑잔액·Planned Seed·기존 Active Capital과 명확히 분리한다.
+2. 실제 시장 데이터 또는 명시적으로 표시된 REPLAY 데이터로 **Signal/Strategy → Risk ALLOW/REDUCE/REJECT → position sizing → OPEN → Stop/TP/protection → management → CLOSE → settlement/accounting** 전 과정을 통과한다.
+3. 시장에서 유효 신호가 발생하지 않아 라이프사이클 검증을 못 하는 상황을 피하기 위해, **live PAPER 관측과 별도로 deterministic/replay 시나리오를 사용해 진입·보호·종료·정산 전체 경로를 반드시 실행**한다. REPLAY 결과를 live market 성과로 표시하지 않는다.
+4. 수수료·slippage·funding·borrow·price impact는 가능한 실제 관측/기존 cost model을 사용하되, 실제 체결비용이 아닌 값은 **SIMULATED/ESTIMATED**로 표시한다.
+5. browser/tab을 닫아도 서버 측 PAPER worker가 지속되고, 재접속·프로세스 재시작 후 상태 복구, duplicate suppression, unresolved/unsettled 차단과 기존 포지션 보호를 확인한다.
+6. 신규 진입 차단이 기존 포지션의 Stop/TP/protection/정상 close를 제거하거나 의도하지 않은 close-all로 바뀌지 않는지 확인한다.
+7. Dashboard에는 **VIRTUAL 400 USDC / PAPER**를 명확히 표시하고 실제 wallet balance나 LIVE trade로 오인될 표현을 금지한다.
+8. 알파는 기능적 E2E 자동매매 경로 검증, 베타는 같은 소스에서 restart/reconnect/idempotency/error handling/지속 운용 안정성을 추가 검증한다. 둘 다 실제 수행 시각·source SHA·배포 SHA·테스트 로그를 남긴다.
+
+### 일정·개발 우선순위 변화
+
+- 10월 1일 기한을 맞추기 위한 우선순위에서 **실자금 wallet authorization, real order submission, LIVE/Relay 금융 활성화는 제거**한다.
+- 우선순위는 **PAPER/virtual E2E lifecycle 완성 → 400 virtual accounting → Stop/TP/protection/settlement → restart/duplicate/reconciliation → dashboard/start usability → exact-source deployment → Oct1 alpha/beta execution** 순서다.
+- 실제 자금 Canary 준비를 위해 이미 만든 코드·진단은 삭제하지 않지만, 10월 1일 테스트를 방해하는 선행조건으로 두지 않는다.
+- 가상 테스트 통과는 실제 체결가격·slippage·funding·wallet permission·on-chain settlement까지 검증했다는 뜻이 아니다. Real-Money Canary에서 별도로 검증한다.
+
+이 지시는 아래의 CCC-OWNER-DEADLINE-20261001-1800 최종기한 지시와 함께 읽으며, **10월 1일 시험의 자금 방식에 대해서는 이 최신 지시가 우선한다.**
+
 ## 최신 사용자 최종기한·중단·전환 지시 — 2026-09-20
 
 **지시 ID: CCC-OWNER-DEADLINE-20261001-1800**  
