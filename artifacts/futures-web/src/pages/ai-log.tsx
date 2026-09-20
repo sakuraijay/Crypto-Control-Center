@@ -7,6 +7,7 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
+import { VirtualPaper400Card } from '@/components/dashboard/VirtualPaper400Card';
 import { useAiEngine } from '@/lib/context/AiEngineContext';
 import { useAppContext } from '@/lib/context';
 import { Card } from '@/components/ui/card';
@@ -589,8 +590,7 @@ function LiveTestSessionReport({
 
 export default function AiLogPage() {
   const {
-    currentDecision, decisionHistory, stats, running, autoExecute,
-    setAutoExecute, triggerCycle, clearHistory, loadMoreHistory,
+    decisionHistory, clearHistory, loadMoreHistory,
     pendingApprovals, notificationPermission,
   } = useAiEngine();
   const { engineState, triggerEmergencyStop } = useAppContext();
@@ -648,7 +648,7 @@ export default function AiLogPage() {
           <ShieldAlert className="w-5 h-5 text-[var(--color-short)] animate-pulse shrink-0" />
           <div className="flex-1">
             <span className="text-[11px] font-bold tracking-wider text-[var(--color-short)]">EMERGENCY STOP ACTIVE</span>
-            <span className="text-[11px] text-muted-foreground ml-2">AI engine suspended · No new decisions being made</span>
+            <span className="text-[11px] text-muted-foreground ml-2">Standard 계정 비상정지 · Virtual 400 상태는 서버 패널에서 확인</span>
           </div>
         </div>
       )}
@@ -658,20 +658,15 @@ export default function AiLogPage() {
         <div>
           <h1 className="text-2xl font-bold flex items-center gap-2">
             <Brain className="w-6 h-6 text-primary" />
-            AI Decision Log
+            서버 판단 및 결정 이력
           </h1>
           <p className="text-xs text-muted-foreground mt-1">
-            5-State engine · GMX V2 · Arbitrum One
-            {stats.lastCycleAt && ` · Last cycle ${formatDistanceToNowStrict(new Date(stats.lastCycleAt), { addSuffix: true })}`}
+            현재 Virtual 400 판단은 서버 패널에 표시됩니다. 아래는 별도 Standard·기존 AI 결정 이력입니다.
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Button size="sm" variant="outline" onClick={triggerCycle} disabled={running || isEmergency} className="gap-1.5">
-            <RefreshCw className={cn('w-3.5 h-3.5', running && 'animate-spin')} />
-            {running ? 'Analysing…' : 'Run Now'}
-          </Button>
           <Button size="sm" variant="outline" onClick={clearHistory} disabled={decisionHistory.length === 0} className="gap-1.5 text-muted-foreground">
-            <Trash2 className="w-3.5 h-3.5" /> Clear
+            <Trash2 className="w-3.5 h-3.5" /> 화면 이력 숨기기
           </Button>
           <Button size="sm" variant="outline" onClick={() => downloadDecisionsCSV(filtered)} disabled={filtered.length === 0} className="gap-1.5 text-muted-foreground" title="현재 필터 적용된 결정 이력 CSV 다운로드">
             <Download className="w-3.5 h-3.5" /> Export CSV
@@ -699,88 +694,8 @@ export default function AiLogPage() {
         </div>
       </div>
 
-      {/* ── Stats row ─────────────────────────────────────────────────────────── */}
-      <div className="grid grid-cols-6 gap-3">
-        <Card className="p-3 flex flex-col gap-0.5">
-          <span className="text-[9px] text-muted-foreground uppercase tracking-wider">Total Cycles</span>
-          <span className="text-lg font-bold font-mono text-primary">{stats.totalCycles}</span>
-        </Card>
-        <Card className="p-3 flex flex-col gap-0.5">
-          <span className="text-[9px] text-muted-foreground uppercase tracking-wider">Avg Confidence</span>
-          <span className="text-lg font-bold font-mono">{stats.avgConfidence.toFixed(0)}%</span>
-        </Card>
-        <Card className="p-3 flex flex-col gap-0.5">
-          <span className="text-[9px] text-muted-foreground uppercase tracking-wider">Current Streak</span>
-          <span className={cn('text-lg font-bold font-mono', STATE_CFG[stats.currentStreak.state].color)}>
-            {stats.currentStreak.cycles}× {stats.currentStreak.state}
-          </span>
-        </Card>
-        {states.slice(0, 3).map(s => (
-          <Card key={s} className="p-3 flex flex-col gap-0.5">
-            <span className={cn('text-[9px] uppercase tracking-wider font-bold', STATE_CFG[s].color)}>{s}</span>
-            <span className="text-lg font-bold font-mono">{stats.stateDistribution[s] ?? 0}</span>
-          </Card>
-        ))}
-      </div>
-
-      {/* ── Current decision card ──────────────────────────────────────────────── */}
-      {currentDecision && (
-        <Card className={cn('p-4 border', STATE_CFG[currentDecision.operatingState].bg)}>
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2">
-              <span className={cn('text-[10px] font-bold uppercase tracking-wider', STATE_CFG[currentDecision.operatingState].color)}>
-                Current State
-              </span>
-              <StatePill state={currentDecision.operatingState} />
-              {currentDecision.stateChanged && (
-                <span className="text-[9px] text-primary bg-primary/10 px-1.5 py-0.5 rounded font-bold">STATE CHANGED</span>
-              )}
-            </div>
-            <div className="flex items-center gap-3">
-              <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                {autoExecute ? <Zap className="w-3.5 h-3.5 text-[var(--color-warning)]" /> : <ZapOff className="w-3.5 h-3.5" />}
-                <span>Auto-execute</span>
-                <button
-                  onClick={() => setAutoExecute(!autoExecute)}
-                  className={cn(
-                    'text-[10px] font-bold px-2 py-0.5 rounded border',
-                    autoExecute
-                      ? 'bg-[var(--color-warning)]/10 border-[var(--color-warning)]/30 text-[var(--color-warning)]'
-                      : 'bg-secondary border-border text-muted-foreground hover:text-foreground'
-                  )}
-                  disabled={isEmergency}
-                >
-                  {autoExecute ? 'ON' : 'OFF'}
-                </button>
-              </div>
-            </div>
-          </div>
-          <p className={cn('text-sm font-medium mb-2', STATE_CFG[currentDecision.operatingState].color)}>
-            {currentDecision.stateRationale}
-          </p>
-          <div className="flex flex-wrap gap-1.5 mb-3">
-            {currentDecision.reasoning.map((r, i) => (
-              <span key={i} className="text-[10px] text-muted-foreground bg-background/50 border border-border px-2 py-0.5 rounded">
-                {r}
-              </span>
-            ))}
-          </div>
-          <div className="grid grid-cols-4 gap-3 text-xs font-mono border-t border-border/30 pt-3">
-            <div><span className="text-muted-foreground">Symbols</span>
-              <div className="font-bold">{currentDecision.selectedSymbols.map(s => `${s}/USD`).join(', ') || '—'}</div>
-            </div>
-            <div><span className="text-muted-foreground">Confidence</span>
-              <div className="font-bold">{currentDecision.confidence}%</div>
-            </div>
-            <div><span className="text-muted-foreground">Risk Level</span>
-              <div className={cn('font-bold', RISK_COLOR[currentDecision.riskLevel])}>{currentDecision.riskLevel}</div>
-            </div>
-            <div><span className="text-muted-foreground">Market</span>
-              <div className="font-bold">{currentDecision.marketCondition.replace(/_/g, ' ')}</div>
-            </div>
-          </div>
-        </Card>
-      )}
+      <VirtualPaper400Card />
+      <h2 className="text-sm font-semibold">Standard·기존 AI 결정 이력 · Virtual 400 정산과 별도</h2>
 
       {/* ── Filters ───────────────────────────────────────────────────────────── */}
       <Card className="p-3 flex flex-wrap gap-3 items-center">
@@ -874,12 +789,8 @@ export default function AiLogPage() {
           {decisionHistory.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-20 text-muted-foreground gap-3">
               <Brain className="w-10 h-10 opacity-30" />
-              <div className="text-sm">No decisions yet — engine initialising…</div>
-              <div className="text-xs opacity-60">First cycle runs ~8 seconds after price data loads</div>
-              <Button size="sm" onClick={triggerCycle} disabled={running || isEmergency}>
-                <RefreshCw className={cn('w-3.5 h-3.5 mr-1.5', running && 'animate-spin')} />
-                Run cycle now
-              </Button>
+              <div className="text-sm">표시할 저장 이력이 없습니다.</div>
+              <div className="text-xs opacity-60">Virtual 400의 현재 판단과 정산은 위 서버 패널에서 확인하세요.</div>
             </div>
           ) : filtered.length === 0 ? (
             <div className="flex items-center justify-center py-12 text-muted-foreground text-sm">

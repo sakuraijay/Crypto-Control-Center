@@ -3,7 +3,7 @@
  *
  * 역할:
  *   - Replit 모니터링 상태 (RPC 헬스, 배포 모드, 가동 시간)
- *   - AI 엔진 현재 상태 및 다음 사이클 카운트다운
+ *   - Virtual400 서버의 실제 판단 상태와 시각
  *
  * 보안 원칙:
  *   - Replit에는 GMX 개인키·시드문구·signer key가 저장되지 않습니다.
@@ -14,11 +14,11 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { Link } from 'wouter';
 import {
   Server, CheckCircle2, XCircle, Loader2,
-  ExternalLink, Cpu, Eye, Clock, Wallet, Key, FlaskConical, WifiOff,
+  ExternalLink, Cpu, Eye, Wallet, Key, FlaskConical, WifiOff,
 } from 'lucide-react';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { useAiEngine } from '@/lib/context/AiEngineContext';
+import { useVirtualPaper400 } from '@/lib/context/VirtualPaper400Context';
 import { useWallet } from '@/lib/context/WalletContext';
 import { cn } from '@/lib/utils';
 import { format } from 'date-fns';
@@ -42,12 +42,6 @@ function formatUptime(sec: number): string {
   if (sec < 3600) return `${Math.floor(sec / 60)}m`;
   if (sec < 86400) return `${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m`;
   return `${Math.floor(sec / 86400)}d ${Math.floor((sec % 86400) / 3600)}h`;
-}
-
-function fmtMs(ms: number): string {
-  const s = Math.ceil(ms / 1000);
-  if (s >= 60) return `${Math.floor(s / 60)}m ${s % 60}s`;
-  return `${s}s`;
 }
 
 // ── Sub-components ────────────────────────────────────────────────────────────
@@ -79,7 +73,7 @@ export function ExecutorStatusWidget() {
   // Keep a stable ref to fetchStatus so the self-scheduling closure doesn't go stale
   const fetchRef = useRef<(() => Promise<void>) | null>(null);
 
-  const { currentDecision, stats, nextCycleMs, running, operatingMode } = useAiEngine();
+  const { data: virtual, status: virtualStatus, fresh: virtualFresh } = useVirtualPaper400();
   const wallet = useWallet();
 
   const fetchStatus = useCallback(async () => {
@@ -135,15 +129,6 @@ export function ExecutorStatusWidget() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const MODE_BADGE: Record<string, string> = {
-    AUTONOMOUS_AI:   'bg-[var(--color-long)]/10 text-[var(--color-long)] border-[var(--color-long)]/30',
-    MANUAL_OVERRIDE: 'bg-amber-500/10 text-amber-400 border-amber-500/30',
-    RISK_LOCKED:     'bg-[var(--color-short)]/10 text-[var(--color-short)] border-[var(--color-short)]/30',
-  };
-  const MODE_LABEL: Record<string, string> = {
-    AUTONOMOUS_AI: 'AUTONOMOUS AI', MANUAL_OVERRIDE: 'MANUAL', RISK_LOCKED: 'RISK LOCKED',
-  };
-
   return (
     <Card className="overflow-hidden border border-border">
       {/* Header */}
@@ -171,20 +156,7 @@ export function ExecutorStatusWidget() {
               ↑ {formatUptime(health.uptimeSeconds)}
             </span>
           )}
-          <div className={cn(
-            'flex items-center gap-1.5 px-2 py-0.5 rounded-full border text-[10px] font-bold tracking-wider',
-            MODE_BADGE[operatingMode] ?? MODE_BADGE.MANUAL_OVERRIDE,
-          )}>
-            <div className={cn(
-              'w-1.5 h-1.5 rounded-full shrink-0',
-              operatingMode === 'AUTONOMOUS_AI'
-                ? 'bg-[var(--color-long)] shadow-[0_0_6px_rgba(0,200,83,0.5)]'
-                : operatingMode === 'RISK_LOCKED'
-                  ? 'bg-[var(--color-short)] animate-pulse'
-                  : 'bg-amber-400',
-            )} />
-            {MODE_LABEL[operatingMode] ?? operatingMode}
-          </div>
+          <span className="text-xs text-muted-foreground">{virtualStatus}</span>
         </div>
       </div>
 
@@ -267,35 +239,9 @@ export function ExecutorStatusWidget() {
           </div>
         )}
 
-        {/* AI Engine stats */}
         <div className="border-t border-border pt-2 flex flex-col gap-1.5">
-          <StatRow
-            label="다음 사이클"
-            value={
-              <span className="flex items-center gap-1">
-                {running && <Loader2 className="w-2.5 h-2.5 animate-spin" />}
-                <Clock className="w-2.5 h-2.5 text-muted-foreground" />
-                {running ? '실행 중…' : fmtMs(nextCycleMs)}
-              </span>
-            }
-          />
-          <StatRow label="총 사이클" value={stats.totalCycles} />
-          {stats.lastCycleAt && (
-            <StatRow label="마지막 사이클" value={format(new Date(stats.lastCycleAt), 'HH:mm:ss')} />
-          )}
-          {currentDecision && (
-            <StatRow
-              label="현재 상태"
-              value={currentDecision.operatingState}
-              cls={
-                currentDecision.operatingState === 'LONG' || currentDecision.operatingState === 'SPOT'
-                  ? 'text-[var(--color-long)]'
-                  : currentDecision.operatingState === 'SHORT'
-                    ? 'text-[var(--color-short)]'
-                    : 'text-muted-foreground'
-              }
-            />
-          )}
+          <StatRow label="Virtual 400 서버 판단" value={virtualFresh ? virtual?.runtime?.status : '미확인'} />
+          <StatRow label="마지막 서버 판단" value={virtualFresh && virtual?.runtime ? format(new Date(virtual.runtime.at), 'HH:mm:ss') : '미확인'} />
         </div>
 
         {/* Reconciliation info */}

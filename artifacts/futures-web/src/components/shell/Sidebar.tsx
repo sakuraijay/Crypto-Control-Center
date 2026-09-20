@@ -4,7 +4,7 @@ import {
   ShieldCheck, SlidersHorizontal,
 } from 'lucide-react';
 import { useAppContext } from '@/lib/context';
-import { useAiEngine, type OperatingMode } from '@/lib/context/AiEngineContext';
+import { useVirtualPaper400 } from '@/lib/context/VirtualPaper400Context';
 import { cn } from '@/lib/utils';
 
 const navItems = [
@@ -21,28 +21,11 @@ const bottomNavItems = [
   { href: '/settings', label: 'Settings', testId: 'advanced-settings', icon: Settings },
 ];
 
-const MODE_DOT: Record<OperatingMode, string> = {
-  AUTONOMOUS_AI:   'bg-[#37d99a] shadow-[0_0_6px_rgba(55,217,154,0.55)]',
-  MANUAL_OVERRIDE: 'bg-[#ffb648]',
-  RISK_LOCKED:     'bg-[#ff5c76] animate-pulse shadow-[0_0_6px_rgba(255,92,118,0.55)]',
-};
-
-const MODE_LABEL: Record<OperatingMode, string> = {
-  AUTONOMOUS_AI:   'AUTONOMOUS AI',
-  MANUAL_OVERRIDE: 'MANUAL',
-  RISK_LOCKED:     'RISK LOCKED',
-};
-
-const MODE_CLS: Record<OperatingMode, string> = {
-  AUTONOMOUS_AI:   'bg-[#0d1d19] text-[#37d99a] border-[#1b2636]',
-  MANUAL_OVERRIDE: 'bg-[#241c0e] text-[#ffb648] border-[#1b2636]',
-  RISK_LOCKED:     'bg-[#251218] text-[#ff5c76] border-[#1b2636]',
-};
-
 export function Sidebar() {
   const [location] = useLocation();
   const { engineState } = useAppContext();
-  const { operatingMode } = useAiEngine();
+  const { status, fresh, data } = useVirtualPaper400();
+  const active = fresh && data?.session.status === 'ACTIVE';
 
   const engineTone = () => {
     switch (engineState) {
@@ -93,7 +76,7 @@ export function Sidebar() {
                 <item.icon className="h-3 w-3" />
               </div>
               <span className={cn('text-[12px]', isActive ? 'font-semibold' : 'font-medium')}>{item.label}</span>
-              {item.href === '/ai-log' && operatingMode === 'AUTONOMOUS_AI' && (
+              {item.href === '/ai-log' && active && (
                 <span className="ml-auto h-1.5 w-1.5 rounded-full bg-[#37d99a] shadow-[0_0_4px_rgba(55,217,154,0.7)]" />
               )}
             </Link>
@@ -129,21 +112,21 @@ export function Sidebar() {
       </div>
 
       <div className="rounded-[10px] border border-[#1b2636] bg-[#0b111c] p-3">
-        <div className="mb-2 text-[9px] font-semibold tracking-[0.12em] text-[#5f6b7a]">RUNTIME</div>
+        <div className="mb-2 text-[9px] font-semibold tracking-[0.12em] text-[#5f6b7a]">VIRTUAL 400 · SERVER</div>
         <div className="flex flex-wrap gap-2">
           <div className={cn(
             'flex items-center gap-1.5 rounded-full border px-2 py-1 text-[9px] font-bold tracking-[0.05em]',
-            MODE_CLS[operatingMode],
+            active ? 'text-[#37d99a]' : 'text-[#8e9aaf]',
           )}>
-            <span className={cn('h-1.5 w-1.5 rounded-full', MODE_DOT[operatingMode])} />
-            {MODE_LABEL[operatingMode]}
+            <span className={cn('h-1.5 w-1.5 rounded-full', active ? 'bg-[#37d99a]' : 'bg-[#8e9aaf]')} />
+            {status}
           </div>
           <div className="rounded-full border border-[#1b2636] bg-[#0f1b28] px-2 py-1 text-[9px] font-semibold text-[#37d0ff]">
-            {engineText}
+            Standard · {engineText}
           </div>
         </div>
         <div className={cn('mt-2 text-[9px]', engineTone())}>
-          Server-derived safety state
+          Virtual 400: 서버 기준 · Standard: 별도 계정
         </div>
       </div>
     </aside>

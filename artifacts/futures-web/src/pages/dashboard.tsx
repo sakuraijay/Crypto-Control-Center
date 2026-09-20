@@ -2,7 +2,7 @@
  * Dashboard — primary desktop operator surface.
  *
  * Desktop-first layout (1280px+):
- *   Top row:    AI Engine state (7/12) │ Execution Engine + Performance (5/12)
+ *   Top row:    Authoritative Virtual400 session + server execution health
  *   KPI rows:   Account metrics + Quick Controls
  *   Data grid:  Equity curve + Positions table (2/3) │ Signals + Strategy logs (1/3)
  */
@@ -21,12 +21,8 @@ import {
 import { format } from 'date-fns';
 import { AreaChart, Area, XAxis, Tooltip, ResponsiveContainer } from '@/lib/recharts-compat';
 import { NewOrderDrawer } from '@/components/trading/NewOrderDrawer';
-import { DailyTargetCard } from '@/components/dashboard/DailyTargetCard';
-import { AiStateCard } from '@/components/dashboard/AiStateCard';
 import { LiveApprovalCard } from '@/components/dashboard/LiveApprovalCard';
 import { LiveApprovalBanner } from '@/components/dashboard/LiveApprovalBanner';
-import { SystemHealthBanner } from '@/components/dashboard/SystemHealthBanner';
-import { AiMarketRankingCard } from '@/components/dashboard/AiMarketRankingCard';
 import { ExecutorStatusWidget } from '@/components/dashboard/ExecutorStatusWidget';
 import { GmxOnchainCard } from '@/components/dashboard/GmxOnchainCard';
 import { BetaRcStatusCard } from '@/components/dashboard/BetaRcStatusCard';
@@ -100,27 +96,13 @@ export default function Dashboard() {
     <div className="flex flex-col gap-5 animate-in fade-in duration-500">
 
       {/* ── Full-width alerts ─────────────────────────────────────────────── */}
-      <SystemHealthBanner />
       <VirtualPaper400Card />
       {/* LiveApprovalBanner: fallback for denied/unsupported notification environments */}
       <LiveApprovalBanner />
       <LiveApprovalCard />
 
-      {/* ── Primary monitoring: 2-column desktop grid ─────────────────────── */}
-      <div className="grid grid-cols-12 gap-5 items-start">
-
-        {/* Left 7/12 — AI engine state (primary operator surface) */}
-        <div className="col-span-7 flex flex-col gap-4">
-          <AiStateCard />
-          <AiMarketRankingCard />
-        </div>
-
-        {/* Right 5/12 — Execution health + daily performance */}
-        <div className="col-span-5 flex flex-col gap-4">
-          <ExecutorStatusWidget />
-          <DailyTargetCard />
-        </div>
-      </div>
+      <ExecutorStatusWidget />
+      <h2 className="text-sm font-semibold text-muted-foreground">Standard PAPER 계정 · Virtual 400과 별도 기록</h2>
 
       {/* ── Account KPI bar — 실제 PAPER DB 데이터만 표시 (mock 금지) ─────── */}
       <div className="grid grid-cols-4 gap-3">
