@@ -57,7 +57,14 @@ NOT a real PostgreSQL process restart, and NOT live market performance.
 
 Runtime adapter tests exercise routing, fail-closed reads, stopped-session restore,
 missing risk with history and advisory lock contention with an in-memory DB double.
-Real PostgreSQL concurrency/durability for this new adapter remains to be tested.
+`virtualPaper400Runtime.postgres.test.ts` now exercises the adapter against an
+isolated temporary PostgreSQL instance. It stops and restarts the actual database
+process, reloads the runtime from a fresh Node process, and verifies the same
+session id, strategy namespace, start time, HWM, sticky hard stop, and
+Standard/fixed-beta sentinels. It also holds the shared advisory lock from a
+separate PostgreSQL session and proves a competing runtime cycle performs no
+writes. This is isolated test-PostgreSQL evidence, not a Production database
+restart and not natural market execution.
 Strategy advisory lifecycle/regime history continuity also requires follow-up;
 actual order duplicate suppression is already durable and independently enforced.
 
@@ -88,8 +95,8 @@ production Dashboard and its Set Master PIN overlay; no PIN was entered/changed.
 Cloud browser access to local preview was blocked (ERR_BLOCKED_BY_CLIENT), so the
 new card has build/typecheck coverage but no browser acceptance yet.
 
-Remaining: isolated PostgreSQL restart/concurrency; natural server PAPER
-OPEN/protection/CLOSE/settlement observation; and Alpha/Beta execution evidence.
+Remaining: natural server PAPER OPEN/protection/CLOSE/settlement observation;
+and Alpha/Beta execution evidence.
 A natural NO_TRADE remains valid and is not represented as a market trade.
 
 Rollback: preserve all virtual keys/rows and any protected open position. STOP
