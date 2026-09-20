@@ -166,6 +166,7 @@ import { runVirtualPaper400Cycle } from '../workers/virtualPaper400Cycle';
 import { buildActiveVirtualPaper400SessionState } from '../workers/virtualPaper400SessionState';
 import { initialVirtualPaper400RiskState, evaluateVirtualPaper400Account } from '../workers/virtualPaper400Accounting';
 import { virtualReplaySignal, virtualReplayCost } from './helpers/virtualPaper400Replay';
+import { rawCandleVirtualReplaySignal } from './helpers/virtualPaper400RawCandleReplay';
 import type { DbTrade } from '@workspace/db';
 import {
   openServerPaperPosition, requestServerPaperCloseAll, loadPendingCloseFromDb,
@@ -257,6 +258,82 @@ describe('VIRTUAL 400 deterministic REPLAY through the real PAPER executor', () 
     expect(restored.ledger.settlementCount).toBe(1);
     expect(restored.next.risk.dailyEntryCount).toBe(1);
     expect(restored.next.risk.consecutiveLossCount).toBe(1);
+    expect(store.workerState.get('riskEngineStateV1')).toBe('STANDARD_SENTINEL');
+  });
+});
+
+describe('VIRTUAL 400 raw-candle REPLAY through Strategy/Risk/PAPER settlement', () => {
+  const REPLAY_NOW = Date.parse('2026-09-20T04:00:10.000Z');
+
+  it('runs closed 4h/1h/15m candles → strategy arbiter → Risk/sizing → OPEN → protection → settlement', async () => {
+    const now = new Date(REPLAY_NOW);
+    const session = buildActiveVirtualPaper400SessionState('raw-candle-replay', new Date(REPLAY_NOW - 1_000));
+    const signal = rawCandleVirtualReplaySignal(REPLAY_NOW);
+    const entryPrice = signal.entryPrice!;
+    const stopPrice = signal.structuralStop!;
+    let saved = initialVirtualPaper400RiskState(session.session);
+    store.workerState.set('riskEngineStateV1', 'STANDARD_SENTINEL');
+    vi.mocked(getPaperCostBinding).mockReturnValue({ ...BINDING, estEntryCostUsd: 0.015, estExitCostUsd: 0.015 });
+
+    const result = await runVirtualPaper400Cycle({
+      now,
+      engineMode: 'PAPER',
+      policyAppliedAt: now.toISOString(),
+      sessionRaw: JSON.stringify(session),
+      previous: saved,
+      rows: [],
+      quote: quoteFn(entryPrice),
+      shouldContinue: () => true,
+      persistRisk: async state => { saved = JSON.parse(JSON.stringify(state)); },
+      readSignals: async () => [signal],
+      readCost: async (_symbol, _long, size) => virtualReplayCost(REPLAY_NOW, size),
+      claim: async (id, audit) => {
+        if (store.workerState.has(id)) return false;
+        store.workerState.set(id, JSON.stringify(audit));
+        return true;
+      },
+      open: args => openServerPaperPosition(args),
+      close: async () => { throw new Error('unexpected signal close-all'); },
+      reduce: async () => { throw new Error('unexpected reduction'); },
+    });
+
+    expect(signal).toMatchObject({
+      action: 'LONG',
+      strategyId: 'TREND_PULLBACK',
+      lifecycleEligible: true,
+    });
+    expect(signal.confidence).toBeGreaterThanOrEqual(80);
+    expect(signal.candleSignalEvidence).toMatchObject({
+      disposition: 'AGREED',
+      authority: 'EVIDENCE_ONLY',
+      executionAuthorized: false,
+      paperPositionMutationAllowed: false,
+    });
+    expect(result.status).toBe('OPENED');
+    expect(store.trades[0]).toMatchObject({
+      strategy: session.session.strategyTag,
+      stopPriceUsd: String(stopPrice),
+    });
+
+    __resetServerPaperStateForTests();
+    await manageServerPaperTick(quoteFn(stopPrice - 0.01), REPLAY_NOW + H);
+    await manageServerPaperTick(quoteFn(stopPrice - 0.01), REPLAY_NOW + H + 1_000);
+    expect(closeRows()).toHaveLength(1);
+    expect(closeRows()[0]).toMatchObject({
+      strategy: session.session.strategyTag,
+      closeReason: 'STOP_LOSS',
+      settlementStatus: 'PAPER_ESTIMATED',
+    });
+    const restored = evaluateVirtualPaper400Account({
+      session: session.session,
+      previous: saved,
+      rows: store.trades as unknown as DbTrade[],
+      now: new Date(REPLAY_NOW + H + 1_000),
+      quote: quoteFn(stopPrice - 0.01),
+    });
+    expect(restored.ledger.realizedEquityUsd).toBeLessThan(400);
+    expect(restored.ledger.modeledTradingCostUsd).toBeGreaterThan(0);
+    expect(restored.ledger.settlementCount).toBe(1);
     expect(store.workerState.get('riskEngineStateV1')).toBe('STANDARD_SENTINEL');
   });
 });

@@ -61,6 +61,23 @@ Real PostgreSQL concurrency/durability for this new adapter remains to be tested
 Strategy advisory lifecycle/regime history continuity also requires follow-up;
 actual order duplicate suppression is already durable and independently enforced.
 
+## Raw-candle lifecycle follow-up — 2026-09-21
+
+The deterministic Virtual400 regression now starts with explicit synthetic,
+closed 4h/1h/15m candle arrays and runs the actual candle foundation, regime,
+strategy ensemble/arbiter, signal lifecycle, net-edge research evidence, Virtual400
+Risk and sizing, server PAPER OPEN, simulated process-local restart, structural
+Stop close and cost-aware settlement. The selected SHADOW record remains
+evidence-only; the explicit Virtual400 session plus Risk/sizing grants PAPER
+authority. The test also preserves a Standard risk-state sentinel and verifies a
+single net settlement with modeled cost and loss accounting.
+
+This closes the deterministic raw-candle-to-settlement REPLAY coverage gap only.
+The candles, quotes and costs are synthetic/estimated, the DB is still an
+in-memory fixture, and this is not live market performance, a natural production
+trade, an actual PostgreSQL process restart, or ALPHA/BETA acceptance. Exact-head
+CI remains required after the test commit is delivered.
+
 ## Deployment/UI evidence and remaining gates
 
 At 2026-09-20T05:30Z the public release identity reported source
@@ -71,10 +88,9 @@ production Dashboard and its Set Master PIN overlay; no PIN was entered/changed.
 Cloud browser access to local preview was blocked (ERR_BLOCKED_BY_CLIENT), so the
 new card has build/typecheck coverage but no browser acceptance yet.
 
-Remaining: exact committed CI; Replit exact-source sync/deploy and source parity;
-new UI Start/Stop/errors/reconnect; isolated PostgreSQL restart/concurrency;
-raw-candle REPLAY; actual server PAPER observation with browser closed. A natural
-NO_TRADE is valid; it does not substitute for the deterministic lifecycle gate.
+Remaining: isolated PostgreSQL restart/concurrency; natural server PAPER
+OPEN/protection/CLOSE/settlement observation; and Alpha/Beta execution evidence.
+A natural NO_TRADE remains valid and is not represented as a market trade.
 
 Rollback: preserve all virtual keys/rows and any protected open position. STOP
 new virtual entries via the existing authenticated action. Review open/pending
