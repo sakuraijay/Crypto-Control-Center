@@ -219,14 +219,14 @@ beforeEach(() => {
 });
 
 describe('VIRTUAL 400 deterministic REPLAY through the real PAPER executor', () => {
-  it('runs Signal/Risk/sizing → OPEN → restart → structural SL → cost settlement', async () => {
+  it.each([false, true])('runs Signal/Risk/sizing → OPEN → restart → structural SL → cost settlement (active=%s)', async active => {
     const now = new Date(T0);
     const session = buildActiveVirtualPaper400SessionState('full-replay', new Date(T0 - 1_000));
     let saved = initialVirtualPaper400RiskState(session.session);
     store.workerState.set('riskEngineStateV1', 'STANDARD_SENTINEL');
     vi.mocked(getPaperCostBinding).mockReturnValue({ ...BINDING, estEntryCostUsd: 0.015, estExitCostUsd: 0.015 });
     const result = await runVirtualPaper400Cycle({
-      now, engineMode: 'PAPER', sessionRaw: JSON.stringify(session), previous: saved,
+      now, engineMode: 'PAPER', policyAppliedAt: active ? now.toISOString() : undefined, sessionRaw: JSON.stringify(session), previous: saved,
       rows: [], quote: quoteFn(50_000), shouldContinue: () => true,
       persistRisk: async state => { saved = JSON.parse(JSON.stringify(state)); },
       readSignals: async () => [virtualReplaySignal(T0)],
@@ -239,7 +239,8 @@ describe('VIRTUAL 400 deterministic REPLAY through the real PAPER executor', () 
     });
     expect(result.status).toBe('OPENED');
     expect(store.trades[0]).toMatchObject({ strategy: session.session.strategyTag, stopPriceUsd: '49000' });
-    expect(Number(store.trades[0].sizeInUsd)).toBeLessThanOrEqual(50);
+    expect(Number(store.trades[0].sizeInUsd)).toBeLessThanOrEqual(active ? 80 : 50);
+    expect(Number(store.trades[0].leverage)).toBe(active ? 2 : 1);
     // Simulated process restart: no cached worker state is needed to protect the OPEN.
     __resetServerPaperStateForTests();
     await manageServerPaperTick(quoteFn(48_950), T0 + H);

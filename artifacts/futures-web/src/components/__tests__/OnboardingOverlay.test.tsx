@@ -101,7 +101,9 @@ describe('OnboardingOverlay', () => {
   });
 
   beforeEach(() => {
-    localStorage.clear();
+    localStorage.clear(); sessionStorage.clear();
+    mocks.gmx.status = 'ok'; mocks.gmx.apiConsistency = 'matched';
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({}) })));
     mocks.authenticated = true;
     mocks.wallet.status = 'disconnected';
     mocks.wallet.address = null;
@@ -112,10 +114,10 @@ describe('OnboardingOverlay', () => {
     mocks.wallet.connect.mockClear();
   });
 
-  it('shows only the explicit wallet connection action before setup', () => {
+  it('offers an explicit wallet connection action before setup', async () => {
     render(<OnboardingOverlay />);
 
-    fireEvent.click(screen.getByTestId('button-connect-wallet'));
+    fireEvent.click(await screen.findByTestId('button-connect-wallet'));
 
     expect(mocks.wallet.connect).toHaveBeenCalledOnce();
     expect(screen.queryByTestId('button-enter-paper')).toBeNull();
@@ -129,7 +131,7 @@ describe('OnboardingOverlay', () => {
     expect(container.innerHTML).toBe('');
   });
 
-  it('enters PAPER only after authoritative readiness and binds acknowledgement to the wallet', () => {
+  it('enters PAPER only after authoritative readiness and binds acknowledgement to the wallet', async () => {
     mocks.wallet.status = 'connected';
     mocks.wallet.address = '0x1234567890abcdef1234567890abcdef12345678';
     mocks.wallet.ethBalance = '0.01';
@@ -138,11 +140,37 @@ describe('OnboardingOverlay', () => {
     mocks.wallet.isArbitrum = true;
 
     const { container } = render(<OnboardingOverlay />);
-    fireEvent.click(screen.getByTestId('button-enter-paper'));
+    fireEvent.click(await screen.findByTestId('button-enter-paper'));
 
     expect(localStorage.getItem('ccc_zero_config_onboarding_v1'))
       .toBe(mocks.wallet.address.toLowerCase());
     expect(container.innerHTML).toBe('');
+  });
+
+  it('does not reopen the completed wizard during loading, errors or disconnect', async () => {
+    localStorage.setItem('ccc_zero_config_onboarding_v1', '0x123');
+    const view = render(<OnboardingOverlay />);
+    for (const status of ['loading', 'error', 'ok']) {
+      mocks.gmx.status = status;
+      view.rerender(<OnboardingOverlay />);
+      expect(screen.queryByTestId('overlay-zero-config-autopilot')).toBeNull();
+    }
+  });
+  it('opens virtual observation without connecting a wallet or granting trading permission', async () => {
+    const view = render(<OnboardingOverlay />);
+    fireEvent.click(await screen.findByTestId('button-view-virtual'));
+    expect(view.container.innerHTML).toBe('');
+    expect(mocks.wallet.connect).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ method: 'PUT' }));
+  });
+  it('keeps an existing active virtual account visible with no browser wallet', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({
+      ok: true, mode: 'VIRTUAL_PAPER_400', realFundsUsed: false, session: { status: 'ACTIVE' },
+    }) })));
+    const view = render(<OnboardingOverlay />);
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+    expect(view.container.innerHTML).toBe('');
+    expect(mocks.wallet.connect).not.toHaveBeenCalled();
   });
 
   it('shows the authoritative $400 proposed plan for an eligible connected wallet without activating it', async () => {

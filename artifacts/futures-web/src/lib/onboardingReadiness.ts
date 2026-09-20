@@ -60,7 +60,9 @@ export function deriveOnboardingReadiness(input: ReadinessInput): ReadinessOutpu
     && isEngineReady
     && areSafetyDefaultsReady;
 
-  const shouldShowOnboarding = !input.dismissedInStorage || !isFullyReady;
+  // Onboarding is presentation, never an execution permission. Background polls
+  // and real failures must revoke readiness without reopening a blocking wizard.
+  const shouldShowOnboarding = !input.dismissedInStorage;
   const phase = !isWalletConnected
     ? 'connect_wallet'
     : !isChainReady

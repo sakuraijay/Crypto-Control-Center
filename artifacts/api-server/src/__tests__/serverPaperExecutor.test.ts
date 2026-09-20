@@ -1,3 +1,4 @@
+import { virtualActiveProfile } from '../workers/virtualPaper400Policy';
 /**
  * Task #111 — 서버 권위 PAPER 실행기 adversarial 테스트.
  *
@@ -183,6 +184,21 @@ beforeEach(() => {
 describe('VIRTUAL/PAPER400 real executor namespace lifecycle', () => {
   const session = buildVirtualPaper400Session('executor-session', new Date('2026-08-21T00:00:00Z'));
 
+  it('accepts the dedicated active profile only in the virtual namespace', async () => {
+    const args = { ...BASE_OPEN, sizeUsd: 80, leverage: 2,
+      riskProfileSnapshot: virtualActiveProfile(400, new Date().toISOString()) };
+    const standard = await openServerPaperPosition(args);
+    expect(standard.ok).toBe(false);
+    expect(db.insert).not.toHaveBeenCalled();
+    const virtual = await openServerPaperPosition({ ...args, strategy: session.strategyTag, stopPriceUsd: 49_000 });
+    expect(virtual.ok).toBe(true);
+  });
+  it('rejects oversized dedicated virtual orders at the executor boundary', async () => {
+    const result = await openServerPaperPosition({ ...BASE_OPEN, strategy: session.strategyTag,
+      sizeUsd: 201, leverage: 2, riskProfileSnapshot: virtualActiveProfile(400, new Date().toISOString()) });
+    expect(result).toMatchObject({ ok: false, reason: 'VIRTUAL_ACTIVE_POLICY_CAP' });
+    expect(db.insert).not.toHaveBeenCalled();
+  });
   it('does not reconstruct a Standard CASH intent for virtual inventory', async () => {
     vi.mocked(db.select).mockImplementation(() => makeChain(() => [serverOpenRow({ strategy: session.strategyTag })]) as never);
     const direction = vi.fn(async () => 'CASH');

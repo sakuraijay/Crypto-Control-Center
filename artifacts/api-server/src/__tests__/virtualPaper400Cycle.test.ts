@@ -83,6 +83,31 @@ describe('VIRTUAL 400 Signal → Risk → sizing → executor boundary (REPLAY)'
     expect(vi.mocked(d.persistRisk).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(d.claim).mock.invocationCallOrder[0]);
     expect(vi.mocked(d.claim).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(d.open).mock.invocationCallOrder[0]);
   });
+  it('increases virtual opportunity size at 2x while budgeting fixed costs without multiplying risk', async () => {
+    const d = deps({ policyAppliedAt: now.toISOString() });
+    const result = await runVirtualPaper400Cycle(d);
+    expect(result.status).toBe('OPENED');
+    const [open, cost] = vi.mocked(d.open).mock.calls[0];
+    expect(open.leverage).toBe(2);
+    expect(open.sizeUsd).toBeGreaterThan(50);
+    expect(open.sizeUsd).toBe(cost.notionalUsd);
+    expect(open.sizeUsd * 0.02 + cost.totalEstimatedRoundTripCostUsd).toBeLessThanOrEqual(2);
+    expect(open.sizeUsd / open.leverage).toBeLessThanOrEqual(100);
+    expect(result.policy?.version).toBe('virtual400-active/v1');
+  });
+  it('takes only the highest ranked eligible candidate and exposes missing costs', async () => {
+    const signal = virtualReplaySignal(now.getTime());
+    const d = deps({ policyAppliedAt: now.toISOString(), readSignals: async () => [signal, signal] });
+    expect((await runVirtualPaper400Cycle(d)).status).toBe('OPENED');
+    expect(d.open).toHaveBeenCalledOnce();
+    const failed = await runVirtualPaper400Cycle(deps({ policyAppliedAt: now.toISOString(), readCost: async () => null }));
+    expect(failed.diagnostics).toEqual(expect.arrayContaining([expect.objectContaining({ reason: 'COST_UNAVAILABLE' })]));
+  });
+  it('cannot apply aggressive entries across a pending recovery boundary', async () => {
+    const d = deps({ policyAppliedAt: now.toISOString(), entryBlockedReason: 'EXECUTOR_RECOVERY_PENDING' });
+    expect((await runVirtualPaper400Cycle(d)).status).toBe('BLOCKED');
+    expect(d.open).not.toHaveBeenCalled();
+  });
   it.each(['LIVE', 'STOP', 'DUPLICATE', 'MISSING_COST', 'NO_SIGNAL', 'STALE', 'SAVE_FAILURE'])('fails closed for %s without an entry-veto close-all', async reason => {
     const d = deps();
     if (reason === 'LIVE') d.engineMode = 'LIVE';

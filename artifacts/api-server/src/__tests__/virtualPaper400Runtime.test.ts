@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const fixture = vi.hoisted(() => ({ rows: new Map<string, string>(), trades: [] as unknown[],
-  writes: [] as string[], acquired: true, failRead: false }));
+  pending: false, writes: [] as string[], acquired: true, failRead: false }));
 vi.mock('drizzle-orm', () => ({ eq: (_field: unknown, value: string) => ({ value }),
   sql: () => ({}), and: () => ({}), inArray: () => ({}) }));
 vi.mock('@workspace/db', () => {
@@ -36,9 +36,12 @@ vi.mock('@workspace/db', () => {
   return { db, workerStateTable, tradesTable };
 });
 vi.mock('../workers/serverPaperExecutor', () => ({
-  getServerPaperStatus: () => ({ unresolved: null }), openServerPaperPosition: vi.fn(),
+  getServerPaperStatus: () => ({ unresolved: null, pendingClose: fixture.pending ? { reason: 'pending' } : null }), openServerPaperPosition: vi.fn(),
   closeServerPaperPosition: vi.fn(), reduceServerPaper70: vi.fn(),
 }));
+vi.mock('../lib/manualCanaryReadonlyEvidence', () => ({ fetchManualCanaryReadonlyCost: vi.fn(async () => ({ ok: false })) }));
+vi.mock('../intel/intelService', () => ({ runStrategyShadowWorkerReadOnly: vi.fn(async () => ({ status: 'EVALUATED', records: [] })) }));
+import { runStrategyShadowWorkerReadOnly } from '../intel/intelService';
 import { maybeRunVirtualPaper400Cycle, VIRTUAL_PAPER_400_RUNTIME_KEY } from '../workers/virtualPaper400Runtime';
 import { buildActiveVirtualPaper400SessionState, buildStoppedVirtualPaper400SessionState,
   VIRTUAL_PAPER_400_SESSION_STATE_KEY } from '../workers/virtualPaper400SessionState';
@@ -47,7 +50,7 @@ import { openServerPaperPosition, closeServerPaperPosition } from '../workers/se
 
 const args = { cycleNumber: 1, quote: () => ({ priceUsd: 50_000, ageMs: 0 }), shouldContinue: () => true };
 beforeEach(() => {
-  fixture.rows.clear(); fixture.trades = []; fixture.writes = []; fixture.acquired = true; fixture.failRead = false;
+  fixture.pending = false; fixture.rows.clear(); fixture.trades = []; fixture.writes = []; fixture.acquired = true; fixture.failRead = false;
   process.env.WORKER_ENGINE_MODE = 'PAPER'; vi.clearAllMocks();
 });
 function stoppedSession() {
@@ -56,6 +59,25 @@ function stoppedSession() {
   fixture.rows.set(VIRTUAL_PAPER_400_SESSION_STATE_KEY, JSON.stringify(state)); return state.session;
 }
 describe('virtual runtime routing and durable account boundary', () => {
+  it('promotes the dedicated policy once and scans all three supported symbols without resetting the session', async () => {
+    const active = buildActiveVirtualPaper400SessionState('active-test', new Date(Date.now() - 1_000));
+    const raw = JSON.stringify(active);
+    fixture.rows.set(VIRTUAL_PAPER_400_SESSION_STATE_KEY, raw);
+    fixture.pending = true;
+    await maybeRunVirtualPaper400Cycle(args);
+    expect(fixture.rows.has(`virtual_paper_400_policy_v1:${active.session.sessionId}`)).toBe(false);
+    expect(runStrategyShadowWorkerReadOnly).not.toHaveBeenCalled();
+    fixture.pending = false;
+    await maybeRunVirtualPaper400Cycle(args);
+    expect(runStrategyShadowWorkerReadOnly).toHaveBeenCalledWith(expect.objectContaining({ expectedSymbols: ['BTC', 'ETH', 'SOL'] }));
+    const key = `virtual_paper_400_policy_v1:${active.session.sessionId}`;
+    const first = fixture.rows.get(key);
+    expect(JSON.parse(first!).version).toBe('virtual400-active/v1');
+    await maybeRunVirtualPaper400Cycle({ ...args, cycleNumber: 2 });
+    expect(fixture.rows.get(key)).toBe(first);
+    expect(fixture.rows.get(VIRTUAL_PAPER_400_SESSION_STATE_KEY)).toBe(raw);
+    expect(JSON.parse(fixture.rows.get(VIRTUAL_PAPER_400_RUNTIME_KEY)!).policy.maxLeverage).toBe(2);
+  });
   it('falls through to Standard only when the virtual session is absent', async () => {
     expect(await maybeRunVirtualPaper400Cycle(args)).toBe(false);
     expect(fixture.writes).toEqual([]);

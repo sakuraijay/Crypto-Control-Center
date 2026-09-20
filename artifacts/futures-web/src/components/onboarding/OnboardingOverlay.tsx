@@ -14,6 +14,7 @@ import { cn } from '@/lib/utils';
 import { apiUrl } from '@/lib/apiUrl';
 import { parseObservedUsdcBalance } from '@/lib/paperTestAllocation';
 
+const VIEW_KEY = 'ccc_virtual_dashboard_view_v1';
 const STORAGE_KEY = 'ccc_zero_config_onboarding_v1';
 
 interface PaperTestAllocationPlan {
@@ -92,6 +93,26 @@ export function OnboardingOverlay() {
       return null;
     }
   });
+  const [viewOnly, setViewOnly] = useState(() => {
+    try { return sessionStorage.getItem(VIEW_KEY) === 'true'; } catch { return false; }
+  });
+  const [sessionChecked, setSessionChecked] = useState(false);
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    const controller = new AbortController();
+    void fetch(apiUrl('data/virtual-paper-400-session'), { signal: controller.signal, cache: 'no-store' })
+      .then(async response => {
+        if (!response.ok) return;
+        const value = await response.json();
+        if (!controller.signal.aborted && value.ok === true && value.mode === 'VIRTUAL_PAPER_400'
+          && value.realFundsUsed === false && ['ACTIVE', 'STOPPED'].includes(value.session?.status)) {
+          setViewOnly(true);
+        }
+      }).catch(() => {}).finally(() => {
+        if (!controller.signal.aborted) setSessionChecked(true);
+      });
+    return () => controller.abort();
+  }, [isAuthenticated]);
   const [switchingNetwork, setSwitchingNetwork] = useState(false);
   const [paperTestPlan, setPaperTestPlan] = useState<PaperTestAllocationPlan | null>(null);
 
@@ -139,8 +160,7 @@ export function OnboardingOverlay() {
         ? flags.relayMode.effective ?? null
         : null,
     },
-    dismissedInStorage: wallet.address !== null
-      && acknowledgedAddress === wallet.address.toLowerCase(),
+    dismissedInStorage: acknowledgedAddress !== null,
   });
 
   const deployableCapital = useMemo(
@@ -202,7 +222,7 @@ export function OnboardingOverlay() {
   };
 
   if (!isAuthenticated) return null;
-  if (!readiness.shouldShowOnboarding) return null;
+  if (viewOnly || !readiness.shouldShowOnboarding || !sessionChecked) return null;
 
   const isChecking = readiness.phase === 'checking';
   const enabledIndicatorCount = indicators.filter((indicator) => indicator.enabled).length;
@@ -236,6 +256,12 @@ export function OnboardingOverlay() {
                 개인키를 요구하거나 거래를 승인하지 않으며, 실제 자금은 움직이지 않습니다.
               </p>
 
+              <Button className="mt-5" variant="outline" data-testid="button-view-virtual"
+                onClick={() => {
+                  try { sessionStorage.setItem(VIEW_KEY, 'true'); } catch { /* view only */ }
+                  setViewOnly(true);
+                }}>지갑 연결 없이 가상 대시보드 보기</Button>
+              <p className="mt-2 text-xs text-muted-foreground">가상 매매는 서버에서 실행됩니다. 대시보드 열기는 매매 시작이나 실거래 승인이 아닙니다.</p>
               <div className="mt-8">
                 {readiness.phase === 'connect_wallet' && (
                   <div className="rounded-xl border border-primary/25 bg-primary/5 p-5">

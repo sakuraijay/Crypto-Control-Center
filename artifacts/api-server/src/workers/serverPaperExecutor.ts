@@ -1,3 +1,4 @@
+import { isVirtualActiveProfile } from './virtualPaper400Policy';
 /**
  * serverPaperExecutor — 서버 권위 PAPER 체결·관리·정산 (Task #111).
  *
@@ -300,8 +301,15 @@ export async function openServerPaperPosition(
   }
   if (state.unresolved) return record({ ok: false, reason: `UNRESOLVED 상태 — 신규 진입 차단: ${state.unresolved}` });
   if (!args.decisionId) return record({ ok: false, reason: "decisionId 없음 — idempotency 불가, 진입 거부" });
-  if (!isAppliedRiskProfileSnapshot(args.riskProfileSnapshot)) {
+  if (!isAppliedRiskProfileSnapshot(args.riskProfileSnapshot)
+    && !(isVirtualPaper400StrategyTag(strategy) && isVirtualActiveProfile(args.riskProfileSnapshot))) {
     return record({ ok: false, reason: "위험 프로필 감사 스냅샷 없음/손상 — 진입 거부" });
+  }
+
+  if (isVirtualActiveProfile(args.riskProfileSnapshot) && (
+    args.leverage > 2 || args.sizeUsd > args.riskProfileSnapshot.derivedLimits.maxTotalExposureUsd
+    || args.sizeUsd / args.leverage > args.riskProfileSnapshot.derivedLimits.maxMarginPerTradeUsd)) {
+    return record({ ok: false, reason: 'VIRTUAL_ACTIVE_POLICY_CAP' });
   }
 
   // ── 최종 서버 게이트 (RiskEngine 상류 통과와 별개로 재검증) ────────────────

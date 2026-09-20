@@ -16,7 +16,7 @@ describe('onboardingReadiness', () => {
     relayMode: 'DISABLED',
   };
 
-  it('shows onboarding when disconnected, ignoring dismissed flag', () => {
+  it('keeps dismissed onboarding hidden after disconnect without granting readiness', () => {
     const state = deriveOnboardingReadiness({
       walletStatus: 'disconnected',
       isArbitrum: false,
@@ -26,7 +26,7 @@ describe('onboardingReadiness', () => {
       executor: readyExecutor,
       dismissedInStorage: true,
     });
-    expect(state.shouldShowOnboarding).toBe(true);
+    expect(state.shouldShowOnboarding).toBe(false);
     expect(state.isFullyReady).toBe(false);
   });
 
@@ -69,7 +69,7 @@ describe('onboardingReadiness', () => {
       dismissedInStorage: true,
     });
 
-    expect(state.shouldShowOnboarding).toBe(true);
+    expect(state.shouldShowOnboarding).toBe(false);
     expect(state.phase).toBe('checking');
     expect(state.isFullyReady).toBe(false);
     expect(state.isDataReady).toBe(false);
@@ -103,7 +103,7 @@ describe('onboardingReadiness', () => {
       dismissedInStorage: true,
     });
 
-    expect(state.shouldShowOnboarding).toBe(true);
+    expect(state.shouldShowOnboarding).toBe(false);
     expect(state.phase).toBe('blocked');
     expect(state.isEngineReady).toBe(false);
     expect(state.isFullyReady).toBe(false);

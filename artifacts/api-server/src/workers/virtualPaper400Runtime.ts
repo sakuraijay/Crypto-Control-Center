@@ -1,3 +1,4 @@
+import { VIRTUAL_ACTIVE_POLICY } from './virtualPaper400Policy';
 import { eq, sql } from 'drizzle-orm';
 import { evaluateVirtualPaper400SessionState, VIRTUAL_PAPER_400_SESSION_STATE_KEY, VIRTUAL_PAPER_400_LOCK_ID } from './virtualPaper400SessionState';
 import { initialVirtualPaper400RiskState, parseVirtualPaper400RiskState, virtualPaper400RiskKey,
@@ -50,6 +51,20 @@ export async function maybeRunVirtualPaper400Cycle(args: {
     const previous = riskRaw === null ? initialVirtualPaper400RiskState(identity)
       : parseVirtualPaper400RiskState(riskRaw, identity);
     const now = new Date();
+    const policyKey = `virtual_paper_400_policy_v1:${identity.sessionId}`;
+    const policyRaw = await read(policyKey);
+    let applied = policyRaw ? JSON.parse(policyRaw) as { version: string; appliedAt: string; sessionId: string } : null;
+    if (policyRaw !== null && (!applied || applied.version !== VIRTUAL_ACTIVE_POLICY.version || applied.sessionId !== identity.sessionId
+      || !Number.isFinite(Date.parse(applied.appliedAt)) || Date.parse(applied.appliedAt) > now.getTime())) {
+      throw new Error('VIRTUAL_POLICY_INVALID');
+    }
+    const executor = getServerPaperStatus();
+    const accountBefore = evaluateVirtualPaper400Account({ session: identity, previous, rows, now, quote: args.quote });
+    if (!applied && session.active && !accountBefore.held.length && !executor.pendingClose && !executor.unresolved) {
+      applied = { version: VIRTUAL_ACTIVE_POLICY.version, appliedAt: now.toISOString(), sessionId: identity.sessionId };
+      await write(policyKey, applied);
+    }
+    let analysis: { symbol: string; reason: string }[] = [];
     const readCost = async (symbol: string, isLong: boolean, notionalUsd: number): Promise<CostSnapshot | null> => {
       const { fetchManualCanaryReadonlyCost } = await import('../lib/manualCanaryReadonlyEvidence');
       const result = await fetchManualCanaryReadonlyCost({ symbol, isLong, notionalUsd });
@@ -57,7 +72,9 @@ export async function maybeRunVirtualPaper400Cycle(args: {
       // remain PAPER estimates, never observed real execution.
       return result.ok ? { ...result.snapshot, source: 'PAPER_GMX_ESTIMATE' } : null;
     };
-    const result = await runVirtualPaper400Cycle({ sessionRaw: raw!, previous, rows, now, clock: () => new Date(),
+    const result = await runVirtualPaper400Cycle({ sessionRaw: raw!, policyAppliedAt: applied?.appliedAt,
+      entryBlockedReason: executor.unresolved || executor.pendingClose ? 'EXECUTOR_RECOVERY_PENDING'
+        : !applied ? 'POLICY_SAFE_BOUNDARY_PENDING' : null, previous, rows, now, clock: () => new Date(),
       engineMode: process.env.WORKER_ENGINE_MODE ?? 'PAPER', quote: args.quote,
       shouldContinue: args.shouldContinue,
       persistRisk: state => write(riskKey, state),
@@ -66,18 +83,25 @@ export async function maybeRunVirtualPaper400Cycle(args: {
         if (getServerPaperStatus().unresolved) return [];
         const { runStrategyShadowWorkerReadOnly } = await import('../intel/intelService');
         const { MARKET_BY_SYMBOL_SERVER } = await import('../lib/gmxMarkets');
-        const symbol = 'BTC';
-        const market = MARKET_BY_SYMBOL_SERVER.get(symbol)!;
+        const symbols = [...VIRTUAL_ACTIVE_POLICY.symbols];
         const notionalUsd = 100;
-        const long = await readCost(symbol, true, notionalUsd);
-        const short = await readCost(symbol, false, notionalUsd);
+        const costsBySymbol: NonNullable<import('../intel/intelService').StrategyShadowWorkerReadOnlyInput['costsBySymbol']> =
+          Object.fromEntries(await Promise.all(symbols.map(async symbol => {
+            const market = MARKET_BY_SYMBOL_SERVER.get(symbol);
+            if (!market) return [symbol, null];
+            const [long, short] = await Promise.all([readCost(symbol, true, notionalUsd), readCost(symbol, false, notionalUsd)]);
+            return [symbol, { market: market.marketToken, notionalUsd, holdingHorizonHours: 1, long, short }];
+          })));
         if (!args.shouldContinue()) return [];
         const evaluatedAt = Date.now();
         const envelope = await runStrategyShadowWorkerReadOnly({ cycleNumber: args.cycleNumber,
-          evaluatedAt, expectedSymbols: [symbol], existingAi: { decisionId: `vp400-analysis:${evaluatedAt}`,
+          evaluatedAt, expectedSymbols: symbols, existingAi: { decisionId: `vp400-analysis:${evaluatedAt}`,
             action: 'NO_TRADE', confidence: 0, primarySymbol: null, createdAt: new Date(evaluatedAt).toISOString() },
-          costsBySymbol: { [symbol]: { market: market.marketToken, notionalUsd, holdingHorizonHours: 1, long, short } } });
-        return envelope.status === 'EVALUATED' ? envelope.records : [];
+          costsBySymbol });
+        analysis = symbols.map(symbol => ({ symbol, reason: envelope.records.find(record => record.symbol === symbol)
+          ?.reasons.join('; ') || (!costsBySymbol[symbol]?.long || !costsBySymbol[symbol]?.short
+            ? 'COST_UNAVAILABLE' : `ANALYSIS_${envelope.status}: ${envelope.reasons.join('; ')}`) }));
+        return ['EVALUATED', 'PARTIAL'].includes(envelope.status) ? envelope.records : [];
       },
       claim: async (id, audit) => {
         const claimed = await db.insert(workerStateTable).values({ key: id, value: JSON.stringify(audit), updatedAt: new Date() })
@@ -99,7 +123,26 @@ export async function maybeRunVirtualPaper400Cycle(args: {
     const final = evaluateVirtualPaper400Account({ session: identity, rows: finalRows,
       previous: currentRisk, now: new Date(), quote: args.quote });
     await write(riskKey, final.next);
-    await write(VIRTUAL_PAPER_400_RUNTIME_KEY, { ...result, sessionId: identity.sessionId,
+    const journal = await Promise.all([...finalRows].filter(row => row.action === 'CLOSE')
+      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()).slice(0, 10).map(async close => {
+        const open = finalRows.find(row => row.id === close.closesTradeId);
+        const auditRaw = open?.openDecisionId?.startsWith('vp400:') ? await read(open.openDecisionId) : null;
+        let audit: { signal?: { strategyId?: string; reasons?: string[] }; sizing?: { finalNotionalUsd?: number }; cost?: { totalEstimatedRoundTripCostUsd?: number } } | null = null;
+        try { audit = auditRaw ? JSON.parse(auditRaw) : null; } catch { /* unavailable, never fake reasons */ }
+        const priorRisk = open && audit?.cost && audit.sizing ? Number(audit.sizing.finalNotionalUsd)
+          * Math.abs(Number(open.price) - Number(open.stopPriceUsd)) / Number(open.price)
+          + Number(audit.cost.totalEstimatedRoundTripCostUsd) : null;
+        return { id: close.id, symbol: close.symbol, side: close.side, openedAt: open?.timestamp ?? null,
+          closedAt: close.timestamp, entryPrice: open?.price ?? null, exitPrice: close.price,
+          stopPrice: open?.stopPriceUsd ?? null, targetPrice: open?.takeProfitPriceUsd ?? null,
+          strategy: audit?.signal?.strategyId ?? null, reasons: audit?.signal?.reasons ?? [],
+          closeReason: close.closeReason, grossPnlUsd: close.pnl, netPnlUsd: close.netPnlEstimatedUsd,
+          entryCostUsd: close.estEntryCostUsd, exitCostUsd: close.estExitCostUsd, holdingCostUsd: close.estHoldingCostUsd,
+          plannedRiskUsd: priorRisk !== null && Number.isFinite(priorRisk) ? priorRisk : null,
+          netR: priorRisk !== null && priorRisk > 0 ? Number(close.netPnlEstimatedUsd) / priorRisk : null,
+          costBasis: 'SIMULATED / ESTIMATED', closeKind: close.closeKind };
+      }));
+    await write(VIRTUAL_PAPER_400_RUNTIME_KEY, { ...result, analysis, journal, sessionId: identity.sessionId,
       at: new Date().toISOString(), account: { ...result.account, ledger: final.ledger,
         equityUsd: final.equityUsd, unrealizedNetPnlUsd: final.unrealizedNetPnlUsd,
         evaluation: final.evaluation, next: final.next,
