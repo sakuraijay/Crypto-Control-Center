@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { Router } from 'express';
 import { db, workerStateTable } from '@workspace/db';
 import { eq } from 'drizzle-orm';
@@ -13,6 +14,13 @@ import {
   type PersistedAlphaStartIntentV1,
 } from '../workers/alphaStartIntent';
 import { WORKER_POLICY_CONTEXT_KEY } from '../workers/workerPolicyContext';
+import {
+  VIRTUAL_PAPER_400_SESSION_STATE_KEY,
+  buildActiveVirtualPaper400SessionState,
+  buildStoppedVirtualPaper400SessionState,
+  evaluateVirtualPaper400SessionState,
+  serializeVirtualPaper400SessionState,
+} from '../workers/virtualPaper400SessionState';
 
 export const router = Router();
 
@@ -177,6 +185,158 @@ router.put('/data/alpha-start-intent', requireOperatorAuth, async (req, res) => 
       scope: ALPHA_START_INTENT_SCOPE,
       executionAuthorized: false,
       error: 'alpha start intent could not be persisted',
+    });
+  }
+});
+
+/**
+ * VIRTUAL/PAPER 400 control-plane state is deliberately independent of the
+ * real-money FIXED_BETA domain. GET is observational and never bootstraps state.
+ */
+router.get('/data/virtual-paper-400-session', async (_req, res) => {
+  try {
+    const raw = await readWorkerStateValue(VIRTUAL_PAPER_400_SESSION_STATE_KEY);
+    const session = evaluateVirtualPaper400SessionState(raw);
+    const response = {
+      ok: session.status !== 'INVALID',
+      mode: 'VIRTUAL_PAPER_400' as const,
+      realFundsUsed: false as const,
+      executionAuthorized: false as const,
+      session,
+    };
+    if (session.status === 'INVALID') return res.status(500).json(response);
+    return res.json(response);
+  } catch {
+    return res.status(503).json({
+      ok: false,
+      code: 'VIRTUAL_PAPER_400_SESSION_READ_FAILED',
+      mode: 'VIRTUAL_PAPER_400',
+      realFundsUsed: false,
+      executionAuthorized: false,
+      error: 'virtual PAPER 400 session state could not be read',
+    });
+  }
+});
+
+/**
+ * Persist an explicit operator START/STOP for the virtual 400-USDC PAPER session.
+ * START is idempotent while already ACTIVE and never touches wallet/FIXED_BETA
+ * accounting. STOP preserves the exact session identity so restart cannot reset
+ * loss/history by silently creating a fresh 400-USDC session.
+ */
+router.put('/data/virtual-paper-400-session', requireOperatorAuth, async (req, res) => {
+  const action = req.body?.action;
+  if (action !== 'START' && action !== 'STOP') {
+    return res.status(400).json({
+      ok: false,
+      code: 'VIRTUAL_PAPER_400_ACTION_INVALID',
+      mode: 'VIRTUAL_PAPER_400',
+      realFundsUsed: false,
+      executionAuthorized: false,
+      error: 'action must be START or STOP',
+    });
+  }
+
+  if (req.body?.reason !== undefined && typeof req.body.reason !== 'string') {
+    return res.status(400).json({
+      ok: false,
+      code: 'STOP_REASON_INVALID',
+      mode: 'VIRTUAL_PAPER_400',
+      realFundsUsed: false,
+      executionAuthorized: false,
+      error: 'reason must be a string when supplied',
+    });
+  }
+
+  try {
+    const currentRaw = await readWorkerStateValue(VIRTUAL_PAPER_400_SESSION_STATE_KEY);
+    const current = evaluateVirtualPaper400SessionState(currentRaw);
+
+    if (current.status === 'INVALID') {
+      return res.status(409).json({
+        ok: false,
+        code: 'VIRTUAL_PAPER_400_SESSION_INVALID',
+        mode: 'VIRTUAL_PAPER_400',
+        realFundsUsed: false,
+        executionAuthorized: false,
+        session: current,
+        error: 'invalid persisted virtual session state must be reviewed; it will not be overwritten automatically',
+      });
+    }
+
+    if (action === 'START' && current.status === 'ACTIVE') {
+      return res.json({
+        ok: true,
+        mode: 'VIRTUAL_PAPER_400',
+        realFundsUsed: false,
+        executionAuthorized: false,
+        idempotent: true,
+        session: current,
+      });
+    }
+
+    if (action === 'STOP' && (current.status === 'MISSING' || current.status === 'STOPPED')) {
+      return res.json({
+        ok: true,
+        mode: 'VIRTUAL_PAPER_400',
+        realFundsUsed: false,
+        executionAuthorized: false,
+        idempotent: true,
+        session: current,
+      });
+    }
+
+    const nextState = action === 'START'
+      ? buildActiveVirtualPaper400SessionState(`vp400-${randomUUID()}`)
+      : buildStoppedVirtualPaper400SessionState(current.state!, req.body?.reason);
+
+    await persistWorkerStateValue(
+      VIRTUAL_PAPER_400_SESSION_STATE_KEY,
+      serializeVirtualPaper400SessionState(nextState),
+    );
+
+    const readbackRaw = await readWorkerStateValue(VIRTUAL_PAPER_400_SESSION_STATE_KEY);
+    const session = evaluateVirtualPaper400SessionState(readbackRaw);
+    const expectedStatus = action === 'START' ? 'ACTIVE' : 'STOPPED';
+    if (session.status !== expectedStatus) {
+      return res.status(503).json({
+        ok: false,
+        code: 'VIRTUAL_PAPER_400_SESSION_READBACK_FAILED',
+        mode: 'VIRTUAL_PAPER_400',
+        realFundsUsed: false,
+        executionAuthorized: false,
+        session,
+        error: 'persisted virtual PAPER 400 session did not verify on readback',
+      });
+    }
+
+    return res.json({
+      ok: true,
+      mode: 'VIRTUAL_PAPER_400',
+      realFundsUsed: false,
+      executionAuthorized: false,
+      idempotent: false,
+      session,
+    });
+  } catch (error) {
+    const code = (error as Error)?.message;
+    if (code === 'STOP_REASON_TOO_LONG' || code === 'STOP_REASON_INVALID') {
+      return res.status(400).json({
+        ok: false,
+        code,
+        mode: 'VIRTUAL_PAPER_400',
+        realFundsUsed: false,
+        executionAuthorized: false,
+        error: 'virtual PAPER 400 STOP reason is invalid',
+      });
+    }
+    return res.status(503).json({
+      ok: false,
+      code: 'VIRTUAL_PAPER_400_SESSION_PERSIST_FAILED',
+      mode: 'VIRTUAL_PAPER_400',
+      realFundsUsed: false,
+      executionAuthorized: false,
+      error: 'virtual PAPER 400 session could not be persisted',
     });
   }
 });
