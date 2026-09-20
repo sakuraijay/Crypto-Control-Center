@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import {
   buildVirtualPaper400Session,
   deriveVirtualPaper400Ledger,
+  isVirtualPaper400StrategyTag,
   parseVirtualPaper400Session,
+  parseVirtualPaper400StrategyTag,
   type VirtualPaper400SessionV1,
   virtualPaper400StrategyTag,
 } from '../workers/virtualPaper400Ledger';
@@ -59,6 +61,32 @@ describe('virtual PAPER 400 ledger core', () => {
       ...session,
       strategyTag: virtualPaper400StrategyTag('another-session'),
     })).toEqual({ ok: false, reason: 'VIRTUAL_SESSION_VALUES_INVALID' });
+  });
+
+  it('accepts only exact virtual strategy tags and returns the bound session identity', () => {
+    const tag = virtualPaper400StrategyTag('alpha-virtual-400');
+    expect(parseVirtualPaper400StrategyTag(tag)).toEqual({
+      ok: true,
+      value: { sessionId: 'alpha-virtual-400', strategyTag: tag },
+    });
+    expect(isVirtualPaper400StrategyTag(tag)).toBe(true);
+  });
+
+  it('rejects Standard PAPER and malformed strings as virtual execution scopes', () => {
+    for (const value of [
+      'SERVER_WORKER_AI',
+      'SERVER_WORKER_AI_VIRTUAL_400_V1',
+      'SERVER_WORKER_AI_VIRTUAL_400_V1:',
+      'SERVER_WORKER_AI_VIRTUAL_400_V1:bad session',
+      ` SERVER_WORKER_AI_VIRTUAL_400_V1:alpha-virtual-400`,
+      null,
+    ]) {
+      expect(parseVirtualPaper400StrategyTag(value)).toEqual({
+        ok: false,
+        reason: 'VIRTUAL_STRATEGY_TAG_INVALID',
+      });
+      expect(isVirtualPaper400StrategyTag(value)).toBe(false);
+    }
   });
 
   it('derives realized equity from isolated virtual settlements including modeled costs', () => {
