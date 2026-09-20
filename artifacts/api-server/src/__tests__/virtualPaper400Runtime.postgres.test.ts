@@ -15,6 +15,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 const LOCK_ID = 4_000_920;
 const STARTED_AT = new Date('2026-09-20T14:21:14.615Z');
+const REPLAY_NOW = Date.parse('2026-09-20T04:00:10.000Z');
 let rootDir = '';
 let dataDir = '';
 let socketDir = '';
@@ -82,7 +83,7 @@ function psql(sql: string): string {
   }).trim();
 }
 
-function runChild(mode: 'seed' | 'reload'): Record<string, unknown> {
+function runChild(mode: 'seed' | 'reload' | 'lifecycle-open' | 'lifecycle-close' | 'lifecycle-recheck'): Record<string, unknown> {
   const stdout = execFileSync(process.execPath, [runnerFile, mode], {
     cwd: resolve(dirname(fileURLToPath(import.meta.url)), '../..'),
     env: childEnv(),
@@ -90,7 +91,9 @@ function runChild(mode: 'seed' | 'reload'): Record<string, unknown> {
     timeout: 30_000,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-  return JSON.parse(stdout.trim());
+  const lastLine = stdout.trim().split('\n').at(-1);
+  if (!lastLine) throw new Error(`PostgreSQL runner produced no output for ${mode}`);
+  return JSON.parse(lastLine);
 }
 
 function fingerprint(): string {
@@ -143,39 +146,48 @@ beforeAll(async () => {
       value text NOT NULL,
       updated_at timestamptz NOT NULL DEFAULT now()
     );
-    CREATE VIEW trades AS SELECT
-      NULL::text AS id, NULL::text AS symbol, NULL::text AS side,
-      NULL::text AS action, NULL::numeric AS size, NULL::numeric AS price,
-      NULL::numeric AS pnl, NULL::text AS strategy, NULL::timestamp AS timestamp,
-      NULL::bigint AS close_time, NULL::timestamp AS created_at,
-      NULL::text AS gmx_market_address, NULL::text AS collateral_token,
-      NULL::numeric AS size_in_usd, NULL::numeric AS leverage,
-      NULL::numeric AS collateral_usd, NULL::boolean AS test_mode,
-      NULL::numeric AS gross_pnl_usd, NULL::numeric AS position_fee_usd,
-      NULL::numeric AS execution_fee_usd, NULL::numeric AS price_impact_usd,
-      NULL::numeric AS funding_fee_usd, NULL::numeric AS borrowing_fee_usd,
-      NULL::numeric AS net_pnl_usd, NULL::text AS settlement_status,
-      NULL::timestamptz AS settled_at, NULL::text AS evidence_tx_hash,
-      NULL::text AS cost_source, NULL::numeric AS est_entry_cost_usd,
-      NULL::numeric AS est_exit_cost_usd, NULL::numeric AS est_holding_cost_usd,
-      NULL::numeric AS funding_rate_per_hour, NULL::numeric AS borrowing_rate_per_hour,
-      NULL::timestamptz AS cost_fetched_at, NULL::numeric AS net_pnl_estimated_usd,
-      NULL::text AS managed_by, NULL::text AS open_decision_id,
-      NULL::text AS closes_trade_id, NULL::text AS close_kind,
-      NULL::text AS close_reason, NULL::numeric AS stop_price_usd,
-      NULL::numeric AS take_profit_price_usd, NULL::jsonb AS risk_profile_snapshot,
-      NULL::integer AS paper_position_slot, NULL::text AS settlement_account,
-      NULL::text AS settlement_market_address,
-      NULL::text AS settlement_collateral_token,
-      NULL::text AS settlement_position_key, NULL::numeric AS pre_close_size_usd,
-      NULL::text AS pre_close_size_usd_30, NULL::numeric AS requested_reduction_usd,
-      NULL::text AS requested_reduction_usd_30, NULL::text AS settlement_intent_id,
-      NULL::text AS settlement_relay_task_id, NULL::text AS settlement_order_key,
-      NULL::text AS settlement_emitter_address, NULL::text AS settlement_block_number,
-      NULL::text AS settlement_latest_block, NULL::integer AS settlement_confirmations,
-      NULL::text AS settlement_evidence_basis,
-      NULL::timestamptz AS settlement_evidence_at
-    WHERE false;
+    CREATE TABLE trades (
+      id text PRIMARY KEY, symbol text NOT NULL, side text NOT NULL,
+      action text NOT NULL, size numeric(18,8) NOT NULL, price numeric(18,8) NOT NULL,
+      pnl numeric(18,8) NOT NULL DEFAULT 0, strategy text NOT NULL DEFAULT 'Manual',
+      timestamp timestamp NOT NULL, close_time bigint NOT NULL DEFAULT 0,
+      created_at timestamp NOT NULL DEFAULT now(), gmx_market_address text,
+      collateral_token text DEFAULT 'USDC', size_in_usd numeric(18,4),
+      leverage numeric(8,2), collateral_usd numeric(18,4),
+      test_mode boolean NOT NULL DEFAULT false, gross_pnl_usd numeric(18,8),
+      position_fee_usd numeric(18,8), execution_fee_usd numeric(18,8),
+      price_impact_usd numeric(18,8), funding_fee_usd numeric(18,8),
+      borrowing_fee_usd numeric(18,8), net_pnl_usd numeric(18,8),
+      settlement_status text NOT NULL DEFAULT 'UNSETTLED', settled_at timestamptz,
+      evidence_tx_hash text, cost_source text, est_entry_cost_usd numeric(18,8),
+      est_exit_cost_usd numeric(18,8), est_holding_cost_usd numeric(18,8),
+      funding_rate_per_hour numeric(18,12), borrowing_rate_per_hour numeric(18,12),
+      cost_fetched_at timestamptz, net_pnl_estimated_usd numeric(18,8),
+      managed_by text, open_decision_id text, closes_trade_id text,
+      close_kind text, close_reason text, stop_price_usd numeric(18,8),
+      take_profit_price_usd numeric(18,8), risk_profile_snapshot jsonb,
+      paper_position_slot integer CHECK (paper_position_slot IS NULL OR paper_position_slot IN (1,2)),
+      settlement_account text, settlement_market_address text,
+      settlement_collateral_token text, settlement_position_key text,
+      pre_close_size_usd numeric(18,4), pre_close_size_usd_30 text,
+      requested_reduction_usd numeric(18,4), requested_reduction_usd_30 text,
+      settlement_intent_id text, settlement_relay_task_id text,
+      settlement_order_key text, settlement_emitter_address text,
+      settlement_block_number text, settlement_latest_block text,
+      settlement_confirmations integer, settlement_evidence_basis text,
+      settlement_evidence_at timestamptz
+    );
+    CREATE UNIQUE INDEX trades_open_decision_uq ON trades (open_decision_id)
+      WHERE open_decision_id IS NOT NULL;
+    CREATE UNIQUE INDEX trades_server_open_slot_uq ON trades (paper_position_slot)
+      WHERE managed_by = 'SERVER' AND action = 'OPEN' AND close_time = 0
+        AND paper_position_slot IS NOT NULL;
+    CREATE UNIQUE INDEX trades_server_open_symbol_uq ON trades ((upper(symbol)))
+      WHERE managed_by = 'SERVER' AND action = 'OPEN' AND close_time = 0;
+    CREATE UNIQUE INDEX trades_full_close_uq ON trades (closes_trade_id)
+      WHERE closes_trade_id IS NOT NULL AND close_kind = 'FULL';
+    CREATE UNIQUE INDEX trades_reduce70_close_uq ON trades (closes_trade_id)
+      WHERE closes_trade_id IS NOT NULL AND close_kind = 'REDUCE70';
   `);
 
   buildSync({
@@ -245,5 +257,46 @@ describe('Virtual400 runtime on isolated temporary PostgreSQL', () => {
     } finally {
       await stopHolder(holder);
     }
+  }, 45_000);
+
+  it('runs raw closed candles through Risk, the real PAPER executor, a database restart, protection and net settlement', () => {
+    const opened = runChild('lifecycle-open');
+    expect(opened).toMatchObject({
+      status: 'OPENED',
+      openRows: 1,
+      closeRows: 0,
+      realFundsUsed: false,
+      sessionId: 'postgres-raw-candle-replay',
+      strategyTag: 'SERVER_WORKER_AI_VIRTUAL_400_V1:postgres-raw-candle-replay',
+      startedAt: new Date(REPLAY_NOW - 1_000).toISOString(),
+      standardState: 'STANDARD_SENTINEL',
+      fixedBetaState: 'FIXED_BETA_SENTINEL',
+    });
+    expect(Number(opened['notionalUsd'])).toBeGreaterThan(0);
+    expect(Number(opened['notionalUsd'])).toBeLessThanOrEqual(200);
+    expect(opened['leverage']).toBe('10.00');
+
+    pgCtl('stop');
+    pgCtl('start');
+
+    const closed = runChild('lifecycle-close');
+    expect(closed).toMatchObject({
+      status: 'SETTLED',
+      openRows: 0,
+      closeRows: 1,
+      settlementStatus: 'PAPER_ESTIMATED',
+      closeReason: 'STOP_LOSS',
+      settlementCount: 1,
+      sessionId: opened['sessionId'],
+      strategyTag: opened['strategyTag'],
+      startedAt: opened['startedAt'],
+      standardState: 'STANDARD_SENTINEL',
+      fixedBetaState: 'FIXED_BETA_SENTINEL',
+    });
+    expect(Number(closed['modeledTradingCostUsd'])).toBeGreaterThan(0);
+    expect(Number(closed['netPnlUsd'])).toBeLessThan(0);
+    expect(Number(closed['realizedEquityUsd'])).toBeLessThan(400);
+
+    expect(runChild('lifecycle-recheck')).toEqual(closed);
   }, 45_000);
 });
