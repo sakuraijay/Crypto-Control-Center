@@ -393,6 +393,9 @@ function resetWorker() {
   wm.lastPriceAt             = 0;
   wm.strategyLifecycleSnapshot = null;
   wm.strategyLifecycleRestoreBlocked = true;
+  wm.strategyPreviousRegimes = null;
+  wm.strategyRegimeSnapshot = null;
+  wm.strategyRegimeRestoreBlocked = true;
   wm.activePaperEpochStartMs = null;
   wm.paperEpochStateOk = true;
   wm.accountingPolicyContext = 'STANDARD_ACTIVE';

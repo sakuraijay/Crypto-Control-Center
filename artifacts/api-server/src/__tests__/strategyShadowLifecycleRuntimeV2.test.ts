@@ -3,7 +3,10 @@ import { buildSignalLifecycleSnapshot } from '../intel/signalLifecycleSnapshotV2
 import type { StrategyShadowRecord } from '../intel/strategyShadowAdapterV2';
 import {
   advanceStrategyShadowLifecycleSnapshot,
+  advanceStrategyShadowRegimeSnapshot,
   restoreStrategyShadowLifecycleFromDecisionFullJson,
+  restoreStrategyShadowRegimesFromDecisionFullJson,
+  validateStrategyPreviousRegimes,
 } from '../intel/strategyShadowLifecycleRuntimeV2';
 import { buildStrategyShadowWorkerEnvelope } from '../intel/strategyShadowWorkerEnvelopeV2';
 import { buildCandleStrategyShadowEvidence } from '../intel/candleStrategyShadowEvidenceV2';
@@ -42,7 +45,19 @@ const record = (overrides: Partial<StrategyShadowRecord> = {}): StrategyShadowRe
     ...withNetEdge,
     candleSignalEvidence: buildCandleStrategyShadowEvidence({
       candleSignal: candle,
-      v2Regime: { configVersion: 'regime-engine/v2', symbol: base.symbol, calculatedAt: base.sourceCandleCloseTime } as never,
+      v2Regime: {
+        configVersion: 'regime-engine/v2', symbol: base.symbol,
+        regime: 'TREND_UP', confidence: 80,
+        sinceCandleCloseTime: base.sourceCandleCloseTime - 15 * 60_000,
+        heldCandles: 3, pendingRegime: 'RANGE', pendingCount: 1,
+        previousRegime: 'TREND_UP', changed: false,
+        candidateRegime: 'RANGE', candidateConfidence: 75,
+        calculatedAt: base.sourceCandleCloseTime,
+        reasons: ['test'], warnings: [], scores: {
+          TREND_UP: 80, TREND_DOWN: 0, RANGE: 75, BREAKOUT_READY: 0,
+          HIGH_VOLATILITY: 0, TRANSITION: 0,
+        },
+      },
       shadowRecord: withNetEdge,
     })!,
   };
@@ -112,5 +127,65 @@ describe('Strategy SHADOW lifecycle runtime persistence v2', () => {
     const restored = restoreStrategyShadowLifecycleFromDecisionFullJson('{broken', NOW);
     expect(restored.status).toBe('BLOCKED');
     expect(restored.snapshot).toBeNull();
+  });
+
+  it('명시적 snapshot이 없는 legacy evidence는 durable 상태로 추정하지 않는다', () => {
+    const restored = restoreStrategyShadowRegimesFromDecisionFullJson({
+      strategyEnsembleShadow: { records: [record()] },
+    }, NOW);
+    expect(restored.status).toBe('EMPTY_LEGACY');
+    expect(restored.previousRegimes).toEqual({});
+    expect(restored.snapshot?.schemaVersion).toBe('strategy-regime-snapshot/v1');
+  });
+
+  it('다음 완료 주기의 regime snapshot을 durable하게 보존하고 재시작 복원한다', () => {
+    const advanced = advanceStrategyShadowRegimeSnapshot({}, envelope([record()]), NOW);
+    expect(advanced?.states[0]).toMatchObject({ symbol: 'BTC', heldCandles: 3, pendingCount: 1 });
+    const restored = restoreStrategyShadowRegimesFromDecisionFullJson({
+      strategyEnsembleShadow: { records: [], regimeSnapshot: advanced },
+    }, NOW + 1);
+    expect(restored.status).toBe('RESTORED');
+    expect(restored.previousRegimes?.BTC.heldCandles).toBe(3);
+  });
+
+  it('손상·미래 snapshot은 빈 상태로 우회하지 않고 BLOCKED한다', () => {
+    expect(restoreStrategyShadowRegimesFromDecisionFullJson({
+      strategyEnsembleShadow: {
+        regimeSnapshot: { schemaVersion: 'strategy-regime-snapshot/v1', capturedAt: NOW + 1, states: [] },
+      },
+    }, NOW).status).toBe('BLOCKED');
+    expect(restoreStrategyShadowRegimesFromDecisionFullJson({
+      strategyEnsembleShadow: {
+        regimeSnapshot: {
+          schemaVersion: 'strategy-regime-snapshot/v1', capturedAt: NOW,
+          states: [{ symbol: 'BTC', regime: 'TREND_UP', confidence: 80,
+            sinceCandleCloseTime: CLOSE, heldCandles: 3, pendingRegime: null, pendingCount: 1 }],
+        },
+      },
+    }, NOW).status).toBe('BLOCKED');
+  });
+
+  it('NOT_EVALUATED 주기는 기존 종목 상태를 지우지 않는다', () => {
+    const initial = advanceStrategyShadowRegimeSnapshot({}, envelope([record()]), NOW)!;
+    const eth = { ...initial.states[0], symbol: 'ETH' };
+    const preserved = advanceStrategyShadowRegimeSnapshot(
+      { BTC: initial.states[0], ETH: eth },
+      envelope([], empty()),
+      NOW + 1,
+    );
+    expect(preserved?.states).toEqual([initial.states[0], eth]);
+    expect(preserved?.capturedAt).toBe(NOW + 1);
+  });
+
+  it('예상 외·key 불일치·미래 regime 상태를 worker 입력에서 거부한다', () => {
+    const state = {
+      symbol: 'BTC', regime: 'TREND_UP' as const, confidence: 80,
+      sinceCandleCloseTime: CLOSE, heldCandles: 3,
+      pendingRegime: null, pendingCount: 0,
+    };
+    expect(validateStrategyPreviousRegimes({ BTC: state }, NOW, ['BTC'])).toEqual({ BTC: state });
+    expect(validateStrategyPreviousRegimes({ ETH: state }, NOW, ['BTC'])).toBeNull();
+    expect(validateStrategyPreviousRegimes({ BTC: { ...state, sinceCandleCloseTime: NOW + 1 } }, NOW, ['BTC']))
+      .toBeNull();
   });
 });

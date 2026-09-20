@@ -6,6 +6,7 @@ import {
 } from './signalLifecycleSnapshotV2';
 import { validateCandleStrategyShadowEvidence } from './candleStrategyShadowEvidenceV2';
 import { validateStrategyNetEdgeResearchResult } from './strategyNetEdgeResearchGateV1';
+import type { RegimeState } from './regimeEngineV2';
 
 export const STRATEGY_SHADOW_WORKER_ENVELOPE_VERSION = 'strategy-shadow-worker-envelope/v1' as const;
 
@@ -33,6 +34,12 @@ export interface StrategyShadowWorkerEnvelope {
   missingSymbols: string[];
   records: StrategyShadowRecord[];
   lifecycleSnapshot: SignalLifecycleSnapshotV2 | null;
+  /** Durable SHADOW-only regime hysteresis state; never grants Risk/execution authority. */
+  regimeSnapshot?: {
+    schemaVersion: 'strategy-regime-snapshot/v1';
+    capturedAt: number;
+    states: RegimeState[];
+  };
   summary: {
     long: number;
     short: number;

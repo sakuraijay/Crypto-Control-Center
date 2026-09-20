@@ -36,6 +36,8 @@ import {
   buildSignalLifecycleSnapshot,
   restoreSignalLifecycleSnapshot,
 } from './signalLifecycleSnapshotV2';
+import type { RegimeState } from './regimeEngineV2';
+import { validateStrategyPreviousRegimes } from './strategyShadowLifecycleRuntimeV2';
 
 export type CycleLifecycleStatus = 'SUCCESS' | 'FAILED' | 'TIMEOUT' | 'BLOCKED' | 'SKIPPED_IN_FLIGHT' | 'SKIPPED_INTERVAL' | 'SKIPPED_SHUTDOWN' | 'SKIPPED_BACKOFF';
 
@@ -170,6 +172,10 @@ export interface StrategyShadowWorkerReadOnlyInput {
   expectedSymbols: string[];
   existingAi: ExistingWorkerAiSummary;
   lifecycleSnapshot?: import('./signalLifecycleSnapshotV2').SignalLifecycleSnapshotV2 | null;
+  /** Validated SHADOW-only hysteresis state restored by the worker. */
+  previousRegimes?: Readonly<Record<string, RegimeState | null>>;
+  /** Stable configured universe; current expectedSymbols may be a warm-up subset. */
+  allowedRegimeSymbols?: readonly string[];
   /** Caller-supplied, direction-bound read-only evidence. Missing pairs remain NOT_EVALUATED. */
   costsBySymbol?: Readonly<Record<string, StrategyShadowCostPair | null>>;
 }
@@ -207,6 +213,18 @@ export async function runStrategyShadowWorkerReadOnly(
     if (!lifecycle) {
       return buildNotEvaluatedStrategyShadowEnvelope(input,
         'SHADOW lifecycle snapshot 복원 실패 — fail-closed');
+    }
+    const previousRegimes = validateStrategyPreviousRegimes(
+      input.previousRegimes ?? {},
+      input.evaluatedAt,
+      input.allowedRegimeSymbols ?? [
+        ...input.expectedSymbols,
+        ...Object.keys(input.previousRegimes ?? {}),
+      ],
+    );
+    if (!previousRegimes) {
+      return buildNotEvaluatedStrategyShadowEnvelope(input,
+        'SHADOW regime snapshot 복원 실패 — fail-closed');
     }
     if (state.shutdownRequested) {
       return buildNotEvaluatedStrategyShadowEnvelope(input,
@@ -248,7 +266,7 @@ export async function runStrategyShadowWorkerReadOnly(
       expectedSymbols: input.expectedSymbols,
       framesBySymbol: read.framesBySymbol,
       costsBySymbol: input.costsBySymbol ?? {},
-      previousRegimes: {},
+      previousRegimes,
       lifecycleRecords: lifecycle.records,
       historyEvents: lifecycle.historyEvents,
       existingAi: input.existingAi,

@@ -295,6 +295,26 @@ describe('Strategy SHADOW worker batch bridge', () => {
     expect(result.executionAuthorized).toBe(false);
   });
 
+  it('passes the validated per-symbol previous regime into the pure runner', () => {
+    const previous = {
+      symbol: 'BTC', regime: 'TREND_UP' as const, confidence: 80,
+      sinceCandleCloseTime: NOW - 1_800_000, heldCandles: 4,
+      pendingRegime: 'RANGE' as const, pendingCount: 1,
+    };
+    const base = {
+      ...input(['BTC']),
+      costsBySymbol: { BTC: costPair() },
+      previousRegimes: { BTC: previous },
+    };
+    const result = buildStrategyShadowWorkerBatch(base, {
+      runSymbol: x => {
+        expect(x.previousRegime).toEqual(previous);
+        return evaluated(x.symbol);
+      },
+    });
+    expect(result.envelope.status).toBe('EVALUATED');
+  });
+
   it('normalizes cost symbol keys consistently with expected symbols', () => {
     const base = input(['btc']);
     let receivedSymbol: string | null = null;

@@ -73,9 +73,13 @@ import { buildStrategyShadowWorkerEnvelope } from "../intel/strategyShadowWorker
 import { buildStrategyRiskWorkerAdvisory } from "../intel/strategyRiskWorkerBridgeV2";
 import { buildStrategyDecisionExplainabilityRuntimeAdvisory } from "../intel/strategyDecisionExplainabilityRuntimeV2";
 import type { SignalLifecycleSnapshotV2 } from "../intel/signalLifecycleSnapshotV2";
+import type { RegimeState } from "../intel/regimeEngineV2";
 import {
   advanceStrategyShadowLifecycleSnapshot,
+  advanceStrategyShadowRegimeSnapshot,
   restoreStrategyShadowLifecycleFromDecisionFullJson,
+  restoreStrategyShadowRegimesFromDecisionFullJson,
+  type StrategyRegimeSnapshotV1,
 } from "../intel/strategyShadowLifecycleRuntimeV2";
 import {
   openServerPaperPosition, closeServerPaperPosition, reduceServerPaper70,
@@ -461,6 +465,10 @@ class WorkerManager {
   private strategyLifecycleSnapshot: SignalLifecycleSnapshotV2 | null = null;
   /** 마지막 fullJson 복원이 손상되면 SHADOW 평가만 fail-closed로 차단한다. */
   private strategyLifecycleRestoreBlocked = true;
+  /** SHADOW v2 regime hysteresis continuity; never used as Risk/execution authority. */
+  private strategyPreviousRegimes: Record<string, RegimeState> | null = null;
+  private strategyRegimeSnapshot: StrategyRegimeSnapshotV1 | null = null;
+  private strategyRegimeRestoreBlocked = true;
 
   // ── Public API ──────────────────────────────────────────────────────────────
 
@@ -1162,16 +1170,31 @@ class WorkerManager {
         rows[0]?.fullJson ?? null,
         Date.now(),
       );
+      const restoredRegimes = restoreStrategyShadowRegimesFromDecisionFullJson(
+        rows[0]?.fullJson ?? null,
+        Date.now(),
+      );
       this.strategyLifecycleSnapshot = restored.snapshot;
       this.strategyLifecycleRestoreBlocked = restored.status === 'BLOCKED';
+      this.strategyPreviousRegimes = restoredRegimes.previousRegimes;
+      this.strategyRegimeSnapshot = restoredRegimes.snapshot;
+      this.strategyRegimeRestoreBlocked = restoredRegimes.status === 'BLOCKED';
       if (restored.status === 'BLOCKED') {
         console.error(`[AIWorker] ${restored.reason} — Strategy SHADOW 평가 차단`);
       } else {
         console.info(`[AIWorker] ${restored.reason} — records=${restored.snapshot.records.length}, history=${restored.snapshot.historyEvents.length}`);
       }
+      if (restoredRegimes.status === 'BLOCKED') {
+        console.error(`[AIWorker] ${restoredRegimes.reason} — Strategy SHADOW 평가 차단`);
+      } else {
+        console.info(`[AIWorker] ${restoredRegimes.reason} — symbols=${restoredRegimes.snapshot.states.length}`);
+      }
     } catch (error) {
       this.strategyLifecycleSnapshot = null;
       this.strategyLifecycleRestoreBlocked = true;
+      this.strategyPreviousRegimes = null;
+      this.strategyRegimeSnapshot = null;
+      this.strategyRegimeRestoreBlocked = true;
       console.error(`[AIWorker] SHADOW lifecycle DB read 실패(${error instanceof Error ? error.name : 'unknown'}) — SHADOW 평가 차단`);
     }
   }
@@ -2213,11 +2236,12 @@ class WorkerManager {
         records: [],
         existingAi: strategyShadowExistingAi,
         lifecycleSnapshot: this.strategyLifecycleSnapshot,
-        notEvaluatedReason: this.strategyLifecycleRestoreBlocked
-          ? 'SHADOW lifecycle 이전 상태 복원 실패 — 외부 read 미제출·fail-closed'
+        notEvaluatedReason: this.strategyLifecycleRestoreBlocked || this.strategyRegimeRestoreBlocked
+          ? 'SHADOW lifecycle/regime 이전 상태 복원 실패 — 외부 read 미제출·fail-closed'
           : 'MTF Strategy Ensemble read 시작 전 — SHADOW 결과 없음',
       });
-      if (!this.strategyLifecycleRestoreBlocked && this.strategyLifecycleSnapshot !== null) {
+      if (!this.strategyLifecycleRestoreBlocked && !this.strategyRegimeRestoreBlocked
+        && this.strategyLifecycleSnapshot !== null && this.strategyPreviousRegimes !== null) {
         try {
           strategyEnsembleShadow = await runStrategyShadowWorkerReadOnly({
             cycleNumber: cycleNum,
@@ -2225,6 +2249,8 @@ class WorkerManager {
             expectedSymbols: analyses.map(analysis => analysis.symbol),
             existingAi: strategyShadowExistingAi,
             lifecycleSnapshot: this.strategyLifecycleSnapshot,
+            previousRegimes: this.strategyPreviousRegimes,
+            allowedRegimeSymbols: WORKER_SYMBOLS,
           });
           if (!this.isCurrentGeneration(capturedGeneration)) return;
         } catch (error) {
@@ -2234,16 +2260,30 @@ class WorkerManager {
         }
       }
       let nextStrategyLifecycleSnapshot = this.strategyLifecycleSnapshot;
-      if (!this.strategyLifecycleRestoreBlocked && this.strategyLifecycleSnapshot !== null) {
+      let nextStrategyRegimeSnapshot = this.strategyRegimeSnapshot;
+      if (!this.strategyLifecycleRestoreBlocked && !this.strategyRegimeRestoreBlocked
+        && this.strategyLifecycleSnapshot !== null && this.strategyPreviousRegimes !== null) {
         const advanced = advanceStrategyShadowLifecycleSnapshot(
           this.strategyLifecycleSnapshot,
           strategyEnsembleShadow,
           Date.parse(decisionCreatedAt),
         );
-        if (advanced) {
+        const advancedRegimes = advanceStrategyShadowRegimeSnapshot(
+          this.strategyPreviousRegimes,
+          strategyEnsembleShadow,
+          Date.parse(decisionCreatedAt),
+        );
+        if (advanced && advancedRegimes) {
           nextStrategyLifecycleSnapshot = advanced;
-          strategyEnsembleShadow = { ...strategyEnsembleShadow, lifecycleSnapshot: advanced };
+          nextStrategyRegimeSnapshot = advancedRegimes;
+          strategyEnsembleShadow = {
+            ...strategyEnsembleShadow,
+            lifecycleSnapshot: advanced,
+            regimeSnapshot: advancedRegimes,
+          };
         } else {
+          nextStrategyLifecycleSnapshot = this.strategyLifecycleSnapshot;
+          nextStrategyRegimeSnapshot = this.strategyRegimeSnapshot;
           strategyEnsembleShadow = buildStrategyShadowWorkerEnvelope({
             cycleNumber: cycleNum,
             generatedAt: Date.parse(decisionCreatedAt),
@@ -2251,9 +2291,12 @@ class WorkerManager {
             records: [],
             existingAi: strategyShadowExistingAi,
             lifecycleSnapshot: this.strategyLifecycleSnapshot,
-            notEvaluatedReason: 'SHADOW lifecycle snapshot 갱신 실패 — 평가 결과 미채택·fail-closed',
+            notEvaluatedReason: 'SHADOW lifecycle/regime snapshot 갱신 실패 — 평가 결과 미채택·fail-closed',
           });
         }
+      }
+      if (nextStrategyRegimeSnapshot !== null) {
+        strategyEnsembleShadow = { ...strategyEnsembleShadow, regimeSnapshot: nextStrategyRegimeSnapshot };
       }
       strategyEnsembleShadow = {
         ...strategyEnsembleShadow,
@@ -2334,6 +2377,13 @@ class WorkerManager {
       if (nextStrategyLifecycleSnapshot !== null) {
         // durable decision에 snapshot이 포함된 뒤에만 메모리 상태를 전진시킨다.
         this.strategyLifecycleSnapshot = nextStrategyLifecycleSnapshot;
+      }
+      if (nextStrategyRegimeSnapshot !== null) {
+        // durable decision에 snapshot이 포함된 뒤에만 메모리 hysteresis를 전진시킨다.
+        this.strategyRegimeSnapshot = nextStrategyRegimeSnapshot;
+        this.strategyPreviousRegimes = Object.fromEntries(
+          nextStrategyRegimeSnapshot.states.map(state => [state.symbol, state]),
+        );
       }
 
       // ── Task #111 — 서버 권위 PAPER 실행 (PAPER 모드 전용, LIVE/승인 경로와 분리) ──
