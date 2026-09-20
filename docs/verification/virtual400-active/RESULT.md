@@ -15,3 +15,5 @@ Validation:
 - The lifecycle replay uses a synthetic signal fixture and in-memory persistence, not real PostgreSQL or observed market performance. Full raw-candle and PostgreSQL restart validation remains on the existing workback schedule.
 
 Deployment: require exact GitHub CI/source verification, publish the existing Reserved VM once, then confirm source identity, session continuity and runtime policy. Do not reset or restart the user's virtual session. This record does not claim deployment has occurred.
+
+CI286 caught a replay-fixture wall-clock assumption: OPEN at 23:03 Manila and close one hour later correctly reset daily entries to zero. Fixed the synthetic replay to a constant same-day timestamp; production accounting is unchanged. CI286: 2667 passed, 2 fixture assertions failed; superseding exact-source CI required.

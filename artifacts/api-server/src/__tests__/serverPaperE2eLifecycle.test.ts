@@ -219,9 +219,11 @@ beforeEach(() => {
 });
 
 describe('VIRTUAL 400 deterministic REPLAY through the real PAPER executor', () => {
+  // Fixed Manila daytime: OPEN and its 1h settlement belong to the same risk day.
+  const REPLAY_NOW = Date.parse('2026-09-20T04:00:10.000Z');
   it.each([false, true])('runs Signal/Risk/sizing → OPEN → restart → structural SL → cost settlement (active=%s)', async active => {
-    const now = new Date(T0);
-    const session = buildActiveVirtualPaper400SessionState('full-replay', new Date(T0 - 1_000));
+    const now = new Date(REPLAY_NOW);
+    const session = buildActiveVirtualPaper400SessionState('full-replay', new Date(REPLAY_NOW - 1_000));
     let saved = initialVirtualPaper400RiskState(session.session);
     store.workerState.set('riskEngineStateV1', 'STANDARD_SENTINEL');
     vi.mocked(getPaperCostBinding).mockReturnValue({ ...BINDING, estEntryCostUsd: 0.015, estExitCostUsd: 0.015 });
@@ -229,8 +231,8 @@ describe('VIRTUAL 400 deterministic REPLAY through the real PAPER executor', () 
       now, engineMode: 'PAPER', policyAppliedAt: active ? now.toISOString() : undefined, sessionRaw: JSON.stringify(session), previous: saved,
       rows: [], quote: quoteFn(50_000), shouldContinue: () => true,
       persistRisk: async state => { saved = JSON.parse(JSON.stringify(state)); },
-      readSignals: async () => [virtualReplaySignal(T0)],
-      readCost: async (_symbol, _long, size) => virtualReplayCost(T0, size),
+      readSignals: async () => [virtualReplaySignal(REPLAY_NOW)],
+      readCost: async (_symbol, _long, size) => virtualReplayCost(REPLAY_NOW, size),
       claim: async (id, audit) => { if (store.workerState.has(id)) return false;
         store.workerState.set(id, JSON.stringify(audit)); return true; },
       open: args => openServerPaperPosition(args),
@@ -243,13 +245,13 @@ describe('VIRTUAL 400 deterministic REPLAY through the real PAPER executor', () 
     expect(Number(store.trades[0].leverage)).toBe(active ? 2 : 1);
     // Simulated process restart: no cached worker state is needed to protect the OPEN.
     __resetServerPaperStateForTests();
-    await manageServerPaperTick(quoteFn(48_950), T0 + H);
-    await manageServerPaperTick(quoteFn(48_950), T0 + H + 1_000);
+    await manageServerPaperTick(quoteFn(48_950), REPLAY_NOW + H);
+    await manageServerPaperTick(quoteFn(48_950), REPLAY_NOW + H + 1_000);
     expect(closeRows()).toHaveLength(1);
     expect(closeRows()[0]).toMatchObject({ strategy: session.session.strategyTag,
       closeReason: 'STOP_LOSS', settlementStatus: 'PAPER_ESTIMATED' });
     const restored = evaluateVirtualPaper400Account({ session: session.session, previous: saved,
-      rows: store.trades as unknown as DbTrade[], now: new Date(T0 + H + 1_000), quote: quoteFn(48_950) });
+      rows: store.trades as unknown as DbTrade[], now: new Date(REPLAY_NOW + H + 1_000), quote: quoteFn(48_950) });
     expect(restored.ledger.realizedEquityUsd).toBeLessThan(400);
     expect(restored.ledger.modeledTradingCostUsd).toBeGreaterThan(0);
     expect(restored.ledger.settlementCount).toBe(1);
