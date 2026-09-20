@@ -57,6 +57,7 @@ import request from 'supertest';
 import { router } from '../routes/alphaStartIntent';
 import { ALPHA_START_INTENT_KEY } from '../workers/alphaStartIntent';
 import { WORKER_POLICY_CONTEXT_KEY } from '../workers/workerPolicyContext';
+import { VIRTUAL_PAPER_400_SESSION_STATE_KEY } from '../workers/virtualPaper400SessionState';
 
 const app = express();
 app.use(express.json());
@@ -179,5 +180,115 @@ describe('alpha start intent HTTP boundary', () => {
     expect(res.body.intent.status).toBe('STOPPED');
     expect(res.body.intent.active).toBe(false);
     expect(memory.rows.has(ALPHA_START_INTENT_KEY)).toBe(true);
+  });
+});
+
+describe('virtual PAPER 400 session HTTP boundary', () => {
+  it('keeps GET observational and does not bootstrap a missing virtual session', async () => {
+    const res = await request(app).get('/api/data/virtual-paper-400-session');
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.mode).toBe('VIRTUAL_PAPER_400');
+    expect(res.body.realFundsUsed).toBe(false);
+    expect(res.body.executionAuthorized).toBe(false);
+    expect(res.body.session.status).toBe('MISSING');
+    expect(memory.rows.has(VIRTUAL_PAPER_400_SESSION_STATE_KEY)).toBe(false);
+  });
+
+  it('requires operator auth for START and leaves state untouched on failure', async () => {
+    const res = await request(app)
+      .put('/api/data/virtual-paper-400-session')
+      .set('x-operator-pin', '000000')
+      .send({ action: 'START' });
+
+    expect(res.status).toBe(401);
+    expect(memory.rows.has(VIRTUAL_PAPER_400_SESSION_STATE_KEY)).toBe(false);
+  });
+
+  it('starts a separate 400-USDC virtual session without FIXED_BETA policy and keeps START idempotent', async () => {
+    const first = await request(app)
+      .put('/api/data/virtual-paper-400-session')
+      .set('x-operator-pin', '654321')
+      .send({ action: 'START' });
+
+    expect(first.status).toBe(200);
+    expect(first.body.ok).toBe(true);
+    expect(first.body.realFundsUsed).toBe(false);
+    expect(first.body.executionAuthorized).toBe(false);
+    expect(first.body.idempotent).toBe(false);
+    expect(first.body.session.status).toBe('ACTIVE');
+    expect(first.body.session.paperRoutingEligible).toBe(true);
+    expect(first.body.session.state.session.initialEquityUsd).toBe(400);
+    expect(first.body.session.state.session.mode).toBe('VIRTUAL_PAPER_400');
+    expect(first.body.session.state.session.strategyTag).toContain('SERVER_WORKER_AI_VIRTUAL_400_V1:vp400-');
+    const firstSessionId = first.body.session.state.session.sessionId;
+
+    const second = await request(app)
+      .put('/api/data/virtual-paper-400-session')
+      .set('x-operator-pin', '654321')
+      .send({ action: 'START' });
+
+    expect(second.status).toBe(200);
+    expect(second.body.idempotent).toBe(true);
+    expect(second.body.session.state.session.sessionId).toBe(firstSessionId);
+  });
+
+  it('STOP preserves exact session identity and is idempotent after the stop', async () => {
+    const started = await request(app)
+      .put('/api/data/virtual-paper-400-session')
+      .set('x-operator-pin', '654321')
+      .send({ action: 'START' });
+    const sessionId = started.body.session.state.session.sessionId;
+    const strategyTag = started.body.session.state.session.strategyTag;
+
+    const stopped = await request(app)
+      .put('/api/data/virtual-paper-400-session')
+      .set('x-operator-pin', '654321')
+      .send({ action: 'STOP', reason: 'operator stop' });
+
+    expect(stopped.status).toBe(200);
+    expect(stopped.body.idempotent).toBe(false);
+    expect(stopped.body.session.status).toBe('STOPPED');
+    expect(stopped.body.session.active).toBe(false);
+    expect(stopped.body.session.paperRoutingEligible).toBe(false);
+    expect(stopped.body.session.state.session.sessionId).toBe(sessionId);
+    expect(stopped.body.session.state.session.strategyTag).toBe(strategyTag);
+    expect(stopped.body.session.state.stopReason).toBe('operator stop');
+
+    const stoppedAgain = await request(app)
+      .put('/api/data/virtual-paper-400-session')
+      .set('x-operator-pin', '654321')
+      .send({ action: 'STOP', reason: 'ignored retry' });
+    expect(stoppedAgain.status).toBe(200);
+    expect(stoppedAgain.body.idempotent).toBe(true);
+    expect(stoppedAgain.body.session.state.session.sessionId).toBe(sessionId);
+  });
+
+  it('does not invent a session for STOP when state is missing', async () => {
+    const res = await request(app)
+      .put('/api/data/virtual-paper-400-session')
+      .set('x-operator-pin', '654321')
+      .send({ action: 'STOP' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.idempotent).toBe(true);
+    expect(res.body.session.status).toBe('MISSING');
+    expect(memory.rows.has(VIRTUAL_PAPER_400_SESSION_STATE_KEY)).toBe(false);
+  });
+
+  it('fails closed and preserves malformed persisted state instead of resetting to 400', async () => {
+    const malformed = '{"schemaVersion":1,"status":"ACTIVE"}';
+    memory.rows.set(VIRTUAL_PAPER_400_SESSION_STATE_KEY, malformed);
+
+    const res = await request(app)
+      .put('/api/data/virtual-paper-400-session')
+      .set('x-operator-pin', '654321')
+      .send({ action: 'START' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('VIRTUAL_PAPER_400_SESSION_INVALID');
+    expect(res.body.executionAuthorized).toBe(false);
+    expect(memory.rows.get(VIRTUAL_PAPER_400_SESSION_STATE_KEY)).toBe(malformed);
   });
 });
