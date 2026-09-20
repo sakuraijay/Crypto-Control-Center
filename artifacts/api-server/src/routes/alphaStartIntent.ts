@@ -221,8 +221,9 @@ router.get('/data/virtual-paper-400-session', async (_req, res) => {
 /**
  * Persist an explicit operator START/STOP for the virtual 400-USDC PAPER session.
  * START is idempotent while already ACTIVE and never touches wallet/FIXED_BETA
- * accounting. STOP preserves the exact session identity so restart cannot reset
- * loss/history by silently creating a fresh 400-USDC session.
+ * accounting. STOP preserves the exact session identity. A later START resumes
+ * that same identity instead of minting a fresh 400-USDC ledger, so stop/restart
+ * cannot erase prior losses or settlement history.
  */
 router.put('/data/virtual-paper-400-session', requireOperatorAuth, async (req, res) => {
   const action = req.body?.action;
@@ -286,9 +287,17 @@ router.put('/data/virtual-paper-400-session', requireOperatorAuth, async (req, r
       });
     }
 
+    const now = new Date();
     const nextState = action === 'START'
-      ? buildActiveVirtualPaper400SessionState(`vp400-${randomUUID()}`)
-      : buildStoppedVirtualPaper400SessionState(current.state!, req.body?.reason);
+      ? current.status === 'STOPPED'
+        ? {
+            schemaVersion: 1 as const,
+            status: 'ACTIVE' as const,
+            session: current.state!.session,
+            updatedAt: now.toISOString(),
+          }
+        : buildActiveVirtualPaper400SessionState(`vp400-${randomUUID()}`, now)
+      : buildStoppedVirtualPaper400SessionState(current.state!, req.body?.reason, now);
 
     await persistWorkerStateValue(
       VIRTUAL_PAPER_400_SESSION_STATE_KEY,
