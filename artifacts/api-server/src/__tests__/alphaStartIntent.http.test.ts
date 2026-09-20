@@ -41,6 +41,9 @@ vi.mock('@workspace/db', () => {
 
   return {
     db: {
+      transaction: vi.fn(async callback => callback({
+        select: () => selectChain(), insert: () => insertChain(), execute: async () => ({ rows: [] }),
+      })),
       select: vi.fn(() => selectChain()),
       insert: vi.fn(() => insertChain()),
     },
@@ -49,6 +52,7 @@ vi.mock('@workspace/db', () => {
 });
 
 vi.mock('drizzle-orm', () => ({
+  sql: vi.fn(() => ({})),
   eq: vi.fn((_field: unknown, value: string) => ({ value })),
 }));
 

@@ -18,6 +18,9 @@
  * LIVE_EXECUTION_LOCKED = true 상태에서만 테스트.
  */
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
+// Virtual routing has its own account/cycle tests. Existing Standard scenarios
+// have no active virtual session and must continue exercising their original path.
+vi.mock('../workers/virtualPaper400Runtime', () => ({ maybeRunVirtualPaper400Cycle: vi.fn(async () => false) }));
 
 // ── 외부 의존성 모킹 (vi.mock은 파일 최상단으로 호이스팅됨) ───────────────────
 
@@ -300,6 +303,26 @@ import {
 import { FIXED_BETA_TRADE_STRATEGY, fixedBetaLedgerBinding, isFixedBetaAccountingStateFresh, type FixedBetaAccountingStateV1 } from '../workers/fixedBetaAccountingState';
 import { manilaDayStartIso, manilaWeekStartIso } from '../lib/manilaTime';
 import { virtualPaper400StrategyTag } from '../workers/virtualPaper400Ledger';
+import { maybeRunVirtualPaper400Cycle } from '../workers/virtualPaper400Runtime';
+
+describe('Virtual worker dispatch isolation', () => {
+  it.each(['handled', 'failed'])('does not reach Standard or LIVE execution when the virtual cycle is %s', async status => {
+    resetWorker(); vi.useFakeTimers();
+    const wm = workerManager as unknown as { active: boolean; runCycle(): Promise<void> };
+    wm.active = true;
+    if (status === 'handled') vi.mocked(maybeRunVirtualPaper400Cycle).mockResolvedValueOnce(true);
+    else vi.mocked(maybeRunVirtualPaper400Cycle).mockRejectedValueOnce(new Error('VIRTUAL_INVALID'));
+    try {
+      await wm.runCycle();
+      expect(runAiEngine).not.toHaveBeenCalled();
+      expect(openServerPaperPosition).not.toHaveBeenCalled();
+      expect(executeLiveTestOrder).not.toHaveBeenCalled();
+      expect(_dbValuesInputs).toEqual([]);
+      expect(workerManager.getStatus().schedulerHeartbeatAt).not.toBeNull();
+      expect(workerManager.getStatus().lastSchedulerCycleOutcome).toBe(status === 'handled' ? 'SAFE_SKIP' : 'ERROR');
+    } finally { workerManager.stop(); vi.useRealTimers(); }
+  });
+});
 
 describe('Standard decision / virtual PAPER inventory isolation', () => {
   it.each(['CLOSE_ALL_POSITIONS', 'REDUCE_POSITION_70PCT'])('does not apply Standard %s to a virtual session', async action => {

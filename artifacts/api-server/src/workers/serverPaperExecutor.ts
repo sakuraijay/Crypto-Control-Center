@@ -68,6 +68,8 @@ export interface ServerPaperOpenArgs {
   quote: PriceQuote | null;
   /** 엔진 제안 TP — 유효(양수·이익 방향)할 때만 채택, 아니면 null(TP 없음) */
   tpPriceUsd: number | null;
+  /** Virtual closed-candle path only. Standard retains its existing stop policy. */
+  stopPriceUsd?: number;
   /** 현재 미청산 포지션 수 (모든 출처) */
   openPositionCount: number;
   /** 적용 프로필 동시 포지션 상한. 서버 절대 상한 2와 교차한다. */
@@ -351,6 +353,15 @@ export async function openServerPaperPosition(
   const isLong = args.side === "LONG";
   const stop = computeStopTrigger({ entryPriceUsd: q.priceUsd, isLong });
   if (!stop.ok) return record({ ok: false, reason: `NO_TRADE: ${stop.reason}` });
+  if (args.stopPriceUsd !== undefined) {
+    const distance = (q.priceUsd - args.stopPriceUsd) / q.priceUsd * (isLong ? 1 : -1);
+    if (!isVirtualPaper400StrategyTag(strategy) || !fin(args.stopPriceUsd) || args.stopPriceUsd <= 0
+      || distance <= 0 || distance >= 0.5) {
+      return record({ ok: false, reason: 'VIRTUAL structural stop invalid — OPEN refused' });
+    }
+    stop.plan.triggerPriceUsd = args.stopPriceUsd;
+    stop.plan.stopDistanceFraction = distance;
+  }
 
   let tp: number | null = null;
   if (args.tpPriceUsd != null && fin(args.tpPriceUsd) && args.tpPriceUsd > 0) {

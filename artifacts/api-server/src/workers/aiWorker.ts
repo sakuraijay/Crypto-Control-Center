@@ -85,6 +85,7 @@ import {
   type ServerPaperExecStatus, type PriceQuote,
 } from "./serverPaperExecutor";
 import { isVirtualPaper400StrategyTag } from "./virtualPaper400Ledger";
+import { maybeRunVirtualPaper400Cycle } from './virtualPaper400Runtime';
 import {
   applyRiskProfileToLimits,
   promoteRiskProfileAtSafeBoundary,
@@ -1709,6 +1710,12 @@ class WorkerManager {
 
     try {
       // 사이클마다 PENDING 세트를 DB에서 재구성 — 승인/거절/만료된 항목 자동 제거
+      if (await maybeRunVirtualPaper400Cycle({ cycleNumber: cycleNum,
+        quote: symbol => this.serverPaperQuote(symbol),
+        shouldContinue: () => this.isCurrentGeneration(capturedGeneration) })) {
+        cycleOutcome = 'SAFE_SKIP';
+        return;
+      }
       await this.loadPendingApprovals();
       if (!this.isCurrentGeneration(capturedGeneration)) return;
       // Context can change only through the operator-authenticated route.  Reload

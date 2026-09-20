@@ -112,7 +112,7 @@ function validLocks(value: unknown): value is PersistedLocks {
     && ((locks.dailyLockState === null) === (locks.dailyLockReason === null));
 }
 
-function validRiskState(value: unknown): value is PersistedRiskEngineState {
+export function validRiskState(value: unknown): value is PersistedRiskEngineState {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const state = value as Record<string, unknown>;
   return iso(state.dayPeriodStart)

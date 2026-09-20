@@ -9,6 +9,7 @@
  */
 
 import { Router } from "express";
+import { VIRTUAL_PAPER_400_STRATEGY_PREFIX } from '../workers/virtualPaper400Ledger';
 import { db, tradesTable, strategyConfigTable, workerStateTable } from "@workspace/db";
 import { and, desc, eq, or } from "drizzle-orm";
 import { getPaperCostBinding } from "../lib/paperCostCache";
@@ -43,7 +44,9 @@ router.get("/data/trades", async (_req, res) => {
       .select()
       .from(tradesTable)
       .orderBy(tradesTable.timestamp);
-    res.json(trades);
+    // The legacy Dashboard/TradingContext is Standard-only. Virtual accounting
+    // is exposed by its session endpoint and must never inflate Standard PnL.
+    res.json(trades.filter(row => !row.strategy?.startsWith(VIRTUAL_PAPER_400_STRATEGY_PREFIX)));
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch trades" });
   }
@@ -72,7 +75,7 @@ router.post("/data/trades/batch", async (req, res) => {
       timestamp: string; closeTime?: number;
     }>;
     if (!Array.isArray(rows) || rows.length === 0) return res.json({ count: 0 });
-    if (rows.some(row => row.strategy === FIXED_BETA_TRADE_STRATEGY)) {
+    if (rows.some(row => row.strategy === FIXED_BETA_TRADE_STRATEGY || row.strategy?.startsWith(VIRTUAL_PAPER_400_STRATEGY_PREFIX))) {
       return res.status(403).json({ ok: false, code: 'RESERVED_ACCOUNTING_SCOPE', error: 'reserved alpha accounting strategy is server-only' });
     }
 
@@ -153,7 +156,7 @@ router.post("/data/trades/batch", async (req, res) => {
 router.post("/data/trades", async (req, res) => {
   try {
     const r = req.body;
-    if (r?.strategy === FIXED_BETA_TRADE_STRATEGY) {
+    if (r?.strategy === FIXED_BETA_TRADE_STRATEGY || (typeof r?.strategy === 'string' && r.strategy.startsWith(VIRTUAL_PAPER_400_STRATEGY_PREFIX))) {
       return res.status(403).json({ ok: false, code: 'RESERVED_ACCOUNTING_SCOPE', error: 'reserved alpha accounting strategy is server-only' });
     }
 

@@ -14,6 +14,7 @@ import {
  */
 export const VIRTUAL_PAPER_400_SESSION_STATE_KEY = 'virtual_paper_400_session_state_v1';
 export const VIRTUAL_PAPER_400_SESSION_STATE_SCHEMA_VERSION = 1 as const;
+export const VIRTUAL_PAPER_400_LOCK_ID = 4000920;
 
 export type VirtualPaper400SessionStatus = 'ACTIVE' | 'STOPPED';
 

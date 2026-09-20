@@ -36,6 +36,7 @@ import { OpportunityRankingCard } from '@/components/OpportunityRankingCard';
 import { ShadowReviewCard } from '@/components/ShadowReviewCard';
 import { RiskExecutionStatusCard } from '@/components/RiskExecutionStatusCard';
 import { cn } from '@/lib/utils';
+import { VirtualPaper400Card } from '@/components/dashboard/VirtualPaper400Card';
 
 // ── KPI card ─────────────────────────────────────────────────────────────────
 
@@ -100,6 +101,7 @@ export default function Dashboard() {
 
       {/* ── Full-width alerts ─────────────────────────────────────────────── */}
       <SystemHealthBanner />
+      <VirtualPaper400Card />
       {/* LiveApprovalBanner: fallback for denied/unsupported notification environments */}
       <LiveApprovalBanner />
       <LiveApprovalCard />

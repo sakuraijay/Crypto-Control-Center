@@ -162,6 +162,11 @@ globalThis.__e2eRestore = (snapshot) => {
 vi.mock('../lib/paperCostCache', () => ({ getPaperCostBinding: vi.fn(() => null) }));
 
 import { getPaperCostBinding } from '../lib/paperCostCache';
+import { runVirtualPaper400Cycle } from '../workers/virtualPaper400Cycle';
+import { buildActiveVirtualPaper400SessionState } from '../workers/virtualPaper400SessionState';
+import { initialVirtualPaper400RiskState, evaluateVirtualPaper400Account } from '../workers/virtualPaper400Accounting';
+import { virtualReplaySignal, virtualReplayCost } from './helpers/virtualPaper400Replay';
+import type { DbTrade } from '@workspace/db';
 import {
   openServerPaperPosition, requestServerPaperCloseAll, loadPendingCloseFromDb,
   manageServerPaperTick, loadServerOpenRows, getServerPaperStatus,
@@ -211,6 +216,46 @@ beforeEach(() => {
   store.workerState.clear();
   forceOpenUpdateZero = false;
   vi.mocked(getPaperCostBinding).mockReturnValue(BINDING as ReturnType<typeof getPaperCostBinding>);
+});
+
+describe('VIRTUAL 400 deterministic REPLAY through the real PAPER executor', () => {
+  it('runs Signal/Risk/sizing → OPEN → restart → structural SL → cost settlement', async () => {
+    const now = new Date(T0);
+    const session = buildActiveVirtualPaper400SessionState('full-replay', new Date(T0 - 1_000));
+    let saved = initialVirtualPaper400RiskState(session.session);
+    store.workerState.set('riskEngineStateV1', 'STANDARD_SENTINEL');
+    vi.mocked(getPaperCostBinding).mockReturnValue({ ...BINDING, estEntryCostUsd: 0.015, estExitCostUsd: 0.015 });
+    const result = await runVirtualPaper400Cycle({
+      now, engineMode: 'PAPER', sessionRaw: JSON.stringify(session), previous: saved,
+      rows: [], quote: quoteFn(50_000), shouldContinue: () => true,
+      persistRisk: async state => { saved = JSON.parse(JSON.stringify(state)); },
+      readSignals: async () => [virtualReplaySignal(T0)],
+      readCost: async (_symbol, _long, size) => virtualReplayCost(T0, size),
+      claim: async (id, audit) => { if (store.workerState.has(id)) return false;
+        store.workerState.set(id, JSON.stringify(audit)); return true; },
+      open: args => openServerPaperPosition(args),
+      close: async () => { throw new Error('unexpected signal close-all'); },
+      reduce: async () => { throw new Error('unexpected reduction'); },
+    });
+    expect(result.status).toBe('OPENED');
+    expect(store.trades[0]).toMatchObject({ strategy: session.session.strategyTag, stopPriceUsd: '49000' });
+    expect(Number(store.trades[0].sizeInUsd)).toBeLessThanOrEqual(50);
+    // Simulated process restart: no cached worker state is needed to protect the OPEN.
+    __resetServerPaperStateForTests();
+    await manageServerPaperTick(quoteFn(48_950), T0 + H);
+    await manageServerPaperTick(quoteFn(48_950), T0 + H + 1_000);
+    expect(closeRows()).toHaveLength(1);
+    expect(closeRows()[0]).toMatchObject({ strategy: session.session.strategyTag,
+      closeReason: 'STOP_LOSS', settlementStatus: 'PAPER_ESTIMATED' });
+    const restored = evaluateVirtualPaper400Account({ session: session.session, previous: saved,
+      rows: store.trades as unknown as DbTrade[], now: new Date(T0 + H + 1_000), quote: quoteFn(48_950) });
+    expect(restored.ledger.realizedEquityUsd).toBeLessThan(400);
+    expect(restored.ledger.modeledTradingCostUsd).toBeGreaterThan(0);
+    expect(restored.ledger.settlementCount).toBe(1);
+    expect(restored.next.risk.dailyEntryCount).toBe(1);
+    expect(restored.next.risk.consecutiveLossCount).toBe(1);
+    expect(store.workerState.get('riskEngineStateV1')).toBe('STANDARD_SENTINEL');
+  });
 });
 
 describe('E2E §1 — OPEN → SL 터치 → net settlement → 중복 0건', () => {

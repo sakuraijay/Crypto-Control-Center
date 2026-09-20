@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { Router } from 'express';
 import { db, workerStateTable } from '@workspace/db';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { requireOperatorAuth } from '../lib/operatorAuthGuard';
 import {
   ALPHA_START_INTENT_KEY,
@@ -16,6 +16,7 @@ import {
 import { WORKER_POLICY_CONTEXT_KEY } from '../workers/workerPolicyContext';
 import {
   VIRTUAL_PAPER_400_SESSION_STATE_KEY,
+  VIRTUAL_PAPER_400_LOCK_ID,
   buildActiveVirtualPaper400SessionState,
   buildStoppedVirtualPaper400SessionState,
   evaluateVirtualPaper400SessionState,
@@ -24,15 +25,15 @@ import {
 
 export const router = Router();
 
-async function readWorkerStateValue(key: string): Promise<string | null> {
-  const rows = await db.select().from(workerStateTable)
+async function readWorkerStateValue(key: string, database: Pick<typeof db, 'select'> = db): Promise<string | null> {
+  const rows = await database.select().from(workerStateTable)
     .where(eq(workerStateTable.key, key)).limit(1);
   return rows[0]?.value ?? null;
 }
 
-async function persistWorkerStateValue(key: string, value: string): Promise<void> {
+async function persistWorkerStateValue(key: string, value: string, database: Pick<typeof db, 'insert'> = db): Promise<void> {
   const updatedAt = new Date();
-  await db.insert(workerStateTable)
+  await database.insert(workerStateTable)
     .values({ key, value, updatedAt })
     .onConflictDoUpdate({
       target: workerStateTable.key,
@@ -197,12 +198,22 @@ router.get('/data/virtual-paper-400-session', async (_req, res) => {
   try {
     const raw = await readWorkerStateValue(VIRTUAL_PAPER_400_SESSION_STATE_KEY);
     const session = evaluateVirtualPaper400SessionState(raw);
+    const runtimeRaw = await readWorkerStateValue('virtual_paper_400_runtime_v1');
+    let runtime = null;
+    if (runtimeRaw) {
+      const candidate = JSON.parse(runtimeRaw);
+      if (candidate?.mode === 'VIRTUAL_PAPER_400' && candidate.realFundsUsed === false
+        && session.state && candidate.sessionId === session.state.session.sessionId) runtime = candidate;
+    }
+    const age = runtime ? Date.now() - Date.parse(runtime.at) : NaN;
     const response = {
       ok: session.status !== 'INVALID',
       mode: 'VIRTUAL_PAPER_400' as const,
       realFundsUsed: false as const,
       executionAuthorized: false as const,
       session,
+      runtime,
+      runtimeFresh: Number.isFinite(age) && age >= 0 && age <= 120_000,
     };
     if (session.status === 'INVALID') return res.status(500).json(response);
     return res.json(response);
@@ -250,83 +261,92 @@ router.put('/data/virtual-paper-400-session', requireOperatorAuth, async (req, r
   }
 
   try {
-    const currentRaw = await readWorkerStateValue(VIRTUAL_PAPER_400_SESSION_STATE_KEY);
-    const current = evaluateVirtualPaper400SessionState(currentRaw);
+    const reply = await db.transaction(async tx => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(${VIRTUAL_PAPER_400_LOCK_ID})`);
+      let statusCode = 200;
+      const response = {
+        status(code: number) { statusCode = code; return this; },
+        json(body: unknown) { return { statusCode, body }; },
+      };
+      const currentRaw = await readWorkerStateValue(VIRTUAL_PAPER_400_SESSION_STATE_KEY, tx);
+      const current = evaluateVirtualPaper400SessionState(currentRaw);
 
-    if (current.status === 'INVALID') {
-      return res.status(409).json({
-        ok: false,
-        code: 'VIRTUAL_PAPER_400_SESSION_INVALID',
-        mode: 'VIRTUAL_PAPER_400',
-        realFundsUsed: false,
-        executionAuthorized: false,
-        session: current,
-        error: 'invalid persisted virtual session state must be reviewed; it will not be overwritten automatically',
-      });
-    }
+      if (current.status === 'INVALID') {
+        return response.status(409).json({
+          ok: false,
+          code: 'VIRTUAL_PAPER_400_SESSION_INVALID',
+          mode: 'VIRTUAL_PAPER_400',
+          realFundsUsed: false,
+          executionAuthorized: false,
+          session: current,
+          error: 'invalid persisted virtual session state must be reviewed; it will not be overwritten automatically',
+        });
+      }
 
-    if (action === 'START' && current.status === 'ACTIVE') {
-      return res.json({
+      if (action === 'START' && current.status === 'ACTIVE') {
+        return response.json({
+          ok: true,
+          mode: 'VIRTUAL_PAPER_400',
+          realFundsUsed: false,
+          executionAuthorized: false,
+          idempotent: true,
+          session: current,
+        });
+      }
+
+      if (action === 'STOP' && (current.status === 'MISSING' || current.status === 'STOPPED')) {
+        return response.json({
+          ok: true,
+          mode: 'VIRTUAL_PAPER_400',
+          realFundsUsed: false,
+          executionAuthorized: false,
+          idempotent: true,
+          session: current,
+        });
+      }
+
+      const now = new Date();
+      const nextState = action === 'START'
+        ? current.status === 'STOPPED'
+          ? {
+              schemaVersion: 1 as const,
+              status: 'ACTIVE' as const,
+              session: current.state!.session,
+              updatedAt: now.toISOString(),
+            }
+          : buildActiveVirtualPaper400SessionState(`vp400-${randomUUID()}`, now)
+        : buildStoppedVirtualPaper400SessionState(current.state!, req.body?.reason, now);
+
+      await persistWorkerStateValue(
+        VIRTUAL_PAPER_400_SESSION_STATE_KEY,
+        serializeVirtualPaper400SessionState(nextState), tx,
+      );
+
+      const readbackRaw = await readWorkerStateValue(VIRTUAL_PAPER_400_SESSION_STATE_KEY, tx);
+      const session = evaluateVirtualPaper400SessionState(readbackRaw);
+      const expectedStatus = action === 'START' ? 'ACTIVE' : 'STOPPED';
+      if (session.status !== expectedStatus || session.state?.session.sessionId !== nextState.session.sessionId) {
+        return response.status(503).json({
+          ok: false,
+          code: 'VIRTUAL_PAPER_400_SESSION_READBACK_FAILED',
+          mode: 'VIRTUAL_PAPER_400',
+          realFundsUsed: false,
+          executionAuthorized: false,
+          session,
+          error: 'persisted virtual PAPER 400 session did not verify on readback',
+        });
+      }
+
+      return response.json({
         ok: true,
         mode: 'VIRTUAL_PAPER_400',
         realFundsUsed: false,
         executionAuthorized: false,
-        idempotent: true,
-        session: current,
-      });
-    }
-
-    if (action === 'STOP' && (current.status === 'MISSING' || current.status === 'STOPPED')) {
-      return res.json({
-        ok: true,
-        mode: 'VIRTUAL_PAPER_400',
-        realFundsUsed: false,
-        executionAuthorized: false,
-        idempotent: true,
-        session: current,
-      });
-    }
-
-    const now = new Date();
-    const nextState = action === 'START'
-      ? current.status === 'STOPPED'
-        ? {
-            schemaVersion: 1 as const,
-            status: 'ACTIVE' as const,
-            session: current.state!.session,
-            updatedAt: now.toISOString(),
-          }
-        : buildActiveVirtualPaper400SessionState(`vp400-${randomUUID()}`, now)
-      : buildStoppedVirtualPaper400SessionState(current.state!, req.body?.reason, now);
-
-    await persistWorkerStateValue(
-      VIRTUAL_PAPER_400_SESSION_STATE_KEY,
-      serializeVirtualPaper400SessionState(nextState),
-    );
-
-    const readbackRaw = await readWorkerStateValue(VIRTUAL_PAPER_400_SESSION_STATE_KEY);
-    const session = evaluateVirtualPaper400SessionState(readbackRaw);
-    const expectedStatus = action === 'START' ? 'ACTIVE' : 'STOPPED';
-    if (session.status !== expectedStatus) {
-      return res.status(503).json({
-        ok: false,
-        code: 'VIRTUAL_PAPER_400_SESSION_READBACK_FAILED',
-        mode: 'VIRTUAL_PAPER_400',
-        realFundsUsed: false,
-        executionAuthorized: false,
+        idempotent: false,
         session,
-        error: 'persisted virtual PAPER 400 session did not verify on readback',
       });
-    }
-
-    return res.json({
-      ok: true,
-      mode: 'VIRTUAL_PAPER_400',
-      realFundsUsed: false,
-      executionAuthorized: false,
-      idempotent: false,
-      session,
     });
+    return res.status(reply.statusCode).json(reply.body);
   } catch (error) {
     const code = (error as Error)?.message;
     if (code === 'STOP_REASON_TOO_LONG' || code === 'STOP_REASON_INVALID') {

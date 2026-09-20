@@ -1,0 +1,111 @@
+import { eq, sql } from 'drizzle-orm';
+import { evaluateVirtualPaper400SessionState, VIRTUAL_PAPER_400_SESSION_STATE_KEY, VIRTUAL_PAPER_400_LOCK_ID } from './virtualPaper400SessionState';
+import { initialVirtualPaper400RiskState, parseVirtualPaper400RiskState, virtualPaper400RiskKey,
+  evaluateVirtualPaper400Account } from './virtualPaper400Accounting';
+import { runVirtualPaper400Cycle } from './virtualPaper400Cycle';
+import { openServerPaperPosition, closeServerPaperPosition, reduceServerPaper70,
+  getServerPaperStatus, type PriceLookup } from './serverPaperExecutor';
+import { storePaperCostSnapshot } from '../lib/paperCostCache';
+import type { CostSnapshot } from '../lib/costSnapshot';
+
+export const VIRTUAL_PAPER_400_RUNTIME_KEY = 'virtual_paper_400_runtime_v1';
+// Shared with START/STOP. This is a coordination lock, not a trading permission.
+
+/** Returns false only for an absent session. A stopped/invalid virtual session
+ * must not silently fall back to Standard entries. No financial modules are called. */
+export async function maybeRunVirtualPaper400Cycle(args: {
+  cycleNumber: number; quote: PriceLookup; shouldContinue(): boolean;
+}): Promise<boolean> {
+  const { db, workerStateTable, tradesTable } = await import('@workspace/db');
+  const observed = await db.select().from(workerStateTable)
+    .where(eq(workerStateTable.key, VIRTUAL_PAPER_400_SESSION_STATE_KEY)).limit(2);
+  if (observed.length === 0) return false;
+  if (observed.length !== 1) throw new Error('VIRTUAL_SESSION_DUPLICATE');
+  await db.transaction(async tx => {
+    const lock = await tx.execute(sql`SELECT pg_try_advisory_xact_lock(${VIRTUAL_PAPER_400_LOCK_ID}) AS acquired`);
+    if (lock.rows[0]?.acquired !== true) return;
+    const read = async (key: string) => {
+      const rows = await tx.select().from(workerStateTable).where(eq(workerStateTable.key, key)).limit(2);
+      if (rows.length > 1) throw new Error('VIRTUAL_STATE_DUPLICATE');
+      return rows[0]?.value ?? null;
+    };
+    const write = async (key: string, value: unknown) => {
+      if (!args.shouldContinue()) throw new Error('VIRTUAL_WORKER_STOPPED');
+      const updatedAt = new Date();
+      await db.insert(workerStateTable).values({ key, value: JSON.stringify(value), updatedAt })
+        .onConflictDoUpdate({ target: workerStateTable.key,
+          set: { value: JSON.stringify(value), updatedAt } });
+    };
+    const raw = await read(VIRTUAL_PAPER_400_SESSION_STATE_KEY);
+    const session = evaluateVirtualPaper400SessionState(raw);
+    if (!session.state) throw new Error('VIRTUAL_SESSION_INVALID');
+    if ((process.env.WORKER_ENGINE_MODE ?? 'PAPER') !== 'PAPER') throw new Error('VIRTUAL_PAPER_MODE_REQUIRED');
+    const identity = session.state.session;
+    const riskKey = virtualPaper400RiskKey(identity);
+    const loadTrades = () => db.select().from(tradesTable).where(eq(tradesTable.strategy, identity.strategyTag));
+    const rows = await loadTrades();
+    const riskRaw = await read(riskKey);
+    // Missing risk state may initialize only a completely unused virtual ledger.
+    if (riskRaw === null && rows.length !== 0) throw new Error('VIRTUAL_RISK_STATE_MISSING_WITH_HISTORY');
+    const previous = riskRaw === null ? initialVirtualPaper400RiskState(identity)
+      : parseVirtualPaper400RiskState(riskRaw, identity);
+    const now = new Date();
+    const readCost = async (symbol: string, isLong: boolean, notionalUsd: number): Promise<CostSnapshot | null> => {
+      const { fetchManualCanaryReadonlyCost } = await import('../lib/manualCanaryReadonlyEvidence');
+      const result = await fetchManualCanaryReadonlyCost({ symbol, isLong, notionalUsd });
+      // Inputs are official read-only observations; simulated fills/settlement
+      // remain PAPER estimates, never observed real execution.
+      return result.ok ? { ...result.snapshot, source: 'PAPER_GMX_ESTIMATE' } : null;
+    };
+    const result = await runVirtualPaper400Cycle({ sessionRaw: raw!, previous, rows, now, clock: () => new Date(),
+      engineMode: process.env.WORKER_ENGINE_MODE ?? 'PAPER', quote: args.quote,
+      shouldContinue: args.shouldContinue,
+      persistRisk: state => write(riskKey, state),
+      readCost,
+      readSignals: async () => {
+        if (getServerPaperStatus().unresolved) return [];
+        const { runStrategyShadowWorkerReadOnly } = await import('../intel/intelService');
+        const { MARKET_BY_SYMBOL_SERVER } = await import('../lib/gmxMarkets');
+        const symbol = 'BTC';
+        const market = MARKET_BY_SYMBOL_SERVER.get(symbol)!;
+        const notionalUsd = 100;
+        const long = await readCost(symbol, true, notionalUsd);
+        const short = await readCost(symbol, false, notionalUsd);
+        if (!args.shouldContinue()) return [];
+        const evaluatedAt = Date.now();
+        const envelope = await runStrategyShadowWorkerReadOnly({ cycleNumber: args.cycleNumber,
+          evaluatedAt, expectedSymbols: [symbol], existingAi: { decisionId: `vp400-analysis:${evaluatedAt}`,
+            action: 'NO_TRADE', confidence: 0, primarySymbol: null, createdAt: new Date(evaluatedAt).toISOString() },
+          costsBySymbol: { [symbol]: { market: market.marketToken, notionalUsd, holdingHorizonHours: 1, long, short } } });
+        return envelope.status === 'EVALUATED' ? envelope.records : [];
+      },
+      claim: async (id, audit) => {
+        const claimed = await db.insert(workerStateTable).values({ key: id, value: JSON.stringify(audit), updatedAt: new Date() })
+          .onConflictDoNothing({ target: workerStateTable.key }).returning({ key: workerStateTable.key });
+        return claimed.length === 1;
+      },
+      open: async (open, cost) => {
+        storePaperCostSnapshot(open.symbol, cost, open.nowMs);
+        return openServerPaperPosition(open, args.shouldContinue);
+      },
+      close: async (row, reason) => (await closeServerPaperPosition({ openTradeId: row.id,
+        expectedStrategy: identity.strategyTag, reason, kind: 'FULL', quote: args.quote(row.symbol) }, args.shouldContinue)).ok,
+      reduce: async row => (await reduceServerPaper70({ openRow: row, quote: args.quote(row.symbol),
+        shouldContinue: args.shouldContinue })).ok,
+    });
+    // Read back the durable executor rows after OPEN/CLOSE/REDUCE. No invented PnL.
+    const finalRows = await loadTrades();
+    const currentRisk = parseVirtualPaper400RiskState((await read(riskKey))!, identity);
+    const final = evaluateVirtualPaper400Account({ session: identity, rows: finalRows,
+      previous: currentRisk, now: new Date(), quote: args.quote });
+    await write(riskKey, final.next);
+    await write(VIRTUAL_PAPER_400_RUNTIME_KEY, { ...result, sessionId: identity.sessionId,
+      at: new Date().toISOString(), account: { ...result.account, ledger: final.ledger,
+        equityUsd: final.equityUsd, unrealizedNetPnlUsd: final.unrealizedNetPnlUsd,
+        evaluation: final.evaluation, next: final.next,
+        held: final.held.map(row => ({ id: row.id, symbol: row.symbol, side: row.side,
+          sizeUsd: row.sizeInUsd, entryPrice: row.price, stopPrice: row.stopPriceUsd,
+          takeProfitPrice: row.takeProfitPriceUsd })) } });
+  });
+  return true;
+}

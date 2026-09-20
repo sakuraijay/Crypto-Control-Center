@@ -26,7 +26,7 @@ vi.mock('@workspace/db', () => {
     const query: any = {
       from: (value: { name: string }) => { table = value; return query; },
       where: (value: unknown) => { predicate = value; return query; },
-      limit: () => query,
+      limit: () => query, orderBy: () => query,
       values: (value: unknown) => { fixture.writes.push({ table: table!.name, value }); return query; },
       set: (value: unknown) => { fixture.writes.push({ table: table!.name, value }); return query; },
       onConflictDoNothing: () => query, onConflictDoUpdate: () => query,
@@ -81,6 +81,17 @@ beforeEach(() => {
 });
 
 describe('legacy strategy compatibility and reserved accounting boundary', () => {
+  it('excludes virtual trades from the legacy Standard read surface', async () => {
+    fixture.trades = [{ id: 'standard', strategy: 'SERVER_WORKER_AI' },
+      { id: 'virtual', strategy: 'SERVER_WORKER_AI_VIRTUAL_400_V1:session' }];
+    const response = await invoke('get', '/data/trades');
+    expect(response.body).toEqual([{ id: 'standard', strategy: 'SERVER_WORKER_AI' }]);
+  });
+  it.each(['/data/trades', '/data/trades/batch'])('rejects a forged virtual namespace via %s', async path => {
+    const row = { id: 'forged', strategy: 'SERVER_WORKER_AI_VIRTUAL_400_V1:session' };
+    const response = await invoke('post', path, path.endsWith('batch') ? [row] : row);
+    expect(response.statusCode).toBe(403); expect(fixture.writes).toEqual([]);
+  });
   it('preserves shipped header-less legacy autosave without interpreting capital/mode as policy', async () => {
     const body = { indicators: [{ id: 'ema', params: { fast: 9 } }], limits: { tradingCapital: 1000, liveTestMode: false } };
     expect(containsReservedAccountingFields(body)).toBe(false);
