@@ -234,7 +234,7 @@ describe('virtual PAPER 400 session HTTP boundary', () => {
     expect(second.body.session.state.session.sessionId).toBe(firstSessionId);
   });
 
-  it('STOP preserves exact session identity and is idempotent after the stop', async () => {
+  it('STOP preserves exact session identity and a later START resumes the same ledger', async () => {
     const started = await request(app)
       .put('/api/data/virtual-paper-400-session')
       .set('x-operator-pin', '654321')
@@ -263,6 +263,17 @@ describe('virtual PAPER 400 session HTTP boundary', () => {
     expect(stoppedAgain.status).toBe(200);
     expect(stoppedAgain.body.idempotent).toBe(true);
     expect(stoppedAgain.body.session.state.session.sessionId).toBe(sessionId);
+
+    const resumed = await request(app)
+      .put('/api/data/virtual-paper-400-session')
+      .set('x-operator-pin', '654321')
+      .send({ action: 'START' });
+    expect(resumed.status).toBe(200);
+    expect(resumed.body.idempotent).toBe(false);
+    expect(resumed.body.session.status).toBe('ACTIVE');
+    expect(resumed.body.session.state.session.sessionId).toBe(sessionId);
+    expect(resumed.body.session.state.session.strategyTag).toBe(strategyTag);
+    expect(resumed.body.session.state.session.initialEquityUsd).toBe(400);
   });
 
   it('does not invent a session for STOP when state is missing', async () => {
