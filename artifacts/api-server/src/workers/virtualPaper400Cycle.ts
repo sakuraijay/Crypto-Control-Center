@@ -1,4 +1,5 @@
-import { VIRTUAL_ACTIVE_POLICY, virtualActiveProfile } from './virtualPaper400Policy';
+import { VIRTUAL_ACTIVE_POLICY, VIRTUAL_LEGACY_POLICY, virtualActiveProfile } from './virtualPaper400Policy';
+import { enforceVirtualPaper400Sizing } from './virtualPaper400Sizing';
 import { createHash } from 'node:crypto';
 import type { DbTrade } from '@workspace/db';
 import type { StrategyShadowRecord } from '../intel/strategyShadowAdapterV2';
@@ -16,6 +17,7 @@ import type { PriceLookup, ServerPaperOpenArgs, ServerPaperOpenResult } from './
 export interface VirtualPaper400CycleDeps {
   sessionRaw: string;
   policyAppliedAt?: string;
+  policyVersion?: string;
   entryBlockedReason?: string | null;
   previous: VirtualPaper400RiskState;
   rows: readonly DbTrade[];
@@ -39,7 +41,8 @@ export async function runVirtualPaper400Cycle(d: VirtualPaper400CycleDeps) {
   const account = evaluateVirtualPaper400Account({ session: session.state.session,
     previous: d.previous, rows: d.rows, now: d.now, quote: d.quote });
   const diagnostics: { symbol: string; reason: string; details?: string[] }[] = [];
-  const policy = d.policyAppliedAt ? { ...VIRTUAL_ACTIVE_POLICY, appliedAt: d.policyAppliedAt } : null;
+  const policy = d.policyAppliedAt ? { ...(d.policyVersion === VIRTUAL_LEGACY_POLICY.version
+    ? VIRTUAL_LEGACY_POLICY : VIRTUAL_ACTIVE_POLICY), appliedAt: d.policyAppliedAt } : null;
   const outcome = (status: string, reason: string | null = null) => ({
     policy, diagnostics, status, reason, at: d.now.toISOString(), mode: 'VIRTUAL_PAPER_400' as const,
     realFundsUsed: false, costBasis: 'SIMULATED / ESTIMATED' as const,
@@ -75,6 +78,7 @@ export async function runVirtualPaper400Cycle(d: VirtualPaper400CycleDeps) {
   // STOP is an entry veto. Existing SL/TP/management remains independent.
   if (!session.active) return outcome('STOPPED');
   if (d.entryBlockedReason) return outcome('BLOCKED', d.entryBlockedReason);
+  if (policy && policy.version !== VIRTUAL_ACTIVE_POLICY.version) return outcome('BLOCKED', 'POLICY_SAFE_BOUNDARY_PENDING');
   if (!risk.entryAllowed) return outcome('BLOCKED', risk.blockReasons.join('; '));
   if (account.lastOpenAtMs !== null && d.now.getTime() - account.lastOpenAtMs < (policy?.cooldownMinutes ?? 30) * 60_000) {
     return outcome('NO_TRADE', 'VIRTUAL_COOLDOWN');
@@ -125,13 +129,13 @@ export async function runVirtualPaper400Cycle(d: VirtualPaper400CycleDeps) {
     const checked = validateExecutionEligibleSnapshot(cost, { market: market.marketToken,
       isLong, orderType: 'MarketIncrease', notionalUsd: requested }, submitNow.getTime());
     if (!checked.ok || checked.effectiveRoundTripCostUsd > 0.40) { reject('COST_INVALID_OR_OVER_CAP'); continue; }
-    const sizing = enforceOrderSizing({ requestedSizeUsd: requested, requestedCollateralUsd: requested / profile.derivedLimits.maxLeverage,
+    const sizing = (policy ? enforceVirtualPaper400Sizing : enforceOrderSizing)({ requestedSizeUsd: requested, requestedCollateralUsd: requested / profile.derivedLimits.maxLeverage,
       requestedLeverage: profile.derivedLimits.maxLeverage, positionSizingCapitalUsd: capital, stopDistanceFraction: stopDistance,
       costSnapshot: cost, liquidityCapUsd: profile.derivedLimits.maxTotalExposureUsd,
       tierNotionalCapUsd: policy ? profile.derivedLimits.maxTotalExposureUsd : profile.derivedLimits.maxMarginPerTradeUsd, defensiveMode: policy ? false : risk.sizeFactor < 1,
       liveMode: false, canaryActive: false, riskBudgetPct: policy ? activeRiskPct : profile.derivedLimits.maxRiskPerTradePct,
       expected: { market: market.marketToken, isLong, orderType: 'MarketIncrease' }, now: submitNow });
-    if (!sizing.ok) { reject('SIZING_REJECTED'); continue; }
+    if (!sizing.ok) { reject(policy ? sizing.reason : 'SIZING_REJECTED'); continue; }
     if (policy && (Math.abs(sizing.finalNotionalUsd - requested) > 1e-8
       || sizing.finalNotionalUsd * stopDistance + checked.effectiveRoundTripCostUsd > capital * activeRiskPct / 100 + 1e-8)) {
       reject('EXACT_SIZE_OR_TOTAL_RISK_MISMATCH'); continue;

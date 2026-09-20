@@ -1,4 +1,4 @@
-import { VIRTUAL_ACTIVE_POLICY } from './virtualPaper400Policy';
+import { VIRTUAL_ACTIVE_POLICY, VIRTUAL_LEGACY_POLICY } from './virtualPaper400Policy';
 import { eq, sql } from 'drizzle-orm';
 import { evaluateVirtualPaper400SessionState, VIRTUAL_PAPER_400_SESSION_STATE_KEY, VIRTUAL_PAPER_400_LOCK_ID } from './virtualPaper400SessionState';
 import { initialVirtualPaper400RiskState, parseVirtualPaper400RiskState, virtualPaper400RiskKey,
@@ -60,13 +60,13 @@ export async function maybeRunVirtualPaper400Cycle(args: {
     const policyKey = `virtual_paper_400_policy_v1:${identity.sessionId}`;
     const policyRaw = await read(policyKey);
     let applied = policyRaw ? JSON.parse(policyRaw) as { version: string; appliedAt: string; sessionId: string } : null;
-    if (policyRaw !== null && (!applied || applied.version !== VIRTUAL_ACTIVE_POLICY.version || applied.sessionId !== identity.sessionId
+    if (policyRaw !== null && (!applied || (applied.version !== VIRTUAL_ACTIVE_POLICY.version && applied.version !== VIRTUAL_LEGACY_POLICY.version) || applied.sessionId !== identity.sessionId
       || !Number.isFinite(Date.parse(applied.appliedAt)) || Date.parse(applied.appliedAt) > now.getTime())) {
       throw new Error('VIRTUAL_POLICY_INVALID');
     }
     const executor = getServerPaperStatus();
     const accountBefore = evaluateVirtualPaper400Account({ session: identity, previous, rows, now, quote: args.quote });
-    if (!applied && session.active && !accountBefore.held.length && !executor.pendingClose && !executor.unresolved) {
+    if (applied?.version !== VIRTUAL_ACTIVE_POLICY.version && session.active && !accountBefore.held.length && !executor.pendingClose && !executor.unresolved) {
       applied = { version: VIRTUAL_ACTIVE_POLICY.version, appliedAt: now.toISOString(), sessionId: identity.sessionId };
       await write(policyKey, applied);
     }
@@ -78,7 +78,7 @@ export async function maybeRunVirtualPaper400Cycle(args: {
       // remain PAPER estimates, never observed real execution.
       return result.ok ? { ...result.snapshot, source: 'PAPER_GMX_ESTIMATE' } : null;
     };
-    const result = await runVirtualPaper400Cycle({ sessionRaw: raw!, policyAppliedAt: applied?.appliedAt,
+    const result = await runVirtualPaper400Cycle({ sessionRaw: raw!, policyAppliedAt: applied?.appliedAt, policyVersion: applied?.version,
       entryBlockedReason: executor.unresolved || executor.pendingClose ? 'EXECUTOR_RECOVERY_PENDING'
         : !applied ? 'POLICY_SAFE_BOUNDARY_PENDING' : null, previous, rows, now, clock: () => new Date(),
       engineMode: process.env.WORKER_ENGINE_MODE ?? 'PAPER', quote: args.quote,

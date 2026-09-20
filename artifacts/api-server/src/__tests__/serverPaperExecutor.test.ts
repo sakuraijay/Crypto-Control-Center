@@ -184,8 +184,34 @@ beforeEach(() => {
 describe('VIRTUAL/PAPER400 real executor namespace lifecycle', () => {
   const session = buildVirtualPaper400Session('executor-session', new Date('2026-08-21T00:00:00Z'));
 
-  it('accepts the dedicated active profile only in the virtual namespace', async () => {
-    const args = { ...BASE_OPEN, sizeUsd: 80, leverage: 2,
+  it('cannot use the virtual 10x profile when the process is LIVE', async () => {
+    const previousMode = process.env.WORKER_ENGINE_MODE;
+    process.env.WORKER_ENGINE_MODE = 'LIVE';
+    try {
+      expect(await openServerPaperPosition({ ...BASE_OPEN, strategy: session.strategyTag, sizeUsd: 80, leverage: 10,
+        stopPriceUsd: 49_000, riskProfileSnapshot: virtualActiveProfile(400, new Date().toISOString()) }))
+        .toMatchObject({ ok: false, reason: 'VIRTUAL_PAPER_MODE_REQUIRED' });
+      expect(db.insert).not.toHaveBeenCalled();
+    } finally {
+      if (previousMode === undefined) delete process.env.WORKER_ENGINE_MODE; else process.env.WORKER_ENGINE_MODE = previousMode;
+    }
+  });
+
+  it.each([4, 11, NaN])('rejects out-of-range virtual leverage %s before writes', async leverage => {
+    expect((await openServerPaperPosition({ ...BASE_OPEN, strategy: session.strategyTag, sizeUsd: 80, leverage,
+      stopPriceUsd: 49_000, riskProfileSnapshot: virtualActiveProfile(400, new Date().toISOString()) })).ok).toBe(false);
+    expect(db.insert).not.toHaveBeenCalled();
+  });
+  it('rechecks collateral/stop buffer and risk budget at the executor boundary', async () => {
+    vi.mocked(getPaperCostBinding).mockReturnValue({ ...FRESH_BINDING, estEntryCostUsd: .015, estExitCostUsd: .015 });
+    expect((await openServerPaperPosition({ ...BASE_OPEN, strategy: session.strategyTag, sizeUsd: 10, leverage: 10,
+      stopPriceUsd: 49_000, riskProfileSnapshot: virtualActiveProfile(400, new Date().toISOString()) })).ok).toBe(false);
+    expect(db.insert).not.toHaveBeenCalled();
+  });
+
+  it.each([5, 10])('accepts the dedicated %sx active profile only in the virtual namespace', async leverage => {
+    vi.mocked(getPaperCostBinding).mockReturnValue({ ...FRESH_BINDING, estEntryCostUsd: .015, estExitCostUsd: .015 });
+    const args = { ...BASE_OPEN, sizeUsd: 80, leverage,
       riskProfileSnapshot: virtualActiveProfile(400, new Date().toISOString()) };
     const standard = await openServerPaperPosition(args);
     expect(standard.ok).toBe(false);

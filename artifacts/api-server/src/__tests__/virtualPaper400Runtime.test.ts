@@ -60,6 +60,42 @@ function stoppedSession() {
   fixture.rows.set(VIRTUAL_PAPER_400_SESSION_STATE_KEY, JSON.stringify(state)); return state.session;
 }
 describe('virtual runtime routing and durable account boundary', () => {
+  it('retains the 2x policy and protection of existing inventory until it is settled', async () => {
+    const active = buildActiveVirtualPaper400SessionState('held-upgrade', new Date(Date.now() - 60_000));
+    fixture.rows.set(VIRTUAL_PAPER_400_SESSION_STATE_KEY, JSON.stringify(active));
+    fixture.rows.set(virtualPaper400RiskKey(active.session), JSON.stringify(initialVirtualPaper400RiskState(active.session)));
+    const key = `virtual_paper_400_policy_v1:${active.session.sessionId}`;
+    const old = JSON.stringify({ version: 'virtual400-active/v1', appliedAt: active.session.startedAt, sessionId: active.session.sessionId });
+    fixture.rows.set(key, old);
+    fixture.trades = [{ id: 'old-open', strategy: active.session.strategyTag, symbol: 'BTC', side: 'LONG', action: 'OPEN',
+      timestamp: new Date(Date.now() - 30_000), closeTime: 0, managedBy: 'SERVER', testMode: false,
+      settlementStatus: 'PAPER_ESTIMATED', costSource: 'PAPER_GMX_ESTIMATE', price: '50000', sizeInUsd: '80', leverage: '2',
+      stopPriceUsd: '49000', takeProfitPriceUsd: '52000', estEntryCostUsd: '.015', estExitCostUsd: '.015',
+      fundingRatePerHour: '.00001', borrowingRatePerHour: '.00001' }];
+    const before = JSON.stringify(fixture.trades);
+    await maybeRunVirtualPaper400Cycle(args);
+    expect(fixture.rows.get(key)).toBe(old); expect(JSON.stringify(fixture.trades)).toBe(before);
+    expect(JSON.parse(fixture.rows.get(VIRTUAL_PAPER_400_RUNTIME_KEY)!).reason).toBe('POLICY_SAFE_BOUNDARY_PENDING');
+    expect(openServerPaperPosition).not.toHaveBeenCalled(); expect(closeServerPaperPosition).not.toHaveBeenCalled();
+  });
+  it('migrates v1 only after recovery clears, preserving the active session and risk checkpoint', async () => {
+    const active = buildActiveVirtualPaper400SessionState('upgrade-test', new Date(Date.now() - 60_000));
+    const raw = JSON.stringify(active); fixture.rows.set(VIRTUAL_PAPER_400_SESSION_STATE_KEY, raw);
+    const key = `virtual_paper_400_policy_v1:${active.session.sessionId}`;
+    const old = JSON.stringify({ version: 'virtual400-active/v1', appliedAt: active.session.startedAt, sessionId: active.session.sessionId });
+    fixture.rows.set(key, old); fixture.pending = true;
+    await maybeRunVirtualPaper400Cycle(args);
+    expect(fixture.rows.get(key)).toBe(old);
+    expect(JSON.parse(fixture.rows.get(VIRTUAL_PAPER_400_RUNTIME_KEY)!).policy.maxLeverage).toBe(2);
+    expect(openServerPaperPosition).not.toHaveBeenCalled();
+    fixture.pending = false; await maybeRunVirtualPaper400Cycle(args);
+    const upgraded = fixture.rows.get(key)!;
+    expect(JSON.parse(upgraded).version).toBe('virtual400-active/v2');
+    expect(JSON.parse(fixture.rows.get(VIRTUAL_PAPER_400_RUNTIME_KEY)!).policy).toMatchObject({ minLeverage: 5, maxLeverage: 10 });
+    await maybeRunVirtualPaper400Cycle(args);
+    expect(fixture.rows.get(key)).toBe(upgraded); expect(fixture.rows.get(VIRTUAL_PAPER_400_SESSION_STATE_KEY)).toBe(raw);
+    expect(JSON.parse(fixture.rows.get(virtualPaper400RiskKey(active.session))!).equityHwmUsd).toBe(400);
+  });
   it('exposes the actual in-flight market batch, then stops presenting it as running', async () => {
     const active = buildActiveVirtualPaper400SessionState('activity-test', new Date(Date.now() - 1_000));
     fixture.rows.set(VIRTUAL_PAPER_400_SESSION_STATE_KEY, JSON.stringify(active));
@@ -106,11 +142,11 @@ describe('virtual runtime routing and durable account boundary', () => {
     expect(runStrategyShadowWorkerReadOnly).toHaveBeenCalledWith(expect.objectContaining({ expectedSymbols: ['BTC', 'ETH', 'SOL'] }));
     const key = `virtual_paper_400_policy_v1:${active.session.sessionId}`;
     const first = fixture.rows.get(key);
-    expect(JSON.parse(first!).version).toBe('virtual400-active/v1');
+    expect(JSON.parse(first!).version).toBe('virtual400-active/v2');
     await maybeRunVirtualPaper400Cycle({ ...args, cycleNumber: 2 });
     expect(fixture.rows.get(key)).toBe(first);
     expect(fixture.rows.get(VIRTUAL_PAPER_400_SESSION_STATE_KEY)).toBe(raw);
-    expect(JSON.parse(fixture.rows.get(VIRTUAL_PAPER_400_RUNTIME_KEY)!).policy.maxLeverage).toBe(2);
+    expect(JSON.parse(fixture.rows.get(VIRTUAL_PAPER_400_RUNTIME_KEY)!).policy.maxLeverage).toBe(10);
   });
   it('falls through to Standard only when the virtual session is absent', async () => {
     expect(await maybeRunVirtualPaper400Cycle(args)).toBe(false);

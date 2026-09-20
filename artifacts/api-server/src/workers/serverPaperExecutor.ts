@@ -1,4 +1,5 @@
-import { isVirtualActiveProfile } from './virtualPaper400Policy';
+import { isVirtualActiveProfile, VIRTUAL_ACTIVE_POLICY } from './virtualPaper400Policy';
+import { virtualLeverageCeiling } from './virtualPaper400Sizing';
 /**
  * serverPaperExecutor — 서버 권위 PAPER 체결·관리·정산 (Task #111).
  *
@@ -306,8 +307,14 @@ export async function openServerPaperPosition(
     return record({ ok: false, reason: "위험 프로필 감사 스냅샷 없음/손상 — 진입 거부" });
   }
 
-  if (isVirtualActiveProfile(args.riskProfileSnapshot) && (
-    args.leverage > 2 || args.sizeUsd > args.riskProfileSnapshot.derivedLimits.maxTotalExposureUsd
+  const virtualActive = isVirtualPaper400StrategyTag(strategy) && isVirtualActiveProfile(args.riskProfileSnapshot);
+  const virtualV2 = virtualActive && args.riskProfileSnapshot.derivedLimits.maxLeverage === VIRTUAL_ACTIVE_POLICY.maxLeverage;
+  if (virtualV2 && (process.env.WORKER_ENGINE_MODE ?? 'PAPER') !== 'PAPER') {
+    return record({ ok: false, reason: 'VIRTUAL_PAPER_MODE_REQUIRED' });
+  }
+  if (virtualActive && (
+    args.leverage < (virtualV2 ? VIRTUAL_ACTIVE_POLICY.minLeverage : 1)
+    || args.leverage > args.riskProfileSnapshot.derivedLimits.maxLeverage || args.sizeUsd > args.riskProfileSnapshot.derivedLimits.maxTotalExposureUsd
     || args.sizeUsd / args.leverage > args.riskProfileSnapshot.derivedLimits.maxMarginPerTradeUsd)) {
     return record({ ok: false, reason: 'VIRTUAL_ACTIVE_POLICY_CAP' });
   }
@@ -331,7 +338,8 @@ export async function openServerPaperPosition(
   if (!fin(args.sizeUsd) || args.sizeUsd < GMX_MIN_POSITION_NOTIONAL_USD) {
     return record({ ok: false, reason: `sizeUsd 비정상 (${args.sizeUsd}) — 진입 거부` });
   }
-  if (!fin(args.leverage) || args.leverage < 1 || args.leverage > RISK_POLICY.baseMaxLeverage) {
+  const leverageCap = virtualV2 ? VIRTUAL_ACTIVE_POLICY.maxLeverage : RISK_POLICY.baseMaxLeverage;
+  if (!fin(args.leverage) || args.leverage < 1 || args.leverage > leverageCap) {
     return record({ ok: false, reason: `leverage 비정상 (${args.leverage}) — 최대 ${RISK_POLICY.baseMaxLeverage}x, 진입 거부` });
   }
 
@@ -369,6 +377,15 @@ export async function openServerPaperPosition(
     }
     stop.plan.triggerPriceUsd = args.stopPriceUsd;
     stop.plan.stopDistanceFraction = distance;
+  }
+
+  if (virtualV2) {
+    const riskWithCostReserve = args.sizeUsd * stop.plan.stopDistanceFraction + VIRTUAL_ACTIVE_POLICY.maxRoundTripCostUsd;
+    if (args.stopPriceUsd === undefined || args.leverage > virtualLeverageCeiling(args.sizeUsd, riskWithCostReserve)
+      || riskWithCostReserve > args.riskProfileSnapshot.derivedLimits.maxRiskPerTradeUsd + 1e-8
+      || binding.estEntryCostUsd + binding.estExitCostUsd > VIRTUAL_ACTIVE_POLICY.maxRoundTripCostUsd) {
+      return record({ ok: false, reason: 'VIRTUAL_COLLATERAL_BUFFER_OR_RISK_CAP' });
+    }
   }
 
   let tp: number | null = null;

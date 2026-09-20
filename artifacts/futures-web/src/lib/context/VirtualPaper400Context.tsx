@@ -11,7 +11,7 @@ export interface VirtualPaper400Snapshot {
   activity?: VirtualActivity | null;
   activityFresh?: boolean;
   runtime: null | {
-    policy?: { version: string; appliedAt: string; symbols: string[]; riskPerTradePct: number; maxLeverage: number; cooldownMinutes: number } | null;
+    policy?: { version: string; appliedAt: string; symbols: string[]; riskPerTradePct: number; minLeverage?: number; maxLeverage: number; cooldownMinutes: number } | null;
     diagnostics?: { symbol: string; reason: string; details?: string[] }[];
     analysis?: { symbol: string; reason: string }[];
     journal?: { id: string; symbol: string; side: string; openedAt: string | null; closedAt: string;

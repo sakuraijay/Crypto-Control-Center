@@ -21,6 +21,15 @@ async function flush() { await act(async () => { await Promise.resolve(); }); }
 beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date(at)); vi.clearAllMocks(); });
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 describe('server authority after retiring the browser trading engine', () => {
+ it('restores the applied 5–10x range after remount without browser writes', async () => {
+  const data = snapshot(); data.runtime!.policy = { ...data.runtime!.policy!, version: 'virtual400-active/v2', minLeverage: 5, maxLeverage: 10 };
+  const fetcher = vi.fn(async () => ({ ok: true, json: async () => data })); vi.stubGlobal('fetch', fetcher);
+  const view = mount(); await flush(); expect(screen.getByTestId('virtual-active-policy').textContent).toContain('5–10x');
+  view.unmount(); mount(); await flush();
+  expect(screen.getByTestId('virtual-active-policy').textContent).toContain('적극적 가상 매매');
+  expect(screen.getByTestId('virtual-active-policy').textContent).toContain('5–10x');
+  expect(fetcher.mock.calls.every((call: any) => !call[1]?.method)).toBe(true);
+ });
  it('restores server policy, losses and ACTIVE state after closing and reopening with GET only', async () => {
   const fetcher = vi.fn(async () => ({ ok: true, json: async () => snapshot() })); vi.stubGlobal('fetch', fetcher);
   let view = mount(); await flush();

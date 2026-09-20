@@ -243,7 +243,8 @@ describe('VIRTUAL 400 deterministic REPLAY through the real PAPER executor', () 
     expect(result.status).toBe('OPENED');
     expect(store.trades[0]).toMatchObject({ strategy: session.session.strategyTag, stopPriceUsd: '49000' });
     expect(Number(store.trades[0].sizeInUsd)).toBeLessThanOrEqual(active ? 80 : 50);
-    expect(Number(store.trades[0].leverage)).toBe(active ? 2 : 1);
+    expect(Number(store.trades[0].leverage)).toBe(active ? 10 : 1);
+    expect(Number(store.trades[0].collateralUsd)).toBe(Number(store.trades[0].sizeInUsd) / (active ? 10 : 1));
     // Simulated process restart: no cached worker state is needed to protect the OPEN.
     __resetServerPaperStateForTests();
     await manageServerPaperTick(quoteFn(48_950), REPLAY_NOW + H);
