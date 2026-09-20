@@ -48,9 +48,10 @@ vi.mock('../lib/paperCostCache', () => ({
   getPaperCostBinding: vi.fn(() => null),
 }));
 
-import { db } from '@workspace/db';
+import { db, tradesTable } from '@workspace/db';
 import { getPaperCostBinding } from '../lib/paperCostCache';
 import { buildProfitProtectKey, manilaDayKey } from '../lib/profitProtection';
+import { buildVirtualPaper400Session, deriveVirtualPaper400Ledger, virtualPaper400StrategyTag } from '../workers/virtualPaper400Ledger';
 import type { Candle } from '../intel/types';
 import type { CandleFrameInput, StrategyTimeframe } from '../intel/candleFoundationV2';
 import { runStrategyShadowSymbol } from '../intel/strategyShadowRunnerV2';
@@ -177,6 +178,170 @@ beforeEach(() => {
   vi.mocked(db.update).mockImplementation(() => makeChain(() => [{ id: 'updated' }]) as never);
   vi.mocked(db.delete).mockImplementation(() => makeChain(() => 0) as never);
   vi.mocked(db.transaction).mockImplementation(async (fn) => fn(db as never));
+});
+
+describe('VIRTUAL/PAPER400 real executor namespace lifecycle', () => {
+  const session = buildVirtualPaper400Session('executor-session', new Date('2026-08-21T00:00:00Z'));
+
+  it('does not reconstruct a Standard CASH intent for virtual inventory', async () => {
+    vi.mocked(db.select).mockImplementation(() => makeChain(() => [serverOpenRow({ strategy: session.strategyTag })]) as never);
+    const direction = vi.fn(async () => 'CASH');
+    await reconcileStartupCloseIntent(direction);
+    expect(direction).not.toHaveBeenCalled();
+    expect(db.insert).not.toHaveBeenCalled();
+  });
+
+  it('legacy Standard pendingClose cannot close virtual inventory but its SL remains active', async () => {
+    await requestServerPaperCloseAll('CASH_TRANSITION');
+    vi.mocked(db.insert).mockClear();
+    const open = serverOpenRow({ strategy: session.strategyTag });
+    vi.mocked(db.select).mockImplementation(() => makeChain(() => [open]) as never);
+    await manageServerPaperTick(() => ({ priceUsd: 50_100, ageMs: 0 }));
+    expect(db.insert).not.toHaveBeenCalled();
+    expect(getServerPaperStatus().pendingClose).toBeNull();
+    let reads = 0;
+    vi.mocked(db.select).mockImplementation(() => makeChain(() => ++reads <= 2 ? [open] : []) as never);
+    await manageServerPaperTick(() => ({ priceUsd: 49_400, ageMs: 0 }));
+    expect(getServerPaperStatus().lastCloseAction).toMatchObject({ reason: 'STOP_LOSS', ok: true });
+  });
+
+  it.each(['arbitrary', '', 'SERVER_WORKER_AI_VIRTUAL_400_V1:', 'SERVER_WORKER_AI_VIRTUAL_400_V1:bad session'])(
+    'rejects invalid OPEN namespace %s before writes', async strategy => {
+      expect((await openServerPaperPosition({ ...BASE_OPEN, strategy })).ok).toBe(false);
+      expect(db.insert).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['SERVER_WORKER_AI', virtualPaper400StrategyTag('other-session'), 'arbitrary'])(
+    'rejects OPEN inventory contamination from %s', async strategy => {
+      vi.mocked(db.select).mockImplementation(() => makeChain(() => [serverOpenRow({ strategy, symbol: 'ETH' })]) as never);
+      expect((await openServerPaperPosition({ ...BASE_OPEN, strategy: session.strategyTag })).ok).toBe(false);
+      expect(db.insert).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['SERVER_WORKER_AI', virtualPaper400StrategyTag('other-session'), 'arbitrary'])(
+    'rejects cross-scope FULL and REDUCE70 against %s', async strategy => {
+      vi.mocked(db.select).mockImplementation(() => makeChain(() => [serverOpenRow({ strategy })]) as never);
+      for (const kind of ['FULL', 'REDUCE70'] as const) {
+        expect((await closeServerPaperPosition({
+          openTradeId: 'open-1', expectedStrategy: session.strategyTag,
+          kind, reason: 'test', quote: BASE_OPEN.quote,
+        })).ok).toBe(false);
+      }
+      expect(db.insert).not.toHaveBeenCalled();
+      expect(db.update).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['FULL', 'REDUCE70'] as const)(
+    '%s preserves OPEN namespace through protection, restart, duplicate close and net ledger', async kind => {
+      // Stateful persistence at the real executor seam; no database, quotes or cost network calls.
+      const trades: Record<string, unknown>[] = [];
+      const reservations = new Map<string, Record<string, unknown>>();
+      vi.mocked(db.insert).mockImplementation((table) => {
+        let pendingValues: Record<string, unknown> = {};
+        const chain = makeChain(() => {
+          if (table !== tradesTable) {
+            if (reservations.has(String(pendingValues.key))) return [];
+            reservations.set(String(pendingValues.key), { ...pendingValues });
+            return [{ key: pendingValues.key }];
+          }
+          trades.push({ ...pendingValues });
+          return [{ id: pendingValues.id }];
+        });
+        chain.values = (values: Record<string, unknown>) => { pendingValues = values; return chain; };
+        return chain as never;
+      });
+      const opened = await openServerPaperPosition({
+        ...BASE_OPEN, strategy: session.strategyTag, nowMs: session.startedAtMs,
+      });
+      expect(opened.ok).toBe(true);
+      const open = trades[0];
+      expect(open).toMatchObject({ strategy: session.strategyTag, action: 'OPEN', managedBy: 'SERVER' });
+      expect(Number(open.stopPriceUsd)).toBeGreaterThan(0);
+
+      vi.mocked(db.update).mockImplementation((table) => {
+        const chain = makeChain(() => [{ id: open.id }]);
+        chain.set = (values: Record<string, unknown>) => {
+          if (table === tradesTable) Object.assign(open, values);
+          else for (const reservation of reservations.values()) Object.assign(reservation, values);
+          return chain;
+        };
+        return chain as never;
+      });
+      __resetServerPaperStateForTests(); // Durable OPEN, not current selection, owns exits.
+      if (kind === 'REDUCE70') {
+        let reads = 0;
+        vi.mocked(db.select).mockImplementation(() => makeChain(() => {
+          reads += 1;
+          return reads === 1 ? [{ ...open }] : reads === 2 ? [] : [...reservations.values()];
+        }) as never);
+        const reduced = await reduceServerPaper70({
+          openRow: { ...open } as never, quote: { priceUsd: 51_000, ageMs: 0 },
+          nowMs: session.startedAtMs + 3_600_000,
+        });
+        expect(reduced.ok).toBe(true);
+        expect(Number(open.sizeInUsd)).toBeCloseTo(90);
+        expect(JSON.parse(String([...reservations.values()][0].value)).status).toBe('CONFIRMED');
+        __resetServerPaperStateForTests();
+        vi.mocked(db.select).mockImplementation(() => makeChain(() => [...reservations.values()]) as never);
+        const duplicateReduction = await reduceServerPaper70({
+          openRow: { ...open } as never, quote: { priceUsd: 51_000, ageMs: 0 },
+          nowMs: session.startedAtMs + 3_600_000,
+        });
+        expect(duplicateReduction.ok).toBe(false);
+        expect(trades.filter(row => row.action === 'CLOSE')).toHaveLength(1);
+      }
+
+      // Entry disabled via the existing lifecycle guard; protection tick remains independent.
+      expect((await openServerPaperPosition({ ...BASE_OPEN, strategy: session.strategyTag }, () => false)).ok).toBe(false);
+      let reads = 0;
+      vi.mocked(db.select).mockImplementation(() => makeChain(() => ++reads <= 2 ? [{ ...open }] : []) as never);
+      await manageServerPaperTick(() => ({ priceUsd: 49_400, ageMs: 0 }), session.startedAtMs + 7_200_000);
+      expect(getServerPaperStatus().lastCloseAction).toMatchObject({ reason: 'STOP_LOSS', ok: true });
+      expect(Number(open.closeTime)).toBeGreaterThan(0);
+
+      __resetServerPaperStateForTests();
+      vi.mocked(db.select).mockImplementation(() => makeChain(() => [{ ...open }]) as never);
+      const duplicate = await closeServerPaperPosition({
+        openTradeId: String(open.id), expectedStrategy: session.strategyTag,
+        kind: 'FULL', reason: 'restart-duplicate', quote: BASE_OPEN.quote,
+      });
+      expect(duplicate).toMatchObject({ ok: false, alreadyClosed: true });
+      const closes = trades.filter(row => row.action === 'CLOSE');
+      expect(closes).toHaveLength(kind === 'FULL' ? 1 : 2);
+      expect(closes.every(row => row.strategy === session.strategyTag)).toBe(true);
+      const ledger = deriveVirtualPaper400Ledger(session, closes as never);
+      expect(ledger.ok).toBe(true);
+      if (ledger.ok) {
+        expect(ledger.value.realizedEquityUsd).toBeCloseTo(400 + ledger.value.realizedNetPnlUsd);
+        expect(ledger.value.modeledTradingCostUsd).toBeGreaterThan(0);
+        expect(ledger.value.realizedNetPnlUsd).toBeLessThan(ledger.value.realizedGrossPnlUsd);
+      }
+    },
+  );
+
+  it.each(['FULL', 'REDUCE70'] as const)('rejects cross-session %s durable repair evidence', async kind => {
+    for (const strategy of ['SERVER_WORKER_AI', virtualPaper400StrategyTag('other-session')]) {
+      __resetServerPaperStateForTests();
+      const open = serverOpenRow({ strategy: session.strategyTag });
+      const close = serverOpenRow({
+        id: 'foreign-close', action: 'CLOSE', strategy, closesTradeId: open.id,
+        closeKind: kind, sizeInUsd: kind === 'FULL' ? '300' : '210',
+        size: kind === 'FULL' ? '300' : '210', pnl: '6', netPnlEstimatedUsd: '4',
+      });
+      let reads = 0;
+      vi.mocked(db.select).mockImplementation(() => makeChain(() => ++reads === 1 ? [open] : [close]) as never);
+      vi.mocked(db.insert).mockImplementation(() => makeChain(() => []) as never);
+      const result = await closeServerPaperPosition({
+        openTradeId: open.id, expectedStrategy: session.strategyTag, kind,
+        reason: 'restart-repair', quote: BASE_OPEN.quote,
+      });
+      expect(result.ok).toBe(false);
+      expect(db.update).not.toHaveBeenCalled();
+    }
+  });
 });
 
 // ── OPEN — 정상 경로 ──────────────────────────────────────────────────────────

@@ -1,0 +1,1482 @@
+[1m[43m DEPRECATED [49m[22m [33m`test.poolOptions` was removed in Vitest 4. All previous `poolOptions` are now top-level options. Please, refer to the migration guide: https://vitest.dev/guide/migration#pool-rework[39m
+
+[1m[30m[46m RUN [49m[39m[22m [36mv4.1.10 [39m[90m/tmp/ccc-virtual400-executor/artifacts/api-server[39m
+
+[90mstdout[2m | src/__tests__/serverPaperE2eLifecycle.test.ts[2m > [22m[2mE2E §1 — OPEN → SL 터치 → net settlement → 중복 0건[2m > [22m[2m전 수명주기 round-trip: 저장된 OPEN 값 그대로 정산
+[22m[39m[ServerPaper] OPEN BTC LONG $300.00 @50000 lev=3x stop=49500.0000 tp=52000 (decision=dec-e2e-1)
+
+[90mstdout[2m | src/__tests__/serverPaperE2eLifecycle.test.ts[2m > [22m[2mE2E §1 — OPEN → SL 터치 → net settlement → 중복 0건[2m > [22m[2m전 수명주기 round-trip: 저장된 OPEN 값 그대로 정산
+[22m[39m[ServerPaper] CLOSE(FULL) BTC $300.00 @49400 reason=STOP_LOSS gross=$-3.60 net=$-5.22
+
+[90mstdout[2m | src/__tests__/serverPaperE2eLifecycle.test.ts[2m > [22m[2mE2E §1 — OPEN → SL 터치 → net settlement → 중복 0건[2m > [22m[2mCLOSE insert 후 OPEN 조건부 갱신 실패는 transaction 전체를 rollback한다
+[22m[39m[ServerPaper] OPEN BTC LONG $300.00 @50000 lev=3x stop=49500.0000 tp=52000 (decision=dec-e2e-1)
+
+[90mstdout[2m | src/__tests__/serverPaperE2eLifecycle.test.ts[2m > [22m[2mE2E §2 — TP 터치[2m > [22m[2mTP 도달 시 reason=TAKE_PROFIT, net = gross − 비용
+[22m[39m[ServerPaper] OPEN BTC LONG $300.00 @50000 lev=3x stop=49500.0000 tp=52000 (decision=dec-e2e-1)
+
+[90mstdout[2m | src/__tests__/serverPaperE2eLifecycle.test.ts[2m > [22m[2mE2E §2 — TP 터치[2m > [22m[2mTP 도달 시 reason=TAKE_PROFIT, net = gross − 비용
+[22m[39m[ServerPaper] CLOSE(FULL) BTC $300.00 @52100 reason=TAKE_PROFIT gross=$12.60 net=$10.97
+
+[90mstdout[2m | src/__tests__/serverPaperE2eLifecycle.test.ts[2m > [22m[2mE2E §3/§4 — CASH·RISK 전환 pendingClose[2m > [22m[2mCASH_TRANSITION: pendingClose 최우선 청산 + worker_state 키 정리
+[22m[39m[ServerPaper] OPEN BTC LONG $300.00 @50000 lev=3x stop=49500.0000 tp=52000 (decision=dec-e2e-1)
+
+[90mstdout[2m | src/__tests__/serverPaperE2eLifecycle.test.ts[2m > [22m[2mE2E §3/§4 — CASH·RISK 전환 pendingClose[2m > [22m[2mCASH_TRANSITION: pendingClose 최우선 청산 + worker_state 키 정리
+[22m[39m[ServerPaper] CLOSE(FULL) BTC $300.00 @50100 reason=CASH_TRANSITION gross=$0.60 net=$-1.02
+
+[90mstdout[2m | src/__tests__/serverPaperE2eLifecycle.test.ts[2m > [22m[2mE2E §3/§4 — CASH·RISK 전환 pendingClose[2m > [22m[2mRISK_CLOSE_ALL 사유가 CLOSE 행에 결속된다
+[22m[39m[ServerPaper] OPEN BTC LONG $300.00 @50000 lev=3x stop=49500.0000 tp=52000 (decision=dec-e2e-1)
+
+[90mstdout[2m | src/__tests__/serverPaperE2eLifecycle.test.ts[2m > [22m[2mE2E §3/§4 — CASH·RISK 전환 pendingClose[2m > [22m[2mRISK_CLOSE_ALL 사유가 CLOSE 행에 결속된다
+[22m[39m[ServerPaper] CLOSE(FULL) BTC $300.00 @50000 reason=RISK_CLOSE_ALL gross=$0.00 net=$-1.62
+
+[90mstdout[2m | src/__tests__/serverPaperE2eLifecycle.test.ts[2m > [22m[2mE2E §5 — 재시작 복구[2m > [22m[2m프로세스 재시작 시뮬레이션: 메모리 리셋 후 DB만으로 pendingClose 복원·청산 완수
+[22m[39m[ServerPaper] OPEN BTC LONG $300.00 @50000 lev=3x stop=49500.0000 tp=52000 (decision=dec-e2e-1)
+
+[90mstdout[2m | src/__tests__/serverPaperE2eLifecycle.test.ts[2m > [22m[2mE2E §5 — 재시작 복구[2m > [22m[2m프로세스 재시작 시뮬레이션: 메모리 리셋 후 DB만으로 pendingClose 복원·청산 완수
+[22m[39m[ServerPaper] CLOSE(FULL) BTC $300.00 @50050 reason=CASH_TRANSITION gross=$0.30 net=$-1.32
+
+[90mstdout[2m | src/__tests__/serverPaperE2eLifecycle.test.ts[2m > [22m[2mE2E §5 — 재시작 복구[2m > [22m[2mpendingClose 없는 재시작: DB open 행이 SL/TP 계약으로 계속 관리된다
+[22m[39m[ServerPaper] OPEN BTC LONG $300.00 @50000 lev=3x stop=49500.0000 tp=52000 (decision=dec-e2e-1)
+
+[90mstdout[2m | src/__tests__/serverPaperE2eLifecycle.test.ts[2m > [22m[2mE2E §5 — 재시작 복구[2m > [22m[2mpendingClose 없는 재시작: DB open 행이 SL/TP 계약으로 계속 관리된다
+[22m[39m[ServerPaper] CLOSE(FULL) BTC $300.00 @49000 reason=STOP_LOSS gross=$-6.00 net=$-7.63
+
+[90mstdout[2m | src/__tests__/serverPaperE2eLifecycle.test.ts[2m > [22m[2mE2E §6 — 중복 진입 차단[2m > [22m[2m동일 decisionId 재시도 = unique 차단 no-op (OPEN 1건 유지)
+[22m[39m[ServerPaper] OPEN BTC LONG $300.00 @50000 lev=3x stop=49500.0000 tp=52000 (decision=dec-dup)
+
+[90mstdout[2m | src/__tests__/serverPaperE2eLifecycle.test.ts[2m > [22m[2mE2E §6 — 중복 진입 차단[2m > [22m[2m보수적 기본은 SERVER 미청산 1개에서 다른 결정도 차단
+[22m[39m[ServerPaper] OPEN BTC LONG $300.00 @50000 lev=3x stop=49500.0000 tp=52000 (decision=dec-a)
+
+[90mstdout[2m | src/__tests__/serverPaperE2eLifecycle.test.ts[2m > [22m[2mE2E §6 — 중복 진입 차단[2m > [22m[2maggressive 이름을 선택해도 동시 포지션 1개 한도는 완화되지 않는다
+[22m[39m[ServerPaper] OPEN BTC LONG $300.00 @50000 lev=3x stop=49500.0000 tp=없음 (decision=dec-slot-1)
+
+ [32m✓[39m src/__tests__/serverPaperE2eLifecycle.test.ts [2m([22m[2m10 tests[22m[2m)[22m[32m 23[2mms[22m[39m
+ [32m✓[39m src/__tests__/virtualPaper400Ledger.test.ts [2m([22m[2m12 tests[22m[2m)[22m[32m 6[2mms[22m[39m
+ [32m✓[39m src/__tests__/paperEpochNoImplicitActivation.test.ts [2m([22m[2m3 tests[22m[2m)[22m[32m 7[2mms[22m[39m
+[90mstdout[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mVIRTUAL/PAPER400 real executor namespace lifecycle[2m > [22m[2mlegacy Standard pendingClose cannot close virtual inventory but its SL remains active
+[22m[39m[ServerPaper] CLOSE(FULL) BTC $300.00 @49400 reason=STOP_LOSS gross=$-3.60 net=$-5.22
+
+[90mstdout[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mVIRTUAL/PAPER400 real executor namespace lifecycle[2m > [22m[2mFULL preserves OPEN namespace through protection, restart, duplicate close and net ledger
+[22m[39m[ServerPaper] OPEN BTC LONG $300.00 @50000 lev=3x stop=49500.0000 tp=52000 (decision=dec-1)
+
+[90mstdout[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mVIRTUAL/PAPER400 real executor namespace lifecycle[2m > [22m[2mFULL preserves OPEN namespace through protection, restart, duplicate close and net ledger
+[22m[39m[ServerPaper] CLOSE(FULL) BTC $300.00 @49400 reason=STOP_LOSS gross=$-3.60 net=$-5.23
+
+[90mstdout[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mVIRTUAL/PAPER400 real executor namespace lifecycle[2m > [22m[2mREDUCE70 preserves OPEN namespace through protection, restart, duplicate close and net ledger
+[22m[39m[ServerPaper] OPEN BTC LONG $300.00 @50000 lev=3x stop=49500.0000 tp=52000 (decision=dec-1)
+
+[90mstdout[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mVIRTUAL/PAPER400 real executor namespace lifecycle[2m > [22m[2mREDUCE70 preserves OPEN namespace through protection, restart, duplicate close and net ledger
+[22m[39m[ServerPaper] CLOSE(REDUCE70) BTC $210.00 @51000 reason=PROFIT_PROTECT_REDUCE70 gross=$4.20 net=$3.06
+
+[90mstdout[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mVIRTUAL/PAPER400 real executor namespace lifecycle[2m > [22m[2mREDUCE70 preserves OPEN namespace through protection, restart, duplicate close and net ledger
+[22m[39m[ServerPaper] CLOSE(FULL) BTC $90.00 @49400 reason=STOP_LOSS gross=$-1.08 net=$-1.58
+
+[90mstdout[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mopenServerPaperPosition — 정상[2m > [22m[2m신선 시세+완전 비용 결속이면 OPEN 성공, SL/TP 계약 포함
+[22m[39m[ServerPaper] OPEN BTC LONG $300.00 @50000 lev=3x stop=49500.0000 tp=52000 (decision=dec-1)
+
+[90mstdout[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mopenServerPaperPosition — 정상[2m > [22m[2mSHORT의 이익 반대 방향 TP는 버린다 (엉뚱한 TP 저장 금지)
+[22m[39m[ServerPaper] OPEN BTC SHORT $300.00 @50000 lev=3x stop=50500.0000 tp=없음 (decision=dec-1)
+
+[90mstdout[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mCandle/v2 Ensemble fixture at test-only PAPER boundary[2m > [22m[2mreuses one completed SHADOW fixture while the existing PAPER gate enforces stop, quote/cost, limits and idempotency
+[22m[39m[ServerPaper] OPEN BTC LONG $300.00 @50000 lev=3x stop=49500.0000 tp=52000 (decision=test-only:8da02783dbeccacef7f105383ab94fbb4743c708f15450a167f289656be89fe2)
+
+[90mstdout[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mcloseServerPaperPosition[2m > [22m[2m정상 FULL 청산 — 순손익 = gross − 진입 − 청산 − funding − borrowing
+[22m[39m[ServerPaper] CLOSE(FULL) BTC $300.00 @51000 reason=TAKE_PROFIT gross=$6.00 net=$4.38
+
+[90mstderr[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mcloseServerPaperPosition[2m > [22m[2mCLOSE 행 unique conflict → repair 경로 (OPEN 확정 UPDATE는 진행)
+[22m[39m[ServerPaper] CLOSE claim conflict (open=open-1) — repair 경로 진행
+
+[90mstdout[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mcloseServerPaperPosition[2m > [22m[2mCLOSE 행 unique conflict → repair 경로 (OPEN 확정 UPDATE는 진행)
+[22m[39m[ServerPaper] CLOSE(FULL) BTC $300.00 @49000 reason=STOP_LOSS gross=$0.00 net=불명(비용 계산 실패)
+
+[90mstdout[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mcloseServerPaperPosition[2m > [22m[2mFULL onConflictDoNothing 0행 → 기존 유일 CLOSE 증거를 재사용해 OPEN을 repair한다
+[22m[39m[ServerPaper] CLOSE(FULL) BTC $300.00 @49000 reason=STOP_LOSS gross=$0.00 net=불명(비용 계산 실패)
+
+[90mstdout[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mcloseServerPaperPosition[2m > [22m[2m비용 필드 결손 OPEN 행 → 청산은 진행하되 net=null (0 대체 금지)
+[22m[39m[ServerPaper] CLOSE(FULL) BTC $300.00 @49000 reason=STOP_LOSS gross=$-6.00 net=불명(비용 계산 실패)
+
+[90mstdout[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mcloseServerPaperPosition[2m > [22m[2mFULL CLOSE도 transaction 내부에서 OPEN 행 FOR UPDATE 잠금을 획득한다
+[22m[39m[ServerPaper] CLOSE(FULL) BTC $300.00 @49000 reason=STOP_LOSS gross=$-6.00 net=$-7.62
+
+[90mstdout[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mreduceServerPaper70[2m > [22m[2m정상 REDUCE70은 CLOSE·OPEN 축소·CONFIRMED를 한 transaction에서 완료한다
+[22m[39m[ServerPaper] CLOSE(REDUCE70) BTC $210.00 @51000 reason=PROFIT_PROTECT_REDUCE70 gross=$4.20 net=불명(비용 계산 실패)
+
+[90mstderr[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mreduceServerPaper70[2m > [22m[2mCLOSE 생성 뒤 OPEN update 예외 → atomic 실패, SUBMITTED 복구 대기 + 신규 OPEN 차단
+[22m[39m[ServerPaper] REDUCE70 atomic 처리 실패 — SUBMITTED 유지, 다음 틱 복구: OPEN update failed
+
+[90mstderr[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mreduceServerPaper70[2m > [22m[2mOPEN update 0건이고 잔여 30% 증거도 없으면 fail-closed
+[22m[39m[ServerPaper] REDUCE70 atomic 처리 실패 — SUBMITTED 유지, 다음 틱 복구: REDUCE70 OPEN 조건부 갱신 0건 — durable 상태 불명, fail-closed
+
+[90mstdout[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mreduceServerPaper70[2m > [22m[2mOPEN update 0건이어도 동시 transaction이 이미 정확히 30%로 축소했으면 성공
+[22m[39m[ServerPaper] CLOSE(REDUCE70) BTC $210.00 @51000 reason=PROFIT_PROTECT_REDUCE70 gross=$4.20 net=$3.06
+
+[90mstdout[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mreduceServerPaper70[2m > [22m[2m최종 reservation write 실패 → transaction 실패, SUBMITTED 유지로 재시도 가능
+[22m[39m[ServerPaper] CLOSE(REDUCE70) BTC $210.00 @51000 reason=PROFIT_PROTECT_REDUCE70 gross=$4.20 net=$3.06
+
+[90mstderr[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mreduceServerPaper70[2m > [22m[2m최종 reservation write 실패 → transaction 실패, SUBMITTED 유지로 재시도 가능
+[22m[39m[ServerPaper] REDUCE70 atomic 처리 실패 — SUBMITTED 유지, 다음 틱 복구: reservation final write failed
+
+[90mstdout[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mreduceServerPaper70[2m > [22m[2m동시 동일 REDUCE70은 in-process singleflight로 두 번째 transaction/CLOSE를 차단한다
+[22m[39m[ServerPaper] CLOSE(REDUCE70) BTC $210.00 @51000 reason=PROFIT_PROTECT_REDUCE70 gross=$4.20 net=$3.06
+
+[90mstdout[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mreduceServerPaper70[2m > [22m[2m재시작 SUBMITTED + 기존 CLOSE를 다음 PAPER 틱에서 정확히 한 번 복구한다
+[22m[39m[ServerPaper] CLOSE(REDUCE70) BTC $70.00 @51000 reason=PROFIT_PROTECT_REDUCE70 gross=$1.40 net=$3.06
+
+[90mstdout[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mreduceServerPaper70[2m > [22m[2mlegacy SUBMITTED의 OPEN이 이미 $30.01로 축소됐어도 $70.00 CLOSE를 재사용해 예약만 확정한다
+[22m[39m[ServerPaper] CLOSE(REDUCE70) BTC $70.00 @51000 reason=PROFIT_PROTECT_REDUCE70 gross=$1.40 net=$1.10
+
+[90mstdout[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mreduceServerPaper70[2m > [22m[2m'저장된 full-close 계획' SUBMITTED + active OPEN + 기존 FULL CLOSE를 repair·확정한다
+[22m[39m[ServerPaper] CLOSE(FULL) BTC $5.00 @51000 reason=PROFIT_PROTECT_REDUCE70 gross=$0.10 net=$-0.20
+
+[90mstdout[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mreduceServerPaper70[2m > [22m[2m'legacy 계획 필드 없음' SUBMITTED + active OPEN + 기존 FULL CLOSE를 repair·확정한다
+[22m[39m[ServerPaper] CLOSE(FULL) BTC $5.00 @51000 reason=PROFIT_PROTECT_REDUCE70 gross=$0.10 net=$-0.20
+
+[90mstderr[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mreduceServerPaper70[2m > [22m[2m'stored' active-OPEN 복구는 FULL 증거의 잘못된 'symbol'를 거부한다
+[22m[39m[ServerPaper] REDUCE70 atomic 처리 실패 — SUBMITTED 유지, 다음 틱 복구: FULL CLOSE durable 크기 증거 불일치 — 수동 조사 전 fail-closed
+
+[90mstderr[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mreduceServerPaper70[2m > [22m[2m'stored' active-OPEN 복구는 FULL 증거의 잘못된 'side'를 거부한다
+[22m[39m[ServerPaper] REDUCE70 atomic 처리 실패 — SUBMITTED 유지, 다음 틱 복구: FULL CLOSE durable 크기 증거 불일치 — 수동 조사 전 fail-closed
+
+[90mstderr[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mreduceServerPaper70[2m > [22m[2m'stored' active-OPEN 복구는 FULL 증거의 잘못된 'managedBy'를 거부한다
+[22m[39m[ServerPaper] REDUCE70 atomic 처리 실패 — SUBMITTED 유지, 다음 틱 복구: FULL CLOSE durable 크기 증거 불일치 — 수동 조사 전 fail-closed
+
+[90mstderr[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mreduceServerPaper70[2m > [22m[2m'legacy' active-OPEN 복구는 FULL 증거의 잘못된 'symbol'를 거부한다
+[22m[39m[ServerPaper] REDUCE70 atomic 처리 실패 — SUBMITTED 유지, 다음 틱 복구: FULL CLOSE durable 크기 증거 불일치 — 수동 조사 전 fail-closed
+
+[90mstderr[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mreduceServerPaper70[2m > [22m[2m'legacy' active-OPEN 복구는 FULL 증거의 잘못된 'side'를 거부한다
+[22m[39m[ServerPaper] REDUCE70 atomic 처리 실패 — SUBMITTED 유지, 다음 틱 복구: FULL CLOSE durable 크기 증거 불일치 — 수동 조사 전 fail-closed
+
+[90mstderr[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mreduceServerPaper70[2m > [22m[2m'legacy' active-OPEN 복구는 FULL 증거의 잘못된 'managedBy'를 거부한다
+[22m[39m[ServerPaper] REDUCE70 atomic 처리 실패 — SUBMITTED 유지, 다음 틱 복구: FULL CLOSE durable 크기 증거 불일치 — 수동 조사 전 fail-closed
+
+[90mstderr[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mreduceServerPaper70[2m > [22m[2m'original' OPEN 복구는 REDUCE70 증거의 잘못된 'action'를 거부한다
+[22m[39m[ServerPaper] REDUCE70 atomic 처리 실패 — SUBMITTED 유지, 다음 틱 복구: REDUCE70 durable 증거 identity/PnL 손상 — 수동 조사 전 fail-closed
+
+[90mstderr[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mreduceServerPaper70[2m > [22m[2m'original' OPEN 복구는 REDUCE70 증거의 잘못된 'symbol'를 거부한다
+[22m[39m[ServerPaper] REDUCE70 atomic 처리 실패 — SUBMITTED 유지, 다음 틱 복구: REDUCE70 durable 증거 identity/PnL 손상 — 수동 조사 전 fail-closed
+
+[90mstderr[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mreduceServerPaper70[2m > [22m[2m'original' OPEN 복구는 REDUCE70 증거의 잘못된 'side'를 거부한다
+[22m[39m[ServerPaper] REDUCE70 atomic 처리 실패 — SUBMITTED 유지, 다음 틱 복구: REDUCE70 durable 증거 identity/PnL 손상 — 수동 조사 전 fail-closed
+
+[90mstderr[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mreduceServerPaper70[2m > [22m[2m'original' OPEN 복구는 REDUCE70 증거의 잘못된 'managedBy'를 거부한다
+[22m[39m[ServerPaper] REDUCE70 atomic 처리 실패 — SUBMITTED 유지, 다음 틱 복구: REDUCE70 durable 증거 identity/PnL 손상 — 수동 조사 전 fail-closed
+
+[90mstderr[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mreduceServerPaper70[2m > [22m[2m'original' OPEN 복구는 REDUCE70 증거의 잘못된 'pnl'를 거부한다
+[22m[39m[ServerPaper] REDUCE70 atomic 처리 실패 — SUBMITTED 유지, 다음 틱 복구: REDUCE70 durable 증거 identity/PnL 손상 — 수동 조사 전 fail-closed
+
+[90mstderr[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mreduceServerPaper70[2m > [22m[2m'original' OPEN 복구는 REDUCE70 증거의 잘못된 'netPnlEstimatedUsd'를 거부한다
+[22m[39m[ServerPaper] REDUCE70 atomic 처리 실패 — SUBMITTED 유지, 다음 틱 복구: REDUCE70 durable 증거 identity/PnL 손상 — 수동 조사 전 fail-closed
+
+[90mstderr[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mreduceServerPaper70[2m > [22m[2m'already-reduced' OPEN 복구는 REDUCE70 증거의 잘못된 'action'를 거부한다
+[22m[39m[ServerPaper] REDUCE70 atomic 처리 실패 — SUBMITTED 유지, 다음 틱 복구: REDUCE70 durable 증거 identity/PnL 손상 — 수동 조사 전 fail-closed
+
+[90mstderr[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mreduceServerPaper70[2m > [22m[2m'already-reduced' OPEN 복구는 REDUCE70 증거의 잘못된 'symbol'를 거부한다
+[22m[39m[ServerPaper] REDUCE70 atomic 처리 실패 — SUBMITTED 유지, 다음 틱 복구: REDUCE70 durable 증거 identity/PnL 손상 — 수동 조사 전 fail-closed
+
+[90mstderr[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mreduceServerPaper70[2m > [22m[2m'already-reduced' OPEN 복구는 REDUCE70 증거의 잘못된 'side'를 거부한다
+[22m[39m[ServerPaper] REDUCE70 atomic 처리 실패 — SUBMITTED 유지, 다음 틱 복구: REDUCE70 durable 증거 identity/PnL 손상 — 수동 조사 전 fail-closed
+
+[90mstderr[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mreduceServerPaper70[2m > [22m[2m'already-reduced' OPEN 복구는 REDUCE70 증거의 잘못된 'managedBy'를 거부한다
+[22m[39m[ServerPaper] REDUCE70 atomic 처리 실패 — SUBMITTED 유지, 다음 틱 복구: REDUCE70 durable 증거 identity/PnL 손상 — 수동 조사 전 fail-closed
+
+[90mstderr[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mreduceServerPaper70[2m > [22m[2m'already-reduced' OPEN 복구는 REDUCE70 증거의 잘못된 'pnl'를 거부한다
+[22m[39m[ServerPaper] REDUCE70 atomic 처리 실패 — SUBMITTED 유지, 다음 틱 복구: REDUCE70 durable 증거 identity/PnL 손상 — 수동 조사 전 fail-closed
+
+[90mstderr[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mreduceServerPaper70[2m > [22m[2m'already-reduced' OPEN 복구는 REDUCE70 증거의 잘못된 'netPnlEstimatedUsd'를 거부한다
+[22m[39m[ServerPaper] REDUCE70 atomic 처리 실패 — SUBMITTED 유지, 다음 틱 복구: REDUCE70 durable 증거 identity/PnL 손상 — 수동 조사 전 fail-closed
+
+[90mstdout[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mreduceServerPaper70[2m > [22m[2m'original' OPEN onConflict 복구는 REDUCE70 persisted gross/net을 그대로 재사용한다
+[22m[39m[ServerPaper] CLOSE(REDUCE70) BTC $70.00 @51000 reason=PROFIT_PROTECT_REDUCE70 gross=$123.45 net=$-7.89
+
+[90mstdout[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mreduceServerPaper70[2m > [22m[2m'already-reduced' OPEN onConflict 복구는 REDUCE70 persisted gross/net을 그대로 재사용한다
+[22m[39m[ServerPaper] CLOSE(REDUCE70) BTC $70.00 @51000 reason=PROFIT_PROTECT_REDUCE70 gross=$123.45 net=$-7.89
+
+[90mstderr[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mreduceServerPaper70[2m > [22m[2mREDUCE70 unique-exception fallback도 persisted gross/net 증거를 재사용한다
+[22m[39m[ServerPaper] CLOSE claim conflict (open=open-1) — repair 경로 진행
+
+[90mstdout[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mreduceServerPaper70[2m > [22m[2mREDUCE70 unique-exception fallback도 persisted gross/net 증거를 재사용한다
+[22m[39m[ServerPaper] CLOSE(REDUCE70) BTC $70.00 @51000 reason=PROFIT_PROTECT_REDUCE70 gross=$222.22 net=$-8.88
+
+[90mstderr[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mreduceServerPaper70[2m > [22m[2m이미 닫힌 OPEN의 FULL 증거 '크기 불일치'는 reservation을 확정하지 않는다
+[22m[39m[ServerPaper] REDUCE70 atomic 처리 실패 — SUBMITTED 유지, 다음 틱 복구: REDUCE70 SUBMITTED의 FULL 종료 증거가 손상됨 — fail-closed
+
+[90mstderr[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mreduceServerPaper70[2m > [22m[2m이미 닫힌 OPEN의 FULL 증거 '비정상 net PnL'는 reservation을 확정하지 않는다
+[22m[39m[ServerPaper] REDUCE70 atomic 처리 실패 — SUBMITTED 유지, 다음 틱 복구: REDUCE70 SUBMITTED의 FULL 종료 증거가 손상됨 — fail-closed
+
+[90mstdout[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mmanageServerPaperTick[2m > [22m[2mLONG stop 터치 → FULL 청산 실행
+[22m[39m[ServerPaper] CLOSE(FULL) BTC $300.00 @49400 reason=STOP_LOSS gross=$-3.60 net=$-5.22
+
+[90mstdout[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mmanageServerPaperTick[2m > [22m[2mTP 터치 → TAKE_PROFIT 청산
+[22m[39m[ServerPaper] CLOSE(FULL) BTC $300.00 @52100 reason=TAKE_PROFIT gross=$12.60 net=$10.98
+
+[90mstdout[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mmanageServerPaperTick[2m > [22m[2mpendingClose 존재 → SL/TP 무관 전량 청산 후 요청 해제
+[22m[39m[ServerPaper] CLOSE(FULL) BTC $300.00 @50500 reason=RISK_CLOSE_ALL gross=$3.00 net=$1.38
+
+[90mstderr[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mmanageServerPaperTick[2m > [22m[2mpendingClose 영속 실패 → fail-closed (persisted=false + unresolved) → 틱에서 재시도 성공 시 해제
+[22m[39m[ServerPaper] pendingClose 영속 실패 (fail-closed): db down
+
+[90mstderr[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mmanageServerPaperTick[2m > [22m[2m크래시 복구 — 영속 write 실패 → 크래시(모듈 리셋) → 재시작 후 사이클 재파생 재요청이 영속된다
+[22m[39m[ServerPaper] pendingClose 영속 실패 (fail-closed): db down
+
+[90mstderr[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mmanageServerPaperTick[2m > [22m[2mstartup reconciliation — 판정 실패 = durable 상태 불명 → OPEN 차단, 틱 재시도 성공 시 해제
+[22m[39m[ServerPaper] startup reconciliation 실패 (fail-closed): db down
+
+[90mstderr[2m | src/__tests__/serverPaperExecutor.test.ts[2m > [22m[2mmanageServerPaperTick[2m > [22m[2m크래시 복구 — startup read 실패 = durable 상태 불명 → OPEN 차단, 틱 재시도 성공 시 해제
+[22m[39m[ServerPaper] pendingClose 로드 실패 (fail-closed): db down
+
+ [32m✓[39m src/__tests__/serverPaperExecutor.test.ts [2m([22m[2m102 tests[22m[2m)[22m[32m 115[2mms[22m[39m
+[90mstderr[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mfails closed rather than treating missing alpha net loss evidence as zero
+[22m[39m[AIWorker] loadPaperState 실패 — entry fail-closed: FIXED_BETA_FULL_LEDGER_BINDING_MISMATCH — protection inventory unresolved
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mretains the same management timer and recovered pending protection across Standard → Beta → Standard
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mretains the same management timer and recovered pending protection across Standard → Beta → Standard
+[22m[39m[AIWorker] 이전 decision 없음 — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mretains the same management timer and recovered pending protection across Standard → Beta → Standard
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mretains the same management timer and recovered pending protection across Standard → Beta → Standard
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstderr[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mretains the same management timer and recovered pending protection across Standard → Beta → Standard
+[22m[39m[AIWorker] loadPaperState 실패 — entry fail-closed: FIXED_BETA_ACCOUNTING_CHECKPOINT_OR_LEDGER_INCOMPLETE
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mretains the same management timer and recovered pending protection across Standard → Beta → Standard
+[22m[39m[AIWorker] 사이클 #1 완료 — CASH MULTI conf=60% (0ms)
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mretains the same management timer and recovered pending protection across Standard → Beta → Standard
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mretains the same management timer and recovered pending protection across Standard → Beta → Standard
+[22m[39m[AIWorker] 사이클 #2 동일 완료봉 결정 worker:-8687165:1699999200000:MULTI:CASH 이미 처리됨 — DB claim과 one-shot downstream 생략
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mretains the same management timer and recovered pending protection across Standard → Beta → Standard
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mcold FIXED_BETA_400 startup recovers Standard inventory protection without entry authority
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mcold FIXED_BETA_400 startup recovers Standard inventory protection without entry authority
+[22m[39m[AIWorker] 이전 decision 없음 — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mcold FIXED_BETA_400 startup recovers Standard inventory protection without entry authority
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mcold FIXED_BETA_400 startup recovers Standard inventory protection without entry authority
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstderr[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mcold FIXED_BETA_400 startup recovers Standard inventory protection without entry authority
+[22m[39m[AIWorker] loadPaperState 실패 — entry fail-closed: FIXED_BETA_ACCOUNTING_CHECKPOINT_OR_LEDGER_INCOMPLETE
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mcold FIXED_BETA_400 startup recovers Standard inventory protection without entry authority
+[22m[39m[AIWorker] 사이클 #1 완료 — CASH MULTI conf=60% (0ms)
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mcold FIXED_BETA_400 startup recovers Standard inventory protection without entry authority
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mcold FIXED_BETA_400 startup recovers Standard inventory protection without entry authority
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mcold INVALID startup recovers Standard inventory protection without entry authority
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mcold INVALID startup recovers Standard inventory protection without entry authority
+[22m[39m[AIWorker] 이전 decision 없음 — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mcold INVALID startup recovers Standard inventory protection without entry authority
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mcold INVALID startup recovers Standard inventory protection without entry authority
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstderr[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mcold INVALID startup recovers Standard inventory protection without entry authority
+[22m[39m[AIWorker] 사이클 #1 오류: Error: ACCOUNTING_NAMESPACE_INVALID_OR_STALE — entry blocked; no accounting state writes
+    at WorkerManager.runCycle [90m(/tmp/ccc-virtual400-executor/artifacts/api-server/[39msrc/workers/aiWorker.ts:1721:15[90m)[39m
+[90m    at processTicksAndRejections (node:internal/process/task_queues:103:5)[39m
+    at [90m/tmp/ccc-virtual400-executor/artifacts/api-server/[39msrc/__tests__/aiWorker.test.ts:995:9
+    at file:///home/runner/workspace/node_modules/[4m.pnpm[24m/@vitest+runner@4.1.10/node_modules/[4m@vitest/runner[24m/dist/chunk-artifact.js:1903:20
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mcold INVALID startup recovers Standard inventory protection without entry authority
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mcold INVALID startup recovers Standard inventory protection without entry authority
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL startup reconciliation: selector FIXED_BETA_400, durable scope FIXED_BETA_400, reconstruct=false
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL startup reconciliation: selector FIXED_BETA_400, durable scope FIXED_BETA_400, reconstruct=false
+[22m[39m[AIWorker] legacy decision — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL startup reconciliation: selector FIXED_BETA_400, durable scope FIXED_BETA_400, reconstruct=false
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL startup reconciliation: selector FIXED_BETA_400, durable scope FIXED_BETA_400, reconstruct=false
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL startup reconciliation: selector INVALID, durable scope FIXED_BETA_400, reconstruct=false
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL startup reconciliation: selector INVALID, durable scope FIXED_BETA_400, reconstruct=false
+[22m[39m[AIWorker] legacy decision — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL startup reconciliation: selector INVALID, durable scope FIXED_BETA_400, reconstruct=false
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL startup reconciliation: selector INVALID, durable scope FIXED_BETA_400, reconstruct=false
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL startup reconciliation: selector STANDARD_ACTIVE, durable scope FIXED_BETA_400, reconstruct=false
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL startup reconciliation: selector STANDARD_ACTIVE, durable scope FIXED_BETA_400, reconstruct=false
+[22m[39m[AIWorker] Daily 기준점 복구: 2027-01-15T00:00:00.000Z $1000.00
+[AIWorker] Weekly 기준점 복구: 2027-01-11T00:00:00.000Z $1000.00
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL startup reconciliation: selector STANDARD_ACTIVE, durable scope FIXED_BETA_400, reconstruct=false
+[22m[39m[AIWorker] legacy decision — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL startup reconciliation: selector STANDARD_ACTIVE, durable scope FIXED_BETA_400, reconstruct=false
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL startup reconciliation: selector STANDARD_ACTIVE, durable scope FIXED_BETA_400, reconstruct=false
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL startup reconciliation: selector FIXED_BETA_400, durable scope undefined, reconstruct=false
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL startup reconciliation: selector FIXED_BETA_400, durable scope undefined, reconstruct=false
+[22m[39m[AIWorker] legacy decision — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL startup reconciliation: selector FIXED_BETA_400, durable scope undefined, reconstruct=false
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL startup reconciliation: selector FIXED_BETA_400, durable scope undefined, reconstruct=false
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL startup reconciliation: selector INVALID, durable scope undefined, reconstruct=false
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL startup reconciliation: selector INVALID, durable scope undefined, reconstruct=false
+[22m[39m[AIWorker] legacy decision — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL startup reconciliation: selector INVALID, durable scope undefined, reconstruct=false
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL startup reconciliation: selector INVALID, durable scope undefined, reconstruct=false
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL startup reconciliation: selector STANDARD_ACTIVE, durable scope undefined, reconstruct=false
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL startup reconciliation: selector STANDARD_ACTIVE, durable scope undefined, reconstruct=false
+[22m[39m[AIWorker] Daily 기준점 복구: 2027-01-15T00:00:00.000Z $1000.00
+[AIWorker] Weekly 기준점 복구: 2027-01-11T00:00:00.000Z $1000.00
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL startup reconciliation: selector STANDARD_ACTIVE, durable scope undefined, reconstruct=false
+[22m[39m[AIWorker] legacy decision — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL startup reconciliation: selector STANDARD_ACTIVE, durable scope undefined, reconstruct=false
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL startup reconciliation: selector STANDARD_ACTIVE, durable scope undefined, reconstruct=false
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL startup reconciliation: selector STANDARD_ACTIVE, durable scope STANDARD_ACTIVE, reconstruct=true
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL startup reconciliation: selector STANDARD_ACTIVE, durable scope STANDARD_ACTIVE, reconstruct=true
+[22m[39m[AIWorker] Daily 기준점 복구: 2027-01-15T00:00:00.000Z $1000.00
+[AIWorker] Weekly 기준점 복구: 2027-01-11T00:00:00.000Z $1000.00
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL startup reconciliation: selector STANDARD_ACTIVE, durable scope STANDARD_ACTIVE, reconstruct=true
+[22m[39m[AIWorker] legacy decision — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL startup reconciliation: selector STANDARD_ACTIVE, durable scope STANDARD_ACTIVE, reconstruct=true
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL startup reconciliation: selector STANDARD_ACTIVE, durable scope STANDARD_ACTIVE, reconstruct=true
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL startup reconciliation: selector FIXED_BETA_400, durable scope STANDARD_ACTIVE, reconstruct=true
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL startup reconciliation: selector FIXED_BETA_400, durable scope STANDARD_ACTIVE, reconstruct=true
+[22m[39m[AIWorker] legacy decision — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL startup reconciliation: selector FIXED_BETA_400, durable scope STANDARD_ACTIVE, reconstruct=true
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL startup reconciliation: selector FIXED_BETA_400, durable scope STANDARD_ACTIVE, reconstruct=true
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL reconciliation rejects a tagged Standard entry-only CASH veto
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL reconciliation rejects a tagged Standard entry-only CASH veto
+[22m[39m[AIWorker] Daily 기준점 복구: 2027-01-15T00:00:00.000Z $1000.00
+[AIWorker] Weekly 기준점 복구: 2027-01-11T00:00:00.000Z $1000.00
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL reconciliation rejects a tagged Standard entry-only CASH veto
+[22m[39m[AIWorker] legacy decision — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL reconciliation rejects a tagged Standard entry-only CASH veto
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL reconciliation rejects a tagged Standard entry-only CASH veto
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL pending protection still runs for Standard inventory under an invalid selector
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL pending protection still runs for Standard inventory under an invalid selector
+[22m[39m[AIWorker] legacy decision — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL pending protection still runs for Standard inventory under an invalid selector
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL pending protection still runs for Standard inventory under an invalid selector
+[22m[39m[ServerPaper] CLOSE(FULL) BTC $100.00 @50700 reason=EXISTING_STANDARD_CLOSE gross=$1.40 net=불명(비용 계산 실패)
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL pending protection still runs for Standard inventory under an invalid selector
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL stop protection still runs for Standard inventory under an invalid selector
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL stop protection still runs for Standard inventory under an invalid selector
+[22m[39m[AIWorker] legacy decision — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL stop protection still runs for Standard inventory under an invalid selector
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL stop protection still runs for Standard inventory under an invalid selector
+[22m[39m[ServerPaper] CLOSE(FULL) BTC $100.00 @48000 reason=STOP_LOSS gross=$-4.00 net=불명(비용 계산 실패)
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mREAL stop protection still runs for Standard inventory under an invalid selector
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mpersists a server-owned STANDARD_ACTIVE policy tag on every new decision
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mpersists a server-owned STANDARD_ACTIVE policy tag on every new decision
+[22m[39m[AIWorker] Daily 기준점 복구: 2027-01-15T00:00:00.000Z $1000.00
+[AIWorker] Weekly 기준점 복구: 2027-01-11T00:00:00.000Z $1000.00
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mpersists a server-owned STANDARD_ACTIVE policy tag on every new decision
+[22m[39m[AIWorker] 이전 decision 없음 — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mpersists a server-owned STANDARD_ACTIVE policy tag on every new decision
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mpersists a server-owned STANDARD_ACTIVE policy tag on every new decision
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mpersists a server-owned FIXED_BETA_400 policy tag on every new decision
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mpersists a server-owned FIXED_BETA_400 policy tag on every new decision
+[22m[39m[AIWorker] 이전 decision 없음 — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mpersists a server-owned FIXED_BETA_400 policy tag on every new decision
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mPAPER protection timer accounting independence[2m > [22m[2mpersists a server-owned FIXED_BETA_400 policy tag on every new decision
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mnever cold-starts Standard when the selector is corrupt
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mnever cold-starts Standard when the selector is corrupt
+[22m[39m[AIWorker] 이전 decision 없음 — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mnever cold-starts Standard when the selector is corrupt
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mnever cold-starts Standard when the selector is corrupt
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstderr[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mnever cold-starts Standard when the selector is corrupt
+[22m[39m[AIWorker] 사이클 #1 오류: Error: ACCOUNTING_NAMESPACE_INVALID_OR_STALE — entry blocked; no accounting state writes
+    at WorkerManager.runCycle [90m(/tmp/ccc-virtual400-executor/artifacts/api-server/[39msrc/workers/aiWorker.ts:1721:15[90m)[39m
+[90m    at processTicksAndRejections (node:internal/process/task_queues:103:5)[39m
+    at [90m/tmp/ccc-virtual400-executor/artifacts/api-server/[39msrc/__tests__/aiWorker.test.ts:1121:7
+    at file:///home/runner/workspace/node_modules/[4m.pnpm[24m/@vitest+runner@4.1.10/node_modules/[4m@vitest/runner[24m/dist/chunk-artifact.js:1903:20
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mnever cold-starts Standard when the selector is corrupt
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mnever cold-starts Standard when the selector is duplicate
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mnever cold-starts Standard when the selector is duplicate
+[22m[39m[AIWorker] 이전 decision 없음 — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mnever cold-starts Standard when the selector is duplicate
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mnever cold-starts Standard when the selector is duplicate
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstderr[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mnever cold-starts Standard when the selector is duplicate
+[22m[39m[AIWorker] 사이클 #1 오류: Error: ACCOUNTING_NAMESPACE_INVALID_OR_STALE — entry blocked; no accounting state writes
+    at WorkerManager.runCycle [90m(/tmp/ccc-virtual400-executor/artifacts/api-server/[39msrc/workers/aiWorker.ts:1721:15[90m)[39m
+[90m    at processTicksAndRejections (node:internal/process/task_queues:103:5)[39m
+    at [90m/tmp/ccc-virtual400-executor/artifacts/api-server/[39msrc/__tests__/aiWorker.test.ts:1121:7
+    at file:///home/runner/workspace/node_modules/[4m.pnpm[24m/@vitest+runner@4.1.10/node_modules/[4m@vitest/runner[24m/dist/chunk-artifact.js:1903:20
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mnever cold-starts Standard when the selector is duplicate
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mnever cold-starts Standard when the selector is read-failed
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mnever cold-starts Standard when the selector is read-failed
+[22m[39m[AIWorker] 이전 decision 없음 — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mnever cold-starts Standard when the selector is read-failed
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mnever cold-starts Standard when the selector is read-failed
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstderr[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mnever cold-starts Standard when the selector is read-failed
+[22m[39m[AIWorker] 사이클 #1 오류: Error: ACCOUNTING_NAMESPACE_INVALID_OR_STALE — entry blocked; no accounting state writes
+    at WorkerManager.runCycle [90m(/tmp/ccc-virtual400-executor/artifacts/api-server/[39msrc/workers/aiWorker.ts:1721:15[90m)[39m
+[90m    at processTicksAndRejections (node:internal/process/task_queues:103:5)[39m
+    at [90m/tmp/ccc-virtual400-executor/artifacts/api-server/[39msrc/__tests__/aiWorker.test.ts:1121:7
+    at file:///home/runner/workspace/node_modules/[4m.pnpm[24m/@vitest+runner@4.1.10/node_modules/[4m@vitest/runner[24m/dist/chunk-artifact.js:1903:20
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mnever cold-starts Standard when the selector is read-failed
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mnever cold-starts Standard when the selector is null-value
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mnever cold-starts Standard when the selector is null-value
+[22m[39m[AIWorker] 이전 decision 없음 — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mnever cold-starts Standard when the selector is null-value
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mnever cold-starts Standard when the selector is null-value
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstderr[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mnever cold-starts Standard when the selector is null-value
+[22m[39m[AIWorker] 사이클 #1 오류: Error: ACCOUNTING_NAMESPACE_INVALID_OR_STALE — entry blocked; no accounting state writes
+    at WorkerManager.runCycle [90m(/tmp/ccc-virtual400-executor/artifacts/api-server/[39msrc/workers/aiWorker.ts:1721:15[90m)[39m
+[90m    at processTicksAndRejections (node:internal/process/task_queues:103:5)[39m
+    at [90m/tmp/ccc-virtual400-executor/artifacts/api-server/[39msrc/__tests__/aiWorker.test.ts:1121:7
+    at file:///home/runner/workspace/node_modules/[4m.pnpm[24m/@vitest+runner@4.1.10/node_modules/[4m@vitest/runner[24m/dist/chunk-artifact.js:1903:20
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mnever cold-starts Standard when the selector is null-value
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mdoes not persist zero counters/losses over a nonzero checkpoint on an empty ledger cycle
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mdoes not persist zero counters/losses over a nonzero checkpoint on an empty ledger cycle
+[22m[39m[AIWorker] 이전 decision 없음 — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mdoes not persist zero counters/losses over a nonzero checkpoint on an empty ledger cycle
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mdoes not persist zero counters/losses over a nonzero checkpoint on an empty ledger cycle
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstderr[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mdoes not persist zero counters/losses over a nonzero checkpoint on an empty ledger cycle
+[22m[39m[AIWorker] loadPaperState 실패 — entry fail-closed: FIXED_BETA_ACCOUNTING_CHECKPOINT_OR_LEDGER_INCOMPLETE
+
+[90mstderr[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mdoes not persist zero counters/losses over a nonzero checkpoint on an empty ledger cycle
+[22m[39m[AIWorker] persistDecision 실패: TypeError: Cannot read properties of undefined (reading 'length')
+    at WorkerManager.persistDecision [90m(/tmp/ccc-virtual400-executor/artifacts/api-server/[39msrc/workers/aiWorker.ts:1204:33[90m)[39m
+[90m    at processTicksAndRejections (node:internal/process/task_queues:103:5)[39m
+    at WorkerManager.runCycle [90m(/tmp/ccc-virtual400-executor/artifacts/api-server/[39msrc/workers/aiWorker.ts:2302:29[90m)[39m
+    at [90m/tmp/ccc-virtual400-executor/artifacts/api-server/[39msrc/__tests__/aiWorker.test.ts:1155:7
+    at file:///home/runner/workspace/node_modules/[4m.pnpm[24m/@vitest+runner@4.1.10/node_modules/[4m@vitest/runner[24m/dist/chunk-artifact.js:1903:20
+
+[90mstderr[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mdoes not persist zero counters/losses over a nonzero checkpoint on an empty ledger cycle
+[22m[39m[AIWorker] 사이클 #1 결정 영속 claim 실패 — 모든 downstream dispatch 차단, 다음 cycle 재시도 (fail-closed)
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mdoes not persist zero counters/losses over a nonzero checkpoint on an empty ledger cycle
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mdoes not persist zero counters/losses over a nonzero checkpoint on an partial ledger cycle
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mdoes not persist zero counters/losses over a nonzero checkpoint on an partial ledger cycle
+[22m[39m[AIWorker] 이전 decision 없음 — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mdoes not persist zero counters/losses over a nonzero checkpoint on an partial ledger cycle
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mdoes not persist zero counters/losses over a nonzero checkpoint on an partial ledger cycle
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstderr[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mdoes not persist zero counters/losses over a nonzero checkpoint on an partial ledger cycle
+[22m[39m[AIWorker] loadPaperState 실패 — entry fail-closed: FIXED_BETA_FULL_LEDGER_BINDING_MISMATCH — protection inventory unresolved
+
+[90mstderr[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mdoes not persist zero counters/losses over a nonzero checkpoint on an partial ledger cycle
+[22m[39m[AIWorker] persistDecision 실패: TypeError: Cannot read properties of undefined (reading 'length')
+    at WorkerManager.persistDecision [90m(/tmp/ccc-virtual400-executor/artifacts/api-server/[39msrc/workers/aiWorker.ts:1204:33[90m)[39m
+[90m    at processTicksAndRejections (node:internal/process/task_queues:103:5)[39m
+    at WorkerManager.runCycle [90m(/tmp/ccc-virtual400-executor/artifacts/api-server/[39msrc/workers/aiWorker.ts:2302:29[90m)[39m
+    at [90m/tmp/ccc-virtual400-executor/artifacts/api-server/[39msrc/__tests__/aiWorker.test.ts:1155:7
+    at file:///home/runner/workspace/node_modules/[4m.pnpm[24m/@vitest+runner@4.1.10/node_modules/[4m@vitest/runner[24m/dist/chunk-artifact.js:1903:20
+
+[90mstderr[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mdoes not persist zero counters/losses over a nonzero checkpoint on an partial ledger cycle
+[22m[39m[AIWorker] 사이클 #1 결정 영속 claim 실패 — 모든 downstream dispatch 차단, 다음 cycle 재시도 (fail-closed)
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mdoes not persist zero counters/losses over a nonzero checkpoint on an partial ledger cycle
+[22m[39m[AIWorker] 정지
+
+[90mstderr[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mrejects omission of old-loss even with identical current-day/week aggregates
+[22m[39m[AIWorker] loadPaperState 실패 — entry fail-closed: FIXED_BETA_FULL_LEDGER_BINDING_MISMATCH — protection inventory unresolved
+
+[90mstderr[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mrejects omission of held even with identical current-day/week aggregates
+[22m[39m[AIWorker] loadPaperState 실패 — entry fail-closed: FIXED_BETA_FULL_LEDGER_BINDING_MISMATCH — protection inventory unresolved
+
+[90mstderr[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mkeeps LONG protection identity but refuses missing per-symbol marks despite other fresh prices
+[22m[39m[AIWorker] loadPaperState 실패 — entry fail-closed: FIXED_BETA_POSITION_MARK_MISSING_OR_STALE
+
+[90mstderr[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mkeeps LONG protection identity but refuses stale per-symbol marks despite other fresh prices
+[22m[39m[AIWorker] loadPaperState 실패 — entry fail-closed: FIXED_BETA_POSITION_MARK_MISSING_OR_STALE
+
+[90mstderr[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mkeeps SHORT protection identity but refuses missing per-symbol marks despite other fresh prices
+[22m[39m[AIWorker] loadPaperState 실패 — entry fail-closed: FIXED_BETA_POSITION_MARK_MISSING_OR_STALE
+
+[90mstderr[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mkeeps SHORT protection identity but refuses stale per-symbol marks despite other fresh prices
+[22m[39m[AIWorker] loadPaperState 실패 — entry fail-closed: FIXED_BETA_POSITION_MARK_MISSING_OR_STALE
+
+[90mstderr[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mrejects malformed alpha position fields, never filling valid defaults: {}
+[22m[39m[AIWorker] loadPaperState 실패 — entry fail-closed: FIXED_BETA_NUMERIC_EVIDENCE_INVALID
+
+[90mstderr[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mrejects malformed alpha position fields, never filling valid defaults: {"sizeInUsd":"100bad"}
+[22m[39m[AIWorker] loadPaperState 실패 — entry fail-closed: FIXED_BETA_NUMERIC_EVIDENCE_INVALID
+
+[90mstderr[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mrejects malformed alpha position fields, never filling valid defaults: {"price":0}
+[22m[39m[AIWorker] loadPaperState 실패 — entry fail-closed: FIXED_BETA_POSITION_FIELDS_INVALID
+
+[90mstderr[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mrejects malformed alpha position fields, never filling valid defaults: {"collateralUsd":null}
+[22m[39m[AIWorker] loadPaperState 실패 — entry fail-closed: FIXED_BETA_NUMERIC_EVIDENCE_INVALID
+
+[90mstderr[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mrejects malformed alpha position fields, never filling valid defaults: {}
+[22m[39m[AIWorker] loadPaperState 실패 — entry fail-closed: FIXED_BETA_NUMERIC_EVIDENCE_INVALID
+
+[90mstderr[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mrejects malformed alpha position fields, never filling valid defaults: {"side":"invalid"}
+[22m[39m[AIWorker] loadPaperState 실패 — entry fail-closed: FIXED_BETA_PROTECTION_INVENTORY_INVALID
+
+[90mstderr[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker scoped alpha accounting path[2m > [22m[2mcontinues genuine CASH/REDUCE protection dispatch with unknown alpha equity and retained held identity
+[22m[39m[AIWorker] loadPaperState 실패 — entry fail-closed: FIXED_BETA_POSITION_MARK_MISSING_OR_STALE
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker 초기 상태[2m > [22m[2mstart()를 두 번 호출해도 중복 활성화되지 않는다
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker 초기 상태[2m > [22m[2mstart()를 두 번 호출해도 중복 활성화되지 않는다
+[22m[39m[AIWorker] Daily 기준점 복구: 2027-01-15T00:00:00.000Z $1000.00
+[AIWorker] Weekly 기준점 복구: 2027-01-11T00:00:00.000Z $1000.00
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker 초기 상태[2m > [22m[2mstart()를 두 번 호출해도 중복 활성화되지 않는다
+[22m[39m[AIWorker] 이전 decision 없음 — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker 초기 상태[2m > [22m[2mstart()를 두 번 호출해도 중복 활성화되지 않는다
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker 초기 상태[2m > [22m[2mstart()를 두 번 호출해도 중복 활성화되지 않는다
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mworker lifecycle generation safety[2m > [22m[2mstop during awaited startup prevents every later recovery phase and timer/Intel install
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mworker lifecycle generation safety[2m > [22m[2mstop during awaited startup prevents every later recovery phase and timer/Intel install
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mworker lifecycle generation safety[2m > [22m[2mstop during awaited startup prevents every later recovery phase and timer/Intel install
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mworker lifecycle generation safety[2m > [22m[2mstop while a cycle read is in flight prevents later reads, engine, Intel and reschedule
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mworker lifecycle generation safety[2m > [22m[2mstop while a cycle read is in flight prevents later reads, engine, Intel and reschedule
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mworker lifecycle generation safety[2m > [22m[2mstop while a cycle read is in flight prevents later reads, engine, Intel and reschedule
+[22m[39m[AIWorker] 정지
+
+[90mstderr[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mworker lifecycle generation safety[2m > [22m[2matomic-lock contention neither claims a heartbeat nor creates a second timer
+[22m[39m[AIWorker] 이전 사이클 실행 중 — 이번 사이클 건너뜀
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mworker lifecycle generation safety[2m > [22m[2matomic-lock contention neither claims a heartbeat nor creates a second timer
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mworker lifecycle generation safety[2m > [22m[2ma queued PAPER management callback invoked after stop is a no-op
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mworker lifecycle generation safety[2m > [22m[2ma queued PAPER management callback invoked after stop is a no-op
+[22m[39m[AIWorker] Daily 기준점 복구: 2027-01-15T00:00:00.000Z $1000.00
+[AIWorker] Weekly 기준점 복구: 2027-01-11T00:00:00.000Z $1000.00
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mworker lifecycle generation safety[2m > [22m[2ma queued PAPER management callback invoked after stop is a no-op
+[22m[39m[AIWorker] 이전 decision 없음 — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mworker lifecycle generation safety[2m > [22m[2ma queued PAPER management callback invoked after stop is a no-op
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mworker lifecycle generation safety[2m > [22m[2ma queued PAPER management callback invoked after stop is a no-op
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mworker lifecycle generation safety[2m > [22m[2ma queued PAPER management callback invoked after stop is a no-op
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mworker lifecycle generation safety[2m > [22m[2mrestart discards the previous lifecycle heartbeat and recovers after its first completed cycle
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mworker lifecycle generation safety[2m > [22m[2mrestart discards the previous lifecycle heartbeat and recovers after its first completed cycle
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mworker lifecycle generation safety[2m > [22m[2mrestart discards the previous lifecycle heartbeat and recovers after its first completed cycle
+[22m[39m[AIWorker] Daily 기준점 복구: 2027-01-15T00:00:00.000Z $1000.00
+[AIWorker] Weekly 기준점 복구: 2027-01-11T00:00:00.000Z $1000.00
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mworker lifecycle generation safety[2m > [22m[2mrestart discards the previous lifecycle heartbeat and recovers after its first completed cycle
+[22m[39m[AIWorker] 이전 decision 없음 — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mworker lifecycle generation safety[2m > [22m[2mrestart discards the previous lifecycle heartbeat and recovers after its first completed cycle
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mworker lifecycle generation safety[2m > [22m[2mrestart discards the previous lifecycle heartbeat and recovers after its first completed cycle
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mworker lifecycle generation safety[2m > [22m[2mrestart discards the previous lifecycle heartbeat and recovers after its first completed cycle
+[22m[39m[AIWorker] 사이클 #1 완료 — CASH MULTI conf=60% (0ms)
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mworker lifecycle generation safety[2m > [22m[2mrestart discards the previous lifecycle heartbeat and recovers after its first completed cycle
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2msame completed candle skips repeated DB claim and downstream in one process
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2msame completed candle skips repeated DB claim and downstream in one process
+[22m[39m[AIWorker] Daily 기준점 복구: 2027-01-15T00:00:00.000Z $1000.00
+[AIWorker] Weekly 기준점 복구: 2027-01-11T00:00:00.000Z $1000.00
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2msame completed candle skips repeated DB claim and downstream in one process
+[22m[39m[AIWorker] 이전 decision 없음 — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2msame completed candle skips repeated DB claim and downstream in one process
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2msame completed candle skips repeated DB claim and downstream in one process
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2msame completed candle skips repeated DB claim and downstream in one process
+[22m[39m[AIWorker] 사이클 #1 완료 — CASH MULTI conf=60% (0ms)
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2msame completed candle skips repeated DB claim and downstream in one process
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2msame completed candle skips repeated DB claim and downstream in one process
+[22m[39m[AIWorker] 사이클 #2 동일 완료봉 결정 worker:-8687165:1699999200000:MULTI:CASH 이미 처리됨 — DB claim과 one-shot downstream 생략
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2msame completed candle skips repeated DB claim and downstream in one process
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mdurable decision claim failure records a fresh ERROR cycle instead of a healthy skip
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mdurable decision claim failure records a fresh ERROR cycle instead of a healthy skip
+[22m[39m[AIWorker] Daily 기준점 복구: 2027-01-15T00:00:00.000Z $1000.00
+[AIWorker] Weekly 기준점 복구: 2027-01-11T00:00:00.000Z $1000.00
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mdurable decision claim failure records a fresh ERROR cycle instead of a healthy skip
+[22m[39m[AIWorker] 이전 decision 없음 — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mdurable decision claim failure records a fresh ERROR cycle instead of a healthy skip
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mdurable decision claim failure records a fresh ERROR cycle instead of a healthy skip
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstderr[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mdurable decision claim failure records a fresh ERROR cycle instead of a healthy skip
+[22m[39m[AIWorker] 사이클 #1 결정 영속 claim 실패 — 모든 downstream dispatch 차단, 다음 cycle 재시도 (fail-closed)
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mdurable decision claim failure records a fresh ERROR cycle instead of a healthy skip
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2minsufficient analysis records a fresh ERROR cycle and never claims a decision
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2minsufficient analysis records a fresh ERROR cycle and never claims a decision
+[22m[39m[AIWorker] Daily 기준점 복구: 2027-01-15T00:00:00.000Z $1000.00
+[AIWorker] Weekly 기준점 복구: 2027-01-11T00:00:00.000Z $1000.00
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2minsufficient analysis records a fresh ERROR cycle and never claims a decision
+[22m[39m[AIWorker] 이전 decision 없음 — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2minsufficient analysis records a fresh ERROR cycle and never claims a decision
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2minsufficient analysis records a fresh ERROR cycle and never claims a decision
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2minsufficient analysis records a fresh ERROR cycle and never claims a decision
+[22m[39m[AIWorker] 사이클 #1 건너뜀 — 가격 히스토리 부족 (심볼 0개, 최소 2개 필요)
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2minsufficient analysis records a fresh ERROR cycle and never claims a decision
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mreplaces a stale insufficient-history error when the recovered candle is already durably claimed
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mreplaces a stale insufficient-history error when the recovered candle is already durably claimed
+[22m[39m[AIWorker] Daily 기준점 복구: 2027-01-15T00:00:00.000Z $1000.00
+[AIWorker] Weekly 기준점 복구: 2027-01-11T00:00:00.000Z $1000.00
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mreplaces a stale insufficient-history error when the recovered candle is already durably claimed
+[22m[39m[AIWorker] 이전 decision 없음 — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mreplaces a stale insufficient-history error when the recovered candle is already durably claimed
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mreplaces a stale insufficient-history error when the recovered candle is already durably claimed
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mreplaces a stale insufficient-history error when the recovered candle is already durably claimed
+[22m[39m[AIWorker] 사이클 #1 건너뜀 — 가격 히스토리 부족 (심볼 0개, 최소 2개 필요)
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mreplaces a stale insufficient-history error when the recovered candle is already durably claimed
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mreplaces a stale insufficient-history error when the recovered candle is already durably claimed
+[22m[39m[AIWorker] 사이클 #2 완료봉 결정이 이미 claim됨 — 모든 downstream dispatch 차단 (fail-closed)
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mreplaces a stale insufficient-history error when the recovered candle is already durably claimed
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mnext completed candle permits exactly one new claim and dispatch
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mnext completed candle permits exactly one new claim and dispatch
+[22m[39m[AIWorker] Daily 기준점 복구: 2027-01-15T00:00:00.000Z $1000.00
+[AIWorker] Weekly 기준점 복구: 2027-01-11T00:00:00.000Z $1000.00
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mnext completed candle permits exactly one new claim and dispatch
+[22m[39m[AIWorker] 이전 decision 없음 — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mnext completed candle permits exactly one new claim and dispatch
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mnext completed candle permits exactly one new claim and dispatch
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mnext completed candle permits exactly one new claim and dispatch
+[22m[39m[AIWorker] 사이클 #1 완료 — CASH MULTI conf=60% (0ms)
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mnext completed candle permits exactly one new claim and dispatch
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mnext completed candle permits exactly one new claim and dispatch
+[22m[39m[AIWorker] 사이클 #2 완료 — CASH MULTI conf=60% (0ms)
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mnext completed candle permits exactly one new claim and dispatch
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mnext completed candle permits exactly one new claim and dispatch
+[22m[39m[AIWorker] 사이클 #3 동일 완료봉 결정 worker:-8687229:1700000100000:MULTI:CASH 이미 처리됨 — DB claim과 one-shot downstream 생략
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mnext completed candle permits exactly one new claim and dispatch
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2msame candle permits a changed symbol/state identity after fresh risk and settlement evaluation
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2msame candle permits a changed symbol/state identity after fresh risk and settlement evaluation
+[22m[39m[AIWorker] Daily 기준점 복구: 2027-01-15T00:00:00.000Z $1000.00
+[AIWorker] Weekly 기준점 복구: 2027-01-11T00:00:00.000Z $1000.00
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2msame candle permits a changed symbol/state identity after fresh risk and settlement evaluation
+[22m[39m[AIWorker] 이전 decision 없음 — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2msame candle permits a changed symbol/state identity after fresh risk and settlement evaluation
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2msame candle permits a changed symbol/state identity after fresh risk and settlement evaluation
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2msame candle permits a changed symbol/state identity after fresh risk and settlement evaluation
+[22m[39m[AIWorker] 사이클 #1 완료 — CASH MULTI conf=60% (0ms)
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2msame candle permits a changed symbol/state identity after fresh risk and settlement evaluation
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2msame candle permits a changed symbol/state identity after fresh risk and settlement evaluation
+[22m[39m[AIWorker] 사이클 #2 RiskEngine veto — 시장 데이터 stale — 진입 차단
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2msame candle permits a changed symbol/state identity after fresh risk and settlement evaluation
+[22m[39m[AIWorker] 사이클 #2 완료 — LONG BTC conf=60% (0ms)
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2msame candle permits a changed symbol/state identity after fresh risk and settlement evaluation
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mDB claim error is retried, but a confirmed conflict suppresses later same-candle attempts
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mDB claim error is retried, but a confirmed conflict suppresses later same-candle attempts
+[22m[39m[AIWorker] Daily 기준점 복구: 2027-01-15T00:00:00.000Z $1000.00
+[AIWorker] Weekly 기준점 복구: 2027-01-11T00:00:00.000Z $1000.00
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mDB claim error is retried, but a confirmed conflict suppresses later same-candle attempts
+[22m[39m[AIWorker] 이전 decision 없음 — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mDB claim error is retried, but a confirmed conflict suppresses later same-candle attempts
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mDB claim error is retried, but a confirmed conflict suppresses later same-candle attempts
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstderr[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mDB claim error is retried, but a confirmed conflict suppresses later same-candle attempts
+[22m[39m[AIWorker] persistDecision 실패: Error: transient decision DB failure
+    at _dbInsertImpl [90m(/tmp/ccc-virtual400-executor/artifacts/api-server/[39msrc/__tests__/aiWorker.test.ts:1773:46[90m)[39m
+    at Object.c.then [90m(/tmp/ccc-virtual400-executor/artifacts/api-server/[39msrc/__tests__/aiWorker.test.ts:54:34[90m)[39m
+[90m    at processTicksAndRejections (node:internal/process/task_queues:103:5)[39m
+
+[90mstderr[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mDB claim error is retried, but a confirmed conflict suppresses later same-candle attempts
+[22m[39m[AIWorker] 사이클 #1 결정 영속 claim 실패 — 모든 downstream dispatch 차단, 다음 cycle 재시도 (fail-closed)
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mDB claim error is retried, but a confirmed conflict suppresses later same-candle attempts
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mDB claim error is retried, but a confirmed conflict suppresses later same-candle attempts
+[22m[39m[AIWorker] 사이클 #2 완료봉 결정이 이미 claim됨 — 모든 downstream dispatch 차단 (fail-closed)
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mDB claim error is retried, but a confirmed conflict suppresses later same-candle attempts
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mDB claim error is retried, but a confirmed conflict suppresses later same-candle attempts
+[22m[39m[AIWorker] 사이클 #3 동일 완료봉 결정 worker:-8687165:1699999200000:MULTI:CASH 이미 처리됨 — DB claim과 one-shot downstream 생략
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mDB claim error is retried, but a confirmed conflict suppresses later same-candle attempts
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mrestart replay claim blocks duplicate approval, LIVE intent/order dispatch, and Intel cycle
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mrestart replay claim blocks duplicate approval, LIVE intent/order dispatch, and Intel cycle
+[22m[39m[AIWorker] Daily 기준점 복구: 2027-01-15T00:00:00.000Z $1000.00
+[AIWorker] Weekly 기준점 복구: 2027-01-11T00:00:00.000Z $1000.00
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mrestart replay claim blocks duplicate approval, LIVE intent/order dispatch, and Intel cycle
+[22m[39m[AIWorker] 이전 decision 없음 — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mrestart replay claim blocks duplicate approval, LIVE intent/order dispatch, and Intel cycle
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mrestart replay claim blocks duplicate approval, LIVE intent/order dispatch, and Intel cycle
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mrestart replay claim blocks duplicate approval, LIVE intent/order dispatch, and Intel cycle
+[22m[39m[AIWorker] 사이클 #1 RiskEngine veto — 시장 데이터 stale — 진입 차단
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mrestart replay claim blocks duplicate approval, LIVE intent/order dispatch, and Intel cycle
+[22m[39m[AIWorker] 사이클 #1 완료 — LONG BTC conf=60% (0ms)
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mrestart replay claim blocks duplicate approval, LIVE intent/order dispatch, and Intel cycle
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mrestart replay claim blocks duplicate approval, LIVE intent/order dispatch, and Intel cycle
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mrestart replay claim blocks duplicate approval, LIVE intent/order dispatch, and Intel cycle
+[22m[39m[AIWorker] Daily 기준점 복구: 2027-01-15T00:00:00.000Z $1000.00
+[AIWorker] Weekly 기준점 복구: 2027-01-11T00:00:00.000Z $1000.00
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mrestart replay claim blocks duplicate approval, LIVE intent/order dispatch, and Intel cycle
+[22m[39m[AIWorker] 이전 SHADOW lifecycle snapshot 복원 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mrestart replay claim blocks duplicate approval, LIVE intent/order dispatch, and Intel cycle
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mrestart replay claim blocks duplicate approval, LIVE intent/order dispatch, and Intel cycle
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mrestart replay claim blocks duplicate approval, LIVE intent/order dispatch, and Intel cycle
+[22m[39m[AIWorker] 사이클 #1 RiskEngine veto — 시장 데이터 stale — 진입 차단
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mrestart replay claim blocks duplicate approval, LIVE intent/order dispatch, and Intel cycle
+[22m[39m[AIWorker] 사이클 #1 완료봉 결정이 이미 claim됨 — 모든 downstream dispatch 차단 (fail-closed)
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcompleted-candle decision replay idempotency[2m > [22m[2mrestart replay claim blocks duplicate approval, LIVE intent/order dispatch, and Intel cycle
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — HWM DB 복원[2m > [22m[2mkeeps the cycle busy until the HWM durable write completes
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — HWM DB 복원[2m > [22m[2mkeeps the cycle busy until the HWM durable write completes
+[22m[39m[AIWorker] 사이클 #1 완료 — CASH MULTI conf=60% (0ms)
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — HWM DB 복원[2m > [22m[2mkeeps the cycle busy until the HWM durable write completes
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — HWM DB 복원[2m > [22m[2mstart() 시 DB에서 equityHwm을 로드한다 (15000)
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — HWM DB 복원[2m > [22m[2mstart() 시 DB에서 equityHwm을 로드한다 (15000)
+[22m[39m[AIWorker] Equity HWM 복구: $15000.00
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — HWM DB 복원[2m > [22m[2mstart() 시 DB에서 equityHwm을 로드한다 (15000)
+[22m[39m[AIWorker] Daily 기준점 복구: 2027-01-15T00:00:00.000Z $1000.00
+[AIWorker] Weekly 기준점 복구: 2027-01-11T00:00:00.000Z $1000.00
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — HWM DB 복원[2m > [22m[2mstart() 시 DB에서 equityHwm을 로드한다 (15000)
+[22m[39m[AIWorker] 이전 decision 없음 — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — HWM DB 복원[2m > [22m[2mstart() 시 DB에서 equityHwm을 로드한다 (15000)
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — HWM DB 복원[2m > [22m[2mstart() 시 DB에서 equityHwm을 로드한다 (15000)
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — HWM DB 복원[2m > [22m[2mDB에 HWM 없으면 null로 시작한다 (첫 실행 시나리오)
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — HWM DB 복원[2m > [22m[2mDB에 HWM 없으면 null로 시작한다 (첫 실행 시나리오)
+[22m[39m[AIWorker] Daily 기준점 복구: 2027-01-15T00:00:00.000Z $1000.00
+[AIWorker] Weekly 기준점 복구: 2027-01-11T00:00:00.000Z $1000.00
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — HWM DB 복원[2m > [22m[2mDB에 HWM 없으면 null로 시작한다 (첫 실행 시나리오)
+[22m[39m[AIWorker] 이전 decision 없음 — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — HWM DB 복원[2m > [22m[2mDB에 HWM 없으면 null로 시작한다 (첫 실행 시나리오)
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — HWM DB 복원[2m > [22m[2mDB에 HWM 없으면 null로 시작한다 (첫 실행 시나리오)
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — HWM DB 복원[2m > [22m[2mequityHwm = 0 이면 무시한다 (유효하지 않은 HWM)
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — HWM DB 복원[2m > [22m[2mequityHwm = 0 이면 무시한다 (유효하지 않은 HWM)
+[22m[39m[AIWorker] Daily 기준점 복구: 2027-01-15T00:00:00.000Z $1000.00
+[AIWorker] Weekly 기준점 복구: 2027-01-11T00:00:00.000Z $1000.00
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — HWM DB 복원[2m > [22m[2mequityHwm = 0 이면 무시한다 (유효하지 않은 HWM)
+[22m[39m[AIWorker] 이전 decision 없음 — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — HWM DB 복원[2m > [22m[2mequityHwm = 0 이면 무시한다 (유효하지 않은 HWM)
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — HWM DB 복원[2m > [22m[2mequityHwm = 0 이면 무시한다 (유효하지 않은 HWM)
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m첫 Worker의 durable decision을 두 번째 Worker가 복원해 Signal ID·동일 완료봉·cooldown을 보존한다
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m첫 Worker의 durable decision을 두 번째 Worker가 복원해 Signal ID·동일 완료봉·cooldown을 보존한다
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m첫 Worker의 durable decision을 두 번째 Worker가 복원해 Signal ID·동일 완료봉·cooldown을 보존한다
+[22m[39m[AIWorker] Daily 기준점 복구: 2027-01-15T00:00:00.000Z $1000.00
+[AIWorker] Weekly 기준점 복구: 2027-01-11T00:00:00.000Z $1000.00
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m첫 Worker의 durable decision을 두 번째 Worker가 복원해 Signal ID·동일 완료봉·cooldown을 보존한다
+[22m[39m[AIWorker] 이전 SHADOW lifecycle snapshot 복원 — records=1, history=2
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m첫 Worker의 durable decision을 두 번째 Worker가 복원해 Signal ID·동일 완료봉·cooldown을 보존한다
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m첫 Worker의 durable decision을 두 번째 Worker가 복원해 Signal ID·동일 완료봉·cooldown을 보존한다
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m첫 Worker의 durable decision을 두 번째 Worker가 복원해 Signal ID·동일 완료봉·cooldown을 보존한다
+[22m[39m[AIWorker] 사이클 #1 완료 — CASH MULTI conf=60% (0ms)
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m첫 Worker의 durable decision을 두 번째 Worker가 복원해 Signal ID·동일 완료봉·cooldown을 보존한다
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m손상 JSON은 부분 복원·SHADOW read·권한 mutation 없이 차단한다
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m손상 JSON은 부분 복원·SHADOW read·권한 mutation 없이 차단한다
+[22m[39m[AIWorker] Daily 기준점 복구: 2027-01-15T00:00:00.000Z $1000.00
+[AIWorker] Weekly 기준점 복구: 2027-01-11T00:00:00.000Z $1000.00
+
+[90mstderr[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m손상 JSON은 부분 복원·SHADOW read·권한 mutation 없이 차단한다
+[22m[39m[AIWorker] 이전 decision JSON 손상 — fail-closed — Strategy SHADOW 평가 차단
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m손상 JSON은 부분 복원·SHADOW read·권한 mutation 없이 차단한다
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m손상 JSON은 부분 복원·SHADOW read·권한 mutation 없이 차단한다
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m미래 capturedAt은 부분 복원·SHADOW read·권한 mutation 없이 차단한다
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m미래 capturedAt은 부분 복원·SHADOW read·권한 mutation 없이 차단한다
+[22m[39m[AIWorker] Daily 기준점 복구: 2027-01-15T00:00:00.000Z $1000.00
+[AIWorker] Weekly 기준점 복구: 2027-01-11T00:00:00.000Z $1000.00
+
+[90mstderr[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m미래 capturedAt은 부분 복원·SHADOW read·권한 mutation 없이 차단한다
+[22m[39m[AIWorker] Lifecycle snapshot 복원 거부: snapshot schema/version/시각 INVALID — fail-closed — Strategy SHADOW 평가 차단
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m미래 capturedAt은 부분 복원·SHADOW read·권한 mutation 없이 차단한다
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m미래 capturedAt은 부분 복원·SHADOW read·권한 mutation 없이 차단한다
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m알 수 없는 snapshot schema version은 부분 복원·SHADOW read·권한 mutation 없이 차단한다
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m알 수 없는 snapshot schema version은 부분 복원·SHADOW read·권한 mutation 없이 차단한다
+[22m[39m[AIWorker] Daily 기준점 복구: 2027-01-15T00:00:00.000Z $1000.00
+[AIWorker] Weekly 기준점 복구: 2027-01-11T00:00:00.000Z $1000.00
+
+[90mstderr[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m알 수 없는 snapshot schema version은 부분 복원·SHADOW read·권한 mutation 없이 차단한다
+[22m[39m[AIWorker] Lifecycle snapshot 복원 거부: snapshot schema/version/시각 INVALID — fail-closed — Strategy SHADOW 평가 차단
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m알 수 없는 snapshot schema version은 부분 복원·SHADOW read·권한 mutation 없이 차단한다
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m알 수 없는 snapshot schema version은 부분 복원·SHADOW read·권한 mutation 없이 차단한다
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m알 수 없는 snapshot config version은 부분 복원·SHADOW read·권한 mutation 없이 차단한다
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m알 수 없는 snapshot config version은 부분 복원·SHADOW read·권한 mutation 없이 차단한다
+[22m[39m[AIWorker] Daily 기준점 복구: 2027-01-15T00:00:00.000Z $1000.00
+[AIWorker] Weekly 기준점 복구: 2027-01-11T00:00:00.000Z $1000.00
+
+[90mstderr[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m알 수 없는 snapshot config version은 부분 복원·SHADOW read·권한 mutation 없이 차단한다
+[22m[39m[AIWorker] Lifecycle snapshot 복원 거부: snapshot schema/version/시각 INVALID — fail-closed — Strategy SHADOW 평가 차단
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m알 수 없는 snapshot config version은 부분 복원·SHADOW read·권한 mutation 없이 차단한다
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m알 수 없는 snapshot config version은 부분 복원·SHADOW read·권한 mutation 없이 차단한다
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m알 수 없는 record config version은 부분 복원·SHADOW read·권한 mutation 없이 차단한다
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m알 수 없는 record config version은 부분 복원·SHADOW read·권한 mutation 없이 차단한다
+[22m[39m[AIWorker] Daily 기준점 복구: 2027-01-15T00:00:00.000Z $1000.00
+[AIWorker] Weekly 기준점 복구: 2027-01-11T00:00:00.000Z $1000.00
+
+[90mstderr[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m알 수 없는 record config version은 부분 복원·SHADOW read·권한 mutation 없이 차단한다
+[22m[39m[AIWorker] Lifecycle snapshot 복원 거부: lifecycle record INVALID — fail-closed — Strategy SHADOW 평가 차단
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m알 수 없는 record config version은 부분 복원·SHADOW read·권한 mutation 없이 차단한다
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m알 수 없는 record config version은 부분 복원·SHADOW read·권한 mutation 없이 차단한다
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m중복 Signal ID은 부분 복원·SHADOW read·권한 mutation 없이 차단한다
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m중복 Signal ID은 부분 복원·SHADOW read·권한 mutation 없이 차단한다
+[22m[39m[AIWorker] Daily 기준점 복구: 2027-01-15T00:00:00.000Z $1000.00
+[AIWorker] Weekly 기준점 복구: 2027-01-11T00:00:00.000Z $1000.00
+
+[90mstderr[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m중복 Signal ID은 부분 복원·SHADOW read·권한 mutation 없이 차단한다
+[22m[39m[AIWorker] Lifecycle snapshot 복원 거부: 중복 Signal ID 또는 동일 완료봉 Signal 충돌 — fail-closed — Strategy SHADOW 평가 차단
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m중복 Signal ID은 부분 복원·SHADOW read·권한 mutation 없이 차단한다
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m중복 Signal ID은 부분 복원·SHADOW read·권한 mutation 없이 차단한다
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2mID만 다른 동일 완료봉은 부분 복원·SHADOW read·권한 mutation 없이 차단한다
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2mID만 다른 동일 완료봉은 부분 복원·SHADOW read·권한 mutation 없이 차단한다
+[22m[39m[AIWorker] Daily 기준점 복구: 2027-01-15T00:00:00.000Z $1000.00
+[AIWorker] Weekly 기준점 복구: 2027-01-11T00:00:00.000Z $1000.00
+
+[90mstderr[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2mID만 다른 동일 완료봉은 부분 복원·SHADOW read·권한 mutation 없이 차단한다
+[22m[39m[AIWorker] Lifecycle snapshot 복원 거부: 중복 Signal ID 또는 동일 완료봉 Signal 충돌 — fail-closed — Strategy SHADOW 평가 차단
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2mID만 다른 동일 완료봉은 부분 복원·SHADOW read·권한 mutation 없이 차단한다
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2mID만 다른 동일 완료봉은 부분 복원·SHADOW read·권한 mutation 없이 차단한다
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m중복 History event ID은 부분 복원·SHADOW read·권한 mutation 없이 차단한다
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m중복 History event ID은 부분 복원·SHADOW read·권한 mutation 없이 차단한다
+[22m[39m[AIWorker] Daily 기준점 복구: 2027-01-15T00:00:00.000Z $1000.00
+[AIWorker] Weekly 기준점 복구: 2027-01-11T00:00:00.000Z $1000.00
+
+[90mstderr[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m중복 History event ID은 부분 복원·SHADOW read·권한 mutation 없이 차단한다
+[22m[39m[AIWorker] Lifecycle snapshot 복원 거부: 중복 History event ID — fail-closed — Strategy SHADOW 평가 차단
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m중복 History event ID은 부분 복원·SHADOW read·권한 mutation 없이 차단한다
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m중복 History event ID은 부분 복원·SHADOW read·권한 mutation 없이 차단한다
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m차단된 복원은 첫 cycle에서도 SHADOW NOT_EVALUATED·execution 권한 0을 유지한다
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m차단된 복원은 첫 cycle에서도 SHADOW NOT_EVALUATED·execution 권한 0을 유지한다
+[22m[39m[AIWorker] Daily 기준점 복구: 2027-01-15T00:00:00.000Z $1000.00
+[AIWorker] Weekly 기준점 복구: 2027-01-11T00:00:00.000Z $1000.00
+
+[90mstderr[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m차단된 복원은 첫 cycle에서도 SHADOW NOT_EVALUATED·execution 권한 0을 유지한다
+[22m[39m[AIWorker] 이전 decision JSON 손상 — fail-closed — Strategy SHADOW 평가 차단
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m차단된 복원은 첫 cycle에서도 SHADOW NOT_EVALUATED·execution 권한 0을 유지한다
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m차단된 복원은 첫 cycle에서도 SHADOW NOT_EVALUATED·execution 권한 0을 유지한다
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m차단된 복원은 첫 cycle에서도 SHADOW NOT_EVALUATED·execution 권한 0을 유지한다
+[22m[39m[AIWorker] 사이클 #1 완료 — CASH MULTI conf=60% (0ms)
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — Strategy SHADOW lifecycle DB 복원[2m > [22m[2m차단된 복원은 첫 cycle에서도 SHADOW NOT_EVALUATED·execution 권한 0을 유지한다
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — prevState 초기화 정책[2m > [22m[2mprevState는 DB에 저장되지 않으므로 재시작 후 항상 CASH에서 시작한다
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — prevState 초기화 정책[2m > [22m[2mprevState는 DB에 저장되지 않으므로 재시작 후 항상 CASH에서 시작한다
+[22m[39m[AIWorker] Daily 기준점 복구: 2027-01-15T00:00:00.000Z $1000.00
+[AIWorker] Weekly 기준점 복구: 2027-01-11T00:00:00.000Z $1000.00
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — prevState 초기화 정책[2m > [22m[2mprevState는 DB에 저장되지 않으므로 재시작 후 항상 CASH에서 시작한다
+[22m[39m[AIWorker] 이전 decision 없음 — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — prevState 초기화 정책[2m > [22m[2mprevState는 DB에 저장되지 않으므로 재시작 후 항상 CASH에서 시작한다
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — prevState 초기화 정책[2m > [22m[2mprevState는 DB에 저장되지 않으므로 재시작 후 항상 CASH에서 시작한다
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — prevState 초기화 정책[2m > [22m[2mprevState는 DB에 저장되지 않으므로 재시작 후 항상 CASH에서 시작한다
+[22m[39m[AIWorker] 사이클 #1 RiskEngine veto — 시장 데이터 stale — 진입 차단
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — prevState 초기화 정책[2m > [22m[2mprevState는 DB에 저장되지 않으므로 재시작 후 항상 CASH에서 시작한다
+[22m[39m[AIWorker] 사이클 #1 완료 — LONG MULTI conf=60% (0ms)
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — prevState 초기화 정책[2m > [22m[2mprevState는 DB에 저장되지 않으므로 재시작 후 항상 CASH에서 시작한다
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2m정상 사이클 실행[2m > [22m[2m첫 사이클이 실행되면 scheduler heartbeat와 새 decision 시각이 각각 갱신된다
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2m정상 사이클 실행[2m > [22m[2m첫 사이클이 실행되면 scheduler heartbeat와 새 decision 시각이 각각 갱신된다
+[22m[39m[AIWorker] Daily 기준점 복구: 2026-09-20T00:00:00.000Z $1000.00
+[AIWorker] Weekly 기준점 복구: 2026-09-14T00:00:00.000Z $1000.00
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2m정상 사이클 실행[2m > [22m[2m첫 사이클이 실행되면 scheduler heartbeat와 새 decision 시각이 각각 갱신된다
+[22m[39m[AIWorker] 이전 decision 없음 — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2m정상 사이클 실행[2m > [22m[2m첫 사이클이 실행되면 scheduler heartbeat와 새 decision 시각이 각각 갱신된다
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2m정상 사이클 실행[2m > [22m[2m첫 사이클이 실행되면 scheduler heartbeat와 새 decision 시각이 각각 갱신된다
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2m정상 사이클 실행[2m > [22m[2m첫 사이클이 실행되면 scheduler heartbeat와 새 decision 시각이 각각 갱신된다
+[22m[39m[AIWorker] 사이클 #1 완료 — CASH MULTI conf=60% (0ms)
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2m정상 사이클 실행[2m > [22m[2m첫 사이클이 실행되면 scheduler heartbeat와 새 decision 시각이 각각 갱신된다
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2m정상 사이클 실행[2m > [22m[2m연속 사이클에서 cycleCount가 누적된다
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2m정상 사이클 실행[2m > [22m[2m연속 사이클에서 cycleCount가 누적된다
+[22m[39m[AIWorker] Daily 기준점 복구: 2026-09-20T00:00:00.000Z $1000.00
+[AIWorker] Weekly 기준점 복구: 2026-09-14T00:00:00.000Z $1000.00
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2m정상 사이클 실행[2m > [22m[2m연속 사이클에서 cycleCount가 누적된다
+[22m[39m[AIWorker] 이전 decision 없음 — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2m정상 사이클 실행[2m > [22m[2m연속 사이클에서 cycleCount가 누적된다
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2m정상 사이클 실행[2m > [22m[2m연속 사이클에서 cycleCount가 누적된다
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2m정상 사이클 실행[2m > [22m[2m연속 사이클에서 cycleCount가 누적된다
+[22m[39m[AIWorker] 사이클 #1 완료 — CASH MULTI conf=60% (0ms)
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2m정상 사이클 실행[2m > [22m[2m연속 사이클에서 cycleCount가 누적된다
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2m정상 사이클 실행[2m > [22m[2m연속 사이클에서 cycleCount가 누적된다
+[22m[39m[AIWorker] 사이클 #2 동일 완료봉 결정 worker:-8687165:1699999200000:MULTI:CASH 이미 처리됨 — DB claim과 one-shot downstream 생략
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2m정상 사이클 실행[2m > [22m[2m연속 사이클에서 cycleCount가 누적된다
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2m사이클 오류 복구 — 다음 사이클 계속[2m > [22m[2mrunAiEngine 오류 발생 후 다음 사이클이 여전히 스케줄된다
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2m사이클 오류 복구 — 다음 사이클 계속[2m > [22m[2mrunAiEngine 오류 발생 후 다음 사이클이 여전히 스케줄된다
+[22m[39m[AIWorker] Daily 기준점 복구: 2026-09-20T00:00:00.000Z $1000.00
+[AIWorker] Weekly 기준점 복구: 2026-09-14T00:00:00.000Z $1000.00
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2m사이클 오류 복구 — 다음 사이클 계속[2m > [22m[2mrunAiEngine 오류 발생 후 다음 사이클이 여전히 스케줄된다
+[22m[39m[AIWorker] 이전 decision 없음 — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2m사이클 오류 복구 — 다음 사이클 계속[2m > [22m[2mrunAiEngine 오류 발생 후 다음 사이클이 여전히 스케줄된다
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2m사이클 오류 복구 — 다음 사이클 계속[2m > [22m[2mrunAiEngine 오류 발생 후 다음 사이클이 여전히 스케줄된다
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstderr[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2m사이클 오류 복구 — 다음 사이클 계속[2m > [22m[2mrunAiEngine 오류 발생 후 다음 사이클이 여전히 스케줄된다
+[22m[39m[AIWorker] 사이클 #1 오류: Error: 테스트 강제 오류
+    at [90m/tmp/ccc-virtual400-executor/artifacts/api-server/[39msrc/__tests__/aiWorker.test.ts:2468:45
+    at Mock (file:///home/runner/workspace/node_modules/[4m.pnpm[24m/@vitest+spy@4.1.10/node_modules/[4m@vitest/spy[24m/dist/index.js:332:34)
+    at WorkerManager.runCycle [90m(/tmp/ccc-virtual400-executor/artifacts/api-server/[39msrc/workers/aiWorker.ts:1950:28[90m)[39m
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2m사이클 오류 복구 — 다음 사이클 계속[2m > [22m[2mrunAiEngine 오류 발생 후 다음 사이클이 여전히 스케줄된다
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2m사이클 오류 복구 — 다음 사이클 계속[2m > [22m[2mrunAiEngine 오류 발생 후 다음 사이클이 여전히 스케줄된다
+[22m[39m[AIWorker] 사이클 #2 완료 — CASH MULTI conf=60% (0ms)
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2m사이클 오류 복구 — 다음 사이클 계속[2m > [22m[2mrunAiEngine 오류 발생 후 다음 사이클이 여전히 스케줄된다
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2m사이클 오류 복구 — 다음 사이클 계속[2m > [22m[2m사이클 오류 시 lastCycleResult.error가 기록된다
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2m사이클 오류 복구 — 다음 사이클 계속[2m > [22m[2m사이클 오류 시 lastCycleResult.error가 기록된다
+[22m[39m[AIWorker] Daily 기준점 복구: 2026-09-20T00:00:00.000Z $1000.00
+[AIWorker] Weekly 기준점 복구: 2026-09-14T00:00:00.000Z $1000.00
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2m사이클 오류 복구 — 다음 사이클 계속[2m > [22m[2m사이클 오류 시 lastCycleResult.error가 기록된다
+[22m[39m[AIWorker] 이전 decision 없음 — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2m사이클 오류 복구 — 다음 사이클 계속[2m > [22m[2m사이클 오류 시 lastCycleResult.error가 기록된다
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2m사이클 오류 복구 — 다음 사이클 계속[2m > [22m[2m사이클 오류 시 lastCycleResult.error가 기록된다
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstderr[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2m사이클 오류 복구 — 다음 사이클 계속[2m > [22m[2m사이클 오류 시 lastCycleResult.error가 기록된다
+[22m[39m[AIWorker] 사이클 #1 오류: Error: DB 연결 실패 시뮬레이션
+    at [90m/tmp/ccc-virtual400-executor/artifacts/api-server/[39msrc/__tests__/aiWorker.test.ts:2489:13
+    at Mock (file:///home/runner/workspace/node_modules/[4m.pnpm[24m/@vitest+spy@4.1.10/node_modules/[4m@vitest/spy[24m/dist/index.js:332:34)
+    at WorkerManager.runCycle [90m(/tmp/ccc-virtual400-executor/artifacts/api-server/[39msrc/workers/aiWorker.ts:1950:28[90m)[39m
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2m사이클 오류 복구 — 다음 사이클 계속[2m > [22m[2m사이클 오류 시 lastCycleResult.error가 기록된다
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2misRunning atomic lock — 중복 사이클 방지[2m > [22m[2m사이클 실행 중에는 isRunning이 true이다
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2misRunning atomic lock — 중복 사이클 방지[2m > [22m[2m사이클 실행 중에는 isRunning이 true이다
+[22m[39m[AIWorker] Daily 기준점 복구: 2026-09-20T00:00:00.000Z $1000.00
+[AIWorker] Weekly 기준점 복구: 2026-09-14T00:00:00.000Z $1000.00
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2misRunning atomic lock — 중복 사이클 방지[2m > [22m[2m사이클 실행 중에는 isRunning이 true이다
+[22m[39m[AIWorker] 이전 decision 없음 — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2misRunning atomic lock — 중복 사이클 방지[2m > [22m[2m사이클 실행 중에는 isRunning이 true이다
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2misRunning atomic lock — 중복 사이클 방지[2m > [22m[2m사이클 실행 중에는 isRunning이 true이다
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2misRunning atomic lock — 중복 사이클 방지[2m > [22m[2m사이클 실행 중에는 isRunning이 true이다
+[22m[39m[AIWorker] 사이클 #1 완료 — CASH MULTI conf=60% (0ms)
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2misRunning atomic lock — 중복 사이클 방지[2m > [22m[2m사이클 실행 중에는 isRunning이 true이다
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — consecutiveLosses DB 재계산[2m > [22m[2m연속 음수 CLOSE 2건이 있으면 consecutiveLosses=2를 엔진에 전달한다
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — consecutiveLosses DB 재계산[2m > [22m[2m연속 음수 CLOSE 2건이 있으면 consecutiveLosses=2를 엔진에 전달한다
+[22m[39m[AIWorker] Daily 기준점 복구: 2026-09-20T00:00:00.000Z $1000.00
+[AIWorker] Weekly 기준점 복구: 2026-09-14T00:00:00.000Z $1000.00
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — consecutiveLosses DB 재계산[2m > [22m[2m연속 음수 CLOSE 2건이 있으면 consecutiveLosses=2를 엔진에 전달한다
+[22m[39m[AIWorker] 이전 decision 없음 — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — consecutiveLosses DB 재계산[2m > [22m[2m연속 음수 CLOSE 2건이 있으면 consecutiveLosses=2를 엔진에 전달한다
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — consecutiveLosses DB 재계산[2m > [22m[2m연속 음수 CLOSE 2건이 있으면 consecutiveLosses=2를 엔진에 전달한다
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — consecutiveLosses DB 재계산[2m > [22m[2m연속 음수 CLOSE 2건이 있으면 consecutiveLosses=2를 엔진에 전달한다
+[22m[39m[AIWorker] 사이클 #1 완료 — CASH MULTI conf=60% (0ms)
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — consecutiveLosses DB 재계산[2m > [22m[2m연속 음수 CLOSE 2건이 있으면 consecutiveLosses=2를 엔진에 전달한다
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — consecutiveLosses DB 재계산[2m > [22m[2mCLOSE 거래가 없으면 consecutiveLosses=0
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — consecutiveLosses DB 재계산[2m > [22m[2mCLOSE 거래가 없으면 consecutiveLosses=0
+[22m[39m[AIWorker] Daily 기준점 복구: 2026-09-20T00:00:00.000Z $1000.00
+[AIWorker] Weekly 기준점 복구: 2026-09-14T00:00:00.000Z $1000.00
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — consecutiveLosses DB 재계산[2m > [22m[2mCLOSE 거래가 없으면 consecutiveLosses=0
+[22m[39m[AIWorker] 이전 decision 없음 — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — consecutiveLosses DB 재계산[2m > [22m[2mCLOSE 거래가 없으면 consecutiveLosses=0
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — consecutiveLosses DB 재계산[2m > [22m[2mCLOSE 거래가 없으면 consecutiveLosses=0
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — consecutiveLosses DB 재계산[2m > [22m[2mCLOSE 거래가 없으면 consecutiveLosses=0
+[22m[39m[AIWorker] 사이클 #1 완료 — CASH MULTI conf=60% (0ms)
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — consecutiveLosses DB 재계산[2m > [22m[2mCLOSE 거래가 없으면 consecutiveLosses=0
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — 쿨다운 DB에서 재계산[2m > [22m[2m최근 5분 전 OPEN 거래가 있으면 30분 쿨다운에 의해 사이클이 조기 반환된다
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — 쿨다운 DB에서 재계산[2m > [22m[2m최근 5분 전 OPEN 거래가 있으면 30분 쿨다운에 의해 사이클이 조기 반환된다
+[22m[39m[AIWorker] Daily 기준점 복구: 2026-09-20T00:00:00.000Z $1000.00
+[AIWorker] Weekly 기준점 복구: 2026-09-14T00:00:00.000Z $1000.00
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — 쿨다운 DB에서 재계산[2m > [22m[2m최근 5분 전 OPEN 거래가 있으면 30분 쿨다운에 의해 사이클이 조기 반환된다
+[22m[39m[AIWorker] 이전 decision 없음 — 빈 SHADOW lifecycle 기준선 — records=0, history=0
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — 쿨다운 DB에서 재계산[2m > [22m[2m최근 5분 전 OPEN 거래가 있으면 30분 쿨다운에 의해 사이클이 조기 반환된다
+[22m[39m[AIWorker] 시작 — 60초 AI 사이클, 10초 가격 폴링
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — 쿨다운 DB에서 재계산[2m > [22m[2m최근 5분 전 OPEN 거래가 있으면 30분 쿨다운에 의해 사이클이 조기 반환된다
+[22m[39m[AIWorker] PENDING 세트 재구성: 0건
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — 쿨다운 DB에서 재계산[2m > [22m[2m최근 5분 전 OPEN 거래가 있으면 30분 쿨다운에 의해 사이클이 조기 반환된다
+[22m[39m[AIWorker] 사이클 #1 쿨다운 — 1470s 남음 (설정: 30분)
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mcrash-restart — 쿨다운 DB에서 재계산[2m > [22m[2m최근 5분 전 OPEN 거래가 있으면 30분 쿨다운에 의해 사이클이 조기 반환된다
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2m중복 PENDING 승인 방지[2m > [22m[2mstop() 후 재시작 시 pendingApprovalKeys가 초기화된다
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mWorker heartbeat — scheduler 생존과 새 decision 시각 분리[2m > [22m[2mstop() 호출 후 active가 false가 된다
+[22m[39m[AIWorker] 정지
+
+[90mstdout[2m | src/__tests__/aiWorker.test.ts[2m > [22m[2mLIVE_EXECUTION_LOCKED 불변 보안 상수[2m > [22m[2mexecuteOrder()가 항상 simulated:true를 반환한다 (실제 주문 없음)
+[22m[39m[Executor] LIVE_EXECUTION_LOCKED=true — dry-run 반환 (decisionId=undefined symbol=MULTI)
+
+ [32m✓[39m src/__tests__/aiWorker.test.ts [2m([22m[2m102 tests[22m[2m)[22m[32m 245[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m5 passed[39m[22m[90m (5)[39m
+[2m      Tests [22m [1m[32m229 passed[39m[22m[90m (229)[39m
+[2m   Start at [22m 02:07:14
+[2m   Duration [22m 1.76s[2m (transform 1.74s, setup 0ms, import 3.37s, tests 396ms, environment 0ms)[22m
+

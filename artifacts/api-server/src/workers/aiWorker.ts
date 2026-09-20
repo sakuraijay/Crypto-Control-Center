@@ -80,10 +80,11 @@ import {
 import {
   openServerPaperPosition, closeServerPaperPosition, reduceServerPaper70,
   requestServerPaperCloseAll, loadPendingCloseFromDb, loadSubmittedReduce70FromDb, manageServerPaperTick,
-  loadServerOpenRows, getServerPaperStatus, MAX_MANAGE_PRICE_AGE_MS,
+  loadServerOpenRows, getServerPaperStatus, MAX_MANAGE_PRICE_AGE_MS, SERVER_PAPER_STRATEGY,
   reconcileStartupCloseIntent,
   type ServerPaperExecStatus, type PriceQuote,
 } from "./serverPaperExecutor";
+import { isVirtualPaper400StrategyTag } from "./virtualPaper400Ledger";
 import {
   applyRiskProfileToLimits,
   promoteRiskProfileAtSafeBoundary,
@@ -716,7 +717,9 @@ class WorkerManager {
     generation: number,
   ): Promise<void> {
     if (!this.isCurrentGeneration(generation)) return;
-    const serverOpenRows = await loadServerOpenRows();
+    // This caller only authorizes Standard decisions. Virtual inventory still
+    // receives independent SL/TP/recovery ticks, never another namespace's risk action.
+    const serverOpenRows = (await loadServerOpenRows()).filter(row => row.strategy === SERVER_PAPER_STRATEGY);
     if (!this.isCurrentGeneration(generation)) return;
 
     // 1) 수익 보호 70% 축소 (RiskEngine 액션)
@@ -753,7 +756,7 @@ class WorkerManager {
       for (const row of serverOpenRows) {
         await closeServerPaperPosition(
           {
-            openTradeId: row.id, reason, kind: 'FULL', quote: this.serverPaperQuote(row.symbol),
+            openTradeId: row.id, expectedStrategy: row.strategy ?? "", reason, kind: 'FULL', quote: this.serverPaperQuote(row.symbol),
           },
           () => this.isCurrentGeneration(generation),
         );
@@ -1390,9 +1393,11 @@ class WorkerManager {
         .orderBy(desc(tradesTable.timestamp));
       // Legacy/unscoped rows remain Standard only.  Alpha accepts only its exact
       // immutable strategy provenance and never guesses that an old row is beta.
+      // Validated virtual sessions are neither Standard nor Fixed Beta capital.
       const scopedTrades = alpha
         ? allTrades.filter(t => t.strategy === FIXED_BETA_TRADE_STRATEGY)
-        : allTrades.filter(t => t.strategy !== FIXED_BETA_TRADE_STRATEGY);
+        : allTrades.filter(t => t.strategy !== FIXED_BETA_TRADE_STRATEGY
+          && !isVirtualPaper400StrategyTag(t.strategy));
       if (alpha) {
         // Enumerate held identities BEFORE checking ledger/mark evidence. A
         // failed mark must not turn a known position into a synthetic flat book.

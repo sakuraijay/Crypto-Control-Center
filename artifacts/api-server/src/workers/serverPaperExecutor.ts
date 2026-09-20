@@ -29,6 +29,7 @@ import { computeStopTrigger } from "../lib/stopLossPlan";
 import { computeReduction, GMX_MIN_POSITION_NOTIONAL_USD, canExecuteReduction, buildProfitProtectKey, manilaDayKey, type ProfitProtectRecord } from "../lib/profitProtection";
 import { RISK_POLICY } from "../lib/riskPolicy";
 import { isAppliedRiskProfileSnapshot } from "../lib/riskProfiles";
+import { isVirtualPaper400StrategyTag } from "./virtualPaper400Ledger";
 
 const fin = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 type PaperDb = Pick<typeof db, "select" | "insert" | "update" | "delete">;
@@ -57,6 +58,8 @@ function isUsableQuoteAge(ageMs: number, maxAgeMs: number): boolean {
 export type PriceLookup = (symbol: string) => PriceQuote | null;
 
 export interface ServerPaperOpenArgs {
+  /** Omitted = legacy Standard PAPER. Only the existing virtual session tag contract is accepted. */
+  strategy?: string;
   decisionId: string;
   symbol: string;
   side: "LONG" | "SHORT";
@@ -81,6 +84,8 @@ export type ServerPaperOpenResult =
   | { ok: false; reason: string };
 
 export interface ServerPaperCloseArgs {
+  /** Optional caller scope assertion; exits always persist the locked OPEN's exact namespace. */
+  expectedStrategy?: string;
   openTradeId: string;
   reason: string;
   kind: "FULL" | "REDUCE70";
@@ -287,6 +292,10 @@ export async function openServerPaperPosition(
     ({ ok: false, reason: "lifecycle stopped — OPEN no-op" });
 
   if (!shouldContinue()) return stopped();
+  const strategy = args.strategy === undefined ? SERVER_PAPER_STRATEGY : args.strategy;
+  if (strategy !== SERVER_PAPER_STRATEGY && !isVirtualPaper400StrategyTag(strategy)) {
+    return record({ ok: false, reason: "PAPER strategy namespace invalid — OPEN refused" });
+  }
   if (state.unresolved) return record({ ok: false, reason: `UNRESOLVED 상태 — 신규 진입 차단: ${state.unresolved}` });
   if (!args.decisionId) return record({ ok: false, reason: "decisionId 없음 — idempotency 불가, 진입 거부" });
   if (!isAppliedRiskProfileSnapshot(args.riskProfileSnapshot)) {
@@ -352,6 +361,9 @@ export async function openServerPaperPosition(
 
   const existingRows = await loadServerOpenRows();
   if (!shouldContinue()) return stopped();
+  if (existingRows.some(row => row.strategy !== strategy)) {
+    return record({ ok: false, reason: "PAPER strategy namespace mismatch — OPEN refused" });
+  }
   if (existingRows.some(row => row.symbol.toUpperCase() === args.symbol.toUpperCase())) {
     return record({ ok: false, reason: `${args.symbol} 기존 포지션 중복 — 동일 심볼 추가 진입/물타기 금지` });
   }
@@ -372,7 +384,7 @@ export async function openServerPaperPosition(
       size: String(args.sizeUsd),
       price: String(q.priceUsd),
       pnl: "0",
-      strategy: SERVER_PAPER_STRATEGY,
+      strategy,
       timestamp: new Date(nowMs),
       closeTime: 0,
       sizeInUsd: String(args.sizeUsd),
@@ -444,6 +456,11 @@ async function closeServerPaperPositionInDb(
   const openRow = rows[0];
   if (!openRow) { record(args.kind, args.reason, false, "OPEN 행 없음"); return { ok: false, reason: "OPEN 행 없음" }; }
   if (openRow.managedBy !== "SERVER") { record(args.kind, args.reason, false, "서버 관리 행 아님"); return { ok: false, reason: "서버 관리 행 아님 — 거부" }; }
+  if (openRow.action !== "OPEN"
+    || (openRow.strategy !== SERVER_PAPER_STRATEGY && !isVirtualPaper400StrategyTag(openRow.strategy))
+    || (args.expectedStrategy !== undefined && args.expectedStrategy !== openRow.strategy)) {
+    return { ok: false, reason: "PAPER strategy namespace mismatch/invalid — CLOSE refused" };
+  }
   if (openRow.closeTime && openRow.closeTime > 0) {
     record(args.kind, args.reason, true, "이미 청산됨 (no-op)");
     return { ok: false, reason: "이미 청산됨", alreadyClosed: true };
@@ -462,6 +479,7 @@ async function closeServerPaperPositionInDb(
       || row.symbol !== openRow.symbol
       || row.side !== openRow.side
       || row.managedBy !== "SERVER"
+      || row.strategy !== openRow.strategy
       || !fin(size) || size <= 0
       || (expectedSize !== undefined && (!fin(expectedSize) || Math.abs(size - expectedSize) > 0.0001))
       || !fin(gross)
@@ -623,7 +641,7 @@ async function closeServerPaperPositionInDb(
       size: String(closedSize),
       price: String(q.priceUsd),
       pnl: String(grossPnl),
-      strategy: SERVER_PAPER_STRATEGY,
+      strategy: openRow.strategy,
       timestamp: new Date(nowMs),
       closeTime: nowMs,
       sizeInUsd: String(closedSize),
@@ -925,7 +943,7 @@ async function reduceServerPaper70Internal(args: {
       }
       const result = await db.transaction(async (tx) => {
       let result = await closeServerPaperPositionInDb({
-        openTradeId: args.openRow.id, reason: "PROFIT_PROTECT_REDUCE70", kind: "REDUCE70", quote: args.quote, nowMs,
+        openTradeId: args.openRow.id, expectedStrategy: args.openRow.strategy ?? "", reason: "PROFIT_PROTECT_REDUCE70", kind: "REDUCE70", quote: args.quote, nowMs,
       }, shouldContinue, tx, expectedReduction);
       if (!result.ok && result.alreadyClosed) {
         const fullRows = await tx.select().from(tradesTable).where(and(
@@ -947,6 +965,7 @@ async function reduceServerPaper70Internal(args: {
           || !fin(grossPnl) || (netPnl != null && !fin(netPnl))
           || full.symbol !== args.openRow.symbol
           || full.side !== args.openRow.side
+          || full.strategy !== args.openRow.strategy
           || full.managedBy !== "SERVER") {
           throw new Error("REDUCE70 SUBMITTED의 FULL 종료 증거가 손상됨 — fail-closed");
         }
@@ -1106,7 +1125,9 @@ export async function reconcileStartupCloseIntent(
   storedDirFetcher = fetchLastDecisionDirection;
   try {
     if (!state.pendingClose) {
-      const open = await loadServerOpenRows();
+      // The current decision-direction fetcher is Standard-only. It cannot
+      // reconstruct a missing virtual-session close intent.
+      const open = (await loadServerOpenRows()).filter(row => row.strategy === SERVER_PAPER_STRATEGY);
       if (!shouldContinue()) return;
       if (open.length > 0) {
         const dir = await fetchLastDecisionDirection();
@@ -1234,10 +1255,12 @@ export async function manageServerPaperTick(
       }
 
       // 1) pendingClose (CASH 전환·RiskEngine CLOSE_ALL) — 최우선 전량 청산
-      if (state.pendingClose) {
+      // Legacy pendingClose has no session identity and is Standard-only.
+      // Virtual inventory must still reach its own persisted SL/TP below.
+      if (state.pendingClose && row.strategy === SERVER_PAPER_STRATEGY) {
         if (!shouldContinue()) return;
         await closeServerPaperPosition(
-          { openTradeId: row.id, reason: state.pendingClose.reason, kind: "FULL", quote, nowMs },
+          { openTradeId: row.id, expectedStrategy: row.strategy ?? "", reason: state.pendingClose.reason, kind: "FULL", quote, nowMs },
           shouldContinue,
         );
         if (!shouldContinue()) return;
@@ -1253,14 +1276,14 @@ export async function manageServerPaperTick(
       if (stopHit) {
         if (!shouldContinue()) return;
         await closeServerPaperPosition(
-          { openTradeId: row.id, reason: "STOP_LOSS", kind: "FULL", quote, nowMs },
+          { openTradeId: row.id, expectedStrategy: row.strategy ?? "", reason: "STOP_LOSS", kind: "FULL", quote, nowMs },
           shouldContinue,
         );
         if (!shouldContinue()) return;
       } else if (tpHit) {
         if (!shouldContinue()) return;
         await closeServerPaperPosition(
-          { openTradeId: row.id, reason: "TAKE_PROFIT", kind: "FULL", quote, nowMs },
+          { openTradeId: row.id, expectedStrategy: row.strategy ?? "", reason: "TAKE_PROFIT", kind: "FULL", quote, nowMs },
           shouldContinue,
         );
         if (!shouldContinue()) return;
@@ -1272,10 +1295,10 @@ export async function manageServerPaperTick(
       if (!shouldContinue()) return;
       const remaining = await loadServerOpenRows();
       if (!shouldContinue()) return;
-      if (remaining.length === 0) {
+      if (!remaining.some(row => row.strategy === SERVER_PAPER_STRATEGY)) {
         state.pendingClose = null;
-        state.openPosition = null;
-        state.openPositions = [];
+        state.openPositions = remaining.map(row => toView(row, getQuote(row.symbol)));
+        state.openPosition = state.openPositions[0] ?? null;
         await deleteWorkerState(PENDING_CLOSE_KEY, shouldContinue).catch(() => {});
         if (!shouldContinue()) return;
       }

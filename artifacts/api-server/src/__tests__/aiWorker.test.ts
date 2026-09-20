@@ -216,6 +216,7 @@ vi.mock('../workers/liveTestExecutor', () => ({
 }));
 
 vi.mock('../workers/serverPaperExecutor', () => ({
+  SERVER_PAPER_STRATEGY: 'SERVER_WORKER_AI',
   MAX_MANAGE_PRICE_AGE_MS: 30_000,
   openServerPaperPosition: vi.fn(async () => ({ ok: false, reason: 'TEST_BLOCKED' })),
   closeServerPaperPosition: vi.fn(async () => ({ ok: false, reason: 'TEST_BLOCKED' })),
@@ -298,6 +299,30 @@ import {
 } from '../workers/serverPaperExecutor';
 import { FIXED_BETA_TRADE_STRATEGY, fixedBetaLedgerBinding, isFixedBetaAccountingStateFresh, type FixedBetaAccountingStateV1 } from '../workers/fixedBetaAccountingState';
 import { manilaDayStartIso, manilaWeekStartIso } from '../lib/manilaTime';
+import { virtualPaper400StrategyTag } from '../workers/virtualPaper400Ledger';
+
+describe('Standard decision / virtual PAPER inventory isolation', () => {
+  it.each(['CLOSE_ALL_POSITIONS', 'REDUCE_POSITION_70PCT'])('does not apply Standard %s to a virtual session', async action => {
+    const wm = workerManager as unknown as {
+      isCurrentGeneration(generation: number): boolean;
+      runServerPaperExecution(...args: unknown[]): Promise<void>;
+    };
+    const generation = vi.spyOn(wm, 'isCurrentGeneration').mockReturnValue(true);
+    vi.mocked(loadServerOpenRows).mockResolvedValueOnce([{
+      id: 'virtual-held', strategy: virtualPaper400StrategyTag('worker-isolation'),
+    }] as never);
+    try {
+      await wm.runServerPaperExecution(
+        { operatingState: 'CASH' }, { positions: [], entriesManilaDay: 0 },
+        { actions: [action], entryAllowed: false }, 1, 0,
+      );
+      expect(requestServerPaperCloseAll).not.toHaveBeenCalled();
+      expect(closeServerPaperPosition).not.toHaveBeenCalled();
+      expect(reduceServerPaper70).not.toHaveBeenCalled();
+      expect(openServerPaperPosition).not.toHaveBeenCalled();
+    } finally { generation.mockRestore(); }
+  });
+});
 
 // ── 최소 유효 AI 결정 (CASH — 가장 안전한 기본값) ──────────────────────────────
 const CASH_DECISION = {
@@ -701,7 +726,7 @@ describe('Worker entry veto does not synthesize a close-all', () => {
     };
     wm.active = true;
     wm.lifecycleGeneration = 901;
-    vi.mocked(loadServerOpenRows).mockResolvedValue([{ id: 'open-1', symbol: 'BTC' }] as never);
+    vi.mocked(loadServerOpenRows).mockResolvedValue([{ id: 'open-1', symbol: 'BTC', strategy: 'SERVER_WORKER_AI' }] as never);
 
     await wm.runServerPaperExecution({
       id: 'entry-veto',
@@ -724,7 +749,7 @@ describe('Worker entry veto does not synthesize a close-all', () => {
     };
     wm.active = true;
     wm.lifecycleGeneration = 902;
-    vi.mocked(loadServerOpenRows).mockResolvedValue([{ id: 'open-2', symbol: 'BTC' }] as never);
+    vi.mocked(loadServerOpenRows).mockResolvedValue([{ id: 'open-2', symbol: 'BTC', strategy: 'SERVER_WORKER_AI' }] as never);
 
     await wm.runServerPaperExecution({
       id: 'actual-cash',
@@ -763,6 +788,12 @@ describe('Worker scoped alpha accounting path', () => {
         id: 'standard-close', action: 'CLOSE', strategy: 'SERVER_WORKER_AI',
         timestamp: now - 1_000, closeTime: now - 1_000, settlementStatus: 'SETTLED',
         pnl: -3, sizeInUsd: 100, size: 100, price: 49_000, symbol: 'ETH', side: 'LONG',
+      },
+      {
+        id: 'virtual-close', action: 'CLOSE', strategy: virtualPaper400StrategyTag('isolated-ledger'),
+        timestamp: now - 500, closeTime: now - 500, settlementStatus: 'PAPER_ESTIMATED',
+        netPnlEstimatedUsd: '-99', pnl: -98, sizeInUsd: 100, size: 100,
+        price: 49_000, symbol: 'ETH', side: 'LONG',
       },
     ];
     _dbSelectImpl = query => query?.table?.__name === 'trades' ? ledger : [];
