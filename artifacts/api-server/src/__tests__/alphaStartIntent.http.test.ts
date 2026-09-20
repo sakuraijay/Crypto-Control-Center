@@ -61,7 +61,8 @@ import request from 'supertest';
 import { router } from '../routes/alphaStartIntent';
 import { ALPHA_START_INTENT_KEY } from '../workers/alphaStartIntent';
 import { WORKER_POLICY_CONTEXT_KEY } from '../workers/workerPolicyContext';
-import { VIRTUAL_PAPER_400_SESSION_STATE_KEY } from '../workers/virtualPaper400SessionState';
+import { VIRTUAL_PAPER_400_SESSION_STATE_KEY, buildActiveVirtualPaper400SessionState } from '../workers/virtualPaper400SessionState';
+import { virtualPaper400Activity } from '../workers/virtualPaper400Activity';
 
 const app = express();
 app.use(express.json());
@@ -188,6 +189,23 @@ describe('alpha start intent HTTP boundary', () => {
 });
 
 describe('virtual PAPER 400 session HTTP boundary', () => {
+  it('exposes only the matching session activity through observational GET without financial writes', async () => {
+    const session = buildActiveVirtualPaper400SessionState('activity-http', new Date());
+    memory.rows.set(VIRTUAL_PAPER_400_SESSION_STATE_KEY, JSON.stringify(session));
+    const run = virtualPaper400Activity.begin(session.session.sessionId, 12);
+    virtualPaper400Activity.stage(run, 'ANALYZING_MARKETS', ['BTC','ETH','SOL']);
+    const before = [...memory.rows];
+    const res = await request(app).get('/api/data/virtual-paper-400-session');
+    expect(res.status).toBe(200); expect(res.body.executionAuthorized).toBe(false);
+    expect(res.body.activityFresh).toBe(true);
+    expect(res.body.activity.phase).toBe('ANALYZING_MARKETS');
+    expect(res.body.activity.symbols).toEqual(['BTC','ETH','SOL']);
+    expect([...memory.rows]).toEqual(before);
+    memory.rows.set(VIRTUAL_PAPER_400_SESSION_STATE_KEY,
+      JSON.stringify(buildActiveVirtualPaper400SessionState('another-session', new Date())));
+    const other = await request(app).get('/api/data/virtual-paper-400-session');
+    expect(other.body.activity).toBeNull(); expect(other.body.activityFresh).toBe(false);
+  });
   it('keeps GET observational and does not bootstrap a missing virtual session', async () => {
     const res = await request(app).get('/api/data/virtual-paper-400-session');
 

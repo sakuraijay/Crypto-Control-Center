@@ -7,6 +7,7 @@ import { amount, explainReason, finite, timestamp, type VirtualRuntime } from '@
 import { VirtualSessionControls } from './VirtualSessionControls';
 import { VirtualPerformanceChart } from './VirtualPerformanceChart';
 import { VirtualTradeJournal } from './VirtualTradeJournal';
+import { AiAnalysisActivity } from './AiAnalysisActivity';
 
 function Metric({ label, value, unit = 'USDC', note, icon: Icon, tone = '', featured = false }: {
   label: string; value: string; unit?: string; note: string; icon: typeof Wallet; tone?: string; featured?: boolean;
@@ -65,6 +66,7 @@ export function VirtualPaper400Card() {
       <Metric label="미실현 순손익 추정" value={amount(account?.unrealizedNetPnlUsd,true)} note="현재 보유 포지션의 평가 손익" icon={Activity} tone={pnlTone(account?.unrealizedNetPnlUsd)} />
       <Metric label="보유 포지션" value={account?String(account.held.length):'—'} unit="개" note="진입과 보호는 서버에서 실행" icon={Layers3} />
     </div>
+    <AiAnalysisActivity />
     <div className="ccc-overview-grid"><VirtualPerformanceChart runtime={runtime} fresh={fresh} />
       <section className="ccc-panel ccc-strategy-panel" aria-label="자동매매 상태와 설정"><div className="ccc-panel-heading"><div><p className="ccc-eyebrow">AUTOMATION</p><h2>자동매매 상태</h2></div><span className={`ccc-radar-icon ${active&&!blocked?'is-active':''}`}><Radar size={20} /></span></div>
         <div className="ccc-strategy-message"><h3>{headline}</h3><p>{stopped?'기존 포지션의 손절·익절 보호는 계속됩니다.':explainReason(runtime?.reason)}</p></div>

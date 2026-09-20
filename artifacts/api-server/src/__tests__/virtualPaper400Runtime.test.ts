@@ -47,6 +47,7 @@ import { buildActiveVirtualPaper400SessionState, buildStoppedVirtualPaper400Sess
   VIRTUAL_PAPER_400_SESSION_STATE_KEY } from '../workers/virtualPaper400SessionState';
 import { initialVirtualPaper400RiskState, virtualPaper400RiskKey } from '../workers/virtualPaper400Accounting';
 import { openServerPaperPosition, closeServerPaperPosition } from '../workers/serverPaperExecutor';
+import { virtualPaper400Activity } from '../workers/virtualPaper400Activity';
 
 const args = { cycleNumber: 1, quote: () => ({ priceUsd: 50_000, ageMs: 0 }), shouldContinue: () => true };
 beforeEach(() => {
@@ -59,6 +60,39 @@ function stoppedSession() {
   fixture.rows.set(VIRTUAL_PAPER_400_SESSION_STATE_KEY, JSON.stringify(state)); return state.session;
 }
 describe('virtual runtime routing and durable account boundary', () => {
+  it('exposes the actual in-flight market batch, then stops presenting it as running', async () => {
+    const active = buildActiveVirtualPaper400SessionState('activity-test', new Date(Date.now() - 1_000));
+    fixture.rows.set(VIRTUAL_PAPER_400_SESSION_STATE_KEY, JSON.stringify(active));
+    let release!: () => void;
+    let entered!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    vi.mocked(runStrategyShadowWorkerReadOnly).mockImplementationOnce(async () => {
+      entered(); await new Promise<void>(resolve => { release = resolve; });
+      return { status: 'EVALUATED', records: [] } as any;
+    });
+    const cycle = maybeRunVirtualPaper400Cycle({ ...args, cycleNumber: 9 });
+    await started;
+    const current = virtualPaper400Activity.read(active.session.sessionId);
+    expect(current.activityFresh).toBe(true);
+    expect(current.activity!.phase).toBe('ANALYZING_MARKETS');
+    expect(current.activity!.symbols).toEqual(['BTC','ETH','SOL']);
+    expect(fixture.rows.has(VIRTUAL_PAPER_400_RUNTIME_KEY)).toBe(false);
+    release(); await cycle;
+    const final = virtualPaper400Activity.read(active.session.sessionId).activity!;
+    expect(final.phase).toBe('WAITING'); expect(final.outcome).toBe('NO_TRADE');
+    expect(final.symbols).toEqual([]);
+    expect(openServerPaperPosition).not.toHaveBeenCalled();
+  });
+  it('ends a failed analysis with a generic error without exposing raw infrastructure errors', async () => {
+    const active = buildActiveVirtualPaper400SessionState('activity-error', new Date(Date.now() - 1_000));
+    fixture.rows.set(VIRTUAL_PAPER_400_SESSION_STATE_KEY, JSON.stringify(active));
+    vi.mocked(runStrategyShadowWorkerReadOnly).mockRejectedValueOnce(new Error('private infrastructure error'));
+    await expect(maybeRunVirtualPaper400Cycle(args)).rejects.toThrow('private infrastructure error');
+    const snapshot = virtualPaper400Activity.read(active.session.sessionId).activity!;
+    expect(snapshot.phase).toBe('ERROR'); expect(snapshot.reason).toBe('CYCLE_FAILED');
+    expect(JSON.stringify(snapshot)).not.toContain('private infrastructure');
+    expect(openServerPaperPosition).not.toHaveBeenCalled();
+  });
   it('promotes the dedicated policy once and scans all three supported symbols without resetting the session', async () => {
     const active = buildActiveVirtualPaper400SessionState('active-test', new Date(Date.now() - 1_000));
     const raw = JSON.stringify(active);

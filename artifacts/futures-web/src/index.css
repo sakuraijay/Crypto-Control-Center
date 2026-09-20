@@ -322,3 +322,23 @@ button:focus-visible, a:focus-visible, summary:focus-visible, select:focus-visib
 @media (prefers-reduced-motion: reduce) { .ccc-shell-body,.ccc-sidebar { transition: none; }.ccc-overview .animate-spin { animation: none; } }
 
 .ccc-dialog { max-height: 90dvh; overflow-y: auto; }
+
+/* Figma CCC / AI analysis activity (20:22): server observations only. */
+.ccc-ai-activity { padding: 24px; display: flex; flex-direction: column; gap: 16px; }
+.ccc-ai-activity-heading { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+.ccc-ai-activity h2 { color: #f1f5f2; font-size: 16px; font-weight: 700; margin-top: 6px; }
+.ccc-ai-state { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: #9aabb4; }
+.ccc-ai-state i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
+.ccc-ai-state.is-live { color: #8be0b4; }.ccc-ai-state.is-error { color: #f38e91; }
+.ccc-ai-summary { font-size: 14px; line-height: 1.6; color: #f1f5f2; }
+.ccc-ai-stages { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 12px; padding: 12px 16px; border-radius: 12px; background: #0d1114; list-style: none; }
+.ccc-ai-stages li { display: flex; flex-direction: column; gap: 4px; color: #9aabb4; font-size: 12px; }
+.ccc-ai-stages li small { font-size: 11px; }.ccc-ai-stages .is-observed { color: #c4d3cb; }.ccc-ai-stages .is-current { color: #8be0b4; font-weight: 600; }
+.ccc-ai-symbols { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 16px; }
+.ccc-ai-symbols article { min-width: 0; background: #0d1114; border-radius: 12px; padding: 16px; display: flex; flex-direction: column; gap: 8px; }
+.ccc-ai-symbols strong { font-size: 16px; color: #f1f5f2; }.ccc-ai-symbols span,.ccc-ai-symbols p { color: #9aabb4; font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; }
+.ccc-ai-meta { display: flex; flex-wrap: wrap; gap: 8px 20px; font-size: 11px; color: #9aabb4; }
+.ccc-ai-unavailable { color: #9aabb4; font-size: 12px; padding: 16px; background: #0d1114; border-radius: 12px; }
+.ccc-ai-events { font-size: 12px; color: #9aabb4; }.ccc-ai-events summary { cursor: pointer; padding: 10px 0; min-height: 44px; }.ccc-ai-events summary:focus-visible { outline: 2px solid #8be0b4; outline-offset: 3px; border-radius: 4px; }
+.ccc-ai-events ol { display: grid; gap: 8px; list-style: none; padding-block: 8px; }.ccc-ai-events li { display: flex; gap: 16px; }.ccc-ai-events time { font-variant-numeric: tabular-nums; }
+@media (max-width: 1020px) { .ccc-ai-activity-heading { align-items: flex-start; flex-direction: column; }.ccc-ai-stages { grid-template-columns: repeat(2,minmax(0,1fr)); }.ccc-ai-symbols { grid-template-columns: 1fr; } }

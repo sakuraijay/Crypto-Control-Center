@@ -14,6 +14,7 @@ import {
   type PersistedAlphaStartIntentV1,
 } from '../workers/alphaStartIntent';
 import { WORKER_POLICY_CONTEXT_KEY } from '../workers/workerPolicyContext';
+import { virtualPaper400Activity } from '../workers/virtualPaper400Activity';
 import {
   VIRTUAL_PAPER_400_SESSION_STATE_KEY,
   VIRTUAL_PAPER_400_LOCK_ID,
@@ -195,6 +196,7 @@ router.put('/data/alpha-start-intent', requireOperatorAuth, async (req, res) => 
  * real-money FIXED_BETA domain. GET is observational and never bootstraps state.
  */
 router.get('/data/virtual-paper-400-session', async (_req, res) => {
+  res.set('Cache-Control', 'no-store');
   try {
     const raw = await readWorkerStateValue(VIRTUAL_PAPER_400_SESSION_STATE_KEY);
     const session = evaluateVirtualPaper400SessionState(raw);
@@ -214,6 +216,7 @@ router.get('/data/virtual-paper-400-session', async (_req, res) => {
       session,
       runtime,
       runtimeFresh: Number.isFinite(age) && age >= 0 && age <= 120_000,
+      ...virtualPaper400Activity.read(session.state?.session.sessionId ?? null),
     };
     if (session.status === 'INVALID') return res.status(500).json(response);
     return res.json(response);

@@ -8,6 +8,7 @@ import { openServerPaperPosition, closeServerPaperPosition, reduceServerPaper70,
   getServerPaperStatus, type PriceLookup } from './serverPaperExecutor';
 import { storePaperCostSnapshot } from '../lib/paperCostCache';
 import type { CostSnapshot } from '../lib/costSnapshot';
+import { virtualPaper400Activity as activity } from './virtualPaper400Activity';
 
 export const VIRTUAL_PAPER_400_RUNTIME_KEY = 'virtual_paper_400_runtime_v1';
 // Shared with START/STOP. This is a coordination lock, not a trading permission.
@@ -22,6 +23,9 @@ export async function maybeRunVirtualPaper400Cycle(args: {
     .where(eq(workerStateTable.key, VIRTUAL_PAPER_400_SESSION_STATE_KEY)).limit(2);
   if (observed.length === 0) return false;
   if (observed.length !== 1) throw new Error('VIRTUAL_SESSION_DUPLICATE');
+  let activityRun: number | null = null;
+  let activityOutcome: { status: string; reason: string | null } | null = null;
+  try {
   await db.transaction(async tx => {
     const lock = await tx.execute(sql`SELECT pg_try_advisory_xact_lock(${VIRTUAL_PAPER_400_LOCK_ID}) AS acquired`);
     if (lock.rows[0]?.acquired !== true) return;
@@ -42,6 +46,8 @@ export async function maybeRunVirtualPaper400Cycle(args: {
     if (!session.state) throw new Error('VIRTUAL_SESSION_INVALID');
     if ((process.env.WORKER_ENGINE_MODE ?? 'PAPER') !== 'PAPER') throw new Error('VIRTUAL_PAPER_MODE_REQUIRED');
     const identity = session.state.session;
+    const run = activity.begin(identity.sessionId, args.cycleNumber);
+    activityRun = run;
     const riskKey = virtualPaper400RiskKey(identity);
     const loadTrades = () => db.select().from(tradesTable).where(eq(tradesTable.strategy, identity.strategyTag));
     const rows = await loadTrades();
@@ -78,12 +84,16 @@ export async function maybeRunVirtualPaper400Cycle(args: {
       engineMode: process.env.WORKER_ENGINE_MODE ?? 'PAPER', quote: args.quote,
       shouldContinue: args.shouldContinue,
       persistRisk: state => write(riskKey, state),
-      readCost,
+      readCost: async (symbol, isLong, notionalUsd) => {
+        activity.stage(run, 'CHECKING_ENTRY', [symbol]);
+        return readCost(symbol, isLong, notionalUsd);
+      },
       readSignals: async () => {
         if (getServerPaperStatus().unresolved) return [];
         const { runStrategyShadowWorkerReadOnly } = await import('../intel/intelService');
         const { MARKET_BY_SYMBOL_SERVER } = await import('../lib/gmxMarkets');
         const symbols = [...VIRTUAL_ACTIVE_POLICY.symbols];
+        activity.stage(run, 'CHECKING_COSTS', symbols);
         const notionalUsd = 100;
         const costsBySymbol: NonNullable<import('../intel/intelService').StrategyShadowWorkerReadOnlyInput['costsBySymbol']> =
           Object.fromEntries(await Promise.all(symbols.map(async symbol => {
@@ -94,6 +104,7 @@ export async function maybeRunVirtualPaper400Cycle(args: {
           })));
         if (!args.shouldContinue()) return [];
         const evaluatedAt = Date.now();
+        activity.stage(run, 'ANALYZING_MARKETS', symbols);
         const envelope = await runStrategyShadowWorkerReadOnly({ cycleNumber: args.cycleNumber,
           evaluatedAt, expectedSymbols: symbols, existingAi: { decisionId: `vp400-analysis:${evaluatedAt}`,
             action: 'NO_TRADE', confidence: 0, primarySymbol: null, createdAt: new Date(evaluatedAt).toISOString() },
@@ -101,6 +112,10 @@ export async function maybeRunVirtualPaper400Cycle(args: {
         analysis = symbols.map(symbol => ({ symbol, reason: envelope.records.find(record => record.symbol === symbol)
           ?.reasons.join('; ') || (!costsBySymbol[symbol]?.long || !costsBySymbol[symbol]?.short
             ? 'COST_UNAVAILABLE' : `ANALYSIS_${envelope.status}: ${envelope.reasons.join('; ')}`) }));
+        activity.analyzed(run, analysis.map(row => ({ ...row,
+          evaluated: ['EVALUATED', 'PARTIAL'].includes(envelope.status)
+            && envelope.records.some(record => record.symbol === row.symbol) })));
+        activity.stage(run, 'CHECKING_ENTRY', symbols);
         return ['EVALUATED', 'PARTIAL'].includes(envelope.status) ? envelope.records : [];
       },
       claim: async (id, audit) => {
@@ -109,14 +124,23 @@ export async function maybeRunVirtualPaper400Cycle(args: {
         return claimed.length === 1;
       },
       open: async (open, cost) => {
+        activity.stage(run, 'EXECUTING_PAPER', [open.symbol]);
         storePaperCostSnapshot(open.symbol, cost, open.nowMs);
         return openServerPaperPosition(open, args.shouldContinue);
       },
-      close: async (row, reason) => (await closeServerPaperPosition({ openTradeId: row.id,
-        expectedStrategy: identity.strategyTag, reason, kind: 'FULL', quote: args.quote(row.symbol) }, args.shouldContinue)).ok,
-      reduce: async row => (await reduceServerPaper70({ openRow: row, quote: args.quote(row.symbol),
-        shouldContinue: args.shouldContinue })).ok,
+      close: async (row, reason) => {
+        activity.stage(run, 'EXECUTING_PAPER', [row.symbol]);
+        return (await closeServerPaperPosition({ openTradeId: row.id,
+          expectedStrategy: identity.strategyTag, reason, kind: 'FULL', quote: args.quote(row.symbol) }, args.shouldContinue)).ok;
+      },
+      reduce: async row => {
+        activity.stage(run, 'EXECUTING_PAPER', [row.symbol]);
+        return (await reduceServerPaper70({ openRow: row, quote: args.quote(row.symbol),
+          shouldContinue: args.shouldContinue })).ok;
+      },
     });
+    activity.decisions(run, result.diagnostics);
+    activity.stage(run, 'RECONCILING');
     // Read back the durable executor rows after OPEN/CLOSE/REDUCE. No invented PnL.
     const finalRows = await loadTrades();
     const currentRisk = parseVirtualPaper400RiskState((await read(riskKey))!, identity);
@@ -149,6 +173,17 @@ export async function maybeRunVirtualPaper400Cycle(args: {
         held: final.held.map(row => ({ id: row.id, symbol: row.symbol, side: row.side,
           sizeUsd: row.sizeInUsd, entryPrice: row.price, stopPrice: row.stopPriceUsd,
           takeProfitPrice: row.takeProfitPriceUsd })) } });
+    activityOutcome = { status: result.status, reason: result.reason };
   });
+  // Publish completion only after the transaction commits; rollback must never
+  // look like a successful cycle. Raw errors are not exposed in public telemetry.
+  if (activityRun !== null && activityOutcome !== null) {
+    const outcome = activityOutcome as { status: string; reason: string | null };
+    activity.finish(activityRun, outcome.status, outcome.reason);
+  }
+  } catch (error) {
+    if (activityRun !== null) activity.finish(activityRun, 'ERROR', 'CYCLE_FAILED');
+    throw error;
+  }
   return true;
 }

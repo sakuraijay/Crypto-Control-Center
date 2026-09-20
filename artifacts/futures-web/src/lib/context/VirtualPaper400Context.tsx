@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { apiUrl } from '@/lib/apiUrl';
+import type { VirtualActivity } from '@/lib/virtualActivityPresentation';
 
 export interface VirtualPaper400Snapshot {
   ok: boolean;
@@ -7,6 +8,8 @@ export interface VirtualPaper400Snapshot {
   realFundsUsed: false;
   session: { status: 'ACTIVE' | 'STOPPED' | 'MISSING' | 'INVALID' };
   runtimeFresh: boolean;
+  activity?: VirtualActivity | null;
+  activityFresh?: boolean;
   runtime: null | {
     policy?: { version: string; appliedAt: string; symbols: string[]; riskPerTradePct: number; maxLeverage: number; cooldownMinutes: number } | null;
     diagnostics?: { symbol: string; reason: string; details?: string[] }[];
@@ -41,7 +44,7 @@ export function virtualSessionLabel(data: VirtualPaper400Snapshot | null, fresh:
 }
 
 type ContextValue = { data: VirtualPaper400Snapshot | null; error: string | null;
-  fresh: boolean; status: string; refresh: (signal?: AbortSignal) => Promise<void> };
+  fresh: boolean; now: number; status: string; refresh: (signal?: AbortSignal) => Promise<void> };
 const VirtualPaper400Context = createContext<ContextValue | null>(null);
 export function VirtualPaper400Provider({ children }: { children: ReactNode }) {
   const [data, setData] = useState<VirtualPaper400Snapshot | null>(null);
@@ -81,7 +84,7 @@ export function VirtualPaper400Provider({ children }: { children: ReactNode }) {
     return () => { controller.abort(); clearTimeout(timer); clearInterval(clock); latest.current++; };
   }, [refresh]);
   const fresh = !error && virtualSnapshotFresh(data, now);
-  return <VirtualPaper400Context.Provider value={{ data, error, fresh, status: virtualSessionLabel(data, fresh), refresh }}>
+  return <VirtualPaper400Context.Provider value={{ data, error, fresh, now, status: virtualSessionLabel(data, fresh), refresh }}>
     {children}
   </VirtualPaper400Context.Provider>;
 }
