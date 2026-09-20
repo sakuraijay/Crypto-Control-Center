@@ -72,6 +72,36 @@ export function virtualPaper400StrategyTag(sessionId: string): string {
   return `${VIRTUAL_PAPER_400_STRATEGY_PREFIX}:${sessionId}`;
 }
 
+/**
+ * Validate an execution strategy before it is allowed to select a VIRTUAL/PAPER
+ * session. This intentionally accepts only tags produced by
+ * virtualPaper400StrategyTag(); callers must handle Standard PAPER separately.
+ */
+export function parseVirtualPaper400StrategyTag(
+  value: unknown,
+): ParseResult<{ sessionId: string; strategyTag: string }> {
+  if (typeof value !== 'string') {
+    return { ok: false, reason: 'VIRTUAL_STRATEGY_TAG_INVALID' };
+  }
+  const prefix = `${VIRTUAL_PAPER_400_STRATEGY_PREFIX}:`;
+  if (!value.startsWith(prefix)) {
+    return { ok: false, reason: 'VIRTUAL_STRATEGY_TAG_INVALID' };
+  }
+  const sessionId = value.slice(prefix.length);
+  if (!SESSION_ID_RE.test(sessionId)) {
+    return { ok: false, reason: 'VIRTUAL_STRATEGY_TAG_INVALID' };
+  }
+  const strategyTag = virtualPaper400StrategyTag(sessionId);
+  if (strategyTag !== value) {
+    return { ok: false, reason: 'VIRTUAL_STRATEGY_TAG_INVALID' };
+  }
+  return { ok: true, value: { sessionId, strategyTag } };
+}
+
+export function isVirtualPaper400StrategyTag(value: unknown): value is string {
+  return parseVirtualPaper400StrategyTag(value).ok;
+}
+
 export function buildVirtualPaper400Session(
   sessionId: string,
   startedAt: Date,
