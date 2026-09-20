@@ -39,7 +39,7 @@ function allSourceFiles(dir = srcDir, out: string[] = []): string[] {
 
 const tradingSrc   = read('lib/context/TradingContext.tsx');
 const watchlistSrc = read('lib/context/WatchlistContext.tsx');
-const dashboardSrc = read('pages/dashboard.tsx');
+const dashboardSrc = read('pages/standard.tsx');
 const topBarSrc    = read('components/shell/TopBar.tsx');
 const positionsSrc = read('pages/positions.tsx');
 
@@ -107,7 +107,7 @@ describe('API 실패 시 mock fallback 금지', () => {
     expect(tradingSrc).toContain('Market price unavailable');
   });
 
-  it('dashboard는 dataStatus가 ok가 아니면 Unavailable을 표시한다', () => {
+  it('Standard dashboard는 dataStatus가 ok가 아니면 Unavailable을 표시한다', () => {
     expect(dashboardSrc).toContain('dataStatus');
     expect(dashboardSrc).toContain("'Unavailable'");
   });
@@ -116,7 +116,7 @@ describe('API 실패 시 mock fallback 금지', () => {
 // ── 4. 라벨: MOCK 제거, Paper Equity, 서버 기준 모드 배지 ─────────────────────
 
 describe('라벨 및 모드 배지', () => {
-  it("dashboard에 'MOCK' 라벨이 없고 'Paper Equity' 라벨이 있다", () => {
+  it("Standard dashboard에 'MOCK' 라벨이 없고 'Paper Equity' 라벨이 있다", () => {
     expect(dashboardSrc).not.toMatch(/MOCK/);
     expect(dashboardSrc).toContain('Paper Equity');
   });

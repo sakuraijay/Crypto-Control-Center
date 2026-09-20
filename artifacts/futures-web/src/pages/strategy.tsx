@@ -111,6 +111,7 @@ export default function Strategy() {
 
   return (
     <div className="animate-in fade-in duration-500 flex flex-col gap-6">
+      <div className="ccc-callout"><strong>Standard 전략 설정</strong><p>이 화면은 Standard 계정의 신호·위험 설정입니다. Virtual 400은 오버뷰에 표시된 별도 서버 운용 정책을 사용합니다.</p></div>
       {profileDialogOpen && (
         <div className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm flex items-center justify-center p-4" role="presentation">
           <form

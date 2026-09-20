@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useLocation } from 'wouter';
 import { Activity, FlaskConical, Lock, Wifi, WifiOff } from 'lucide-react';
+import { QuickNavigation } from './QuickNavigation';
 import { cn } from '@/lib/utils';
 
 type ServerMode = 'PAPER' | 'LIVE_LOCKED' | 'LIVE_TEST' | 'LIVE' | 'UNKNOWN';
@@ -46,7 +47,8 @@ function useServerStatus(): ServerStatus {
           gmxConnected?: unknown;
           networkChainId?: unknown;
         };
-        if (cancelled || payload.ok === false) return;
+        if (cancelled) return;
+        if (payload.ok === false) { setStatus(UNKNOWN_STATUS); return; }
         setStatus({
           mode: deriveMode(payload),
           gmxConnected: typeof payload.gmxConnected === 'boolean' ? payload.gmxConnected : null,
@@ -125,7 +127,10 @@ function RpcBadge({ connected, chainId }: { connected: boolean | null; chainId: 
 }
 
 const PAGE_META: Record<string, { title: string; subtitle: string }> = {
-  '/': { title: 'Overview', subtitle: 'AI-driven market monitoring and execution safety' },
+  '/': { title: '오버뷰', subtitle: 'Virtual 400' },
+  '/activity': { title: '거래 기록', subtitle: 'Virtual 400' },
+  '/system': { title: '시스템 진단', subtitle: 'Operations' },
+  '/standard': { title: 'Standard 계정', subtitle: 'Separate workspace' },
   '/positions': { title: 'Positions', subtitle: 'PAPER positions and authoritative GMX read-only account state' },
   '/watchlist': { title: 'Market Watch', subtitle: 'Opportunity ranking and market condition monitoring' },
   '/strategy': { title: 'Strategy', subtitle: 'Regime-aware strategy controls and bounded risk profiles' },
@@ -141,14 +146,10 @@ export function TopBar() {
   const meta = PAGE_META[location] ?? { title: '', subtitle: '' };
 
   return (
-    <header className="sticky top-0 z-30 flex h-[72px] items-center justify-between gap-4 border-b border-[#1b2636] bg-[#070b12]/95 px-6 backdrop-blur">
-      <div className="min-w-0">
-        <h1 className="truncate text-[20px] font-semibold tracking-tight text-[#f4f7fb]">{meta.title}</h1>
-        <p className="mt-0.5 truncate text-[10px] text-[#8e9aaf]">{meta.subtitle}</p>
-      </div>
-      <div className="flex shrink-0 items-center gap-2">
-        <RpcBadge connected={server.gmxConnected} chainId={server.networkChainId} />
-        <ModeBadge mode={server.mode} />
+    <header className="ccc-topbar">
+      <div className="ccc-breadcrumb"><span>Workspace</span><span>/</span><strong>{meta.title}</strong></div>
+      <div className="ccc-topbar-actions"><QuickNavigation /><div className="ccc-topbar-divider" />
+        <RpcBadge connected={server.gmxConnected} chainId={server.networkChainId} /><ModeBadge mode={server.mode} />
       </div>
     </header>
   );

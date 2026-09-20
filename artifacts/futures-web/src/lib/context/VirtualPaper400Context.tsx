@@ -11,8 +11,8 @@ export interface VirtualPaper400Snapshot {
     policy?: { version: string; appliedAt: string; symbols: string[]; riskPerTradePct: number; maxLeverage: number; cooldownMinutes: number } | null;
     diagnostics?: { symbol: string; reason: string; details?: string[] }[];
     analysis?: { symbol: string; reason: string }[];
-    journal?: { id: string; symbol: string; side: string; openedAt: string; closedAt: string;
-      entryPrice: string; exitPrice: string; stopPrice: string; targetPrice: string | null;
+    journal?: { id: string; symbol: string; side: string; openedAt: string | null; closedAt: string;
+      entryPrice: string | null; exitPrice: string; stopPrice: string | null; targetPrice: string | null;
       strategy: string | null; reasons: string[]; closeReason: string; grossPnlUsd: string; netPnlUsd: string;
       entryCostUsd: string | null; exitCostUsd: string | null; holdingCostUsd: string | null;
       plannedRiskUsd: number | null; netR: number | null; closeKind: string }[];

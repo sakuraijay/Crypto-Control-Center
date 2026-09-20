@@ -7,6 +7,7 @@ import { AiEngineProvider } from '@/lib/context/AiEngineContext';
 const trade = vi.hoisted(() => ({ placeOrder: vi.fn(), clearAllPositions: vi.fn(), updatePositionRisk: vi.fn() }));
 vi.mock('@/lib/context/TradingContext', () => ({ useTradingContext: () => ({ ...trade, closedTrades: [] }) }));
 vi.mock('@/lib/context/StrategyContext', () => ({ useStrategyContext: () => ({ limits: {} }) }));
+vi.mock('@/lib/context/WatchlistContext', () => ({ useWatchlistContext: () => ({ watchlist: [], streamStatus: 'offline' }) }));
 vi.mock('@/hooks/use-toast', () => ({ useToast: () => ({ toast: vi.fn() }) }));
 const at = '2026-09-20T15:30:00.000Z';
 function snapshot(): VirtualPaper400Snapshot {
@@ -25,12 +26,13 @@ describe('server authority after retiring the browser trading engine', () => {
   let view = mount(); await flush();
   expect(screen.getByTestId('badge').textContent).toContain('조건 대기');
   expect(screen.getByTestId('virtual-active-policy').textContent).toContain('0.5%');
-  expect(screen.getByText('-3.00 USDC')).toBeTruthy();
-  expect((screen.getByText('가상매매 시작') as HTMLButtonElement).disabled).toBe(true);
+  expect(screen.getByTestId('metric-비용 차감 실현 손익').textContent).toContain('-3.00');
+  expect(screen.queryByRole('button', { name: '가상매매 시작' })).toBeNull();
+  expect(screen.getByRole('button', { name: '신규 진입 중지' })).toBeTruthy();
   expect(screen.queryByText('Auto-executing')).toBeNull();
   view.unmount(); view = mount(); await flush();
   expect(screen.getByTestId('virtual-active-policy').textContent).toContain('최대 2x');
-  expect(screen.getByText('-3.00 USDC')).toBeTruthy();
+  expect(screen.getByTestId('metric-비용 차감 실현 손익').textContent).toContain('-3.00');
   expect(fetcher.mock.calls).toHaveLength(2);
   expect(fetcher.mock.calls.every((call: any) => !call[1]?.method)).toBe(true);
  });
@@ -49,7 +51,7 @@ describe('server authority after retiring the browser trading engine', () => {
   mount(); await flush();
   await act(async () => { await vi.advanceTimersByTimeAsync(121_000); });
   expect(screen.getByTestId('badge').textContent).toBe('서버 실행 확인 대기');
-  expect(screen.queryByText('397.00 USDC')).toBeNull();
+  expect(screen.getByTestId('metric-가상 평가자산').textContent).toContain('미확인');
  });
  it('keeps STOP distinct from missing, blocked, future and malformed evidence', () => {
   const s = snapshot(); s.session.status = 'STOPPED'; expect(virtualSessionLabel(s, true)).toBe('신규 진입 중지');
@@ -61,8 +63,10 @@ describe('server authority after retiring the browser trading engine', () => {
  it('never starts a session on load and retains explicit PIN-authenticated STOP', async () => {
   const fetcher = vi.fn(async (_url: unknown, init?: RequestInit) => ({ ok: true, json: async () => init?.method === 'PUT' ? { ok: true } : snapshot() }));
   vi.stubGlobal('fetch', fetcher); mount(); await flush();
+  fireEvent.click(screen.getByRole('button', { name: '신규 진입 중지' }));
+  expect(fetcher.mock.calls.filter(([, init]) => init?.method)).toHaveLength(0);
   fireEvent.change(screen.getByLabelText('서버 운영자 PIN'), { target: { value: 'test-only-pin' } });
-  fireEvent.click(screen.getByText('신규 진입 중지')); await flush();
+  fireEvent.click(screen.getByRole('button', { name: '중지 적용' })); await flush();
   const writes = fetcher.mock.calls.filter(([, init]) => init?.method === 'PUT');
   expect(writes).toHaveLength(1); expect(writes[0][1]?.body).toBe(JSON.stringify({ action: 'STOP' }));
   expect(writes[0][1]?.headers).toEqual({ 'content-type': 'application/json', 'x-operator-pin': 'test-only-pin' });

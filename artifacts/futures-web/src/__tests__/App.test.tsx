@@ -40,6 +40,9 @@ vi.mock('@/pages/history', () => ({ default: () => <div>History route</div> }));
 vi.mock('@/pages/settings', () => ({ default: () => <div>Settings route</div> }));
 vi.mock('@/pages/backtest', () => ({ default: () => <div>Backtest route</div> }));
 vi.mock('@/pages/ai-log', () => ({ default: () => <div>AI log route</div> }));
+vi.mock('@/pages/standard', () => ({ default: () => <div>Standard route</div> }));
+vi.mock('@/pages/system', () => ({ default: () => <div>System route</div> }));
+vi.mock('@/pages/activity', () => ({ default: () => <div>Activity route</div> }));
 vi.mock('@/pages/not-found', () => ({
   default: () => <div data-route-test="not-found">404 Page Not Found</div>,
 }));

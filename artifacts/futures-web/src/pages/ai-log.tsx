@@ -7,7 +7,7 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
-import { VirtualPaper400Card } from '@/components/dashboard/VirtualPaper400Card';
+import { Link } from 'wouter';
 import { useAiEngine } from '@/lib/context/AiEngineContext';
 import { useAppContext } from '@/lib/context';
 import { Card } from '@/components/ui/card';
@@ -694,7 +694,7 @@ export default function AiLogPage() {
         </div>
       </div>
 
-      <VirtualPaper400Card />
+      <Link href="/" className="ccc-callout block">Virtual 400의 현재 판단과 설정은 자동매매 오버뷰에서 확인하세요. →</Link>
       <h2 className="text-sm font-semibold">Standard·기존 AI 결정 이력 · Virtual 400 정산과 별도</h2>
 
       {/* ── Filters ───────────────────────────────────────────────────────────── */}

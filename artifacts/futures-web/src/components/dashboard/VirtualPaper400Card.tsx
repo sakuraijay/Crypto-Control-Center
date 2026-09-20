@@ -1,82 +1,81 @@
 import { useState } from 'react';
+import { Link } from 'wouter';
+import { Activity, ArrowUpRight, ChevronDown, CircleDollarSign, Clock3, Layers3, Radar, RefreshCw, ShieldCheck, SlidersHorizontal, Wallet, WifiOff } from 'lucide-react';
 import { useVirtualPaper400 } from '@/lib/context/VirtualPaper400Context';
-import { Card } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { apiUrl } from '@/lib/apiUrl';
+import { useWatchlistContext } from '@/lib/context/WatchlistContext';
+import { amount, explainReason, finite, timestamp, type VirtualRuntime } from '@/lib/virtual400Presentation';
+import { VirtualSessionControls } from './VirtualSessionControls';
+import { VirtualPerformanceChart } from './VirtualPerformanceChart';
+import { VirtualTradeJournal } from './VirtualTradeJournal';
+
+function Metric({ label, value, unit = 'USDC', note, icon: Icon, tone = '', featured = false }: {
+  label: string; value: string; unit?: string; note: string; icon: typeof Wallet; tone?: string; featured?: boolean;
+}) {
+  return <div className={`ccc-metric ${featured ? 'ccc-metric-featured' : ''}`}><div className="ccc-metric-label"><span>{label}</span><Icon size={17} /></div>
+    <div className={`ccc-metric-value ${tone}`} data-testid={`metric-${label}`}>{value}<small>{unit}</small></div><p>{note}</p></div>;
+}
+
+function PositionPanel({ runtime, fresh }: { runtime: VirtualRuntime | null; fresh: boolean }) {
+  const rows = fresh ? runtime?.account.held ?? [] : [];
+  return <section className="ccc-panel" aria-label="가상 보유 포지션"><div className="ccc-panel-heading"><div><p className="ccc-eyebrow">OPEN POSITIONS</p><h2>보유 포지션 <span className="ccc-count">{fresh ? rows.length : '—'}</span></h2></div><span className="ccc-caption"><ShieldCheck size={14} />서버 손절·익절 관리</span></div>
+    {rows.length ? <div className="ccc-table-wrap"><table className="ccc-table"><thead><tr><th>종목 / 방향</th><th>진입 가격</th><th>포지션 규모</th><th>손절</th><th>목표</th></tr></thead><tbody>{rows.map(row=><tr key={row.id}><td><strong>{row.symbol}</strong> <span className={`ccc-direction ${row.side==='LONG'?'ccc-positive':'ccc-negative'}`}>{row.side}</span></td><td>{amount(row.entryPrice)}</td><td>{amount(row.sizeUsd)} USD</td><td>{amount(row.stopPrice)}</td><td>{row.takeProfitPrice===null?'없음':amount(row.takeProfitPrice)}</td></tr>)}</tbody></table></div>
+    : <div className="ccc-empty-row"><Layers3 size={23} /><div><strong>{fresh ? '열린 포지션이 없습니다' : '포지션 확인 대기'}</strong><p>{fresh ? '진입이 발생하면 규모와 손절·목표 가격을 표시합니다.' : '서버 연결이 복구되면 최신 포지션을 표시합니다.'}</p></div></div>}
+  </section>;
+}
+
+function MarketDecisions({ runtime, fresh }: { runtime: VirtualRuntime | null; fresh: boolean }) {
+  const { watchlist, streamStatus } = useWatchlistContext();
+  const symbols = fresh ? [...new Set([...(runtime?.policy?.symbols??[]), ...(runtime?.analysis??[]).map(row=>row.symbol), ...(runtime?.diagnostics??[]).map(row=>row.symbol)])] : [];
+  return <section className="ccc-panel ccc-markets" aria-label="종목별 진입 판단"><div className="ccc-panel-heading"><div><p className="ccc-eyebrow">MARKET RADAR</p><h2>시장과 진입 판단</h2></div><Link href="/watchlist" className="ccc-text-link">시장 보기 <ArrowUpRight size={14} /></Link></div>
+    <div className="ccc-market-columns"><span>감시 종목</span><span>참고 시세 · USD</span><span>서버 판단</span></div>
+    {symbols.map(symbol=>{
+      const quote = watchlist.find(row=>row.symbol===symbol);
+      const price = streamStatus==='connected' && (finite(quote?.price)??0)>0 ? quote!.price : null;
+      const reasons = [...new Set([...(runtime?.diagnostics??[]).filter(row=>row.symbol===symbol).flatMap(row=>[row.reason,...(row.details??[])]),...(runtime?.analysis??[]).filter(row=>row.symbol===symbol).map(row=>row.reason)])];
+      return <details className="ccc-market-row" key={symbol}><summary><div className="ccc-asset"><span className={`ccc-coin ccc-coin-${symbol.toLowerCase()}`}>{symbol==='BTC'?'₿':symbol==='ETH'?'Ξ':symbol.slice(0,1)}</span><span><strong>{symbol}</strong><small>{symbol==='BTC'?'Bitcoin':symbol==='ETH'?'Ethereum':symbol==='SOL'?'Solana':'GMX Market'}</small></span></div><strong className="ccc-quote">{amount(price)}</strong><span className="ccc-decision-text"><i />{explainReason(reasons[0])}</span><ChevronDown size={14} className="ccc-expand-icon" /></summary><div className="ccc-market-evidence"><span className="ccc-eyebrow">SERVER EVIDENCE</span>{reasons.length?reasons.map((reason,index)=><p key={index}>{reason}</p>):<p>종목별 근거 확인 대기</p>}</div></details>;
+    })}
+    {!symbols.length && <div className="ccc-empty-row"><Radar size={23} /><div><strong>감시 종목 확인 대기</strong><p>서버에서 확인된 종목과 판단만 표시합니다.</p></div></div>}
+    <footer className="ccc-panel-footer"><span>행을 펼치면 판단 근거를 확인할 수 있습니다.</span><span>확정 캔들 기반</span></footer>
+  </section>;
+}
 
 export function VirtualPaper400Card() {
-  const { data, error: loadError, fresh, status, refresh } = useVirtualPaper400();
-  const [error, setError] = useState<string | null>(null);
-  const [pin, setPin] = useState('');
-  const [busy, setBusy] = useState(false);
-  async function act(action: 'START' | 'STOP') {
-    setBusy(true); setError(null);
-    const enteredPin = pin; setPin('');
-    try {
-      const response = await fetch(apiUrl('data/virtual-paper-400-session'), { method: 'PUT',
-        headers: { 'content-type': 'application/json', 'x-operator-pin': enteredPin },
-        body: JSON.stringify({ action }) });
-      const result = await response.json();
-      if (!response.ok || !result.ok) {
-        throw new Error(response.status === 401 ? '운영자 PIN을 확인해 주세요.' : '요청이 적용되지 않았습니다. 서버 상태를 확인해 주세요.');
-      }
-      await refresh();
-    } catch (failure) { setError(failure instanceof Error ? failure.message : '요청 실패'); }
-    finally { setBusy(false); }
-  }
-  const account = fresh ? data?.runtime?.account : null;
-  const money = (value: number | null | undefined) => typeof value === 'number' && Number.isFinite(value)
-    ? `${value.toFixed(2)} USDC` : '미확인';
-  return <Card className="p-5 border-amber-500/40 bg-amber-500/5" aria-label="Virtual 400 paper account">
-    <div className="flex flex-wrap items-center justify-between gap-3">
-      <div><h2 className="font-semibold">가상 자동매매 · 400 USDC / PAPER</h2>
-        <p className="text-xs text-muted-foreground mt-1">초기 가상자본 400 USDC · 실자금 사용 없음 · 비용과 체결은 SIMULATED / ESTIMATED</p></div>
-      <span className="text-sm text-amber-500">{status}</span>
+  const { data, error, fresh, status, refresh } = useVirtualPaper400();
+  const [refreshing, setRefreshing] = useState(false);
+  const runtime = fresh ? data?.runtime ?? null : null;
+  const account = runtime?.account;
+  const policy = runtime?.policy;
+  const active = data?.session.status === 'ACTIVE' && fresh;
+  const blocked = runtime?.status === 'BLOCKED';
+  const stopped = data?.session.status === 'STOPPED';
+  const pnlTone = (value: unknown) => finite(value)===null?'':Number(value)>0?'ccc-positive':Number(value)<0?'ccc-negative':'';
+  const headline = !fresh ? '서버 상태를 확인하고 있습니다' : stopped ? '신규 진입이 중지되어 있습니다'
+    : blocked ? '진입 조건을 다시 확인하고 있습니다' : runtime?.status==='NO_TRADE' ? '기준에 맞는 기회를 기다립니다'
+    : (account?.held.length??0)>0 ? '포지션을 관리하고 있습니다' : '서버가 전략을 실행하고 있습니다';
+  async function reload() { setRefreshing(true); try { await refresh(); } finally { setRefreshing(false); } }
+  return <div className="ccc-overview" aria-label="Virtual 400 paper account">
+    <div className="ccc-page-heading"><div><div className="ccc-heading-meta"><span className="ccc-eyebrow">YOUR TRADING, AT A GLANCE</span><span className="ccc-paper-tag">PAPER ACCOUNT</span></div><h1>자동매매 오버뷰<span className="ccc-title-dot">.</span></h1><p>복잡한 시장 속에서도, 내 자산과 다음 판단은 명확하게.</p></div>
+      <div className="ccc-page-actions"><button className="ccc-icon-button" aria-label="서버 상태 새로고침" disabled={refreshing} onClick={()=>void reload()}><RefreshCw size={17} className={refreshing?'animate-spin':''} /></button><VirtualSessionControls /></div>
     </div>
-    <p className="text-xs text-muted-foreground mt-3">설정과 실행 상태는 서버에 저장됩니다. 활성 세션은 웹페이지를 닫아도 서버에서 판단·매매·포지션 보호를 계속합니다.</p>
-    {fresh && <p className="text-xs mt-2">마지막 서버 판단: {new Date(data!.runtime!.at).toLocaleString()} · 화면 갱신 10초</p>}
-    {fresh && data?.runtime?.policy && <p className="text-xs mt-4" data-testid="virtual-active-policy">
-      적극적 가상 매매 · {data.runtime.policy.symbols.join(' / ')} · 위험 예산 {data.runtime.policy.riskPerTradePct}%
-      {' '}· 최대 {data.runtime.policy.maxLeverage}x · 진입 간격 {data.runtime.policy.cooldownMinutes}분
-      <span className="block text-muted-foreground">{data.runtime.policy.version} · 적용 {new Date(data.runtime.policy.appliedAt).toLocaleString()}</span>
-    </p>}
-    <dl className="grid grid-cols-2 lg:grid-cols-4 gap-4 my-5 text-sm">
-      {[
-        ['가상 정산 잔액', money(account?.ledger.realizedEquityUsd)],
-        ['비용 차감 실현 손익', money(account?.ledger.realizedNetPnlUsd)],
-        ['가상 평가자산', money(account?.equityUsd)],
-        ['미실현 순손익 추정', money(account?.unrealizedNetPnlUsd)],
-        ['정산 횟수', account ? String(account.ledger.settlementCount) : '미확인'],
-      ].map(([label, value]) => <div key={label}><dt className="text-muted-foreground text-xs">{label}</dt>
-        <dd className="font-mono mt-1">{value}</dd></div>)}
-    </dl>
-    {account?.held.map(row => <p className="text-sm font-mono mb-2" key={row.id}>
-      {row.symbol} {row.side} · {row.sizeUsd} USD · SL {row.stopPrice} · TP {row.takeProfitPrice ?? '없음'}
-    </p>)}
-    {fresh && data?.runtime?.reason && <p className="text-xs text-muted-foreground mb-3">{data.runtime.reason}</p>}
-    {fresh && <details className="text-xs mb-4" open><summary className="cursor-pointer">종목별 신호·진입 판단</summary>
-      {[...(data?.runtime?.analysis ?? []), ...(data?.runtime?.diagnostics ?? [])].map((row, index) =>
-        <p className="mt-2 break-words" key={index}>{row.symbol}: {row.reason}</p>)}
-    </details>}
-    {fresh && !!data?.runtime?.journal?.length && <details className="text-xs mb-4" open>
-      <summary className="cursor-pointer">최근 가상 정산 · 비용은 추정치</summary>
-      {data.runtime.journal.map(row => <div key={row.id} className="border-t mt-3 pt-3 space-y-1">
-        <p>{row.symbol} {row.side} · {row.strategy ?? '전략 증거 미확인'} · {row.closeKind}</p>
-        <p>{new Date(row.openedAt).toLocaleString()} → {new Date(row.closedAt).toLocaleString()}</p>
-        <p>진입 {row.entryPrice} → 청산 {row.exitPrice} · SL {row.stopPrice} · TP {row.targetPrice ?? '없음'}</p>
-        <p>총손익 {row.grossPnlUsd} · 순손익 {row.netPnlUsd} USDC · {row.netR?.toFixed(2) ?? '미확인'} R</p>
-        <p>비용: 진입 {row.entryCostUsd ?? '미확인'} / 청산 {row.exitCostUsd ?? '미확인'} / 보유 {row.holdingCostUsd ?? '미확인'} USDC</p>
-        <p>사전 위험 추정 {money(row.plannedRiskUsd)} · 청산 사유 {row.closeReason}</p>
-        <p className="text-muted-foreground">{row.reasons.join(' · ') || '진입 근거 미확인'}</p>
-      </div>)}
-    </details>}
-    <div className="flex flex-wrap gap-2 items-center">
-      <label className="text-xs">서버 운영자 PIN <input type="password" autoComplete="off" value={pin}
-        onChange={event => setPin(event.target.value)} className="ml-2 rounded border bg-background px-2 py-2 w-32" /></label>
-      <Button disabled={busy || !pin || !data || data.session.status === 'ACTIVE'} onClick={() => void act('START')}>가상매매 시작</Button>
-      <Button variant="outline" disabled={busy || !pin || data?.session.status !== 'ACTIVE'} onClick={() => void act('STOP')}>신규 진입 중지</Button>
+    <div className="ccc-session-strip"><span className={`ccc-status-pill ${active&&!blocked?'is-active':blocked?'is-warning':''}`}><i />{status}</span><span>Virtual 400 <span className="ccc-strip-divider">/</span> 실자금 사용 없음</span><span className="ccc-session-time"><Clock3 size={13} />{fresh ? `${timestamp(runtime?.at)} PHT 기준` : '최신 상태 확인 대기'}</span></div>
+    {error && <div role="alert" className="ccc-inline-alert"><WifiOff size={17} />{error}</div>}
+    <div className="ccc-metric-grid">
+      <Metric label="가상 평가자산" value={amount(account?.equityUsd)} note="가상 정산 잔액 + 미실현 순손익" icon={Wallet} featured />
+      <Metric label="비용 차감 실현 손익" value={amount(account?.ledger.realizedNetPnlUsd,true)} note={account?`${account.ledger.settlementCount}건 정산 · 추정 비용 반영`:'정산 기록 확인 대기'} icon={CircleDollarSign} tone={pnlTone(account?.ledger.realizedNetPnlUsd)} />
+      <Metric label="미실현 순손익 추정" value={amount(account?.unrealizedNetPnlUsd,true)} note="현재 보유 포지션의 평가 손익" icon={Activity} tone={pnlTone(account?.unrealizedNetPnlUsd)} />
+      <Metric label="보유 포지션" value={account?String(account.held.length):'—'} unit="개" note="진입과 보호는 서버에서 실행" icon={Layers3} />
     </div>
-    <p className="text-xs text-muted-foreground mt-3">중지 후에도 기존 포지션의 손절·익절 보호는 계속됩니다. 재시작해도 손익 기록은 유지됩니다.</p>
-    {(error || loadError) && <p role="alert" className="text-sm text-red-500 mt-3">{error || loadError}</p>}
-  </Card>;
+    <div className="ccc-overview-grid"><VirtualPerformanceChart runtime={runtime} fresh={fresh} />
+      <section className="ccc-panel ccc-strategy-panel" aria-label="자동매매 상태와 설정"><div className="ccc-panel-heading"><div><p className="ccc-eyebrow">AUTOMATION</p><h2>자동매매 상태</h2></div><span className={`ccc-radar-icon ${active&&!blocked?'is-active':''}`}><Radar size={20} /></span></div>
+        <div className="ccc-strategy-message"><h3>{headline}</h3><p>{stopped?'기존 포지션의 손절·익절 보호는 계속됩니다.':explainReason(runtime?.reason)}</p></div>
+        {policy ? <div className="ccc-policy" data-testid="virtual-active-policy"><div className="ccc-policy-name"><SlidersHorizontal size={15} /><strong>{policy.version==='virtual400-active/v1'?'적극적 가상 매매':'저장된 운용 설정'}</strong><span>서버 적용</span></div><dl><div><dt>1회 위험 예산</dt><dd>{policy.riskPerTradePct}%</dd></div><div><dt>레버리지 상한</dt><dd>최대 {policy.maxLeverage}x</dd></div><div><dt>진입 간격</dt><dd>{policy.cooldownMinutes}분</dd></div></dl><p className="ccc-policy-symbols">{policy.symbols.join(' · ')}</p></div>
+        : <div className="ccc-callout">적용된 설정을 확인하고 있습니다. 기본값으로 대체하지 않습니다.</div>}
+        <div className="ccc-automation-note"><ShieldCheck size={15} /><span>활성 세션은 웹페이지를 닫아도 서버에서 계속 실행됩니다.</span></div>
+      </section>
+    </div>
+    <MarketDecisions runtime={runtime} fresh={fresh} />
+    <PositionPanel runtime={runtime} fresh={fresh} />
+    <VirtualTradeJournal />
+    <details className="ccc-session-details"><summary>운용 세부 정보 <ChevronDown size={14} /></summary><div><p>가상 정산 잔액: {amount(account?.ledger.realizedEquityUsd)} USDC · 화면 갱신 10초</p><p>설정: {policy?.version??'미확인'} · 적용 {timestamp(policy?.appliedAt,true)} PHT</p><p>비용과 체결은 SIMULATED / ESTIMATED입니다. 시작·중지·재접속으로 손익 기록이 초기화되지 않습니다.</p><Link href="/system">시스템 진단 보기 →</Link></div></details>
+  </div>;
 }
