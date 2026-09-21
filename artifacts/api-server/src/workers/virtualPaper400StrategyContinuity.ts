@@ -18,6 +18,7 @@ export interface VirtualPaper400StrategyContinuityState {
   sessionId: string;
   updatedAt: number;
   lastEnvelopeStatus: StrategyShadowWorkerEnvelope['status'];
+  lastSourceCandleCloseTimeBySymbol: Record<string, number>;
   strategyEnsembleShadow: {
     lifecycleSnapshot: SignalLifecycleSnapshotV2;
     regimeSnapshot: StrategyRegimeSnapshotV1;
@@ -60,6 +61,7 @@ function initialState(
       sessionId,
       updatedAt: restoredAt,
       lastEnvelopeStatus: 'NOT_EVALUATED',
+      lastSourceCandleCloseTimeBySymbol: {},
       strategyEnsembleShadow: {
         lifecycleSnapshot: lifecycle.snapshot,
         regimeSnapshot: regimes.snapshot,
@@ -112,9 +114,32 @@ export function restoreVirtualPaper400StrategyContinuity(
   const validated = validateStrategyPreviousRegimes(regimes.previousRegimes, restoredAt, allowedSymbols);
   if (!validated) return { status: 'BLOCKED', state: null, lifecycleSnapshot: null,
     previousRegimes: null, reason: 'STRATEGY_CONTINUITY_SYMBOLS_INVALID' };
+  const rawLast = object(state.lastSourceCandleCloseTimeBySymbol);
+  const allowed = new Set(allowedSymbols.map(symbol => symbol.trim().toUpperCase()));
+  const lastSourceCandleCloseTimeBySymbol: Record<string, number> = {};
+  if (rawLast) {
+    for (const [rawSymbol, value] of Object.entries(rawLast)) {
+      const symbol = rawSymbol.trim().toUpperCase();
+      if (!allowed.has(symbol) || !finiteInteger(value) || value <= 0 || value > restoredAt) {
+        return { status: 'BLOCKED', state: null, lifecycleSnapshot: null,
+          previousRegimes: null, reason: 'STRATEGY_CONTINUITY_CANDLE_CURSOR_INVALID' };
+      }
+      lastSourceCandleCloseTimeBySymbol[symbol] = value;
+    }
+  } else {
+    // One-time migration for the just-introduced v1 state: use the last closed
+    // 15-minute boundary at its own durable update time. This prevents the next
+    // one-minute worker tick from counting the same completed candle again.
+    const boundary = Math.floor((state.updatedAt as number) / (15 * 60_000)) * 15 * 60_000;
+    for (const symbol of Object.keys(validated)) lastSourceCandleCloseTimeBySymbol[symbol] = boundary;
+  }
+  const normalizedState = {
+    ...(state as unknown as VirtualPaper400StrategyContinuityState),
+    lastSourceCandleCloseTimeBySymbol,
+  };
   return {
     status: 'RESTORED',
-    state: state as unknown as VirtualPaper400StrategyContinuityState,
+    state: normalizedState,
     lifecycleSnapshot: lifecycle.snapshot,
     previousRegimes: validated,
   };
@@ -140,7 +165,47 @@ export function advanceVirtualPaper400StrategyContinuity(
     sessionId,
     updatedAt: capturedAt,
     lastEnvelopeStatus: envelope.status,
+    lastSourceCandleCloseTimeBySymbol: { ...previous.state.lastSourceCandleCloseTimeBySymbol },
     strategyEnsembleShadow: { lifecycleSnapshot, regimeSnapshot },
+  };
+}
+
+/** Drops repeated/out-of-order completed-candle records before they can affect entry or hysteresis. */
+export function filterNewVirtualPaper400StrategyRecords(
+  previous: VirtualPaper400StrategyContinuityRestore,
+  envelope: StrategyShadowWorkerEnvelope,
+  evaluatedAt: number,
+): { envelope: StrategyShadowWorkerEnvelope; cursors: Record<string, number> } | null {
+  if (previous.status === 'BLOCKED') return null;
+  const cursors = { ...previous.state.lastSourceCandleCloseTimeBySymbol };
+  const records = [] as StrategyShadowWorkerEnvelope['records'];
+  for (const record of envelope.records) {
+    const symbol = record.symbol.trim().toUpperCase();
+    if (!symbol || !finiteInteger(record.sourceCandleCloseTime)
+      || record.sourceCandleCloseTime <= 0 || record.sourceCandleCloseTime > evaluatedAt) return null;
+    if (record.sourceCandleCloseTime <= (cursors[symbol] ?? 0)) continue;
+    records.push(record);
+    cursors[symbol] = record.sourceCandleCloseTime;
+  }
+  if (records.length === envelope.records.length) return { envelope, cursors };
+  const evaluatedSymbols = [...new Set(records.map(record => record.symbol.trim().toUpperCase()))].sort();
+  const evaluated = new Set(evaluatedSymbols);
+  return {
+    cursors,
+    envelope: {
+      ...envelope,
+      status: records.length ? 'PARTIAL' : 'NOT_EVALUATED',
+      records,
+      evaluatedSymbols,
+      missingSymbols: envelope.expectedSymbols.filter(symbol => !evaluated.has(symbol)),
+      reasons: [...envelope.reasons, '중복/역순 완료봉 record 제외 — hysteresis 재계산 금지'],
+      summary: { long: records.filter(row => row.action === 'LONG').length,
+        short: records.filter(row => row.action === 'SHORT').length,
+        noTrade: records.filter(row => row.action === 'NO_TRADE').length,
+        rejected: records.filter(row => row.action === 'REJECTED').length,
+        disabled: records.filter(row => row.action === 'DISABLED').length,
+        directionConflicts: records.filter(row => row.comparison === 'DIRECTION_CONFLICT').length },
+    },
   };
 }
 
@@ -152,6 +217,7 @@ export function summarizeVirtualPaper400StrategyContinuity(
     status: restored.status,
     updatedAt: restored.state.updatedAt,
     lastEnvelopeStatus: restored.state.lastEnvelopeStatus,
+    lastSourceCandleCloseTimeBySymbol: restored.state.lastSourceCandleCloseTimeBySymbol,
     lifecycleRecords: restored.lifecycleSnapshot.records.length,
     historyEvents: restored.lifecycleSnapshot.historyEvents.length,
     regimes: Object.values(restored.previousRegimes).map(state => ({

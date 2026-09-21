@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { buildStrategyShadowWorkerEnvelope } from '../intel/strategyShadowWorkerEnvelopeV2';
 import {
   advanceVirtualPaper400StrategyContinuity,
+  filterNewVirtualPaper400StrategyRecords,
   restoreVirtualPaper400StrategyContinuity,
   virtualPaper400StrategyContinuityKey,
 } from '../workers/virtualPaper400StrategyContinuity';
@@ -55,5 +56,19 @@ describe('Virtual400 session-scoped Strategy continuity codec', () => {
     expect(restoreVirtualPaper400StrategyContinuity(
       { ...persisted, updatedAt: now + 1 }, sessionId, now, symbols,
     )).toMatchObject({ status: 'BLOCKED', reason: 'STRATEGY_CONTINUITY_STATE_INVALID' });
+  });
+
+  it('drops a repeated completed-candle record before it can advance hysteresis or authorize entry', () => {
+    const missing = restoreVirtualPaper400StrategyContinuity(null, sessionId, now, symbols);
+    if (missing.status === 'BLOCKED') throw new Error('unexpected blocked baseline');
+    missing.state.lastSourceCandleCloseTimeBySymbol.BTC = now - 15 * 60_000;
+    const envelope = notEvaluatedEnvelope() as any;
+    envelope.status = 'EVALUATED';
+    envelope.records = [{ symbol: 'BTC', sourceCandleCloseTime: now - 15 * 60_000,
+      action: 'LONG', comparison: 'ENSEMBLE_ONLY' }];
+    const filtered = filterNewVirtualPaper400StrategyRecords(missing, envelope, now);
+    expect(filtered?.envelope.status).toBe('NOT_EVALUATED');
+    expect(filtered?.envelope.records).toEqual([]);
+    expect(filtered?.cursors.BTC).toBe(now - 15 * 60_000);
   });
 });

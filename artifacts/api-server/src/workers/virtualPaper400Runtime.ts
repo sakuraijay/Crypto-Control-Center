@@ -11,6 +11,7 @@ import type { CostSnapshot } from '../lib/costSnapshot';
 import { virtualPaper400Activity as activity } from './virtualPaper400Activity';
 import {
   advanceVirtualPaper400StrategyContinuity,
+  filterNewVirtualPaper400StrategyRecords,
   restoreVirtualPaper400StrategyContinuity,
   summarizeVirtualPaper400StrategyContinuity,
   virtualPaper400StrategyContinuityKey,
@@ -124,9 +125,14 @@ export async function maybeRunVirtualPaper400Cycle(args: {
           lifecycleSnapshot: continuity.status === 'BLOCKED' ? null : continuity.lifecycleSnapshot,
           previousRegimes: continuity.status === 'BLOCKED' ? {} : continuity.previousRegimes,
           allowedRegimeSymbols: symbols, costsBySymbol });
-        const nextContinuity = advanceVirtualPaper400StrategyContinuity(
-          identity.sessionId, continuity, envelope, evaluatedAt,
-        );
+        const filtered = filterNewVirtualPaper400StrategyRecords(continuity, envelope, evaluatedAt);
+        const acceptedEnvelope = filtered?.envelope ?? envelope;
+        const nextContinuity = filtered ? advanceVirtualPaper400StrategyContinuity(
+          identity.sessionId, continuity, acceptedEnvelope, evaluatedAt,
+        ) : null;
+        if (nextContinuity && filtered) {
+          nextContinuity.lastSourceCandleCloseTimeBySymbol = filtered.cursors;
+        }
         if (!nextContinuity) {
           analysis = symbols.map(symbol => ({ symbol, reason: 'STRATEGY_CONTINUITY_ADVANCE_INVALID' }));
           activity.analyzed(run, analysis.map(row => ({ ...row, evaluated: false })));
@@ -136,14 +142,14 @@ export async function maybeRunVirtualPaper400Cycle(args: {
         continuity = restoreVirtualPaper400StrategyContinuity(
           nextContinuity, identity.sessionId, evaluatedAt, symbols,
         );
-        analysis = symbols.map(symbol => ({ symbol, reason: envelope.records.find(record => record.symbol === symbol)
+        analysis = symbols.map(symbol => ({ symbol, reason: acceptedEnvelope.records.find(record => record.symbol === symbol)
           ?.reasons.join('; ') || (!costsBySymbol[symbol]?.long || !costsBySymbol[symbol]?.short
-            ? 'COST_UNAVAILABLE' : `ANALYSIS_${envelope.status}: ${envelope.reasons.join('; ')}`) }));
+            ? 'COST_UNAVAILABLE' : `ANALYSIS_${acceptedEnvelope.status}: ${acceptedEnvelope.reasons.join('; ')}`) }));
         activity.analyzed(run, analysis.map(row => ({ ...row,
-          evaluated: ['EVALUATED', 'PARTIAL'].includes(envelope.status)
-            && envelope.records.some(record => record.symbol === row.symbol) })));
+          evaluated: ['EVALUATED', 'PARTIAL'].includes(acceptedEnvelope.status)
+            && acceptedEnvelope.records.some(record => record.symbol === row.symbol) })));
         activity.stage(run, 'CHECKING_ENTRY', symbols);
-        return ['EVALUATED', 'PARTIAL'].includes(envelope.status) ? envelope.records : [];
+        return ['EVALUATED', 'PARTIAL'].includes(acceptedEnvelope.status) ? acceptedEnvelope.records : [];
       },
       claim: async (id, audit) => {
         const claimed = await db.insert(workerStateTable).values({ key: id, value: JSON.stringify(audit), updatedAt: new Date() })
