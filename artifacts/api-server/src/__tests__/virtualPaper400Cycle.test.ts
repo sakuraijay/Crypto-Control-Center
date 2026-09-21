@@ -176,6 +176,7 @@ describe('dynamic eligible market execution boundary', () => {
       readSignals:vi.fn(async()=>[signal]), readCost:vi.fn(async(_s,_l,n)=>({...virtualReplayCost(now.getTime(),n),market:market.marketToken}))});
     expect((await runVirtualPaper400Cycle(d)).status).toBe('OPENED');
     expect(d.open).toHaveBeenCalledWith(expect.objectContaining({symbol:'XRP'}), expect.objectContaining({market:market.marketToken}));
+    expect(d.claim).toHaveBeenCalledWith(expect.any(String),expect.objectContaining({market,policy:expect.objectContaining({symbols:['XRP'],universeSource:'GMX_ARBITRUM'})}));
     vi.mocked(d.open).mockClear(); d.markets = new Map();
     expect((await runVirtualPaper400Cycle(d)).diagnostics[0].reason).toBe('UNSUPPORTED_SYMBOL');
     expect(d.open).not.toHaveBeenCalled(); d.markets = new Map([['XRP',market]]);

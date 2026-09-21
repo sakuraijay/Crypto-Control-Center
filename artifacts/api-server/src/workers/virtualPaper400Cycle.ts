@@ -47,9 +47,9 @@ export async function runVirtualPaper400Cycle(d: VirtualPaper400CycleDeps) {
     previous: d.previous, rows: d.rows, now: d.now, quote: d.quote });
   const diagnostics: { symbol: string; reason: string; details?: string[] }[] = [];
   const policy = d.policyAppliedAt ? { ...(d.policyVersion === VIRTUAL_LEGACY_POLICY.version
-    ? VIRTUAL_LEGACY_POLICY : VIRTUAL_ACTIVE_POLICY), appliedAt: d.policyAppliedAt } : null;
+    ? VIRTUAL_LEGACY_POLICY : VIRTUAL_ACTIVE_POLICY), ...(d.markets ? { symbols: [...d.markets.keys()], universeSource: 'GMX_ARBITRUM' } : {}), appliedAt: d.policyAppliedAt } : null;
   const outcome = (status: string, reason: string | null = null) => ({
-    policy: policy && d.markets ? { ...policy, symbols: [...d.markets.keys()] } : policy, tradingMode: d.tradingMode ? { mode: d.tradingMode, ...VIRTUAL_TRADING_MODES[d.tradingMode] } : null,
+    policy, tradingMode: d.tradingMode ? { mode: d.tradingMode, ...VIRTUAL_TRADING_MODES[d.tradingMode] } : null,
     diagnostics, status, reason, at: d.now.toISOString(), mode: 'VIRTUAL_PAPER_400' as const,
     realFundsUsed: false, costBasis: 'SIMULATED / ESTIMATED' as const,
     account: { ...account, held: account.held.map(row => ({ id: row.id, symbol: row.symbol,
@@ -180,7 +180,7 @@ export async function runVirtualPaper400Cycle(d: VirtualPaper400CycleDeps) {
     const id = `${tradePlan ? MODE_DECISION_PREFIX : 'vp400:'}${hash}`;
     if (d.rows.some(row => row.openDecisionId === `vp400:${hash}` || row.openDecisionId === `${MODE_DECISION_PREFIX}${hash}`)) { reject('DUPLICATE_SIGNAL'); continue; }
     if (!d.shouldContinue() || !await d.claim(id, { mode: 'VIRTUAL_PAPER_400', signal, decision, sizing,
-      cost, policy, tradePlan, sessionId: session.state.session.sessionId })) { reject('CLAIM_UNAVAILABLE_OR_DUPLICATE'); continue; }
+      cost, policy, market, tradePlan, sessionId: session.state.session.sessionId })) { reject('CLAIM_UNAVAILABLE_OR_DUPLICATE'); continue; }
     if (risk.locks.defensiveActive) {
       // Reserve before dispatch: a crash/failed OPEN must not mint another
       // defensive allowance on restart. It never increases after a loss.
