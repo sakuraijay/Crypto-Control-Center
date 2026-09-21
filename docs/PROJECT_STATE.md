@@ -3,6 +3,15 @@
 > **운영 주의:** 이 문서는 실시간 상태 스냅샷이 아니다. 현재 HEAD/CI/배포/PAPER/GMX/Owner Approval/Canary readiness 값은 매 실행마다 authoritative source에서 새로 읽어야 한다. 과거 이 파일에 기록되어 있던 진행률, 배포 SHA, 플래그 기본값, 테스트 개수, readiness 상태는 역사 기록일 뿐 현재 상태로 사용하지 않는다.
 
 
+## 최신 상품 로드맵 — 2026-09-21
+
+**CCC-SUPERVISION-20260921-09 / ROADMAP_RECORDED / IMPLEMENTATION_NOT_STARTED.**
+무료 사용자 시작 시드 **$500**, 추가 증거금 운용은 유료 전환, 1인의 다중 계정 무료 혜택 악용 방지를 상품화 로드맵에 추가한다.
+[가격정책·악용 방지 상세와 단계별 수용 기준](CCC_PRICING_AND_ABUSE_ROADMAP.md)을 후속 개발의 기준으로 읽는다.
+현재 PAPER에는 가상 시드로 설계하며 실제 현금 지급이 아니다. 서버 이용권/배정 원장과 사용자별 격리, 기본 가입 보호·위험 기반 추가 확인·이의제기를 계획한다.
+가격·청구 주기·유료 한도·결제 사업자는 미정이다. 현재 **Virtual400 자본·세션·손익·HWM·5–10배 정책**과 **10/1 18:00 Asia/Manila** 가상 Alpha/Beta 목표는 유지한다.
+아래 ‘개인용/외부 SaaS 아님’은 현재 운영 상태이며, 이 최신 무료·유료 상품화 계획을 배제하지 않는다. 공개 다중 사용자 및 실결제는 해당 격리/인증/결제 수용 기준 충족 전 개방하지 않는다.
+
 ## Canonical session implementation handoff — 2026-09-20
 
 새 canonical 대화의 single writer가 Virtual 400 서버 worker 연결, 독립 위험회계,
@@ -104,7 +113,7 @@ Canonical development branch는 `codex/handover-20260820`, canonical PR은 **#1*
 ## 프로젝트 정의
 
 - 단일 사용자 개인용 **GMX V2 / Arbitrum One** AI 자동매매 시스템
-- 외부 고객용 SaaS가 아님
+- 현재 운영은 개인용이며, 향후 외부 무료·유료 상품화는 위 2026-09-21 로드맵의 별도 단계다.
 - Arbitrage SaaS와 분리
 - Replit Reserved VM이 Production runtime/final deployment layer
 - Desktop-first React + TypeScript UI
