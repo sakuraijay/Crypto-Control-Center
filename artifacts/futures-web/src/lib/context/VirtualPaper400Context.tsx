@@ -12,9 +12,9 @@ export interface VirtualPaper400Snapshot {
   activityFresh?: boolean;
   tradingModeSelection?: { version: string; mode: 'INTRADAY' | 'SWING'; sessionId: string; updatedAt: string } | null;
   tradingModeOptions?: Record<'INTRADAY' | 'SWING', { label: string; minTargetRoePct: number; maxTargetRoePct: number;
-    targetRoePct: number; stopRoePct: number; maxHoldHours: number }>;
+    targetRoePct: number | null; stopRoePct: number; maxHoldHours: number; exitBasis?: string }>;
   runtime: null | {
-    tradingMode?: { mode: 'INTRADAY' | 'SWING'; targetRoePct: number; stopRoePct: number; maxHoldHours: number } | null;
+    tradingMode?: { mode: 'INTRADAY' | 'SWING'; targetRoePct: number | null; stopRoePct: number; maxHoldHours: number } | null;
     policy?: { version: string; appliedAt: string; symbols: string[]; riskPerTradePct: number; minLeverage?: number; maxLeverage: number; cooldownMinutes: number } | null;
     diagnostics?: { symbol: string; reason: string; details?: string[] }[];
     analysis?: { symbol: string; reason: string }[];

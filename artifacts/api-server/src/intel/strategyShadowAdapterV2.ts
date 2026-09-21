@@ -80,6 +80,9 @@ export interface StrategyShadowRecord {
   structuralStop: number | null;
   expectedNetEdgeBps: number | null;
   expectedNetRR: number | null;
+  /** Original strategy price target, before turnover costs. Advisory evidence only. */
+  strategyTargetPrice?: number | null;
+  rejectedStrategies?: Array<{ strategyId: StrategyId; reasons: string[] }>;
   strategyEconomicsBasis?: 'STRATEGY_SIGNAL_PRE_TURNOVER' | null;
   lifecycleEligible: boolean | null;
   existingAi: ExistingAiDecisionSnapshot | null;
@@ -185,6 +188,10 @@ function baseRecord(
     structuralStop: selected?.structuralStop ?? null,
     expectedNetEdgeBps: selected?.netExpectedEdgeBps ?? null,
     expectedNetRR: selected?.expectedNetRR ?? null,
+    strategyTargetPrice: selected?.targets[0]?.price ?? null,
+    rejectedStrategies: input.arbiter.rejectedCandidates.map(candidate => ({
+      strategyId: candidate.strategyId, reasons: candidate.reasons.slice(0, 8),
+    })),
     strategyEconomicsBasis: selected ? 'STRATEGY_SIGNAL_PRE_TURNOVER' : null,
     lifecycleEligible: input.eligibility?.eligible ?? null,
     existingAi: input.existingAi,

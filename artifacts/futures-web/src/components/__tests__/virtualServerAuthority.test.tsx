@@ -37,6 +37,18 @@ describe('server authority after retiring the browser trading engine', () => {
   view.unmount();mount();await flush();expect(screen.getByLabelText('가상 매매 방식').textContent).toContain('중기 스윙');
   expect(fetcher.mock.calls.filter(([,i])=>i?.method)).toHaveLength(1);
  });
+ it('separates the unverified account goal from strategy price exits without browser trading writes', async () => {
+  const data = snapshot(); data.tradingModeSelection = { version:'virtual-trading-mode/v1',mode:'INTRADAY',sessionId:'ui',updatedAt:at };
+  const spec = { minTargetRoePct:5,maxTargetRoePct:10,targetRoePct:null,stopRoePct:10,exitBasis:'STRATEGY_PRICE_TARGET' };
+  data.tradingModeOptions = { INTRADAY:{...spec,label:'단타',maxHoldHours:12},SWING:{...spec,label:'중기 스윙',maxHoldHours:72} };
+  const fetcher = vi.fn(async () => ({ ok:true,json:async()=>data })); vi.stubGlobal('fetch',fetcher);
+  mount(); await flush();
+  expect(screen.getByLabelText('가상 매매 방식').textContent).toContain('전략 가격');
+  fireEvent.click(screen.getByRole('button',{name:'매매 방식 선택'}));
+  expect(screen.getByRole('dialog').textContent).toContain('미검증');
+  expect(screen.getByRole('dialog').textContent).toContain('1.5');
+  expect(fetcher.mock.calls.every((call:any)=>!call[1]?.method)).toBe(true);
+ });
  it('restores the applied 5–10x range after remount without browser writes', async () => {
   const data = snapshot(); data.runtime!.policy = { ...data.runtime!.policy!, version: 'virtual400-active/v2', minLeverage: 5, maxLeverage: 10 };
   const fetcher = vi.fn(async () => ({ ok: true, json: async () => data })); vi.stubGlobal('fetch', fetcher);

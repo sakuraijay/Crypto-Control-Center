@@ -185,3 +185,19 @@ describe('dynamic eligible market execution boundary', () => {
     expect(d.open).not.toHaveBeenCalled();
   });
 });
+
+it('routes a structural strategy target through exact-cost validation and immutable claim, without the old ROE veto',async()=>{
+  const signal={...virtualReplaySignal(now.getTime()),structuralStop:49_600,strategyTargetPrice:50_800};
+  const d=deps({policyAppliedAt:now.toISOString(),tradingMode:'INTRADAY',structuralTargets:true,readSignals:vi.fn(async()=>[signal])});
+  const result=await runVirtualPaper400Cycle(d);
+  expect(result.status).toBe('OPENED');
+  const audit=vi.mocked(d.claim).mock.calls[0][1] as any;
+  expect(audit.tradePlan.version).toBe('virtual-structural-plan/v2');
+  expect(audit.tradePlan.tpPrice).toBe(50_800);expect(audit.tradePlan.structuralStop).toBe(49_600);
+  expect(audit.tradePlan.plannedRiskUsd).toBeLessThanOrEqual(2+1e-8);
+  expect(vi.mocked(d.open).mock.calls[0][0].sizeUsd).toBeLessThanOrEqual(200);
+});
+it('never falls back to legacy targets when structural target evidence is absent',async()=>{
+  const d=deps({policyAppliedAt:now.toISOString(),tradingMode:'INTRADAY',structuralTargets:true});
+  await runVirtualPaper400Cycle(d);expect(d.open).not.toHaveBeenCalled();expect(d.claim).not.toHaveBeenCalled();
+});

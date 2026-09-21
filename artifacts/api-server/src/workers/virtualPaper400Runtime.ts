@@ -1,3 +1,5 @@
+import { advanceVirtualDiagnostics, virtualDiagnosticsKey } from './virtualPaper400Diagnostics';
+import type { StrategyShadowRecord } from '../intel/strategyShadowAdapterV2';
 import { discoverVirtualGmxUniverse, selectVirtualAnalysisBatch, VIRTUAL_GMX_SYMBOLS } from '../lib/virtualGmxUniverse';
 import { VIRTUAL_ACTIVE_POLICY, VIRTUAL_LEGACY_POLICY } from './virtualPaper400Policy';
 import { readTradingMode, tradingModeKey, MODE_VERSION, MODE_DECISION_PREFIX } from './virtualPaperTradingMode';
@@ -104,6 +106,7 @@ export async function maybeRunVirtualPaper400Cycle(args: {
       await write(policyKey, applied);
     }
     let analysis: { symbol: string; reason: string }[] = [];
+    let evaluatedRecords: StrategyShadowRecord[] = [];
     const costFailureBySymbol: Record<string, { long: string | null; short: string | null }> = {};
     const readCost = async (symbol: string, isLong: boolean, notionalUsd: number): Promise<CostSnapshot | null> => {
       const { fetchVirtualGmxReadonlyCost } = await import('../lib/manualCanaryReadonlyEvidence');
@@ -126,7 +129,7 @@ export async function maybeRunVirtualPaper400Cycle(args: {
       return { ...result.snapshot, source: 'PAPER_GMX_ESTIMATE' };
     };
     const result = await runVirtualPaper400Cycle({ sessionRaw: raw!, policyAppliedAt: applied?.appliedAt, policyVersion: applied?.version,
-      tradingMode: selectedMode?.mode, markets,
+      tradingMode: selectedMode?.mode, structuralTargets: true, markets,
       entryBlockedReason: executor.unresolved || executor.pendingClose ? 'EXECUTOR_RECOVERY_PENDING'
         : continuity.status === 'BLOCKED' ? continuity.reason
         : !applied ? 'POLICY_SAFE_BOUNDARY_PENDING'
@@ -177,6 +180,7 @@ export async function maybeRunVirtualPaper400Cycle(args: {
           return [];
         }
         await write(continuityKey, nextContinuity);
+        evaluatedRecords = acceptedEnvelope.records;
         continuity = restoreVirtualPaper400StrategyContinuity(
           nextContinuity, identity.sessionId, evaluatedAt, VIRTUAL_GMX_SYMBOLS,
         );
@@ -238,7 +242,15 @@ export async function maybeRunVirtualPaper400Cycle(args: {
           netR: priorRisk !== null && priorRisk > 0 ? Number(close.netPnlEstimatedUsd) / priorRisk : null,
           costBasis: 'SIMULATED / ESTIMATED', closeKind: close.closeKind };
       }));
-    await write(VIRTUAL_PAPER_400_RUNTIME_KEY, { ...result, universe: universe ? { ...universe, batchSymbols: symbols } : null, analysis, journal, sessionId: identity.sessionId,
+    const diagnosticKey = virtualDiagnosticsKey(identity.sessionId);
+    const diagnostic = advanceVirtualDiagnostics({ raw: await read(diagnosticKey), sessionId: identity.sessionId,
+      now: Date.now(), records: evaluatedRecords, analysis, diagnostics: result.diagnostics, entryStages: result.entryStages,
+      status: result.status, reason: result.reason, openCount: finalRows.filter(r => r.action === 'OPEN').length,
+      closeCount: finalRows.filter(r => r.action === 'CLOSE').length,
+      lastOpenAtMs: final.lastOpenAtMs, sessionStartedAtMs: identity.startedAtMs });
+    // Corrupt diagnostic history must neither erase evidence nor disable position protection.
+    if (diagnostic.state) await write(diagnosticKey, diagnostic.state);
+    await write(VIRTUAL_PAPER_400_RUNTIME_KEY, { ...result, tradingDiagnostics: diagnostic.summary, universe: universe ? { ...universe, batchSymbols: symbols } : null, analysis, journal, sessionId: identity.sessionId,
       strategyContinuity: summarizeVirtualPaper400StrategyContinuity(continuity),
       at: new Date().toISOString(), account: { ...result.account, ledger: final.ledger,
         equityUsd: final.equityUsd, unrealizedNetPnlUsd: final.unrealizedNetPnlUsd,

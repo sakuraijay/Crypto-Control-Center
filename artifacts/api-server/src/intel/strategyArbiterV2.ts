@@ -209,7 +209,7 @@ export function arbitrateStrategySignals(
       decision.rejectedCandidates.push({
         signalId: candidate.signalId,
         strategyId: candidate.strategyId,
-        reasons,
+        reasons: [...new Set([...reasons, ...candidate.reasons])].slice(0, 12),
       });
     } else eligible.push(candidate);
   }

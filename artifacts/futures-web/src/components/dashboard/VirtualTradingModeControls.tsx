@@ -39,12 +39,12 @@ export function VirtualTradingModeControls() {
   }
   return <div className="mt-4 space-y-3" aria-label="가상 매매 방식">
     <p className="text-sm">다음 진입: <strong>{selected?.label ?? '서버 설정 확인 대기'}</strong>
-      {selected && <span className="block mt-1 text-xs text-muted-foreground">시험 익절 {selected.targetRoePct}% · 손절 상한 {selected.stopRoePct}% · 최대 {selected.maxHoldHours}시간</span>}</p>
+      {selected && <span className="block mt-1 text-xs text-muted-foreground">{selected.exitBasis === 'STRATEGY_PRICE_TARGET' ? '익절: 전략 가격' : `시험 익절 ${selected.targetRoePct}%`} · 증거금 손절 상한 {selected.stopRoePct}% · 최대 {selected.maxHoldHours}시간</span>}</p>
     <Button variant="outline" className="w-full" onClick={begin} disabled={!options || !data || !['ACTIVE','STOPPED'].includes(data.session.status)}>매매 방식 선택</Button>
     <Dialog open={open} onOpenChange={value => { if (!busy) { setOpen(value); if (!value) setPin(''); } }}>
       <DialogContent className="ccc-dialog sm:max-w-[620px]">
         <DialogHeader><DialogTitle>매매 방식 선택</DialogTitle><DialogDescription>
-          PAPER 시험 설정 · 포지션 초기 증거금 대비 순수익률입니다. 목표 수익을 보장하지 않습니다.
+          PAPER · 계좌 일수익 목표 5–10%는 미검증 목표입니다. 거래별 익절은 전략 가격, 손절률은 포지션 증거금 기준입니다.
         </DialogDescription></DialogHeader>
         <form onSubmit={event => void submit(event)} className="space-y-4">
           <fieldset disabled={busy} className="space-y-3"><legend className="sr-only">단타 또는 중기 스윙</legend>
@@ -52,7 +52,7 @@ export function VirtualTradingModeControls() {
               className={`flex gap-3 items-center rounded-lg border p-4 cursor-pointer ${draft === mode ? 'border-primary bg-primary/10' : 'border-border'}`}>
               <input type="radio" name="tradingMode" value={mode} checked={draft === mode} onChange={() => setDraft(mode)} />
               <span><strong>{options[mode].label} · {mode === 'INTRADAY' ? '최대 12시간' : '1–3일'}</strong>
-                <span className="block text-sm text-muted-foreground">목표 {options[mode].minTargetRoePct}–{options[mode].maxTargetRoePct}% · 시험 익절 {options[mode].targetRoePct}% / 손절 상한 {options[mode].stopRoePct}%</span></span>
+                <span className="block text-sm text-muted-foreground">{options[mode].exitBasis === 'STRATEGY_PRICE_TARGET' ? '전략 가격 익절 · 비용 반영 순손익비 1.5 이상' : `시험 익절 ${options[mode].targetRoePct}%`} / 증거금 손절 상한 {options[mode].stopRoePct}%</span></span>
             </label>)}
           </fieldset>
           <div className="ccc-callout">저장한 선택은 다음 신규 진입부터 적용됩니다. 기존 포지션은 진입 당시 설정으로 보호합니다. 스윙도 손절·익절은 1일 전에 작동할 수 있습니다. 계좌 위험 한도가 우선하며, 급변·체결 비용으로 손실이 초과될 수 있습니다.</div>

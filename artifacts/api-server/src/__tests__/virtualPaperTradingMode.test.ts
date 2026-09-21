@@ -61,3 +61,27 @@ describe('PAPER mode plans and immutable exit contract', () => {
     expect(()=>readTradingMode(JSON.stringify({...selected,mode:'UNKNOWN'}),'s')).toThrow();
   });
 });
+
+import { buildStructuralTradePlan, STRUCTURAL_PLAN_VERSION } from '../workers/virtualPaperTradingMode';
+describe('strategy-price plan replaces the contradictory fixed ROE entry gate',()=>{
+  const args=()=>({mode:'INTRADAY' as const,entryPrice:100,structuralStop:99.2,targetPrice:101.6,
+    notionalUsd:200,maxLeverage:10,costReserveUsd:.4,estimatedRoundTripCostUsd:.12,riskBudgetUsd:2,openedAtMs:now});
+  it('admits a cost-positive 2R price signal, keeps exposure and stop, and caps net margin risk at 10%',()=>{
+    expect(build('INTRADAY',{structuralStop:99.2}).ok).toBe(false);
+    const r=buildStructuralTradePlan(args());expect(r.ok).toBe(true);if(!r.ok)return;
+    expect(r.plan).toMatchObject({version:STRUCTURAL_PLAN_VERSION,notionalUsd:200,structuralStop:99.2,tpPrice:101.6});
+    expect(r.plan.plannedRiskUsd).toBeCloseTo(2);expect(r.plan.leverage).toBeGreaterThanOrEqual(5);
+    expect(r.plan.plannedRiskUsd/r.plan.collateralUsd).toBeLessThanOrEqual(.1+1e-9);
+    expect(parseVirtualTradePlan(JSON.parse(JSON.stringify(r.plan)))).toEqual(r.plan);
+  });
+  it('refuses cost-adjusted negative/weak reward, reversed targets and risk above budget',()=>{
+    for(const changes of [{targetPrice:100.1},{targetPrice:99},{estimatedRoundTripCostUsd:.41},{riskBudgetUsd:1.9},{structuralStop:100},{maxLeverage:4}]){
+      expect(buildStructuralTradePlan({...args(),...changes}).ok).toBe(false);
+    }
+  });
+  it('supports shorts and rejects forged saved risk/cost contracts',()=>{
+    const r=buildStructuralTradePlan({...args(),structuralStop:100.8,targetPrice:98.4});if(!r.ok)throw Error(r.reason);
+    expect(parseVirtualTradePlan(r.plan)).toEqual(r.plan);
+    for(const key of ['plannedRiskUsd','stopRoePct','estimatedRoundTripCostUsd','targetRoePct'])expect(parseVirtualTradePlan({...r.plan,[key]:999})).toBeNull();
+  });
+});

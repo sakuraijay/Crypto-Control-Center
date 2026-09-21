@@ -226,8 +226,10 @@ describe('VIRTUAL 400 deterministic REPLAY through the real PAPER executor', () 
     ['INTRADAY','profit'],['INTRADAY','deadline'],['INTRADAY','gap'],
     ['SWING','profit'],['SWING','deadline'],['SWING','gap'],['SWING','corrupt'],
     ['INTRADAY','invalid_entry_plan'],['SWING','changed_cost'],['INTRADAY','xrp_profit'],
+    ['INTRADAY','structural_profit'],['INTRADAY','structural_gap'],['SWING','structural_deadline'],['INTRADAY','structural_changed_cost'],
   ] as const)('runs %s mode through actual executor, restart, %s exit and exact net settlement',async(mode,testScenario)=>{
-    const scenario = testScenario === 'xrp_profit' ? 'profit' : testScenario;
+    const structural = testScenario.startsWith('structural_');
+    const scenario = structural ? testScenario.slice('structural_'.length) : testScenario === 'xrp_profit' ? 'profit' : testScenario;
     const symbol = testScenario === 'xrp_profit' ? 'XRP' : 'BTC';
     const { VIRTUAL_GMX_MARKETS } = await import('../lib/virtualGmxUniverse');
     const market = VIRTUAL_GMX_MARKETS.find(m=>m.name === `${symbol}/USD`)!;
@@ -236,10 +238,10 @@ describe('VIRTUAL 400 deterministic REPLAY through the real PAPER executor', () 
     let saved=initialVirtualPaper400RiskState(session.session);
     vi.mocked(getPaperCostBinding).mockReturnValue({...BINDING,estEntryCostUsd:.015,estExitCostUsd:.015,
       fundingRatePerHourFraction:.00001,borrowingRatePerHourFraction:.00001});
-    const result=await runVirtualPaper400Cycle({now,engineMode:'PAPER',policyAppliedAt:now.toISOString(),tradingMode:mode, markets: new Map([[symbol, market]]),
+    const result=await runVirtualPaper400Cycle({now,engineMode:'PAPER',policyAppliedAt:now.toISOString(),tradingMode:mode, structuralTargets:structural, markets: new Map([[symbol, market]]),
       sessionRaw:JSON.stringify(session),previous:saved,rows:[],quote:quoteFn(50_000),shouldContinue:()=>true,
       persistRisk:async state=>{saved=structuredClone(state);},
-      readSignals:async()=>[{...virtualReplaySignal(REPLAY_NOW, symbol),structuralStop:49_900,expectedNetEdgeBps:300}],
+      readSignals:async()=>[{...virtualReplaySignal(REPLAY_NOW, symbol),structuralStop:structural?49_600:49_900,strategyTargetPrice:mode==='SWING'?51_000:50_800,expectedNetEdgeBps:300}],
       readCost:async(_s,_l,n)=>({...virtualReplayCost(REPLAY_NOW,n),market:market.marketToken}),
       claim:async(id,audit)=>{const recorded=structuredClone(audit) as {tradePlan:{targetRoePct:number}};
         if(scenario==='invalid_entry_plan')recorded.tradePlan.targetRoePct=100;
@@ -248,7 +250,7 @@ describe('VIRTUAL 400 deterministic REPLAY through the real PAPER executor', () 
         estEntryCostUsd:.015,estExitCostUsd:.015,fundingRatePerHourFraction:.001});
         return openServerPaperPosition(args);},close:async()=>false,reduce:async()=>false});
     if(scenario==='invalid_entry_plan'||scenario==='changed_cost'){
-      expect(result.status).toBe('BLOCKED');expect(result.reason).toBe('VIRTUAL_MODE_PLAN_OR_HORIZON_COST_INVALID');
+      expect(result.status).toBe('BLOCKED');expect(result.reason).toBe(structural?'VIRTUAL_STRATEGY_TARGET_OR_COST_MISMATCH':'VIRTUAL_MODE_PLAN_OR_HORIZON_COST_INVALID');
       expect(store.trades).toHaveLength(0);return;
     }
     expect(result.status).toBe('OPENED');
@@ -264,7 +266,7 @@ describe('VIRTUAL 400 deterministic REPLAY through the real PAPER executor', () 
     await manageServerPaperTick(quoteFn(price),REPLAY_NOW+hours*H+1000);
     expect(closeRows()).toHaveLength(1);
     const close=closeRows()[0];
-    expect(close.closeReason).toBe(scenario==='profit'?'MODE_NET_TAKE_PROFIT':scenario==='deadline'?'MODE_TIME_EXIT':scenario==='gap'?'STOP_LOSS':'MODE_PLAN_UNAVAILABLE');
+    expect(close.closeReason).toBe(scenario==='profit'?(structural?'TAKE_PROFIT':'MODE_NET_TAKE_PROFIT'):scenario==='deadline'?'MODE_TIME_EXIT':scenario==='gap'?'STOP_LOSS':'MODE_PLAN_UNAVAILABLE');
     expect(Number(close.netPnlEstimatedUsd)).toBeCloseTo(Number(close.pnl)-Number(close.estEntryCostUsd)-Number(close.estExitCostUsd)-Number(close.estHoldingCostUsd));
     if(scenario==='gap')expect(Number(close.netPnlEstimatedUsd)/Number(open.collateralUsd)*100).toBeLessThan(-10);
     if(scenario!=='corrupt')expect(store.workerState.get(String(open.openDecisionId))).toBe(originalClaim);

@@ -75,6 +75,23 @@ function stoppedSession() {
   fixture.rows.set(VIRTUAL_PAPER_400_SESSION_STATE_KEY, JSON.stringify(state)); return state.session;
 }
 describe('virtual runtime routing and durable account boundary', () => {
+  it('persists diagnostic coverage across cycles and preserves corrupt evidence without disabling the runtime', async () => {
+    const active = buildActiveVirtualPaper400SessionState('diagnostic-restore', new Date(Date.now() - 60_000));
+    const raw = JSON.stringify(active); fixture.rows.set(VIRTUAL_PAPER_400_SESSION_STATE_KEY, raw);
+    const key = `virtual_diagnostics_v1:${active.session.sessionId}`;
+    await maybeRunVirtualPaper400Cycle(args);
+    const first = JSON.parse(fixture.rows.get(key)!);
+    expect(first.sessionId).toBe(active.session.sessionId);
+    expect(first.buckets[0].counts.OBSERVED_MINUTE).toBe(1);
+    await maybeRunVirtualPaper400Cycle(args);
+    expect(JSON.parse(fixture.rows.get(key)!).since).toBe(first.since);
+    expect(JSON.parse(fixture.rows.get(VIRTUAL_PAPER_400_RUNTIME_KEY)!).tradingDiagnostics.ledger).toEqual({ opens: 0, closes: 0 });
+    fixture.rows.set(key, 'corrupt-evidence');
+    await maybeRunVirtualPaper400Cycle(args);
+    expect(fixture.rows.get(key)).toBe('corrupt-evidence');
+    expect(JSON.parse(fixture.rows.get(VIRTUAL_PAPER_400_RUNTIME_KEY)!).tradingDiagnostics.status).toBe('UNAVAILABLE');
+    expect(fixture.rows.get(VIRTUAL_PAPER_400_SESSION_STATE_KEY)).toBe(raw);
+  });
   it('retains the 2x policy and protection of existing inventory until it is settled', async () => {
     const active = buildActiveVirtualPaper400SessionState('held-upgrade', new Date(Date.now() - 60_000));
     fixture.rows.set(VIRTUAL_PAPER_400_SESSION_STATE_KEY, JSON.stringify(active));

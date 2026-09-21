@@ -1,6 +1,6 @@
 import { VIRTUAL_ACTIVE_POLICY, VIRTUAL_LEGACY_POLICY, virtualActiveProfile } from './virtualPaper400Policy';
 import { enforceVirtualPaper400Sizing } from './virtualPaper400Sizing';
-import { buildVirtualTradePlan, modeHoldingCost, MODE_DECISION_PREFIX, VIRTUAL_TRADING_MODES,
+import { buildVirtualTradePlan, buildStructuralTradePlan, VIRTUAL_ENTRY_OPTIONS, modeHoldingCost, MODE_DECISION_PREFIX, VIRTUAL_TRADING_MODES,
   type VirtualTradingMode, type VirtualTradePlan } from './virtualPaperTradingMode';
 import { createHash } from 'node:crypto';
 import type { DbTrade } from '@workspace/db';
@@ -22,6 +22,7 @@ export interface VirtualPaper400CycleDeps {
   policyAppliedAt?: string;
   policyVersion?: string;
   tradingMode?: VirtualTradingMode;
+  structuralTargets?: boolean;
   markets?: ReadonlyMap<string, GmxMarketInfo>;
   entryBlockedReason?: string | null;
   previous: VirtualPaper400RiskState;
@@ -45,12 +46,13 @@ export async function runVirtualPaper400Cycle(d: VirtualPaper400CycleDeps) {
   if (!session.state || session.status === 'INVALID') throw new Error('VIRTUAL_SESSION_INVALID');
   const account = evaluateVirtualPaper400Account({ session: session.state.session,
     previous: d.previous, rows: d.rows, now: d.now, quote: d.quote });
+  const entryStages: { symbol: string; stage: string }[] = [];
   const diagnostics: { symbol: string; reason: string; details?: string[] }[] = [];
   const policy = d.policyAppliedAt ? { ...(d.policyVersion === VIRTUAL_LEGACY_POLICY.version
     ? VIRTUAL_LEGACY_POLICY : VIRTUAL_ACTIVE_POLICY), ...(d.markets ? { symbols: [...d.markets.keys()], universeSource: 'GMX_ARBITRUM' } : {}), appliedAt: d.policyAppliedAt } : null;
   const outcome = (status: string, reason: string | null = null) => ({
-    policy, tradingMode: d.tradingMode ? { mode: d.tradingMode, ...VIRTUAL_TRADING_MODES[d.tradingMode] } : null,
-    diagnostics, status, reason, at: d.now.toISOString(), mode: 'VIRTUAL_PAPER_400' as const,
+    policy, tradingMode: d.tradingMode ? { mode: d.tradingMode, ...(d.structuralTargets ? VIRTUAL_ENTRY_OPTIONS[d.tradingMode] : VIRTUAL_TRADING_MODES[d.tradingMode]) } : null,
+    diagnostics, entryStages, status, reason, at: d.now.toISOString(), mode: 'VIRTUAL_PAPER_400' as const,
     realFundsUsed: false, costBasis: 'SIMULATED / ESTIMATED' as const,
     account: { ...account, held: account.held.map(row => ({ id: row.id, symbol: row.symbol,
       side: row.side, sizeUsd: row.sizeInUsd, entryPrice: row.price,
@@ -106,6 +108,7 @@ export async function runVirtualPaper400Cycle(d: VirtualPaper400CycleDeps) {
     }
     const decision = adaptStrategySignalToRisk({ shadowRecord: signal, riskEvaluation: risk });
     if (decision.action === 'REJECT') { reject('STRATEGY_OR_RISK_REJECTED'); continue; }
+    entryStages.push({ symbol: signal.symbol, stage: 'RISK_SIGNAL_ALLOWED' });
     if (!signal.signalId || signal.confidence === null
       || !Number.isFinite(signal.confidence) || signal.confidence > 100
       || signal.confidence < profile.derivedLimits.immediateEntryThreshold
@@ -138,6 +141,7 @@ export async function runVirtualPaper400Cycle(d: VirtualPaper400CycleDeps) {
     const checked = validateExecutionEligibleSnapshot(cost, { market: market.marketToken,
       isLong, orderType: 'MarketIncrease', notionalUsd: requested }, submitNow.getTime());
     if (!checked.ok || checked.effectiveRoundTripCostUsd > 0.40) { reject('COST_INVALID_OR_OVER_CAP'); continue; }
+    entryStages.push({ symbol: signal.symbol, stage: 'EXACT_COST_VALIDATED' });
     const sizing = (policy ? enforceVirtualPaper400Sizing : enforceOrderSizing)({ requestedSizeUsd: requested, requestedCollateralUsd: requested / profile.derivedLimits.maxLeverage,
       requestedLeverage: profile.derivedLimits.maxLeverage, positionSizingCapitalUsd: capital, stopDistanceFraction: stopDistance,
       costSnapshot: cost, liquidityCapUsd: profile.derivedLimits.maxTotalExposureUsd,
@@ -149,6 +153,7 @@ export async function runVirtualPaper400Cycle(d: VirtualPaper400CycleDeps) {
       || sizing.finalNotionalUsd * stopDistance + checked.effectiveRoundTripCostUsd > capital * activeRiskPct / 100 + 1e-8)) {
       reject('EXACT_SIZE_OR_TOTAL_RISK_MISMATCH'); continue;
     }
+    entryStages.push({ symbol: signal.symbol, stage: 'SIZED' });
     let tradePlan: VirtualTradePlan | undefined;
     if (d.tradingMode) {
       if (!policy) { reject('MODE_ACTIVE_POLICY_REQUIRED'); continue; }
@@ -158,14 +163,17 @@ export async function runVirtualPaper400Cycle(d: VirtualPaper400CycleDeps) {
       if (holding === null || entryExit + holding > policy.maxRoundTripCostUsd + 1e-8) {
         reject('MODE_HORIZON_COST_CAP'); continue;
       }
-      const planned = buildVirtualTradePlan({ mode: d.tradingMode, entryPrice: q.priceUsd,
+      const planInput = { mode: d.tradingMode, entryPrice: q.priceUsd,
         structuralStop: signal.structuralStop, notionalUsd: sizing.finalNotionalUsd,
         maxLeverage: sizing.finalLeverage, costReserveUsd: policy.maxRoundTripCostUsd,
-        riskBudgetUsd: capital * activeRiskPct / 100, openedAtMs: submitNow.getTime() });
+        riskBudgetUsd: capital * activeRiskPct / 100, openedAtMs: submitNow.getTime() };
+      const planned = d.structuralTargets
+        ? buildStructuralTradePlan({ ...planInput, targetPrice: signal.strategyTargetPrice ?? NaN, estimatedRoundTripCostUsd: entryExit + holding })
+        : buildVirtualTradePlan(planInput);
       if (!planned.ok) { reject(planned.reason); continue; }
-      if (signal.expectedNetEdgeBps === null || !Number.isFinite(signal.expectedNetEdgeBps)
+      if (!d.structuralTargets && (signal.expectedNetEdgeBps === null || !Number.isFinite(signal.expectedNetEdgeBps)
         || sizing.finalNotionalUsd * signal.expectedNetEdgeBps / 10_000 - holding
-          < planned.plan.collateralUsd * planned.plan.targetRoePct / 100) {
+          < planned.plan.collateralUsd * planned.plan.targetRoePct / 100)) {
         reject('MODE_TARGET_EXCEEDS_SIGNAL_EDGE'); continue;
       }
       tradePlan = planned.plan;
@@ -176,11 +184,13 @@ export async function runVirtualPaper400Cycle(d: VirtualPaper400CycleDeps) {
       sizing.finalLeverage = tradePlan.leverage;
       sizing.finalCollateralUsd = tradePlan.collateralUsd;
     }
+    entryStages.push({ symbol: signal.symbol, stage: 'PLAN_VALIDATED' });
     const hash = createHash('sha256').update(`${session.state.session.strategyTag}:${signal.signalId}`).digest('hex');
     const id = `${tradePlan ? MODE_DECISION_PREFIX : 'vp400:'}${hash}`;
     if (d.rows.some(row => row.openDecisionId === `vp400:${hash}` || row.openDecisionId === `${MODE_DECISION_PREFIX}${hash}`)) { reject('DUPLICATE_SIGNAL'); continue; }
     if (!d.shouldContinue() || !await d.claim(id, { mode: 'VIRTUAL_PAPER_400', signal, decision, sizing,
       cost, policy, market, tradePlan, sessionId: session.state.session.sessionId })) { reject('CLAIM_UNAVAILABLE_OR_DUPLICATE'); continue; }
+    entryStages.push({ symbol: signal.symbol, stage: 'CLAIMED' });
     if (risk.locks.defensiveActive) {
       // Reserve before dispatch: a crash/failed OPEN must not mint another
       // defensive allowance on restart. It never increases after a loss.
