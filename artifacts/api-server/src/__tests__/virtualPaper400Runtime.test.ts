@@ -39,9 +39,12 @@ vi.mock('../workers/serverPaperExecutor', () => ({
   getServerPaperStatus: () => ({ unresolved: null, pendingClose: fixture.pending ? { reason: 'pending' } : null }), openServerPaperPosition: vi.fn(),
   closeServerPaperPosition: vi.fn(), reduceServerPaper70: vi.fn(),
 }));
-vi.mock('../lib/manualCanaryReadonlyEvidence', () => ({ fetchManualCanaryReadonlyCost: vi.fn(async () => ({ ok: false })) }));
+vi.mock('../lib/manualCanaryReadonlyEvidence', () => ({ fetchManualCanaryReadonlyCost: vi.fn(async () => ({
+  ok: false, reason: 'COST_DATA_UNAVAILABLE: test fixture',
+})) }));
 vi.mock('../intel/intelService', () => ({ runStrategyShadowWorkerReadOnly: vi.fn(async () => ({ status: 'EVALUATED', records: [] })) }));
 import { runStrategyShadowWorkerReadOnly } from '../intel/intelService';
+import { fetchManualCanaryReadonlyCost } from '../lib/manualCanaryReadonlyEvidence';
 import { maybeRunVirtualPaper400Cycle, VIRTUAL_PAPER_400_RUNTIME_KEY } from '../workers/virtualPaper400Runtime';
 import { buildActiveVirtualPaper400SessionState, buildStoppedVirtualPaper400SessionState,
   VIRTUAL_PAPER_400_SESSION_STATE_KEY } from '../workers/virtualPaper400SessionState';
@@ -124,6 +127,21 @@ describe('virtual runtime routing and durable account boundary', () => {
     const final = virtualPaper400Activity.read(active.session.sessionId).activity!;
     expect(final.phase).toBe('WAITING'); expect(final.outcome).toBe('NO_TRADE');
     expect(final.symbols).toEqual([]);
+    expect(openServerPaperPosition).not.toHaveBeenCalled();
+  });
+  it('persists sanitized directional cost failure evidence without weakening fail-closed entry', async () => {
+    const active = buildActiveVirtualPaper400SessionState('cost-diagnostics', new Date(Date.now() - 1_000));
+    fixture.rows.set(VIRTUAL_PAPER_400_SESSION_STATE_KEY, JSON.stringify(active));
+    vi.mocked(fetchManualCanaryReadonlyCost).mockResolvedValueOnce({
+      ok: false,
+      reason: 'COST_DATA_UNAVAILABLE: provider https://private.example/path?token=raw-secret',
+    });
+    await maybeRunVirtualPaper400Cycle(args);
+    const runtime = JSON.parse(fixture.rows.get(VIRTUAL_PAPER_400_RUNTIME_KEY)!);
+    const btc = runtime.analysis.find((row: { symbol: string }) => row.symbol === 'BTC');
+    expect(btc.reason).toContain('COST_UNAVAILABLE: long=COST_DATA_UNAVAILABLE: provider [URL]');
+    expect(btc.reason).not.toContain('private.example');
+    expect(btc.reason).not.toContain('raw-secret');
     expect(openServerPaperPosition).not.toHaveBeenCalled();
   });
   it('ends a failed analysis with a generic error without exposing raw infrastructure errors', async () => {
