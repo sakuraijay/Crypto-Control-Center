@@ -1,3 +1,4 @@
+import { discoverVirtualGmxUniverse, selectVirtualAnalysisBatch, VIRTUAL_GMX_SYMBOLS } from '../lib/virtualGmxUniverse';
 import { VIRTUAL_ACTIVE_POLICY, VIRTUAL_LEGACY_POLICY } from './virtualPaper400Policy';
 import { readTradingMode, tradingModeKey, MODE_VERSION, MODE_DECISION_PREFIX } from './virtualPaperTradingMode';
 import { eq, sql } from 'drizzle-orm';
@@ -74,12 +75,24 @@ export async function maybeRunVirtualPaper400Cycle(args: {
       throw new Error('VIRTUAL_POLICY_INVALID');
     }
     const executor = getServerPaperStatus();
+    const accountBefore = evaluateVirtualPaper400Account({ session: identity, previous, rows, now, quote: args.quote });
+    const universe = session.active && accountBefore.evaluation.entryAllowed && !executor.pendingClose && !executor.unresolved
+      ? await discoverVirtualGmxUniverse() : null;
+    const markets = new Map((universe?.complete ? universe.markets : []).map(m => [m.name.split('/')[0], m]));
+    const rotationKey = `virtual_universe_rotation_v1:${identity.sessionId}`;
+    const rotationRaw = await read(rotationKey);
+    let rotation: Record<string, number> = {};
+    let rotationInvalid = false;
+    try {
+      rotation = rotationRaw === null ? {} : JSON.parse(rotationRaw);
+      rotationInvalid = !rotation || typeof rotation !== 'object' || Array.isArray(rotation) || Object.entries(rotation).some(([s,t]) => !VIRTUAL_GMX_SYMBOLS.includes(s) || !Number.isFinite(t) || t < 0 || t > Date.now());
+    } catch { rotationInvalid = true; }
+    const symbols = universe && !rotationInvalid ? selectVirtualAnalysisBatch(universe, rotation) : [];
     const continuityKey = virtualPaper400StrategyContinuityKey(identity.sessionId);
     let continuity: VirtualPaper400StrategyContinuityRestore =
       restoreVirtualPaper400StrategyContinuity(
-        await read(continuityKey), identity.sessionId, now.getTime(), VIRTUAL_ACTIVE_POLICY.symbols,
+        await read(continuityKey), identity.sessionId, now.getTime(), VIRTUAL_GMX_SYMBOLS,
       );
-    const accountBefore = evaluateVirtualPaper400Account({ session: identity, previous, rows, now, quote: args.quote });
     const modeKey = tradingModeKey(identity.sessionId);
     let selectedMode = readTradingMode(await read(modeKey), identity.sessionId);
     if (!selectedMode && session.active) {
@@ -93,8 +106,10 @@ export async function maybeRunVirtualPaper400Cycle(args: {
     let analysis: { symbol: string; reason: string }[] = [];
     const costFailureBySymbol: Record<string, { long: string | null; short: string | null }> = {};
     const readCost = async (symbol: string, isLong: boolean, notionalUsd: number): Promise<CostSnapshot | null> => {
-      const { fetchManualCanaryReadonlyCost } = await import('../lib/manualCanaryReadonlyEvidence');
-      const result = await fetchManualCanaryReadonlyCost({ symbol, isLong, notionalUsd });
+      const { fetchVirtualGmxReadonlyCost } = await import('../lib/manualCanaryReadonlyEvidence');
+      const market = markets.get(symbol);
+      if (!market) return null;
+      const result = await fetchVirtualGmxReadonlyCost({ symbol, marketAddress: market.marketToken, isLong, notionalUsd });
       const side = isLong ? 'long' : 'short';
       costFailureBySymbol[symbol] ??= { long: null, short: null };
       if (!result.ok) {
@@ -111,10 +126,13 @@ export async function maybeRunVirtualPaper400Cycle(args: {
       return { ...result.snapshot, source: 'PAPER_GMX_ESTIMATE' };
     };
     const result = await runVirtualPaper400Cycle({ sessionRaw: raw!, policyAppliedAt: applied?.appliedAt, policyVersion: applied?.version,
-      tradingMode: selectedMode?.mode,
+      tradingMode: selectedMode?.mode, markets,
       entryBlockedReason: executor.unresolved || executor.pendingClose ? 'EXECUTOR_RECOVERY_PENDING'
         : continuity.status === 'BLOCKED' ? continuity.reason
-        : !applied ? 'POLICY_SAFE_BOUNDARY_PENDING' : null, previous, rows, now, clock: () => new Date(),
+        : !applied ? 'POLICY_SAFE_BOUNDARY_PENDING'
+        : rotationInvalid ? 'VIRTUAL_UNIVERSE_ROTATION_INVALID'
+        : universe && !universe.complete ? universe.reason ?? 'UNIVERSE_UNAVAILABLE'
+        : universe && !symbols.length ? 'NO_ELIGIBLE_GMX_MARKETS' : null, previous, rows, now, clock: () => new Date(),
       engineMode: process.env.WORKER_ENGINE_MODE ?? 'PAPER', quote: args.quote,
       shouldContinue: args.shouldContinue,
       persistRisk: state => write(riskKey, state),
@@ -125,13 +143,13 @@ export async function maybeRunVirtualPaper400Cycle(args: {
       readSignals: async () => {
         if (getServerPaperStatus().unresolved) return [];
         const { runStrategyShadowWorkerReadOnly } = await import('../intel/intelService');
-        const { MARKET_BY_SYMBOL_SERVER } = await import('../lib/gmxMarkets');
-        const symbols = [...VIRTUAL_ACTIVE_POLICY.symbols];
+        if (!universe?.complete || !symbols.length) return [];
+        await write(rotationKey, { ...rotation, ...Object.fromEntries(symbols.map(s => [s, Date.now()])) });
         activity.stage(run, 'CHECKING_COSTS', symbols);
         const notionalUsd = 100;
         const costsBySymbol: NonNullable<import('../intel/intelService').StrategyShadowWorkerReadOnlyInput['costsBySymbol']> =
           Object.fromEntries(await Promise.all(symbols.map(async symbol => {
-            const market = MARKET_BY_SYMBOL_SERVER.get(symbol);
+            const market = markets.get(symbol);
             if (!market) return [symbol, null];
             const [long, short] = await Promise.all([readCost(symbol, true, notionalUsd), readCost(symbol, false, notionalUsd)]);
             return [symbol, { market: market.marketToken, notionalUsd, holdingHorizonHours: 1, long, short }];
@@ -144,7 +162,7 @@ export async function maybeRunVirtualPaper400Cycle(args: {
             action: 'NO_TRADE', confidence: 0, primarySymbol: null, createdAt: new Date(evaluatedAt).toISOString() },
           lifecycleSnapshot: continuity.status === 'BLOCKED' ? null : continuity.lifecycleSnapshot,
           previousRegimes: continuity.status === 'BLOCKED' ? {} : continuity.previousRegimes,
-          allowedRegimeSymbols: symbols, costsBySymbol });
+          allowedRegimeSymbols: VIRTUAL_GMX_SYMBOLS, costsBySymbol });
         const filtered = filterNewVirtualPaper400StrategyRecords(continuity, envelope, evaluatedAt);
         const acceptedEnvelope = filtered?.envelope ?? envelope;
         const nextContinuity = filtered ? advanceVirtualPaper400StrategyContinuity(
@@ -160,7 +178,7 @@ export async function maybeRunVirtualPaper400Cycle(args: {
         }
         await write(continuityKey, nextContinuity);
         continuity = restoreVirtualPaper400StrategyContinuity(
-          nextContinuity, identity.sessionId, evaluatedAt, symbols,
+          nextContinuity, identity.sessionId, evaluatedAt, VIRTUAL_GMX_SYMBOLS,
         );
         analysis = symbols.map(symbol => ({ symbol, reason: acceptedEnvelope.records.find(record => record.symbol === symbol)
           ?.reasons.join('; ') || (!costsBySymbol[symbol]?.long || !costsBySymbol[symbol]?.short
@@ -220,7 +238,7 @@ export async function maybeRunVirtualPaper400Cycle(args: {
           netR: priorRisk !== null && priorRisk > 0 ? Number(close.netPnlEstimatedUsd) / priorRisk : null,
           costBasis: 'SIMULATED / ESTIMATED', closeKind: close.closeKind };
       }));
-    await write(VIRTUAL_PAPER_400_RUNTIME_KEY, { ...result, analysis, journal, sessionId: identity.sessionId,
+    await write(VIRTUAL_PAPER_400_RUNTIME_KEY, { ...result, universe: universe ? { ...universe, batchSymbols: symbols } : null, analysis, journal, sessionId: identity.sessionId,
       strategyContinuity: summarizeVirtualPaper400StrategyContinuity(continuity),
       at: new Date().toISOString(), account: { ...result.account, ledger: final.ledger,
         equityUsd: final.equityUsd, unrealizedNetPnlUsd: final.unrealizedNetPnlUsd,

@@ -165,3 +165,22 @@ describe('VIRTUAL 400 Signal → Risk → sizing → executor boundary (REPLAY)'
     expect(vi.mocked(d.persistRisk).mock.calls.at(-1)?.[0].risk.locks.profitReductionDone).toBe(true);
   });
 });
+
+
+describe('dynamic eligible market execution boundary', () => {
+  it('allows nonlegacy XRP through risk and exact market cost binding, then rejects removal and wrong-pool costs', async () => {
+    const { VIRTUAL_GMX_MARKETS } = await import('../lib/virtualGmxUniverse');
+    const market = VIRTUAL_GMX_MARKETS.find(m => m.name === 'XRP/USD')!;
+    const signal = {...virtualReplaySignal(now.getTime(), 'XRP'), structuralStop:49_900, expectedNetEdgeBps:300};
+    const d = deps({policyAppliedAt:now.toISOString(), tradingMode:'INTRADAY', markets:new Map([['XRP',market]]),
+      readSignals:vi.fn(async()=>[signal]), readCost:vi.fn(async(_s,_l,n)=>({...virtualReplayCost(now.getTime(),n),market:market.marketToken}))});
+    expect((await runVirtualPaper400Cycle(d)).status).toBe('OPENED');
+    expect(d.open).toHaveBeenCalledWith(expect.objectContaining({symbol:'XRP'}), expect.objectContaining({market:market.marketToken}));
+    vi.mocked(d.open).mockClear(); d.markets = new Map();
+    expect((await runVirtualPaper400Cycle(d)).diagnostics[0].reason).toBe('UNSUPPORTED_SYMBOL');
+    expect(d.open).not.toHaveBeenCalled(); d.markets = new Map([['XRP',market]]);
+    d.readCost = vi.fn(async(_s,_l,n)=>virtualReplayCost(now.getTime(),n));
+    expect((await runVirtualPaper400Cycle(d)).diagnostics[0].reason).toBe('COST_INVALID_OR_OVER_CAP');
+    expect(d.open).not.toHaveBeenCalled();
+  });
+});

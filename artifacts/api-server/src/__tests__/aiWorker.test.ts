@@ -984,6 +984,25 @@ describe('Worker scoped alpha accounting path', () => {
       expect(executeLiveTestOrder).not.toHaveBeenCalled();
     }
 
+    it('manages a verified XRP quote even when every legacy price buffer is unavailable', async () => {
+      const prior = vi.mocked(getCachedPrices).getMockImplementation();
+      const { VIRTUAL_GMX_MARKETS } = await import('../lib/virtualGmxUniverse');
+      const market = VIRTUAL_GMX_MARKETS.find(m=>m.name==='XRP/USD')!;
+      vi.mocked(getCachedPrices).mockReturnValue([{tokenSymbol:'XRP',tokenAddress:market.indexToken,
+        priceUsd:1.4,minPriceUsd:1.4,maxPriceUsd:1.401,updatedAt:Date.now(),change24hPct:0}]);
+      try {
+        await workerManager.start();
+        timerWorker().priceBuffer.clear(); timerWorker().lastPriceAt=0;
+        vi.mocked(manageServerPaperTick).mockImplementation(async getQuote => {
+          expect(getQuote('XRP')).toEqual({priceUsd:1.4,ageMs:0});
+        });
+        tick(); for(let i=0;i<5;i++) await Promise.resolve();
+        expect(manageServerPaperTick).toHaveBeenCalledTimes(1);
+        expect(openServerPaperPosition).not.toHaveBeenCalled();
+        expect(executeLiveTestOrder).not.toHaveBeenCalled();
+      } finally { if(prior) vi.mocked(getCachedPrices).mockImplementation(prior); }
+    });
+
     it('retains the same management timer and recovered pending protection across Standard → Beta → Standard', async () => {
       await workerManager.start();
       const wm = timerWorker();

@@ -9,6 +9,7 @@ import { adaptStrategySignalToRisk } from '../intel/strategyRiskAdapterV2';
 import { deriveRiskProfileLimits, PROFILE_FALLBACK_LIMITS, type AppliedRiskProfileSnapshot } from '../lib/riskProfiles';
 import { enforceOrderSizing } from '../lib/orderSizingEnforcement';
 import { validateExecutionEligibleSnapshot, type CostSnapshot } from '../lib/costSnapshot';
+import type { GmxMarketInfo } from '../lib/gmxMarkets';
 import { MARKET_BY_SYMBOL_SERVER } from '../lib/gmxMarkets';
 import { evaluateVirtualPaper400SessionState } from './virtualPaper400SessionState';
 import { evaluateVirtualPaper400Account, type VirtualPaper400RiskState } from './virtualPaper400Accounting';
@@ -21,6 +22,7 @@ export interface VirtualPaper400CycleDeps {
   policyAppliedAt?: string;
   policyVersion?: string;
   tradingMode?: VirtualTradingMode;
+  markets?: ReadonlyMap<string, GmxMarketInfo>;
   entryBlockedReason?: string | null;
   previous: VirtualPaper400RiskState;
   rows: readonly DbTrade[];
@@ -47,7 +49,7 @@ export async function runVirtualPaper400Cycle(d: VirtualPaper400CycleDeps) {
   const policy = d.policyAppliedAt ? { ...(d.policyVersion === VIRTUAL_LEGACY_POLICY.version
     ? VIRTUAL_LEGACY_POLICY : VIRTUAL_ACTIVE_POLICY), appliedAt: d.policyAppliedAt } : null;
   const outcome = (status: string, reason: string | null = null) => ({
-    policy, tradingMode: d.tradingMode ? { mode: d.tradingMode, ...VIRTUAL_TRADING_MODES[d.tradingMode] } : null,
+    policy: policy && d.markets ? { ...policy, symbols: [...d.markets.keys()] } : policy, tradingMode: d.tradingMode ? { mode: d.tradingMode, ...VIRTUAL_TRADING_MODES[d.tradingMode] } : null,
     diagnostics, status, reason, at: d.now.toISOString(), mode: 'VIRTUAL_PAPER_400' as const,
     realFundsUsed: false, costBasis: 'SIMULATED / ESTIMATED' as const,
     account: { ...account, held: account.held.map(row => ({ id: row.id, symbol: row.symbol,
@@ -98,7 +100,7 @@ export async function runVirtualPaper400Cycle(d: VirtualPaper400CycleDeps) {
     const entryNow = d.clock?.() ?? d.now;
     if (!d.shouldContinue()) return outcome('STOPPED');
     const reject = (reason: string) => diagnostics.push({ symbol: signal.symbol, reason, details: signal.reasons.slice(0, 5) });
-    if (policy && !policy.symbols.includes(signal.symbol)) { reject('UNSUPPORTED_SYMBOL'); continue; }
+    if ((d.markets && !d.markets.has(signal.symbol)) || (!d.markets && policy && !policy.symbols.includes(signal.symbol))) { reject('UNSUPPORTED_SYMBOL'); continue; }
     if (d.tradingMode && !(VIRTUAL_TRADING_MODES[d.tradingMode].strategies as readonly string[]).includes(signal.strategyId ?? '')) {
       reject('MODE_STRATEGY_NOT_ELIGIBLE'); continue;
     }
@@ -111,7 +113,7 @@ export async function runVirtualPaper400Cycle(d: VirtualPaper400CycleDeps) {
       || signal.sourceCandleCloseTime > entryNow.getTime()
       || entryNow.getTime() - signal.sourceCandleCloseTime > 15 * 60_000) { reject('CONFIDENCE_OR_SIGNAL_FRESHNESS'); continue; }
     const q = d.quote(signal.symbol);
-    const market = MARKET_BY_SYMBOL_SERVER.get(signal.symbol);
+    const market = (d.markets ?? MARKET_BY_SYMBOL_SERVER).get(signal.symbol);
     if (!q || !market || !Number.isFinite(q.priceUsd) || q.priceUsd <= 0 || !Number.isFinite(q.ageMs)
       || q.ageMs < 0 || q.ageMs > 60_000 || signal.structuralStop === null || signal.entryPrice === null) { reject('QUOTE_OR_MARKET_UNAVAILABLE'); continue; }
     const isLong = decision.direction === 'LONG';

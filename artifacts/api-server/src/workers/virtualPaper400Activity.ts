@@ -1,3 +1,4 @@
+import { VIRTUAL_GMX_SYMBOLS } from '../lib/virtualGmxUniverse';
 /** Observational, process-local telemetry. Never grants trading permission and
  * never writes to the financial ledger. Restart intentionally clears live work. */
 export type VirtualActivityPhase = 'CHECKING_ACCOUNT' | 'CHECKING_COSTS' | 'ANALYZING_MARKETS'
@@ -26,7 +27,7 @@ export class VirtualActivityTracker {
   stage(generation: number, phase: VirtualActivityPhase, symbols: readonly string[] = []): void {
     if (!this.current || generation !== this.generation) return;
     const at = new Date(this.clock()).toISOString();
-    const active = [...new Set(symbols)].filter(s => ['BTC', 'ETH', 'SOL'].includes(s));
+    const active = [...new Set(symbols)].filter(s => VIRTUAL_GMX_SYMBOLS.includes(s)).slice(0, 3);
     this.current = { ...this.current, phase, symbols: active, updatedAt: at,
       events: [...this.current.events, { phase, at, symbols: active }].slice(-12) };
   }

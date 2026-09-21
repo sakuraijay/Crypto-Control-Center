@@ -39,12 +39,17 @@ vi.mock('../workers/serverPaperExecutor', () => ({
   getServerPaperStatus: () => ({ unresolved: null, pendingClose: fixture.pending ? { reason: 'pending' } : null }), openServerPaperPosition: vi.fn(),
   closeServerPaperPosition: vi.fn(), reduceServerPaper70: vi.fn(),
 }));
-vi.mock('../lib/manualCanaryReadonlyEvidence', () => ({ fetchManualCanaryReadonlyCost: vi.fn(async () => ({
+vi.mock('../lib/virtualGmxUniverse', async importOriginal => {
+  const actual = await importOriginal<typeof import('../lib/virtualGmxUniverse')>();
+  const { MARKET_BY_SYMBOL_SERVER } = await import('../lib/gmxMarkets');
+  return { ...actual, discoverVirtualGmxUniverse: vi.fn(async () => ({ source: 'GMX_ARBITRUM', observedAt: Date.now(), complete: true, reason: null, totalMarkets: 3, eligibleSymbols: ['BTC','ETH','SOL'], markets: ['BTC','ETH','SOL'].map(s => MARKET_BY_SYMBOL_SERVER.get(s)!), excluded: [] })) };
+});
+vi.mock('../lib/manualCanaryReadonlyEvidence', () => ({ fetchVirtualGmxReadonlyCost: vi.fn(async () => ({
   ok: false, reason: 'COST_DATA_UNAVAILABLE: test fixture',
 })) }));
 vi.mock('../intel/intelService', () => ({ runStrategyShadowWorkerReadOnly: vi.fn(async () => ({ status: 'EVALUATED', records: [] })) }));
 import { runStrategyShadowWorkerReadOnly } from '../intel/intelService';
-import { fetchManualCanaryReadonlyCost } from '../lib/manualCanaryReadonlyEvidence';
+import { fetchVirtualGmxReadonlyCost } from '../lib/manualCanaryReadonlyEvidence';
 import { maybeRunVirtualPaper400Cycle, VIRTUAL_PAPER_400_RUNTIME_KEY } from '../workers/virtualPaper400Runtime';
 import { buildActiveVirtualPaper400SessionState, buildStoppedVirtualPaper400SessionState,
   VIRTUAL_PAPER_400_SESSION_STATE_KEY } from '../workers/virtualPaper400SessionState';
@@ -132,7 +137,7 @@ describe('virtual runtime routing and durable account boundary', () => {
   it('persists sanitized directional cost failure evidence without weakening fail-closed entry', async () => {
     const active = buildActiveVirtualPaper400SessionState('cost-diagnostics', new Date(Date.now() - 1_000));
     fixture.rows.set(VIRTUAL_PAPER_400_SESSION_STATE_KEY, JSON.stringify(active));
-    vi.mocked(fetchManualCanaryReadonlyCost).mockResolvedValueOnce({
+    vi.mocked(fetchVirtualGmxReadonlyCost).mockResolvedValueOnce({
       ok: false,
       reason: 'COST_DATA_UNAVAILABLE: provider https://private.example/path?token=raw-secret',
     });
@@ -165,7 +170,7 @@ describe('virtual runtime routing and durable account boundary', () => {
     fixture.pending = false;
     await maybeRunVirtualPaper400Cycle(args);
     expect(runStrategyShadowWorkerReadOnly).toHaveBeenCalledWith(expect.objectContaining({
-      expectedSymbols: ['BTC', 'ETH', 'SOL'], allowedRegimeSymbols: ['BTC', 'ETH', 'SOL'],
+      expectedSymbols: ['BTC', 'ETH', 'SOL'], allowedRegimeSymbols: expect.arrayContaining(['BTC', 'ETH', 'SOL', 'XRP']),
       lifecycleSnapshot: expect.objectContaining({ schemaVersion: 'signal-lifecycle-snapshot/v1' }),
       previousRegimes: {},
     }));
@@ -259,4 +264,20 @@ describe('virtual runtime routing and durable account boundary', () => {
     await expect(maybeRunVirtualPaper400Cycle(args)).rejects.toThrow('PAPER_MODE_REQUIRED');
     expect(fixture.writes).toEqual([]); expect(openServerPaperPosition).not.toHaveBeenCalled();
   });
+});
+
+
+it('routes a discovered XRP batch into cost/strategy/runtime without resetting the session', async () => {
+  const {discoverVirtualGmxUniverse, VIRTUAL_GMX_MARKETS} = await import('../lib/virtualGmxUniverse');
+  const market = VIRTUAL_GMX_MARKETS.find(m=>m.name==='XRP/USD')!;
+  vi.mocked(discoverVirtualGmxUniverse).mockResolvedValueOnce({source:'GMX_ARBITRUM',observedAt:Date.now(),complete:true,reason:null,totalMarkets:134,eligibleSymbols:['XRP'],markets:[market],excluded:[]});
+  const active = buildActiveVirtualPaper400SessionState('dynamic-xrp',new Date(Date.now()-60_000));
+  const raw = JSON.stringify(active); fixture.rows.set(VIRTUAL_PAPER_400_SESSION_STATE_KEY,raw);
+  await maybeRunVirtualPaper400Cycle(args);
+  expect(runStrategyShadowWorkerReadOnly).toHaveBeenCalledWith(expect.objectContaining({expectedSymbols:['XRP']}));
+  expect(fetchVirtualGmxReadonlyCost).toHaveBeenCalledWith(expect.objectContaining({symbol:'XRP',marketAddress:market.marketToken}));
+  const runtime = JSON.parse(fixture.rows.get(VIRTUAL_PAPER_400_RUNTIME_KEY)!);
+  expect(runtime.universe.totalMarkets).toBe(134); expect(runtime.policy.symbols).toEqual(['XRP']);
+  expect(fixture.rows.get(VIRTUAL_PAPER_400_SESSION_STATE_KEY)).toBe(raw);
+  expect(runtime.account.equityUsd).toBe(400);
 });

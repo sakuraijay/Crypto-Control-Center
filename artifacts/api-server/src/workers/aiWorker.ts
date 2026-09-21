@@ -1,3 +1,4 @@
+import { virtualGmxQuote } from '../lib/virtualGmxUniverse';
 /**
  * AI Worker — 서버 사이드 24/7 AI 사이클 관리자
  *
@@ -582,8 +583,11 @@ class WorkerManager {
           || isPaperEpochActivationHeld()
           || this.serverPaperTickInFlight) return;
         // 신선한 시세가 전혀 없으면 어떤 관리 판정도 불가 (stale 스킵과 동일) — DB 접근 생략
-        if (this.priceBuffer.size === 0) return;
-        if (this.lastPriceAt === 0 || Date.now() - this.lastPriceAt > MAX_MANAGE_PRICE_AGE_MS) return;
+        // New PAPER assets keep protection alive even when the legacy seven price buffers are empty/stale.
+        const virtualQuoteReady = (getCachedPrices() ?? []).some(t => !WORKER_SYMBOLS.includes(t.tokenSymbol)
+          && virtualGmxQuote(t.tokenSymbol) !== null);
+        if (!virtualQuoteReady && (this.priceBuffer.size === 0 || this.lastPriceAt === 0
+          || Date.now() - this.lastPriceAt > MAX_MANAGE_PRICE_AGE_MS)) return;
         this.serverPaperTickInFlight = true;
         void manageServerPaperTick(
           (sym) => this.serverPaperQuote(sym),
@@ -701,6 +705,7 @@ class WorkerManager {
   }
 
   private serverPaperQuote(symbol: string): PriceQuote | null {
+    if (!WORKER_SYMBOLS.includes(symbol)) return virtualGmxQuote(symbol);
     const buf = this.priceBuffer.get(symbol);
     const price = buf && buf.length > 0 ? buf[buf.length - 1] : null;
     const symbolAt = this.priceAtBySymbol.get(symbol) ?? 0;

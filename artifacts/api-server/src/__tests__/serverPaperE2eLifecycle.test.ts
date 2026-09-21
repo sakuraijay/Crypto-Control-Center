@@ -225,18 +225,22 @@ describe('VIRTUAL 400 deterministic REPLAY through the real PAPER executor', () 
   it.each([
     ['INTRADAY','profit'],['INTRADAY','deadline'],['INTRADAY','gap'],
     ['SWING','profit'],['SWING','deadline'],['SWING','gap'],['SWING','corrupt'],
-    ['INTRADAY','invalid_entry_plan'],['SWING','changed_cost'],
-  ] as const)('runs %s mode through actual executor, restart, %s exit and exact net settlement',async(mode,scenario)=>{
+    ['INTRADAY','invalid_entry_plan'],['SWING','changed_cost'],['INTRADAY','xrp_profit'],
+  ] as const)('runs %s mode through actual executor, restart, %s exit and exact net settlement',async(mode,testScenario)=>{
+    const scenario = testScenario === 'xrp_profit' ? 'profit' : testScenario;
+    const symbol = testScenario === 'xrp_profit' ? 'XRP' : 'BTC';
+    const { VIRTUAL_GMX_MARKETS } = await import('../lib/virtualGmxUniverse');
+    const market = VIRTUAL_GMX_MARKETS.find(m=>m.name === `${symbol}/USD`)!;
     const now=new Date(REPLAY_NOW);
     const session=buildActiveVirtualPaper400SessionState('mode-e2e',new Date(REPLAY_NOW-1000));
     let saved=initialVirtualPaper400RiskState(session.session);
     vi.mocked(getPaperCostBinding).mockReturnValue({...BINDING,estEntryCostUsd:.015,estExitCostUsd:.015,
       fundingRatePerHourFraction:.00001,borrowingRatePerHourFraction:.00001});
-    const result=await runVirtualPaper400Cycle({now,engineMode:'PAPER',policyAppliedAt:now.toISOString(),tradingMode:mode,
+    const result=await runVirtualPaper400Cycle({now,engineMode:'PAPER',policyAppliedAt:now.toISOString(),tradingMode:mode, markets: new Map([[symbol, market]]),
       sessionRaw:JSON.stringify(session),previous:saved,rows:[],quote:quoteFn(50_000),shouldContinue:()=>true,
       persistRisk:async state=>{saved=structuredClone(state);},
-      readSignals:async()=>[{...virtualReplaySignal(REPLAY_NOW),structuralStop:49_900,expectedNetEdgeBps:300}],
-      readCost:async(_s,_l,n)=>virtualReplayCost(REPLAY_NOW,n),
+      readSignals:async()=>[{...virtualReplaySignal(REPLAY_NOW, symbol),structuralStop:49_900,expectedNetEdgeBps:300}],
+      readCost:async(_s,_l,n)=>({...virtualReplayCost(REPLAY_NOW,n),market:market.marketToken}),
       claim:async(id,audit)=>{const recorded=structuredClone(audit) as {tradePlan:{targetRoePct:number}};
         if(scenario==='invalid_entry_plan')recorded.tradePlan.targetRoePct=100;
         store.workerState.set(id,JSON.stringify(recorded));return true;},

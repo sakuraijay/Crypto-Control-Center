@@ -18,7 +18,8 @@ import {
   ARBITRUM_CHAIN_ID,
   resolveIndexTokenDecimals,
 } from './indexTokenDecimals';
-import { MARKET_BY_SYMBOL_SERVER } from './gmxMarkets';
+import { MARKET_BY_SYMBOL_SERVER, type GmxMarketInfo } from './gmxMarkets';
+import { virtualMarketForAddress } from './virtualGmxUniverse';
 import {
   buildFreshExecutionCostObservation,
   type CostReadinessAttemptDiagnostics,
@@ -195,7 +196,15 @@ export async function fetchManualCanaryReadonlyCost(args: {
   isLong: boolean;
   notionalUsd: number;
 }): Promise<ManualCanaryReadonlyCostResult> {
-  const market = MARKET_BY_SYMBOL_SERVER.get(args.symbol);
+  return fetchBoundReadonlyCost(args, MARKET_BY_SYMBOL_SERVER.get(args.symbol));
+}
+
+export async function fetchVirtualGmxReadonlyCost(args: { symbol: string; marketAddress: string; isLong: boolean; notionalUsd: number }): Promise<ManualCanaryReadonlyCostResult> {
+  const market = virtualMarketForAddress(args.marketAddress);
+  if ((process.env.WORKER_ENGINE_MODE ?? 'PAPER') !== 'PAPER' || market?.name !== `${args.symbol}/USD`) return { ok: false, reason: 'VIRTUAL_MARKET_IDENTITY_INVALID' };
+  return fetchBoundReadonlyCost(args, market);
+}
+async function fetchBoundReadonlyCost(args: { symbol: string; isLong: boolean; notionalUsd: number }, market: GmxMarketInfo | undefined): Promise<ManualCanaryReadonlyCostResult> {
   if (!market) return { ok: false, reason: '시장 미확인' };
   let diagnostics: CostReadinessAttemptDiagnostics | undefined;
   const result = await fetchLiveCostSnapshot(
