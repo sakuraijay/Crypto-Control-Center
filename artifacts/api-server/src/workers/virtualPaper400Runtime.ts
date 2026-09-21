@@ -8,7 +8,7 @@ import { runVirtualPaper400Cycle } from './virtualPaper400Cycle';
 import { openServerPaperPosition, closeServerPaperPosition, reduceServerPaper70,
   getServerPaperStatus, type PriceLookup } from './serverPaperExecutor';
 import { storePaperCostSnapshot } from '../lib/paperCostCache';
-import type { CostSnapshot } from '../lib/costSnapshot';
+import { sanitizeCostError, type CostSnapshot } from '../lib/costSnapshot';
 import { virtualPaper400Activity as activity } from './virtualPaper400Activity';
 import {
   advanceVirtualPaper400StrategyContinuity,
@@ -91,12 +91,24 @@ export async function maybeRunVirtualPaper400Cycle(args: {
       await write(policyKey, applied);
     }
     let analysis: { symbol: string; reason: string }[] = [];
+    const costFailureBySymbol: Record<string, { long: string | null; short: string | null }> = {};
     const readCost = async (symbol: string, isLong: boolean, notionalUsd: number): Promise<CostSnapshot | null> => {
       const { fetchManualCanaryReadonlyCost } = await import('../lib/manualCanaryReadonlyEvidence');
       const result = await fetchManualCanaryReadonlyCost({ symbol, isLong, notionalUsd });
+      const side = isLong ? 'long' : 'short';
+      costFailureBySymbol[symbol] ??= { long: null, short: null };
+      if (!result.ok) {
+        const reason = typeof result.reason === 'string' && result.reason.trim().length > 0
+          ? result.reason : 'COST_DATA_UNAVAILABLE: 비용 공급자가 실패 사유를 제공하지 않음';
+        // The provider already returns a sanitized reason, but sanitize again at
+        // this public runtime boundary and bound its size. Never expose raw errors.
+        costFailureBySymbol[symbol][side] = sanitizeCostError(reason).slice(0, 300);
+        return null;
+      }
+      costFailureBySymbol[symbol][side] = null;
       // Inputs are official read-only observations; simulated fills/settlement
       // remain PAPER estimates, never observed real execution.
-      return result.ok ? { ...result.snapshot, source: 'PAPER_GMX_ESTIMATE' } : null;
+      return { ...result.snapshot, source: 'PAPER_GMX_ESTIMATE' };
     };
     const result = await runVirtualPaper400Cycle({ sessionRaw: raw!, policyAppliedAt: applied?.appliedAt, policyVersion: applied?.version,
       tradingMode: selectedMode?.mode,
@@ -152,7 +164,8 @@ export async function maybeRunVirtualPaper400Cycle(args: {
         );
         analysis = symbols.map(symbol => ({ symbol, reason: acceptedEnvelope.records.find(record => record.symbol === symbol)
           ?.reasons.join('; ') || (!costsBySymbol[symbol]?.long || !costsBySymbol[symbol]?.short
-            ? 'COST_UNAVAILABLE' : `ANALYSIS_${acceptedEnvelope.status}: ${acceptedEnvelope.reasons.join('; ')}`) }));
+            ? `COST_UNAVAILABLE: long=${costFailureBySymbol[symbol]?.long ?? 'AVAILABLE'}; short=${costFailureBySymbol[symbol]?.short ?? 'AVAILABLE'}`
+            : `ANALYSIS_${acceptedEnvelope.status}: ${acceptedEnvelope.reasons.join('; ')}`) }));
         activity.analyzed(run, analysis.map(row => ({ ...row,
           evaluated: ['EVALUATED', 'PARTIAL'].includes(acceptedEnvelope.status)
             && acceptedEnvelope.records.some(record => record.symbol === row.symbol) })));
