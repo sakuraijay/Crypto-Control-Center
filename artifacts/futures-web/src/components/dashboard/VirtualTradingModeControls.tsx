@@ -39,20 +39,20 @@ export function VirtualTradingModeControls() {
   }
   return <div className="mt-4 space-y-3" aria-label="가상 매매 방식">
     <p className="text-sm">다음 진입: <strong>{selected?.label ?? '서버 설정 확인 대기'}</strong>
-      {selected && <span className="block mt-1 text-xs text-muted-foreground">{selected.exitBasis === 'STRATEGY_PRICE_TARGET' ? '익절: 전략 가격' : `시험 익절 ${selected.targetRoePct}%`} · 증거금 손절 상한 {selected.stopRoePct}% · 최대 {selected.maxHoldHours}시간</span>}</p>
+      {selected && <span className="block mt-1 text-xs text-muted-foreground">{selected.exitBasis === 'PAPER_EXPERIMENT_PRICE_TARGET' ? '적극적 PAPER 시험 · 손실 포함 기록' : selected.exitBasis === 'STRATEGY_PRICE_TARGET' ? '익절: 전략 가격' : `시험 익절 ${selected.targetRoePct}%`} · 증거금 손절 상한 {selected.stopRoePct}% · 최대 {selected.maxHoldHours}시간</span>}</p>
     <Button variant="outline" className="w-full" onClick={begin} disabled={!options || !data || !['ACTIVE','STOPPED'].includes(data.session.status)}>매매 방식 선택</Button>
     <Dialog open={open} onOpenChange={value => { if (!busy) { setOpen(value); if (!value) setPin(''); } }}>
       <DialogContent className="ccc-dialog sm:max-w-[620px]">
         <DialogHeader><DialogTitle>매매 방식 선택</DialogTitle><DialogDescription>
-          PAPER · 계좌 일수익 목표 5–10%는 미검증 목표입니다. 거래별 익절은 전략 가격, 손절률은 포지션 증거금 기준입니다.
+          {selected?.exitBasis === 'PAPER_EXPERIMENT_PRICE_TARGET' ? '적극적 PAPER 시험 · 실제 시세로 손실까지 기록합니다. 검증된 전략 수익이나 수익 보장이 아닙니다.' : 'PAPER · 계좌 일수익 목표 5–10%는 미검증 목표입니다. 거래별 익절은 전략 가격, 손절률은 포지션 증거금 기준입니다.'}
         </DialogDescription></DialogHeader>
         <form onSubmit={event => void submit(event)} className="space-y-4">
           <fieldset disabled={busy} className="space-y-3"><legend className="sr-only">단타 또는 중기 스윙</legend>
             {(['INTRADAY','SWING'] as const).map(mode => options?.[mode] && <label key={mode}
               className={`flex gap-3 items-center rounded-lg border p-4 cursor-pointer ${draft === mode ? 'border-primary bg-primary/10' : 'border-border'}`}>
               <input type="radio" name="tradingMode" value={mode} checked={draft === mode} onChange={() => setDraft(mode)} />
-              <span><strong>{options[mode].label} · {mode === 'INTRADAY' ? '최대 12시간' : '1–3일'}</strong>
-                <span className="block text-sm text-muted-foreground">{options[mode].exitBasis === 'STRATEGY_PRICE_TARGET' ? '전략 가격 익절 · 비용 반영 순손익비 1.5 이상' : `시험 익절 ${options[mode].targetRoePct}%`} / 증거금 손절 상한 {options[mode].stopRoePct}%</span></span>
+              <span><strong>{options[mode].label} · 최대 {options[mode].maxHoldHours < 1 ? `${options[mode].maxHoldHours*60}분` : `${options[mode].maxHoldHours}시간`}</strong>
+                <span className="block text-sm text-muted-foreground">{options[mode].exitBasis === 'PAPER_EXPERIMENT_PRICE_TARGET' ? '미검증 모멘텀 시험 · 가격 목표 익절' : options[mode].exitBasis === 'STRATEGY_PRICE_TARGET' ? '전략 가격 익절 · 비용 반영 순손익비 1.5 이상' : `시험 익절 ${options[mode].targetRoePct}%`} / 증거금 손절 상한 {options[mode].stopRoePct}%</span></span>
             </label>)}
           </fieldset>
           <div className="ccc-callout">저장한 선택은 다음 신규 진입부터 적용됩니다. 기존 포지션은 진입 당시 설정으로 보호합니다. 스윙도 손절·익절은 1일 전에 작동할 수 있습니다. 계좌 위험 한도가 우선하며, 급변·체결 비용으로 손실이 초과될 수 있습니다.</div>

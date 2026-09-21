@@ -1,4 +1,4 @@
-import { VIRTUAL_ENTRY_OPTIONS } from '../workers/virtualPaperTradingMode';
+import { DAILY_ENTRY_OPTIONS, VIRTUAL_ENTRY_OPTIONS } from '../workers/virtualPaperTradingMode';
 import { randomUUID } from 'node:crypto';
 import { Router } from 'express';
 import { db, workerStateTable } from '@workspace/db';
@@ -220,7 +220,7 @@ router.get('/data/virtual-paper-400-session', async (_req, res) => {
       session,
       runtime,
       tradingModeSelection,
-      tradingModeOptions: VIRTUAL_ENTRY_OPTIONS,
+      tradingModeOptions: runtime?.policy?.version === 'virtual400-daily/v3' ? DAILY_ENTRY_OPTIONS : VIRTUAL_ENTRY_OPTIONS,
       runtimeFresh: Number.isFinite(age) && age >= 0 && age <= 120_000,
       ...virtualPaper400Activity.read(session.state?.session.sessionId ?? null),
     };

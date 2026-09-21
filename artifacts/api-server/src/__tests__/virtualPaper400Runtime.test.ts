@@ -47,6 +47,7 @@ vi.mock('../lib/virtualGmxUniverse', async importOriginal => {
 vi.mock('../lib/manualCanaryReadonlyEvidence', () => ({ fetchVirtualGmxReadonlyCost: vi.fn(async () => ({
   ok: false, reason: 'COST_DATA_UNAVAILABLE: test fixture',
 })) }));
+vi.mock('../routes/gmx',()=>({fetchGmxCandles:vi.fn(async()=>null)}));
 vi.mock('../intel/intelService', () => ({ runStrategyShadowWorkerReadOnly: vi.fn(async () => ({ status: 'EVALUATED', records: [] })) }));
 import { runStrategyShadowWorkerReadOnly } from '../intel/intelService';
 import { fetchVirtualGmxReadonlyCost } from '../lib/manualCanaryReadonlyEvidence';
@@ -90,6 +91,18 @@ describe('virtual runtime routing and durable account boundary', () => {
     await maybeRunVirtualPaper400Cycle(args);
     expect(fixture.rows.get(key)).toBe('corrupt-evidence');
     expect(JSON.parse(fixture.rows.get(VIRTUAL_PAPER_400_RUNTIME_KEY)!).tradingDiagnostics.status).toBe('UNAVAILABLE');
+    expect(fixture.rows.get(VIRTUAL_PAPER_400_SESSION_STATE_KEY)).toBe(raw);
+  });
+  it('promotes explicit production daily mode at a safe boundary and retains that policy on restart',async()=>{
+    const active=buildActiveVirtualPaper400SessionState('daily-runtime',new Date(Date.now()-1000));
+    const raw=JSON.stringify(active);fixture.rows.set(VIRTUAL_PAPER_400_SESSION_STATE_KEY,raw);
+    await maybeRunVirtualPaper400Cycle({...args,dailyExperiment:true});
+    const key=`virtual_paper_400_policy_v1:${active.session.sessionId}`;
+    expect(JSON.parse(fixture.rows.get(key)!).version).toBe('virtual400-daily/v3');
+    expect(JSON.parse(fixture.rows.get(VIRTUAL_PAPER_400_RUNTIME_KEY)!).reason).toBe('PAPER_EXPERIMENT_CANDLE_UNAVAILABLE');
+    expect(runStrategyShadowWorkerReadOnly).not.toHaveBeenCalled();
+    await maybeRunVirtualPaper400Cycle(args);
+    expect(JSON.parse(fixture.rows.get(key)!).version).toBe('virtual400-daily/v3');
     expect(fixture.rows.get(VIRTUAL_PAPER_400_SESSION_STATE_KEY)).toBe(raw);
   });
   it('retains the 2x policy and protection of existing inventory until it is settled', async () => {

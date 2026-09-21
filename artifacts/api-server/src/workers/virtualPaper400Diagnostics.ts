@@ -76,8 +76,14 @@ export function advanceVirtualDiagnostics(input: {
     s.lastMinute = minute;
     increment('OBSERVED_MINUTE'); increment(`CYCLE:${input.status}`);
     if (input.reason) increment(`CYCLE_REASON:${input.reason}`);
+    for (const d of input.diagnostics.filter(d=>d.reason.startsWith('PAPER_EXPERIMENT_')||d.reason.startsWith('DAILY_PLAN_'))) {
+      increment(`EXPERIMENT_REJECT:${d.reason}`); incident('PAPER_EXPERIMENT_REJECT',d.symbol,d.reason,minute);
+    }
+    for (const stage of input.entryStages?.filter(s=>s.stage==='PAPER_EXPERIMENT_CLAIMED')??[]) increment('PAPER_EXPERIMENT_CLAIMED');
     for (const a of input.analysis) {
       if (!symbolOk(a.symbol)) continue;
+      if(a.reason.startsWith('AGGRESSIVE_PAPER_EXPERIMENT:'))increment(`EXPERIMENT_CANDIDATE:${a.symbol}`);
+      if(a.reason==='PAPER_EXPERIMENT_CANDLE_UNAVAILABLE'){increment(`EXPERIMENT_CANDLE_UNAVAILABLE:${a.symbol}`);incident('PAPER_EXPERIMENT_CANDLE_UNAVAILABLE',a.symbol,a.reason,minute);}
       if (a.reason.includes('COST_UNAVAILABLE')) {
         increment('ANALYSIS_COST_UNAVAILABLE');
         increment(`ANALYSIS_COST_UNAVAILABLE:${a.symbol}`);

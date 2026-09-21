@@ -49,6 +49,18 @@ describe('server authority after retiring the browser trading engine', () => {
   expect(screen.getByRole('dialog').textContent).toContain('1.5');
   expect(fetcher.mock.calls.every((call:any)=>!call[1]?.method)).toBe(true);
  });
+ it('labels daily experimental policy and actual short holding horizons without profit claims',async()=>{
+  const data=snapshot();data.tradingModeSelection={version:'virtual-trading-mode/v1',mode:'INTRADAY',sessionId:'ui',updatedAt:at};
+  data.runtime!.policy={...data.runtime!.policy!,version:'virtual400-daily/v3',riskPerTradePct:2,minLeverage:5,maxLeverage:10,cooldownMinutes:60};
+  const spec={minTargetRoePct:5,maxTargetRoePct:10,targetRoePct:null,stopRoePct:10,exitBasis:'PAPER_EXPERIMENT_PRICE_TARGET'};
+  data.tradingModeOptions={INTRADAY:{...spec,label:'단타',maxHoldHours:.5},SWING:{...spec,label:'스윙',maxHoldHours:4}};
+  vi.stubGlobal('fetch',vi.fn(async()=>({ok:true,json:async()=>data})));mount();await flush();
+  expect(screen.getByTestId('virtual-active-policy').textContent).toContain('적극적 PAPER 시험');
+  fireEvent.click(screen.getByRole('button',{name:'매매 방식 선택'}));
+  expect(screen.getByRole('dialog').textContent).toContain('최대 30분');
+  expect(screen.getByRole('dialog').textContent).toContain('최대 4시간');
+  expect(screen.getByRole('dialog').textContent).toContain('수익 보장이 아닙니다');
+ });
  it('restores the applied 5–10x range after remount without browser writes', async () => {
   const data = snapshot(); data.runtime!.policy = { ...data.runtime!.policy!, version: 'virtual400-active/v2', minLeverage: 5, maxLeverage: 10 };
   const fetcher = vi.fn(async () => ({ ok: true, json: async () => data })); vi.stubGlobal('fetch', fetcher);

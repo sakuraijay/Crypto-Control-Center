@@ -1,3 +1,4 @@
+import { evaluateDailyPaperRisk } from './virtualPaperDailyPolicy';
 import type { DbTrade } from '@workspace/db';
 import { accrueHoldingCostsFromEntryRates } from '../lib/holdingCosts';
 import { initialRiskEngineState, rollRiskPeriods, type PersistedRiskEngineState } from '../lib/riskEngineState';
@@ -52,6 +53,7 @@ export function evaluateVirtualPaper400Account(args: {
   previous: VirtualPaper400RiskState;
   quote: PriceLookup;
   now: Date;
+  aggressiveDaily?: boolean;
 }) {
   const { session, rows, now, quote } = args;
   const previous = parseVirtualPaper400RiskState(JSON.stringify(args.previous), session);
@@ -147,7 +149,8 @@ export function evaluateVirtualPaper400Account(args: {
     weeklyRealizedNetPnlUsd: weeklyNet,
     dailyEntryCount: opens.filter(row => new Date(row.timestamp).getTime() >= dayStart).length,
     consecutiveLossCount: losses, lastUpdatedAt: now.toISOString() };
-  const evaluation: RiskEvaluationResult = evaluateRiskState({
+  const evaluation: RiskEvaluationResult = args.aggressiveDaily ? evaluateDailyPaperRisk({equity,dayOpening:risk.startOfDayEquityUsd,
+    dailyLossAware:risk.dailyLossAwareNetPnlUsd,entries:risk.dailyEntryCount,held:held.length,fresh:quotesFresh,locks:risk.locks}) : evaluateRiskState({
     dailyRiskCapitalUsd: Math.min(400, risk.startOfDayEquityUsd),
     weeklyRiskCapitalUsd: Math.min(400, risk.startOfWeekEquityUsd),
     currentEquityUsd: equity, newHardStopEvaluationAllowed: true,

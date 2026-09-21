@@ -1,6 +1,7 @@
+import { DAILY_PAPER_POLICY, isDailyPaperProfile } from './virtualPaperDailyPolicy';
 import { isVirtualActiveProfile, VIRTUAL_ACTIVE_POLICY } from './virtualPaper400Policy';
 import { virtualLeverageCeiling } from './virtualPaper400Sizing';
-import { STRUCTURAL_PLAN_VERSION, MODE_DECISION_PREFIX, parseVirtualTradePlan, tradingModeExit, modeHoldingCost } from './virtualPaperTradingMode';
+import { DAILY_PLAN_VERSION, STRUCTURAL_PLAN_VERSION, MODE_DECISION_PREFIX, parseVirtualTradePlan, tradingModeExit, modeHoldingCost } from './virtualPaperTradingMode';
 /**
  * serverPaperExecutor — 서버 권위 PAPER 체결·관리·정산 (Task #111).
  *
@@ -304,11 +305,13 @@ export async function openServerPaperPosition(
   if (state.unresolved) return record({ ok: false, reason: `UNRESOLVED 상태 — 신규 진입 차단: ${state.unresolved}` });
   if (!args.decisionId) return record({ ok: false, reason: "decisionId 없음 — idempotency 불가, 진입 거부" });
   if (!isAppliedRiskProfileSnapshot(args.riskProfileSnapshot)
-    && !(isVirtualPaper400StrategyTag(strategy) && isVirtualActiveProfile(args.riskProfileSnapshot))) {
+    && !(isVirtualPaper400StrategyTag(strategy) && (isVirtualActiveProfile(args.riskProfileSnapshot) || isDailyPaperProfile(args.riskProfileSnapshot)))) {
     return record({ ok: false, reason: "위험 프로필 감사 스냅샷 없음/손상 — 진입 거부" });
   }
 
-  const virtualActive = isVirtualPaper400StrategyTag(strategy) && isVirtualActiveProfile(args.riskProfileSnapshot);
+  const dailyExperiment = isVirtualPaper400StrategyTag(strategy) && isDailyPaperProfile(args.riskProfileSnapshot);
+  const virtualActive = isVirtualPaper400StrategyTag(strategy) && (isVirtualActiveProfile(args.riskProfileSnapshot) || dailyExperiment);
+  const virtualCostCap = dailyExperiment ? 2 : VIRTUAL_ACTIVE_POLICY.maxRoundTripCostUsd;
   const virtualV2 = virtualActive && args.riskProfileSnapshot.derivedLimits.maxLeverage === VIRTUAL_ACTIVE_POLICY.maxLeverage;
   if (virtualV2 && (process.env.WORKER_ENGINE_MODE ?? 'PAPER') !== 'PAPER') {
     return record({ ok: false, reason: 'VIRTUAL_PAPER_MODE_REQUIRED' });
@@ -333,7 +336,7 @@ export async function openServerPaperPosition(
   if (args.openPositionCount >= maxConcurrentPositions) {
     return record({ ok: false, reason: `동시 포지션 한도 (${args.openPositionCount}/${maxConcurrentPositions}) — 진입 거부` });
   }
-  if (args.entriesManilaDay >= RISK_POLICY.maxDailyEntries) {
+  if (args.entriesManilaDay >= (dailyExperiment ? DAILY_PAPER_POLICY.maxDailyEntries : RISK_POLICY.maxDailyEntries)) {
     return record({ ok: false, reason: `Manila 일일 진입 한도 (${args.entriesManilaDay}/${RISK_POLICY.maxDailyEntries}) — 진입 거부` });
   }
   if (!fin(args.sizeUsd) || args.sizeUsd < GMX_MIN_POSITION_NOTIONAL_USD) {
@@ -381,33 +384,42 @@ export async function openServerPaperPosition(
   }
 
   if (virtualV2) {
-    const riskWithCostReserve = args.sizeUsd * stop.plan.stopDistanceFraction + VIRTUAL_ACTIVE_POLICY.maxRoundTripCostUsd;
+    const riskWithCostReserve = args.sizeUsd * stop.plan.stopDistanceFraction + virtualCostCap;
     if (args.stopPriceUsd === undefined || args.leverage > virtualLeverageCeiling(args.sizeUsd, riskWithCostReserve)
       || riskWithCostReserve > args.riskProfileSnapshot.derivedLimits.maxRiskPerTradeUsd + 1e-8
-      || binding.estEntryCostUsd + binding.estExitCostUsd > VIRTUAL_ACTIVE_POLICY.maxRoundTripCostUsd) {
+      || binding.estEntryCostUsd + binding.estExitCostUsd > virtualCostCap) {
       return record({ ok: false, reason: 'VIRTUAL_COLLATERAL_BUFFER_OR_RISK_CAP' });
     }
   }
 
+  if (dailyExperiment && !args.decisionId.startsWith(MODE_DECISION_PREFIX+'daily:'))
+    return record({ok:false,reason:'PAPER_EXPERIMENT_PLAN_REQUIRED'});
   let tp: number | null = null;
   if (args.decisionId.startsWith(MODE_DECISION_PREFIX)) {
     const records = await db.select().from(workerStateTable).where(eq(workerStateTable.key, args.decisionId)).limit(2);
-    let audit: { tradePlan?: unknown; signal?: { strategyTargetPrice?: number } } | null = null;
+    let audit: { tradePlan?: unknown; signal?: { strategyTargetPrice?: number }; policy?:{version?:string};candidate?:{purpose?:string;side?:string;symbol?:string;closedAt?:number;evaluatedAt?:number;stopFraction?:number} } | null = null;
     try { audit = records.length === 1 ? JSON.parse(records[0].value) : null; } catch { /* refuse malformed intent */ }
     const plan = parseVirtualTradePlan(audit?.tradePlan);
     const holding = plan ? modeHoldingCost({ notionalUsd: args.sizeUsd,
       fundingRatePerHourFraction: binding.fundingRatePerHourFraction,
       borrowingRatePerHourFraction: binding.borrowingRatePerHourFraction }, plan.maxHoldHours) : null;
-    if (plan?.version === STRUCTURAL_PLAN_VERSION && (audit?.signal?.strategyTargetPrice !== plan.tpPrice
+    if ((plan?.version === STRUCTURAL_PLAN_VERSION || plan?.version === DAILY_PLAN_VERSION) && (audit?.signal?.strategyTargetPrice !== plan.tpPrice
       || holding === null || !fin(plan.estimatedRoundTripCostUsd)
       || Math.abs(plan.estimatedRoundTripCostUsd - (binding.estEntryCostUsd + binding.estExitCostUsd + holding)) > 1e-8)) {
       return record({ ok: false, reason: 'VIRTUAL_STRATEGY_TARGET_OR_COST_MISMATCH' });
     }
+    if (dailyExperiment !== (plan?.version === DAILY_PLAN_VERSION)
+      || (dailyExperiment && (audit?.policy?.version !== DAILY_PAPER_POLICY.version
+        || audit?.candidate?.purpose !== 'AGGRESSIVE_PAPER_EXPERIMENT' || audit.candidate.side !== args.side || audit.candidate.symbol !== args.symbol
+        || !fin(audit.candidate.closedAt) || audit.candidate.closedAt > nowMs || nowMs-audit.candidate.closedAt > 960_000
+        || !fin(audit.candidate.evaluatedAt) || audit.candidate.evaluatedAt > nowMs || nowMs-audit.candidate.evaluatedAt > 60_000
+        || !fin(audit.candidate.stopFraction) || Math.abs(audit.candidate.stopFraction-stop.plan.stopDistanceFraction)>1e-8)))
+      return record({ok:false,reason:'PAPER_EXPERIMENT_AUDIT_INVALID'});
     if (!virtualV2 || !plan || holding === null || !shouldContinue()
       || plan.entryPrice !== q.priceUsd || plan.structuralStop !== args.stopPriceUsd
       || plan.notionalUsd !== args.sizeUsd || plan.leverage !== args.leverage || plan.tpPrice !== args.tpPriceUsd
       || plan.openedAtMs !== nowMs || plan.plannedRiskUsd > args.riskProfileSnapshot.derivedLimits.maxRiskPerTradeUsd + 1e-8
-      || binding.estEntryCostUsd + binding.estExitCostUsd + holding > 0.4 + 1e-8) {
+      || binding.estEntryCostUsd + binding.estExitCostUsd + holding > virtualCostCap + 1e-8) {
       return record({ ok: false, reason: 'VIRTUAL_MODE_PLAN_OR_HORIZON_COST_INVALID' });
     }
   }

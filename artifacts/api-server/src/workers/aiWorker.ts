@@ -1738,7 +1738,7 @@ class WorkerManager {
 
     try {
       // 사이클마다 PENDING 세트를 DB에서 재구성 — 승인/거절/만료된 항목 자동 제거
-      if (await maybeRunVirtualPaper400Cycle({ cycleNumber: cycleNum,
+      if (await maybeRunVirtualPaper400Cycle({ cycleNumber: cycleNum, dailyExperiment: true,
         quote: symbol => this.serverPaperQuote(symbol),
         shouldContinue: () => this.isCurrentGeneration(capturedGeneration) })) {
         cycleOutcome = 'SAFE_SKIP';
