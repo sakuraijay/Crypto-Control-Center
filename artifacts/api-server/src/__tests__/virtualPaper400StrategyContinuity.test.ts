@@ -51,6 +51,33 @@ function evaluatedEnvelope(at = now, symbol = 'BTC') {
 }
 
 describe('Virtual400 session-scoped Strategy continuity codec', () => {
+  it('restores historical complete three-coin evidence into an expanded universe and then rotates a complete XRP batch', () => {
+    const initial = restoreVirtualPaper400StrategyContinuity(null, sessionId, now, symbols);
+    const complete = evaluatedEnvelope();
+    complete.records = symbols.map(s => evaluatedEnvelope(now, s).records[0]);
+    complete.status = 'EVALUATED'; complete.evaluatedSymbols = symbols; complete.missingSymbols = [];
+    const old = advanceVirtualPaper400StrategyContinuity(sessionId, initial, complete, now)!;
+    delete old.lastMeaningfulAnalysis!.expectedSymbols; // actual pre-expansion persisted schema
+    const before = JSON.stringify(old);
+    const all = [...symbols, 'XRP', 'DOGE'];
+    const restored = restoreVirtualPaper400StrategyContinuity(old, sessionId, now + 60_000, all);
+    expect(restored.status).toBe('RESTORED');
+    expect(JSON.stringify(old)).toBe(before);
+    if (restored.status === 'BLOCKED') throw new Error('restore blocked');
+    expect(Object.keys(restored.previousRegimes).sort()).toEqual([...symbols].sort());
+    const xrp = evaluatedEnvelope(now + 60_000, 'XRP');
+    xrp.expectedSymbols = ['XRP']; xrp.status = 'EVALUATED'; xrp.missingSymbols = [];
+    const next = advanceVirtualPaper400StrategyContinuity(sessionId, restored, xrp, now + 60_000)!;
+    expect(next.lastMeaningfulAnalysis).toMatchObject({expectedSymbols:['XRP'],latestBatchSymbols:['XRP'],status:'EVALUATED'});
+    const afterRestart = restoreVirtualPaper400StrategyContinuity(next, sessionId, now + 120_000, all);
+    expect(afterRestart.status).toBe('RESTORED');
+    if(afterRestart.status === 'BLOCKED') throw new Error('restart blocked');
+    expect(Object.keys(afterRestart.previousRegimes).sort()).toEqual([...symbols,'XRP'].sort());
+    for (const expectedSymbols of [[], ['XRP','XRP'], ['DOGE'], ['UNKNOWN']]) {
+      expect(restoreVirtualPaper400StrategyContinuity({...next,lastMeaningfulAnalysis:{...next.lastMeaningfulAnalysis!,expectedSymbols}},
+        sessionId, now + 120_000, all)).toMatchObject({status:'BLOCKED',reason:'STRATEGY_CONTINUITY_ANALYSIS_INVALID'});
+    }
+  });
   it('establishes a durable baseline and restores it across process-local cycles', () => {
     const missing = restoreVirtualPaper400StrategyContinuity(null, sessionId, now, symbols);
     expect(missing.status).toBe('MISSING');

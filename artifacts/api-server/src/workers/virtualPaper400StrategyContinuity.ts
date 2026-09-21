@@ -27,6 +27,7 @@ export interface VirtualPaper400StrategyContinuityState {
   lastMeaningfulAnalysis: {
     evaluatedAt: number;
     status: 'PARTIAL' | 'EVALUATED';
+    expectedSymbols?: string[];
     latestBatchSymbols: string[];
     records: Array<Pick<StrategyShadowRecord, 'symbol' | 'evaluatedAt' | 'sourceCandleCloseTime' | 'regime'
       | 'action' | 'strategyId' | 'direction' | 'confidence' | 'lifecycleEligible' | 'reasons'>>;
@@ -61,6 +62,13 @@ function restoreLastMeaningfulAnalysis(
     || !['PARTIAL', 'EVALUATED'].includes(String(analysis.status))
     || !Array.isArray(analysis.records) || analysis.records.length === 0) return { ok: false };
   const allowed = new Set(allowedSymbols.map(symbol => symbol.trim().toUpperCase()));
+  // Historical v2 records were produced by the fixed three-symbol runtime.
+  // New EVALUATED/PARTIAL status describes its scheduled batch, not the entire
+  // (now dynamic) universe. Preserve old evidence; do not reset regime/cursors.
+  const rawExpected = analysis.expectedSymbols ?? ['BTC', 'ETH', 'SOL'];
+  if (!Array.isArray(rawExpected) || !rawExpected.length) return { ok: false };
+  const expected = rawExpected.map(s => typeof s === 'string' ? s.trim().toUpperCase() : '');
+  if (new Set(expected).size !== expected.length || expected.some(s => !allowed.has(s))) return { ok: false };
   const latestBatchSymbols = analysis.latestBatchSymbols === undefined
     ? (analysis.records as unknown[]).map(value => object(value)?.symbol)
     : analysis.latestBatchSymbols;
@@ -106,12 +114,14 @@ function restoreLastMeaningfulAnalysis(
       reasons: [...record.reasons] as string[],
     });
   }
-  if ((analysis.status === 'EVALUATED' && normalizedLatestBatchSymbols.length !== allowed.size)
-    || (analysis.status === 'PARTIAL' && normalizedLatestBatchSymbols.length >= allowed.size)
+  if ((analysis.status === 'EVALUATED' && normalizedLatestBatchSymbols.length !== expected.length)
+    || (analysis.status === 'PARTIAL' && normalizedLatestBatchSymbols.length >= expected.length)
+    || normalizedLatestBatchSymbols.some(symbol => !expected.includes(symbol))
     || normalizedLatestBatchSymbols.some(symbol => !seen.has(symbol))) return { ok: false };
   return { ok: true, value: {
     evaluatedAt: analysis.evaluatedAt,
     status: analysis.status as 'PARTIAL' | 'EVALUATED',
+    expectedSymbols: expected,
     latestBatchSymbols: normalizedLatestBatchSymbols,
     records,
   } };
@@ -288,6 +298,7 @@ export function advanceVirtualPaper400StrategyContinuity(
     lastMeaningfulAnalysis = {
       evaluatedAt: capturedAt,
       status: envelope.status as 'PARTIAL' | 'EVALUATED',
+      expectedSymbols: [...envelope.expectedSymbols],
       latestBatchSymbols: envelope.records.map(record => record.symbol.trim().toUpperCase()).sort(),
       records: [...records.values()].sort((a, b) => a.symbol.localeCompare(b.symbol)),
     };

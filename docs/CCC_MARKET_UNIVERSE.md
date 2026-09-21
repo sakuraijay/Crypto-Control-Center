@@ -20,3 +20,8 @@ GMX Arbitrum의 검증 가능한 무기한 시장이 범위다. 전체 암호화
 
 검증: XRP 신규종목 선정, 정확시장 비용 결속, 잘못된 시장·비활성·spot·메타데이터누락·유동성누락·stale/future/주소불일치 시세 차단, ETH/zero-index 구분, 순환배치 비기아성, 기존세션보존, 실제 PAPER executor의 XRP 합성 OPEN→재시작→TP→비용차감정산 및 기존 회귀. 합성시험은 실제 XRP 체결/수익이 아니다.
 최종 CI/배포/runtime 증거는 완료 인계에서 기록하며 이 문서 작성 시에는 미확인이다. 기존 COST_UNAVAILABLE 해결·자연 OPEN/CLOSE/정산·장기 수익성·Alpha/Beta 수용은 각각 별도 검증한다.
+
+## 최초 배포 관측 및 호환성 수정
+
+2026-09-21 11:49:46 UTC의 ae6a41e 배포에서 공식127시장, 기본적격9종목(BTC/ETH/SOL/LINK/XRP/ZEC/HYPE/DOGE/UNI), 첫batch BTC/DOGE/ETH를 관측했다. 제외116시장(유동성104, SDK미확인7, 비활성/spot5), 중복 풀은 코인별 하나로 선정하므로 시장수와코인수합계는 다르다. 현재 시점의 고정 지원목록이 아니라 해당 관측 스냅샷이다.
+이때 과거3종목 EVALUATED 분석 기록을 확대 universe 총수와 비교하는 기존 continuity 검증이 STRATEGY_CONTINUITY_ANALYSIS_INVALID를 반환했다. 신규 진입은 차단됐고400/세션/원장0은 유지됐다. 이를 원장 초기화 없이 수정한다: 새 기록은 당시 expectedSymbols batch를 명시하고 상태 완전성을 그batch와 비교하며, 이전필드없는 기록은 실제기존3종목 batch 의미로 복원한다. 전체시장과batch 의미를 섞지 않는다. 이전regime/cursor/증거보존·XRP1종목완료batch→재시작·위조batch거절 회귀24개및타입검사를 통과했다. 이 호환성 수정의 최종 CI/재배포/운영 차단 해소는 별도 완료 인계에서 확인한다.
