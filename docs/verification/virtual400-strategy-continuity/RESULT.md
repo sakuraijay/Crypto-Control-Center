@@ -27,6 +27,11 @@ does not, by itself, prove that the continuity gap caused the observed
   out-of-order records from the one-minute worker cadence are removed before
   they can inflate `heldCandles`, advance pending hysteresis, or authorize an
   entry.
+- Migrated the affected continuity schema from v1 to v2 by discarding only its
+  derived SHADOW lifecycle/regime evidence and retaining the last completed-
+  candle boundary. This prevents already inflated v1 counters from becoming
+  entry evidence; financial session, ledger, HWM, positions, protection, and
+  settlements are not reset.
 - Bound the state to the active session ID. Malformed, future-dated, symbol-
   mismatched, or cross-session state blocks only new entries and is not replaced
   with an empty baseline.
@@ -47,7 +52,8 @@ threshold was changed.
   NOT_EVALUATED preservation, runtime input wiring, and continued protection of
   an existing position while continuity state is corrupt. A duplicate-candle
   regression verifies that the record becomes NOT_EVALUATED and the cursor and
-  hysteresis state do not advance.
+  hysteresis state do not advance. A v1 migration regression verifies that
+  contaminated derived evidence is discarded without changing the durable key.
 - `git diff --check`: PASS.
 
 ## Remaining verification

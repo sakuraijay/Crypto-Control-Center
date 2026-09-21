@@ -71,4 +71,23 @@ describe('Virtual400 session-scoped Strategy continuity codec', () => {
     expect(filtered?.envelope.records).toEqual([]);
     expect(filtered?.cursors.BTC).toBe(now - 15 * 60_000);
   });
+
+  it('discards contaminated v1 SHADOW evidence while preserving its completed-candle boundary', () => {
+    const missing = restoreVirtualPaper400StrategyContinuity(null, sessionId, now, symbols);
+    const persisted = advanceVirtualPaper400StrategyContinuity(
+      sessionId, missing, notEvaluatedEnvelope(), now,
+    )!;
+    const restored = restoreVirtualPaper400StrategyContinuity(
+      { ...persisted, schemaVersion: 'virtual-paper-400-strategy-continuity/v1' },
+      sessionId, now + 60_000, symbols,
+    );
+    expect(restored.status).toBe('RESTORED');
+    if (restored.status === 'BLOCKED') throw new Error('unexpected blocked migration');
+    expect(restored.state.schemaVersion).toBe('virtual-paper-400-strategy-continuity/v2');
+    expect(restored.previousRegimes).toEqual({});
+    expect(restored.lifecycleSnapshot.records).toEqual([]);
+    expect(restored.state.lastSourceCandleCloseTimeBySymbol).toEqual({
+      BTC: now, ETH: now, SOL: now,
+    });
+  });
 });

@@ -11,6 +11,8 @@ import {
 } from '../intel/strategyShadowLifecycleRuntimeV2';
 
 export const VIRTUAL_PAPER_400_STRATEGY_CONTINUITY_VERSION =
+  'virtual-paper-400-strategy-continuity/v2' as const;
+const LEGACY_VIRTUAL_PAPER_400_STRATEGY_CONTINUITY_VERSION =
   'virtual-paper-400-strategy-continuity/v1' as const;
 
 export interface VirtualPaper400StrategyContinuityState {
@@ -94,7 +96,8 @@ export function restoreVirtualPaper400StrategyContinuity(
   }
   const state = object(parsed);
   const shadow = state ? object(state.strategyEnsembleShadow) : null;
-  if (!state || state.schemaVersion !== VIRTUAL_PAPER_400_STRATEGY_CONTINUITY_VERSION
+  if (!state || (state.schemaVersion !== VIRTUAL_PAPER_400_STRATEGY_CONTINUITY_VERSION
+      && state.schemaVersion !== LEGACY_VIRTUAL_PAPER_400_STRATEGY_CONTINUITY_VERSION)
     || state.sessionId !== sessionId || !finiteInteger(state.updatedAt)
     || state.updatedAt <= 0 || state.updatedAt > restoredAt
     || !['NOT_EVALUATED', 'PARTIAL', 'EVALUATED', 'BLOCKED'].includes(String(state.lastEnvelopeStatus))
@@ -102,6 +105,18 @@ export function restoreVirtualPaper400StrategyContinuity(
     || !Object.prototype.hasOwnProperty.call(shadow, 'regimeSnapshot')) {
     return { status: 'BLOCKED', state: null, lifecycleSnapshot: null,
       previousRegimes: null, reason: 'STRATEGY_CONTINUITY_STATE_INVALID' };
+  }
+  if (state.schemaVersion === LEGACY_VIRTUAL_PAPER_400_STRATEGY_CONTINUITY_VERSION) {
+    // v1 could count one completed 15-minute candle once per one-minute worker
+    // tick. Its derived SHADOW evidence is not safe to reuse. Discard only that
+    // evidence and retain a cursor; financial state and protection live elsewhere.
+    const migrated = initialState(sessionId, restoredAt, allowedSymbols);
+    if (migrated.status === 'BLOCKED') return migrated;
+    const boundary = Math.floor((state.updatedAt as number) / (15 * 60_000)) * 15 * 60_000;
+    for (const symbol of allowedSymbols) {
+      migrated.state.lastSourceCandleCloseTimeBySymbol[symbol.trim().toUpperCase()] = boundary;
+    }
+    return { ...migrated, status: 'RESTORED' };
   }
   const lifecycle = restoreStrategyShadowLifecycleFromDecisionFullJson(state, restoredAt);
   const regimes = restoreStrategyShadowRegimesFromDecisionFullJson(state, restoredAt);

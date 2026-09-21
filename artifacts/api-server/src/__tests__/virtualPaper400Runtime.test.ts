@@ -153,7 +153,7 @@ describe('virtual runtime routing and durable account boundary', () => {
     }));
     const continuityKey = virtualPaper400StrategyContinuityKey(active.session.sessionId);
     expect(JSON.parse(fixture.rows.get(continuityKey)!)).toMatchObject({
-      schemaVersion: 'virtual-paper-400-strategy-continuity/v1',
+      schemaVersion: 'virtual-paper-400-strategy-continuity/v2',
       sessionId: active.session.sessionId,
       lastEnvelopeStatus: 'NOT_EVALUATED',
     });
