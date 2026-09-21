@@ -9,6 +9,13 @@ import { openServerPaperPosition, closeServerPaperPosition, reduceServerPaper70,
 import { storePaperCostSnapshot } from '../lib/paperCostCache';
 import type { CostSnapshot } from '../lib/costSnapshot';
 import { virtualPaper400Activity as activity } from './virtualPaper400Activity';
+import {
+  advanceVirtualPaper400StrategyContinuity,
+  restoreVirtualPaper400StrategyContinuity,
+  summarizeVirtualPaper400StrategyContinuity,
+  virtualPaper400StrategyContinuityKey,
+  type VirtualPaper400StrategyContinuityRestore,
+} from './virtualPaper400StrategyContinuity';
 
 export const VIRTUAL_PAPER_400_RUNTIME_KEY = 'virtual_paper_400_runtime_v1';
 // Shared with START/STOP. This is a coordination lock, not a trading permission.
@@ -65,6 +72,11 @@ export async function maybeRunVirtualPaper400Cycle(args: {
       throw new Error('VIRTUAL_POLICY_INVALID');
     }
     const executor = getServerPaperStatus();
+    const continuityKey = virtualPaper400StrategyContinuityKey(identity.sessionId);
+    let continuity: VirtualPaper400StrategyContinuityRestore =
+      restoreVirtualPaper400StrategyContinuity(
+        await read(continuityKey), identity.sessionId, now.getTime(), VIRTUAL_ACTIVE_POLICY.symbols,
+      );
     const accountBefore = evaluateVirtualPaper400Account({ session: identity, previous, rows, now, quote: args.quote });
     if (applied?.version !== VIRTUAL_ACTIVE_POLICY.version && session.active && !accountBefore.held.length && !executor.pendingClose && !executor.unresolved) {
       applied = { version: VIRTUAL_ACTIVE_POLICY.version, appliedAt: now.toISOString(), sessionId: identity.sessionId };
@@ -80,6 +92,7 @@ export async function maybeRunVirtualPaper400Cycle(args: {
     };
     const result = await runVirtualPaper400Cycle({ sessionRaw: raw!, policyAppliedAt: applied?.appliedAt, policyVersion: applied?.version,
       entryBlockedReason: executor.unresolved || executor.pendingClose ? 'EXECUTOR_RECOVERY_PENDING'
+        : continuity.status === 'BLOCKED' ? continuity.reason
         : !applied ? 'POLICY_SAFE_BOUNDARY_PENDING' : null, previous, rows, now, clock: () => new Date(),
       engineMode: process.env.WORKER_ENGINE_MODE ?? 'PAPER', quote: args.quote,
       shouldContinue: args.shouldContinue,
@@ -108,7 +121,21 @@ export async function maybeRunVirtualPaper400Cycle(args: {
         const envelope = await runStrategyShadowWorkerReadOnly({ cycleNumber: args.cycleNumber,
           evaluatedAt, expectedSymbols: symbols, existingAi: { decisionId: `vp400-analysis:${evaluatedAt}`,
             action: 'NO_TRADE', confidence: 0, primarySymbol: null, createdAt: new Date(evaluatedAt).toISOString() },
-          costsBySymbol });
+          lifecycleSnapshot: continuity.status === 'BLOCKED' ? null : continuity.lifecycleSnapshot,
+          previousRegimes: continuity.status === 'BLOCKED' ? {} : continuity.previousRegimes,
+          allowedRegimeSymbols: symbols, costsBySymbol });
+        const nextContinuity = advanceVirtualPaper400StrategyContinuity(
+          identity.sessionId, continuity, envelope, evaluatedAt,
+        );
+        if (!nextContinuity) {
+          analysis = symbols.map(symbol => ({ symbol, reason: 'STRATEGY_CONTINUITY_ADVANCE_INVALID' }));
+          activity.analyzed(run, analysis.map(row => ({ ...row, evaluated: false })));
+          return [];
+        }
+        await write(continuityKey, nextContinuity);
+        continuity = restoreVirtualPaper400StrategyContinuity(
+          nextContinuity, identity.sessionId, evaluatedAt, symbols,
+        );
         analysis = symbols.map(symbol => ({ symbol, reason: envelope.records.find(record => record.symbol === symbol)
           ?.reasons.join('; ') || (!costsBySymbol[symbol]?.long || !costsBySymbol[symbol]?.short
             ? 'COST_UNAVAILABLE' : `ANALYSIS_${envelope.status}: ${envelope.reasons.join('; ')}`) }));
@@ -167,6 +194,7 @@ export async function maybeRunVirtualPaper400Cycle(args: {
           costBasis: 'SIMULATED / ESTIMATED', closeKind: close.closeKind };
       }));
     await write(VIRTUAL_PAPER_400_RUNTIME_KEY, { ...result, analysis, journal, sessionId: identity.sessionId,
+      strategyContinuity: summarizeVirtualPaper400StrategyContinuity(continuity),
       at: new Date().toISOString(), account: { ...result.account, ledger: final.ledger,
         equityUsd: final.equityUsd, unrealizedNetPnlUsd: final.unrealizedNetPnlUsd,
         evaluation: final.evaluation, next: final.next,

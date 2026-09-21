@@ -48,11 +48,18 @@ import { buildActiveVirtualPaper400SessionState, buildStoppedVirtualPaper400Sess
 import { initialVirtualPaper400RiskState, virtualPaper400RiskKey } from '../workers/virtualPaper400Accounting';
 import { openServerPaperPosition, closeServerPaperPosition } from '../workers/serverPaperExecutor';
 import { virtualPaper400Activity } from '../workers/virtualPaper400Activity';
+import { buildStrategyShadowWorkerEnvelope } from '../intel/strategyShadowWorkerEnvelopeV2';
+import { virtualPaper400StrategyContinuityKey } from '../workers/virtualPaper400StrategyContinuity';
 
 const args = { cycleNumber: 1, quote: () => ({ priceUsd: 50_000, ageMs: 0 }), shouldContinue: () => true };
 beforeEach(() => {
   fixture.pending = false; fixture.rows.clear(); fixture.trades = []; fixture.writes = []; fixture.acquired = true; fixture.failRead = false;
   process.env.WORKER_ENGINE_MODE = 'PAPER'; vi.clearAllMocks();
+  vi.mocked(runStrategyShadowWorkerReadOnly).mockImplementation(async input =>
+    buildStrategyShadowWorkerEnvelope({ cycleNumber: input.cycleNumber,
+      generatedAt: input.evaluatedAt, expectedSymbols: input.expectedSymbols, records: [],
+      existingAi: input.existingAi, lifecycleSnapshot: input.lifecycleSnapshot,
+      notEvaluatedReason: 'test has no completed candle' }));
 });
 function stoppedSession() {
   const active = buildActiveVirtualPaper400SessionState('runtime-replay', new Date(Date.now() - 1_000));
@@ -139,7 +146,17 @@ describe('virtual runtime routing and durable account boundary', () => {
     expect(runStrategyShadowWorkerReadOnly).not.toHaveBeenCalled();
     fixture.pending = false;
     await maybeRunVirtualPaper400Cycle(args);
-    expect(runStrategyShadowWorkerReadOnly).toHaveBeenCalledWith(expect.objectContaining({ expectedSymbols: ['BTC', 'ETH', 'SOL'] }));
+    expect(runStrategyShadowWorkerReadOnly).toHaveBeenCalledWith(expect.objectContaining({
+      expectedSymbols: ['BTC', 'ETH', 'SOL'], allowedRegimeSymbols: ['BTC', 'ETH', 'SOL'],
+      lifecycleSnapshot: expect.objectContaining({ schemaVersion: 'signal-lifecycle-snapshot/v1' }),
+      previousRegimes: {},
+    }));
+    const continuityKey = virtualPaper400StrategyContinuityKey(active.session.sessionId);
+    expect(JSON.parse(fixture.rows.get(continuityKey)!)).toMatchObject({
+      schemaVersion: 'virtual-paper-400-strategy-continuity/v1',
+      sessionId: active.session.sessionId,
+      lastEnvelopeStatus: 'NOT_EVALUATED',
+    });
     const key = `virtual_paper_400_policy_v1:${active.session.sessionId}`;
     const first = fixture.rows.get(key);
     expect(JSON.parse(first!).version).toBe('virtual400-active/v2');
@@ -147,6 +164,42 @@ describe('virtual runtime routing and durable account boundary', () => {
     expect(fixture.rows.get(key)).toBe(first);
     expect(fixture.rows.get(VIRTUAL_PAPER_400_SESSION_STATE_KEY)).toBe(raw);
     expect(JSON.parse(fixture.rows.get(VIRTUAL_PAPER_400_RUNTIME_KEY)!).policy.maxLeverage).toBe(10);
+    expect(JSON.parse(fixture.rows.get(VIRTUAL_PAPER_400_RUNTIME_KEY)!).strategyContinuity)
+      .toMatchObject({ status: 'RESTORED', lifecycleRecords: 0, regimes: [] });
+  });
+  it('fails only new entry closed when session-scoped strategy continuity is corrupt', async () => {
+    const active = buildActiveVirtualPaper400SessionState('continuity-corrupt', new Date(Date.now() - 1_000));
+    fixture.rows.set(VIRTUAL_PAPER_400_SESSION_STATE_KEY, JSON.stringify(active));
+    const key = virtualPaper400StrategyContinuityKey(active.session.sessionId);
+    fixture.rows.set(key, JSON.stringify({ schemaVersion: 'wrong', sessionId: active.session.sessionId }));
+    const before = fixture.rows.get(key);
+    await maybeRunVirtualPaper400Cycle(args);
+    const runtime = JSON.parse(fixture.rows.get(VIRTUAL_PAPER_400_RUNTIME_KEY)!);
+    expect(runtime).toMatchObject({ status: 'BLOCKED', reason: 'STRATEGY_CONTINUITY_STATE_INVALID',
+      strategyContinuity: { status: 'BLOCKED', reason: 'STRATEGY_CONTINUITY_STATE_INVALID' } });
+    expect(fixture.rows.get(key)).toBe(before);
+    expect(runStrategyShadowWorkerReadOnly).not.toHaveBeenCalled();
+    expect(openServerPaperPosition).not.toHaveBeenCalled();
+  });
+  it('continues existing-position protection even when strategy continuity is corrupt', async () => {
+    const active = buildActiveVirtualPaper400SessionState('continuity-protection', new Date(Date.now() - 60_000));
+    fixture.rows.set(VIRTUAL_PAPER_400_SESSION_STATE_KEY, JSON.stringify(active));
+    const risk = initialVirtualPaper400RiskState(active.session);
+    risk.risk.locks.hardStopReason = 'historical hard stop';
+    fixture.rows.set(virtualPaper400RiskKey(active.session), JSON.stringify(risk));
+    fixture.rows.set(virtualPaper400StrategyContinuityKey(active.session.sessionId), '{broken');
+    fixture.trades = [{ id: 'protected-open', strategy: active.session.strategyTag, symbol: 'BTC', side: 'LONG', action: 'OPEN',
+      timestamp: new Date(Date.now() - 30_000), closeTime: 0, managedBy: 'SERVER', testMode: false,
+      settlementStatus: 'PAPER_ESTIMATED', costSource: 'PAPER_GMX_ESTIMATE', price: '50000', sizeInUsd: '80', leverage: '2',
+      stopPriceUsd: '49000', takeProfitPriceUsd: '52000', estEntryCostUsd: '.015', estExitCostUsd: '.015',
+      fundingRatePerHour: '.00001', borrowingRatePerHour: '.00001' }];
+    vi.mocked(closeServerPaperPosition).mockResolvedValueOnce({ ok: true } as never);
+    await maybeRunVirtualPaper400Cycle(args);
+    expect(closeServerPaperPosition).toHaveBeenCalledWith(expect.objectContaining({
+      openTradeId: 'protected-open', expectedStrategy: active.session.strategyTag,
+    }), expect.any(Function));
+    expect(runStrategyShadowWorkerReadOnly).not.toHaveBeenCalled();
+    expect(openServerPaperPosition).not.toHaveBeenCalled();
   });
   it('falls through to Standard only when the virtual session is absent', async () => {
     expect(await maybeRunVirtualPaper400Cycle(args)).toBe(false);
