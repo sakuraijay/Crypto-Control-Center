@@ -1,5 +1,6 @@
 import { isVirtualActiveProfile, VIRTUAL_ACTIVE_POLICY } from './virtualPaper400Policy';
 import { virtualLeverageCeiling } from './virtualPaper400Sizing';
+import { MODE_DECISION_PREFIX, parseVirtualTradePlan, tradingModeExit, modeHoldingCost } from './virtualPaperTradingMode';
 /**
  * serverPaperExecutor — 서버 권위 PAPER 체결·관리·정산 (Task #111).
  *
@@ -389,6 +390,22 @@ export async function openServerPaperPosition(
   }
 
   let tp: number | null = null;
+  if (args.decisionId.startsWith(MODE_DECISION_PREFIX)) {
+    const records = await db.select().from(workerStateTable).where(eq(workerStateTable.key, args.decisionId)).limit(2);
+    let audit: { tradePlan?: unknown } | null = null;
+    try { audit = records.length === 1 ? JSON.parse(records[0].value) : null; } catch { /* refuse malformed intent */ }
+    const plan = parseVirtualTradePlan(audit?.tradePlan);
+    const holding = plan ? modeHoldingCost({ notionalUsd: args.sizeUsd,
+      fundingRatePerHourFraction: binding.fundingRatePerHourFraction,
+      borrowingRatePerHourFraction: binding.borrowingRatePerHourFraction }, plan.maxHoldHours) : null;
+    if (!virtualV2 || !plan || holding === null || !shouldContinue()
+      || plan.entryPrice !== q.priceUsd || plan.structuralStop !== args.stopPriceUsd
+      || plan.notionalUsd !== args.sizeUsd || plan.leverage !== args.leverage || plan.tpPrice !== args.tpPriceUsd
+      || plan.openedAtMs !== nowMs || plan.plannedRiskUsd > args.riskProfileSnapshot.derivedLimits.maxRiskPerTradeUsd + 1e-8
+      || binding.estEntryCostUsd + binding.estExitCostUsd + holding > 0.4 + 1e-8) {
+      return record({ ok: false, reason: 'VIRTUAL_MODE_PLAN_OR_HORIZON_COST_INVALID' });
+    }
+  }
   if (args.tpPriceUsd != null && fin(args.tpPriceUsd) && args.tpPriceUsd > 0) {
     const profitSide = isLong ? args.tpPriceUsd > q.priceUsd : args.tpPriceUsd < q.priceUsd;
     if (profitSide) tp = args.tpPriceUsd;
@@ -1315,6 +1332,14 @@ export async function manageServerPaperTick(
           { openTradeId: row.id, expectedStrategy: row.strategy ?? "", reason: "STOP_LOSS", kind: "FULL", quote, nowMs },
           shouldContinue,
         );
+        if (!shouldContinue()) return;
+      } else if (row.openDecisionId?.startsWith(MODE_DECISION_PREFIX) && isVirtualPaper400StrategyTag(row.strategy)) {
+        const records = await db.select().from(workerStateTable).where(eq(workerStateTable.key, row.openDecisionId)).limit(2);
+        let plan: unknown;
+        try { plan = records.length === 1 ? JSON.parse(records[0].value).tradePlan : null; } catch { plan = null; }
+        const reason = tradingModeExit(row, plan, quote.priceUsd, nowMs);
+        if (reason && shouldContinue()) await closeServerPaperPosition(
+          { openTradeId: row.id, expectedStrategy: row.strategy, reason, kind: 'FULL', quote, nowMs }, shouldContinue);
         if (!shouldContinue()) return;
       } else if (tpHit) {
         if (!shouldContinue()) return;

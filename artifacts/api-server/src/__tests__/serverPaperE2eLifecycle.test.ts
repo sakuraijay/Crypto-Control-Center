@@ -93,7 +93,7 @@ globalThis.__e2eExec = (kind, op) => {
     strs.some((s) => WS_KEYS.some((k) => s.includes(k)) || s.startsWith('profitProtect'));
 
   if (isWorkerState) {
-    const key = strs.find((s) => WS_KEYS.some((k) => s.includes(k)) || s.startsWith('profitProtect'))
+    const key = strs.find((s) => WS_KEYS.some((k) => s.includes(k)) || s.startsWith('profitProtect') || s.startsWith('vp400m1:'))
       ?? (op.values as Record<string, string> | undefined)?.['key'];
     if (kind === 'select') return key && store.workerState.has(key) ? [{ key, value: store.workerState.get(key) }] : [];
     if (kind === 'insert') { const v = op.values as Record<string, string>; store.workerState.set(v['key']!, v['value']!); return [{}]; }
@@ -222,6 +222,49 @@ beforeEach(() => {
 describe('VIRTUAL 400 deterministic REPLAY through the real PAPER executor', () => {
   // Fixed Manila daytime: OPEN and its 1h settlement belong to the same risk day.
   const REPLAY_NOW = Date.parse('2026-09-20T04:00:10.000Z');
+  it.each([
+    ['INTRADAY','profit'],['INTRADAY','deadline'],['INTRADAY','gap'],
+    ['SWING','profit'],['SWING','deadline'],['SWING','gap'],['SWING','corrupt'],
+    ['INTRADAY','invalid_entry_plan'],['SWING','changed_cost'],
+  ] as const)('runs %s mode through actual executor, restart, %s exit and exact net settlement',async(mode,scenario)=>{
+    const now=new Date(REPLAY_NOW);
+    const session=buildActiveVirtualPaper400SessionState('mode-e2e',new Date(REPLAY_NOW-1000));
+    let saved=initialVirtualPaper400RiskState(session.session);
+    vi.mocked(getPaperCostBinding).mockReturnValue({...BINDING,estEntryCostUsd:.015,estExitCostUsd:.015,
+      fundingRatePerHourFraction:.00001,borrowingRatePerHourFraction:.00001});
+    const result=await runVirtualPaper400Cycle({now,engineMode:'PAPER',policyAppliedAt:now.toISOString(),tradingMode:mode,
+      sessionRaw:JSON.stringify(session),previous:saved,rows:[],quote:quoteFn(50_000),shouldContinue:()=>true,
+      persistRisk:async state=>{saved=structuredClone(state);},
+      readSignals:async()=>[{...virtualReplaySignal(REPLAY_NOW),structuralStop:49_900,expectedNetEdgeBps:300}],
+      readCost:async(_s,_l,n)=>virtualReplayCost(REPLAY_NOW,n),
+      claim:async(id,audit)=>{const recorded=structuredClone(audit) as {tradePlan:{targetRoePct:number}};
+        if(scenario==='invalid_entry_plan')recorded.tradePlan.targetRoePct=100;
+        store.workerState.set(id,JSON.stringify(recorded));return true;},
+      open:args=>{if(scenario==='changed_cost')vi.mocked(getPaperCostBinding).mockReturnValue({...BINDING,
+        estEntryCostUsd:.015,estExitCostUsd:.015,fundingRatePerHourFraction:.001});
+        return openServerPaperPosition(args);},close:async()=>false,reduce:async()=>false});
+    if(scenario==='invalid_entry_plan'||scenario==='changed_cost'){
+      expect(result.status).toBe('BLOCKED');expect(result.reason).toBe('VIRTUAL_MODE_PLAN_OR_HORIZON_COST_INVALID');
+      expect(store.trades).toHaveLength(0);return;
+    }
+    expect(result.status).toBe('OPENED');
+    const open=store.trades[0];const originalClaim=store.workerState.get(String(open.openDecisionId));
+    expect(originalClaim).toBeTruthy();
+    // Simulate both browser/selector change and process restart; entry plan remains immutable.
+    store.workerState.set('virtual_trading_mode_v1:mode-e2e',JSON.stringify({mode:mode==='INTRADAY'?'SWING':'INTRADAY'}));
+    __resetServerPaperStateForTests();
+    if(scenario==='corrupt')store.workerState.set(String(open.openDecisionId),'{}');
+    const hours=scenario==='deadline'?(mode==='INTRADAY'?12:72):1;
+    const price=scenario==='profit'?51_000:scenario==='gap'?47_500:50_000;
+    await manageServerPaperTick(quoteFn(price),REPLAY_NOW+hours*H);
+    await manageServerPaperTick(quoteFn(price),REPLAY_NOW+hours*H+1000);
+    expect(closeRows()).toHaveLength(1);
+    const close=closeRows()[0];
+    expect(close.closeReason).toBe(scenario==='profit'?'MODE_NET_TAKE_PROFIT':scenario==='deadline'?'MODE_TIME_EXIT':scenario==='gap'?'STOP_LOSS':'MODE_PLAN_UNAVAILABLE');
+    expect(Number(close.netPnlEstimatedUsd)).toBeCloseTo(Number(close.pnl)-Number(close.estEntryCostUsd)-Number(close.estExitCostUsd)-Number(close.estHoldingCostUsd));
+    if(scenario==='gap')expect(Number(close.netPnlEstimatedUsd)/Number(open.collateralUsd)*100).toBeLessThan(-10);
+    if(scenario!=='corrupt')expect(store.workerState.get(String(open.openDecisionId))).toBe(originalClaim);
+  });
   it.each([false, true])('runs Signal/Risk/sizing → OPEN → restart → structural SL → cost settlement (active=%s)', async active => {
     const now = new Date(REPLAY_NOW);
     const session = buildActiveVirtualPaper400SessionState('full-replay', new Date(REPLAY_NOW - 1_000));

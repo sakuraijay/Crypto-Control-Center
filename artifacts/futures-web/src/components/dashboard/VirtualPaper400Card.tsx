@@ -5,6 +5,7 @@ import { useVirtualPaper400 } from '@/lib/context/VirtualPaper400Context';
 import { useWatchlistContext } from '@/lib/context/WatchlistContext';
 import { amount, explainReason, finite, timestamp, type VirtualRuntime } from '@/lib/virtual400Presentation';
 import { VirtualSessionControls } from './VirtualSessionControls';
+import { VirtualTradingModeControls } from './VirtualTradingModeControls';
 import { VirtualPerformanceChart } from './VirtualPerformanceChart';
 import { VirtualTradeJournal } from './VirtualTradeJournal';
 import { AiAnalysisActivity } from './AiAnalysisActivity';
@@ -72,6 +73,7 @@ export function VirtualPaper400Card() {
         <div className="ccc-strategy-message"><h3>{headline}</h3><p>{stopped?'기존 포지션의 손절·익절 보호는 계속됩니다.':explainReason(runtime?.reason)}</p></div>
         {policy ? <div className="ccc-policy" data-testid="virtual-active-policy"><div className="ccc-policy-name"><SlidersHorizontal size={15} /><strong>{['virtual400-active/v1','virtual400-active/v2'].includes(policy.version)?'적극적 가상 매매':'저장된 운용 설정'}</strong><span>서버 적용</span></div><dl><div><dt>1회 위험 예산</dt><dd>{policy.riskPerTradePct}%</dd></div><div><dt>레버리지 {policy.minLeverage ? '범위' : '상한'}</dt><dd>{policy.minLeverage ? `${policy.minLeverage}–${policy.maxLeverage}x` : `최대 ${policy.maxLeverage}x`}</dd></div><div><dt>진입 간격</dt><dd>{policy.cooldownMinutes}분</dd></div></dl><p className="ccc-policy-symbols">{policy.symbols.join(' · ')}</p></div>
         : <div className="ccc-callout">적용된 설정을 확인하고 있습니다. 기본값으로 대체하지 않습니다.</div>}
+        <VirtualTradingModeControls />
         <div className="ccc-automation-note"><ShieldCheck size={15} /><span>활성 세션은 웹페이지를 닫아도 서버에서 계속 실행됩니다.</span></div>
       </section>
     </div>

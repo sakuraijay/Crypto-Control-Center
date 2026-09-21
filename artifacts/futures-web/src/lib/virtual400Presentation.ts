@@ -36,6 +36,14 @@ export const REASON_LABELS: Record<string, string> = {
   DAILY_LOSS_LOCKED: '일일 손실 제한 도달', PROFIT_CAP_LOCKED: '이익 보호 조건으로 신규 진입 중지',
   STOPPED: '신규 진입이 중지되어 있습니다.', VIRTUAL_SESSION_INVALID: '가상 세션 확인 필요',
   PAPER_MODE_REQUIRED: '가상 매매 모드 확인 필요',
+  MODE_STRATEGY_NOT_ELIGIBLE: '선택한 매매 방식에 맞는 전략을 기다립니다.',
+  MODE_HORIZON_COST_CAP: '최대 보유기간의 추정 비용이 한도를 넘습니다.',
+  MODE_STOP_ROE_OR_MIN_LEVERAGE: '5–10배에서 선택한 증거금 손절 한도를 충족하지 못합니다.',
+  MODE_TARGET_EXCEEDS_SIGNAL_EDGE: '분석된 수익 기회가 선택한 목표에 못 미칩니다.',
+  MODE_NET_REWARD_RISK_BELOW_TWO: '비용 차감 손익비 2배 기준 미충족',
+  MODE_ACCOUNT_RISK_CAP: '계좌 위험 예산 초과', MODE_COST_OR_INPUT_INVALID: '매매 방식·비용 확인 필요',
+  MODE_NET_STOP: '비용 차감 손절 기준 도달', MODE_NET_TAKE_PROFIT: '비용 차감 익절 목표 도달',
+  MODE_TIME_EXIT: '설정한 최대 보유시간 도달', MODE_PLAN_UNAVAILABLE: '진입 설정 확인 실패에 따른 보호 청산',
 };
 export function explainReason(reason: string | null | undefined): string {
   if (!reason) return '서버 판단을 확인하고 있습니다.';

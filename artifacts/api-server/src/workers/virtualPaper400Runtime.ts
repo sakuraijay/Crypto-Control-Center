@@ -1,4 +1,5 @@
 import { VIRTUAL_ACTIVE_POLICY, VIRTUAL_LEGACY_POLICY } from './virtualPaper400Policy';
+import { readTradingMode, tradingModeKey, MODE_VERSION, MODE_DECISION_PREFIX } from './virtualPaperTradingMode';
 import { eq, sql } from 'drizzle-orm';
 import { evaluateVirtualPaper400SessionState, VIRTUAL_PAPER_400_SESSION_STATE_KEY, VIRTUAL_PAPER_400_LOCK_ID } from './virtualPaper400SessionState';
 import { initialVirtualPaper400RiskState, parseVirtualPaper400RiskState, virtualPaper400RiskKey,
@@ -79,6 +80,12 @@ export async function maybeRunVirtualPaper400Cycle(args: {
         await read(continuityKey), identity.sessionId, now.getTime(), VIRTUAL_ACTIVE_POLICY.symbols,
       );
     const accountBefore = evaluateVirtualPaper400Account({ session: identity, previous, rows, now, quote: args.quote });
+    const modeKey = tradingModeKey(identity.sessionId);
+    let selectedMode = readTradingMode(await read(modeKey), identity.sessionId);
+    if (!selectedMode && session.active) {
+      selectedMode = { version: MODE_VERSION, mode: 'INTRADAY', sessionId: identity.sessionId, updatedAt: now.toISOString() };
+      await write(modeKey, selectedMode);
+    }
     if (applied?.version !== VIRTUAL_ACTIVE_POLICY.version && session.active && !accountBefore.held.length && !executor.pendingClose && !executor.unresolved) {
       applied = { version: VIRTUAL_ACTIVE_POLICY.version, appliedAt: now.toISOString(), sessionId: identity.sessionId };
       await write(policyKey, applied);
@@ -92,6 +99,7 @@ export async function maybeRunVirtualPaper400Cycle(args: {
       return result.ok ? { ...result.snapshot, source: 'PAPER_GMX_ESTIMATE' } : null;
     };
     const result = await runVirtualPaper400Cycle({ sessionRaw: raw!, policyAppliedAt: applied?.appliedAt, policyVersion: applied?.version,
+      tradingMode: selectedMode?.mode,
       entryBlockedReason: executor.unresolved || executor.pendingClose ? 'EXECUTOR_RECOVERY_PENDING'
         : continuity.status === 'BLOCKED' ? continuity.reason
         : !applied ? 'POLICY_SAFE_BOUNDARY_PENDING' : null, previous, rows, now, clock: () => new Date(),
@@ -183,7 +191,7 @@ export async function maybeRunVirtualPaper400Cycle(args: {
     const journal = await Promise.all([...finalRows].filter(row => row.action === 'CLOSE')
       .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()).slice(0, 10).map(async close => {
         const open = finalRows.find(row => row.id === close.closesTradeId);
-        const auditRaw = open?.openDecisionId?.startsWith('vp400:') ? await read(open.openDecisionId) : null;
+        const auditRaw = open?.openDecisionId && (open.openDecisionId.startsWith('vp400:') || open.openDecisionId.startsWith(MODE_DECISION_PREFIX)) ? await read(open.openDecisionId) : null;
         let audit: { signal?: { strategyId?: string; reasons?: string[] }; sizing?: { finalNotionalUsd?: number }; cost?: { totalEstimatedRoundTripCostUsd?: number } } | null = null;
         try { audit = auditRaw ? JSON.parse(auditRaw) : null; } catch { /* unavailable, never fake reasons */ }
         const priorRisk = open && audit?.cost && audit.sizing ? Number(audit.sizing.finalNotionalUsd)

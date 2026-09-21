@@ -82,6 +82,39 @@ beforeEach(() => {
   process.env.OPERATOR_MASTER_PIN = '654321';
 });
 
+describe('virtual trading mode HTTP boundary', () => {
+  it('requires auth and a valid mode, and does not START or reset when saving and reading back a selection', async () => {
+    const state = buildActiveVirtualPaper400SessionState('mode-http');
+    const raw=JSON.stringify(state); memory.rows.set(VIRTUAL_PAPER_400_SESSION_STATE_KEY,raw);
+    const url='/api/data/virtual-paper-400-trading-mode';
+    expect((await request(app).put(url).send({mode:'SWING',expectedUpdatedAt:null})).status).toBe(401);
+    expect((await request(app).put(url).set('x-operator-pin','654321').send({mode:'SWING',expectedUpdatedAt:null,stopRoePct:20})).status).toBe(400);
+    const saved=await request(app).put(url).set('x-operator-pin','654321').send({mode:'SWING',expectedUpdatedAt:null});
+    expect(saved.status).toBe(200); expect(saved.body.appliesTo).toBe('NEXT_ENTRY');
+    const got=await request(app).get('/api/data/virtual-paper-400-session');
+    expect(got.body.tradingModeSelection.mode).toBe('SWING');
+    expect(got.body.tradingModeOptions.SWING.maxHoldHours).toBe(72);
+    expect(memory.rows.get(VIRTUAL_PAPER_400_SESSION_STATE_KEY)).toBe(raw);
+    expect(memory.rows.size).toBe(2);
+    const stale=await request(app).put(url).set('x-operator-pin','654321').send({mode:'INTRADAY',expectedUpdatedAt:null});
+    expect(stale.status).toBe(409);
+    const changed=await request(app).put(url).set('x-operator-pin','654321').send({mode:'INTRADAY',expectedUpdatedAt:saved.body.selection.updatedAt});
+    expect(changed.status).toBe(200); expect(changed.body.selection.mode).toBe('INTRADAY');
+    expect(Date.parse(changed.body.selection.updatedAt)).toBeGreaterThan(Date.parse(saved.body.selection.updatedAt));
+  });
+  it('does not mint a virtual session or repair corrupt settings through the preference endpoint', async () => {
+    const url='/api/data/virtual-paper-400-trading-mode';
+    expect((await request(app).put(url).set('x-operator-pin','654321').send({mode:'SWING',expectedUpdatedAt:null})).status).toBe(409);
+    expect(memory.rows.size).toBe(0);
+    const state=buildActiveVirtualPaper400SessionState('corrupt-mode');
+    memory.rows.set(VIRTUAL_PAPER_400_SESSION_STATE_KEY,JSON.stringify(state));
+    memory.rows.set('virtual_trading_mode_v1:corrupt-mode','{"mode":"UNKNOWN"}');
+    expect((await request(app).get('/api/data/virtual-paper-400-session')).status).toBe(503);
+    expect((await request(app).put(url).set('x-operator-pin','654321').send({mode:'SWING',expectedUpdatedAt:null})).status).toBe(503);
+    expect(memory.rows.get('virtual_trading_mode_v1:corrupt-mode')).toBe('{"mode":"UNKNOWN"}');
+  });
+});
+
 describe('alpha start intent HTTP boundary', () => {
   it('keeps GET observational and unauthenticated without bootstrapping missing state', async () => {
     delete process.env.OPERATOR_MASTER_PIN;

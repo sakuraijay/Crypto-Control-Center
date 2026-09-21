@@ -29,6 +29,35 @@ function trades(net = -2): DbTrade[] {
     estHoldingCostUsd: '0', closeTime: now.getTime() - 1_000 }] as DbTrade[];
 }
 
+describe('selected mode routes through strategy, costs, risk, durable claim and OPEN', () => {
+  it.each(['INTRADAY','SWING'] as const)('persists %s plan before dispatch and retains the structural invalidation', async tradingMode => {
+    const signal={...virtualReplaySignal(now.getTime()),structuralStop:49_900,expectedNetEdgeBps:300};
+    const d=deps({policyAppliedAt:now.toISOString(),tradingMode,readSignals:vi.fn(async()=>[signal])});
+    const result=await runVirtualPaper400Cycle(d);
+    expect(result.status).toBe('OPENED');
+    const [id,audit]=vi.mocked(d.claim).mock.calls[0] as [string,any];
+    expect(id).toMatch(/^vp400m1:/); expect(audit.tradePlan.mode).toBe(tradingMode);
+    const [args]=vi.mocked(d.open).mock.calls[0];
+    expect(args.stopPriceUsd).toBe(49_900); expect(args.tpPriceUsd).toBe(audit.tradePlan.tpPrice);
+    expect(args.leverage).toBe(audit.tradePlan.leverage); expect(args.sizeUsd).toBeLessThanOrEqual(200);
+    expect(audit.tradePlan.plannedRiskUsd).toBeLessThanOrEqual(2);
+  });
+  it('refuses the old wide stop in intraday mode without shrinking it or dispatching a trade', async()=>{
+    const d=deps({policyAppliedAt:now.toISOString(),tradingMode:'INTRADAY'});
+    expect((await runVirtualPaper400Cycle(d)).diagnostics[0].reason).toBe('MODE_STOP_ROE_OR_MIN_LEVERAGE');
+    expect(d.claim).not.toHaveBeenCalled(); expect(d.open).not.toHaveBeenCalled();
+  });
+  it.each(['cost','edge','strategy'])('blocks a swing candidate with incompatible %s',async flaw=>{
+    const signal={...virtualReplaySignal(now.getTime()),structuralStop:49_900,expectedNetEdgeBps:flaw==='edge'?1:300,
+      ...(flaw==='strategy'?{strategyId:'RANGE_MEAN_REVERSION' as const}: {})};
+    const d=deps({policyAppliedAt:now.toISOString(),tradingMode:'SWING',readSignals:vi.fn(async()=>[signal]),
+      readCost:vi.fn(async(_s,_l,n)=>({...virtualReplayCost(now.getTime(),n),fundingRatePerHourFraction:flaw==='cost'?.001:.00001}))});
+    const result=await runVirtualPaper400Cycle(d);
+    expect(result.diagnostics[0].reason).toBe(flaw==='cost'?'MODE_HORIZON_COST_CAP':flaw==='edge'?'MODE_TARGET_EXCEEDS_SIGNAL_EDGE':'MODE_STRATEGY_NOT_ELIGIBLE');
+    expect(d.open).not.toHaveBeenCalled();
+  });
+});
+
 describe('VIRTUAL 400 account evidence and restart', () => {
   it('rebuilds nonzero net loss, entries and HWM solely from its own ledger', () => {
     const previous = initial(); previous.equityHwmUsd = 410;

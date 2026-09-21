@@ -1,5 +1,7 @@
 import { VIRTUAL_ACTIVE_POLICY, VIRTUAL_LEGACY_POLICY, virtualActiveProfile } from './virtualPaper400Policy';
 import { enforceVirtualPaper400Sizing } from './virtualPaper400Sizing';
+import { buildVirtualTradePlan, modeHoldingCost, MODE_DECISION_PREFIX, VIRTUAL_TRADING_MODES,
+  type VirtualTradingMode, type VirtualTradePlan } from './virtualPaperTradingMode';
 import { createHash } from 'node:crypto';
 import type { DbTrade } from '@workspace/db';
 import type { StrategyShadowRecord } from '../intel/strategyShadowAdapterV2';
@@ -18,6 +20,7 @@ export interface VirtualPaper400CycleDeps {
   sessionRaw: string;
   policyAppliedAt?: string;
   policyVersion?: string;
+  tradingMode?: VirtualTradingMode;
   entryBlockedReason?: string | null;
   previous: VirtualPaper400RiskState;
   rows: readonly DbTrade[];
@@ -44,7 +47,8 @@ export async function runVirtualPaper400Cycle(d: VirtualPaper400CycleDeps) {
   const policy = d.policyAppliedAt ? { ...(d.policyVersion === VIRTUAL_LEGACY_POLICY.version
     ? VIRTUAL_LEGACY_POLICY : VIRTUAL_ACTIVE_POLICY), appliedAt: d.policyAppliedAt } : null;
   const outcome = (status: string, reason: string | null = null) => ({
-    policy, diagnostics, status, reason, at: d.now.toISOString(), mode: 'VIRTUAL_PAPER_400' as const,
+    policy, tradingMode: d.tradingMode ? { mode: d.tradingMode, ...VIRTUAL_TRADING_MODES[d.tradingMode] } : null,
+    diagnostics, status, reason, at: d.now.toISOString(), mode: 'VIRTUAL_PAPER_400' as const,
     realFundsUsed: false, costBasis: 'SIMULATED / ESTIMATED' as const,
     account: { ...account, held: account.held.map(row => ({ id: row.id, symbol: row.symbol,
       side: row.side, sizeUsd: row.sizeInUsd, entryPrice: row.price,
@@ -95,6 +99,9 @@ export async function runVirtualPaper400Cycle(d: VirtualPaper400CycleDeps) {
     if (!d.shouldContinue()) return outcome('STOPPED');
     const reject = (reason: string) => diagnostics.push({ symbol: signal.symbol, reason, details: signal.reasons.slice(0, 5) });
     if (policy && !policy.symbols.includes(signal.symbol)) { reject('UNSUPPORTED_SYMBOL'); continue; }
+    if (d.tradingMode && !(VIRTUAL_TRADING_MODES[d.tradingMode].strategies as readonly string[]).includes(signal.strategyId ?? '')) {
+      reject('MODE_STRATEGY_NOT_ELIGIBLE'); continue;
+    }
     const decision = adaptStrategySignalToRisk({ shadowRecord: signal, riskEvaluation: risk });
     if (decision.action === 'REJECT') { reject('STRATEGY_OR_RISK_REJECTED'); continue; }
     if (!signal.signalId || signal.confidence === null
@@ -140,10 +147,38 @@ export async function runVirtualPaper400Cycle(d: VirtualPaper400CycleDeps) {
       || sizing.finalNotionalUsd * stopDistance + checked.effectiveRoundTripCostUsd > capital * activeRiskPct / 100 + 1e-8)) {
       reject('EXACT_SIZE_OR_TOTAL_RISK_MISMATCH'); continue;
     }
-    const id = `vp400:${createHash('sha256').update(`${session.state.session.strategyTag}:${signal.signalId}`).digest('hex')}`;
-    if (d.rows.some(row => row.openDecisionId === id)) { reject('DUPLICATE_SIGNAL'); continue; }
+    let tradePlan: VirtualTradePlan | undefined;
+    if (d.tradingMode) {
+      if (!policy) { reject('MODE_ACTIVE_POLICY_REQUIRED'); continue; }
+      const holding = modeHoldingCost(cost, VIRTUAL_TRADING_MODES[d.tradingMode].maxHoldHours);
+      const entryExit = cost.positionFeeUsd + cost.estimatedExitFeeUsd + cost.executionFeeUsd
+        + Math.max(0, cost.estimatedPriceImpactUsd) + Math.max(0, cost.estimatedExitPriceImpactUsd);
+      if (holding === null || entryExit + holding > policy.maxRoundTripCostUsd + 1e-8) {
+        reject('MODE_HORIZON_COST_CAP'); continue;
+      }
+      const planned = buildVirtualTradePlan({ mode: d.tradingMode, entryPrice: q.priceUsd,
+        structuralStop: signal.structuralStop, notionalUsd: sizing.finalNotionalUsd,
+        maxLeverage: sizing.finalLeverage, costReserveUsd: policy.maxRoundTripCostUsd,
+        riskBudgetUsd: capital * activeRiskPct / 100, openedAtMs: submitNow.getTime() });
+      if (!planned.ok) { reject(planned.reason); continue; }
+      if (signal.expectedNetEdgeBps === null || !Number.isFinite(signal.expectedNetEdgeBps)
+        || sizing.finalNotionalUsd * signal.expectedNetEdgeBps / 10_000 - holding
+          < planned.plan.collateralUsd * planned.plan.targetRoePct / 100) {
+        reject('MODE_TARGET_EXCEEDS_SIGNAL_EDGE'); continue;
+      }
+      tradePlan = planned.plan;
+      if (tradePlan.leverage < sizing.finalLeverage) {
+        sizing.clamped = true;
+        sizing.clampDetails.push(`PAPER mode ROE risk: ${sizing.finalLeverage}x → ${tradePlan.leverage}x`);
+      }
+      sizing.finalLeverage = tradePlan.leverage;
+      sizing.finalCollateralUsd = tradePlan.collateralUsd;
+    }
+    const hash = createHash('sha256').update(`${session.state.session.strategyTag}:${signal.signalId}`).digest('hex');
+    const id = `${tradePlan ? MODE_DECISION_PREFIX : 'vp400:'}${hash}`;
+    if (d.rows.some(row => row.openDecisionId === `vp400:${hash}` || row.openDecisionId === `${MODE_DECISION_PREFIX}${hash}`)) { reject('DUPLICATE_SIGNAL'); continue; }
     if (!d.shouldContinue() || !await d.claim(id, { mode: 'VIRTUAL_PAPER_400', signal, decision, sizing,
-      cost, policy, sessionId: session.state.session.sessionId })) { reject('CLAIM_UNAVAILABLE_OR_DUPLICATE'); continue; }
+      cost, policy, tradePlan, sessionId: session.state.session.sessionId })) { reject('CLAIM_UNAVAILABLE_OR_DUPLICATE'); continue; }
     if (risk.locks.defensiveActive) {
       // Reserve before dispatch: a crash/failed OPEN must not mint another
       // defensive allowance on restart. It never increases after a loss.
@@ -154,7 +189,7 @@ export async function runVirtualPaper400Cycle(d: VirtualPaper400CycleDeps) {
     const result = await d.open({ strategy: session.state.session.strategyTag, decisionId: id,
       symbol: signal.symbol, side: isLong ? 'LONG' : 'SHORT', sizeUsd: sizing.finalNotionalUsd,
       leverage: sizing.finalLeverage, quote: freshQuote, stopPriceUsd: signal.structuralStop,
-      tpPriceUsd: q.priceUsd + (isLong ? 1 : -1) * Math.abs(q.priceUsd - signal.structuralStop) * 2,
+      tpPriceUsd: tradePlan?.tpPrice ?? q.priceUsd + (isLong ? 1 : -1) * Math.abs(q.priceUsd - signal.structuralStop) * 2,
       openPositionCount: account.held.length, maxConcurrentPositions: 1,
       riskProfileSnapshot: profile, entriesManilaDay: account.next.risk.dailyEntryCount,
       nowMs: submitNow.getTime() }, cost);

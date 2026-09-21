@@ -15,6 +15,7 @@ import {
 } from '../workers/alphaStartIntent';
 import { WORKER_POLICY_CONTEXT_KEY } from '../workers/workerPolicyContext';
 import { virtualPaper400Activity } from '../workers/virtualPaper400Activity';
+import { isTradingMode, readTradingMode, tradingModeKey, MODE_VERSION, VIRTUAL_TRADING_MODES } from '../workers/virtualPaperTradingMode';
 import {
   VIRTUAL_PAPER_400_SESSION_STATE_KEY,
   VIRTUAL_PAPER_400_LOCK_ID,
@@ -201,6 +202,8 @@ router.get('/data/virtual-paper-400-session', async (_req, res) => {
     const raw = await readWorkerStateValue(VIRTUAL_PAPER_400_SESSION_STATE_KEY);
     const session = evaluateVirtualPaper400SessionState(raw);
     const runtimeRaw = await readWorkerStateValue('virtual_paper_400_runtime_v1');
+    const tradingModeSelection = session.state ? readTradingMode(
+      await readWorkerStateValue(tradingModeKey(session.state.session.sessionId)), session.state.session.sessionId) : null;
     let runtime = null;
     if (runtimeRaw) {
       const candidate = JSON.parse(runtimeRaw);
@@ -215,6 +218,8 @@ router.get('/data/virtual-paper-400-session', async (_req, res) => {
       executionAuthorized: false as const,
       session,
       runtime,
+      tradingModeSelection,
+      tradingModeOptions: VIRTUAL_TRADING_MODES,
       runtimeFresh: Number.isFinite(age) && age >= 0 && age <= 120_000,
       ...virtualPaper400Activity.read(session.state?.session.sessionId ?? null),
     };
@@ -230,6 +235,33 @@ router.get('/data/virtual-paper-400-session', async (_req, res) => {
       error: 'virtual PAPER 400 session state could not be read',
     });
   }
+});
+
+/** User preference only: shared lock with worker/START/STOP, no START and no ledger reset. */
+router.put('/data/virtual-paper-400-trading-mode', requireOperatorAuth, async (req, res) => {
+  if (!isTradingMode(req.body?.mode) || Object.keys(req.body).some(key => key !== 'mode' && key !== 'expectedUpdatedAt')
+    || (req.body.expectedUpdatedAt !== null && typeof req.body.expectedUpdatedAt !== 'string'))
+    return res.status(400).json({ ok: false, code: 'VIRTUAL_TRADING_MODE_INPUT_INVALID' });
+  try {
+    const result = await db.transaction(async tx => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(${VIRTUAL_PAPER_400_LOCK_ID})`);
+      const session = evaluateVirtualPaper400SessionState(await readWorkerStateValue(VIRTUAL_PAPER_400_SESSION_STATE_KEY, tx));
+      if (!session.state) return { status: 409, body: { ok: false, code: 'VIRTUAL_SESSION_REQUIRED' } };
+      const sessionId = session.state.session.sessionId;
+      const key = tradingModeKey(sessionId);
+      const previous = readTradingMode(await readWorkerStateValue(key, tx), sessionId);
+      if ((previous?.updatedAt ?? null) !== req.body.expectedUpdatedAt)
+        return { status: 409, body: { ok: false, code: 'VIRTUAL_TRADING_MODE_CHANGED' } };
+      const selection = previous?.mode === req.body.mode ? previous : {
+        version: MODE_VERSION, mode: req.body.mode, sessionId,
+        updatedAt: new Date(Math.max(Date.now(), previous ? Date.parse(previous.updatedAt) + 1 : 0)).toISOString() };
+      await persistWorkerStateValue(key, JSON.stringify(selection), tx);
+      const verified = readTradingMode(await readWorkerStateValue(key, tx), sessionId);
+      if (JSON.stringify(verified) !== JSON.stringify(selection)) throw new Error('MODE_READBACK_FAILED');
+      return { status: 200, body: { ok: true, selection: verified, appliesTo: 'NEXT_ENTRY', realFundsUsed: false } };
+    });
+    return res.status(result.status).json(result.body);
+  } catch { return res.status(503).json({ ok: false, code: 'VIRTUAL_TRADING_MODE_UNAVAILABLE' }); }
 });
 
 /**

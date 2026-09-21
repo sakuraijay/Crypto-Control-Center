@@ -3,6 +3,14 @@
 > **운영 주의:** 이 문서는 실시간 상태 스냅샷이 아니다. 현재 HEAD/CI/배포/PAPER/GMX/Owner Approval/Canary readiness 값은 매 실행마다 authoritative source에서 새로 읽어야 한다. 과거 이 파일에 기록되어 있던 진행률, 배포 SHA, 플래그 기본값, 테스트 개수, readiness 상태는 역사 기록일 뿐 현재 상태로 사용하지 않는다.
 
 
+## 최신 단타·중기 스윙 지시 — 2026-09-21
+
+**CCC-SUPERVISION-20260921-10.** 단타12시간 목표5~10%, 중기스윙1~3일 목표10~20%, 손절10%이내 목표 및 사용자 모드 선택.
+[공식 서비스 비교·PAPER 초기값·수익성 검증 조건](CCC_TRADING_MODES_RESEARCH.md)을 따른다.
+포지션 증거금 대비 순 ROE로 우선 해석했으며 계좌 일일 수익 보장이 아니다. 시험값은 단타7.5%익절/3%손절상한, 스윙15%/5%, 최대12/72시간이다.
+서버 저장 선택→다음 신규 진입, 불변 진입 계획→지속 보호·순손익/시간 종료를 구현하며 기존 위험·원장·최소5/최대10배를 유지한다.
+기능 회귀와 수익성/실배포 검증을 구분한다. [검증 기록](verification/trading-modes/RESULT.md).
+
 ## 최신 상품 로드맵 — 2026-09-21
 
 **CCC-SUPERVISION-20260921-09 / ROADMAP_RECORDED / IMPLEMENTATION_NOT_STARTED.**

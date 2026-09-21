@@ -21,6 +21,22 @@ async function flush() { await act(async () => { await Promise.resolve(); }); }
 beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date(at)); vi.clearAllMocks(); });
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 describe('server authority after retiring the browser trading engine', () => {
+ it('persists a user-selected swing mode with auth and restores it on remount without START or trading writes', async()=>{
+  const data=snapshot(); data.tradingModeSelection={version:'virtual-trading-mode/v1',mode:'INTRADAY',sessionId:'ui',updatedAt:at};
+  data.tradingModeOptions={INTRADAY:{label:'단타',minTargetRoePct:5,maxTargetRoePct:10,targetRoePct:7.5,stopRoePct:3,maxHoldHours:12},SWING:{label:'중기 스윙',minTargetRoePct:10,maxTargetRoePct:20,targetRoePct:15,stopRoePct:5,maxHoldHours:72}};
+  const fetcher=vi.fn(async(_url:unknown,init?:RequestInit)=>{if(init?.method==='PUT'){data.tradingModeSelection!.mode='SWING';return {ok:true,json:async()=>({ok:true})};}return {ok:true,json:async()=>data};});
+  vi.stubGlobal('fetch',fetcher); const view=mount();await flush();
+  fireEvent.click(screen.getByRole('button',{name:'매매 방식 선택'}));
+  fireEvent.click(screen.getByRole('radio',{name:/중기 스윙/}));
+  expect(fetcher.mock.calls.filter(([,i])=>i?.method)).toHaveLength(0);
+  fireEvent.change(screen.getByLabelText('서버 운영자 PIN'),{target:{value:'test-only-pin'}});
+  fireEvent.click(screen.getByRole('button',{name:'다음 진입에 적용'}));await flush();
+  const writes=fetcher.mock.calls.filter(([,i])=>i?.method);
+  expect(writes).toHaveLength(1);expect(String(writes[0][0])).toContain('virtual-paper-400-trading-mode');
+  expect(JSON.parse(String(writes[0][1]?.body))).toEqual({mode:'SWING',expectedUpdatedAt:at});
+  view.unmount();mount();await flush();expect(screen.getByLabelText('가상 매매 방식').textContent).toContain('중기 스윙');
+  expect(fetcher.mock.calls.filter(([,i])=>i?.method)).toHaveLength(1);
+ });
  it('restores the applied 5–10x range after remount without browser writes', async () => {
   const data = snapshot(); data.runtime!.policy = { ...data.runtime!.policy!, version: 'virtual400-active/v2', minLeverage: 5, maxLeverage: 10 };
   const fetcher = vi.fn(async () => ({ ok: true, json: async () => data })); vi.stubGlobal('fetch', fetcher);
