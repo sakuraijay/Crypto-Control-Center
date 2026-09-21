@@ -22,14 +22,17 @@ function notEvaluatedEnvelope(at = now) {
     notEvaluatedReason: 'no completed candle' });
 }
 
-function evaluatedEnvelope(at = now) {
+function evaluatedEnvelope(at = now, symbol = 'BTC') {
   const envelope = notEvaluatedEnvelope(at);
   const record = virtualReplaySignal(at);
-  const candleSignal = record.candleSignalEvidence!.candleSignal;
+  record.symbol = symbol;
+  record.shadowRecordId = `${symbol}:test:${at}`;
+  record.signalId = `${symbol}:test-signal:${at}`;
+  const candleSignal = { ...record.candleSignalEvidence!.candleSignal, symbol };
   record.candleSignalEvidence = buildCandleStrategyShadowEvidence({
     candleSignal,
     v2Regime: {
-      configVersion: 'regime-engine/v2', symbol: 'BTC', regime: 'TREND_UP', confidence: 80,
+      configVersion: 'regime-engine/v2', symbol, regime: 'TREND_UP', confidence: 80,
       sinceCandleCloseTime: record.sourceCandleCloseTime, heldCandles: 1,
       pendingRegime: null, pendingCount: 0, previousRegime: 'UNKNOWN', changed: true,
       candidateRegime: 'TREND_UP', candidateConfidence: 80,
@@ -42,8 +45,8 @@ function evaluatedEnvelope(at = now) {
   })!;
   envelope.status = 'PARTIAL';
   envelope.records = [record];
-  envelope.evaluatedSymbols = ['BTC'];
-  envelope.missingSymbols = ['ETH', 'SOL'];
+  envelope.evaluatedSymbols = [symbol];
+  envelope.missingSymbols = symbols.filter(value => value !== symbol);
   return envelope;
 }
 
@@ -107,7 +110,8 @@ describe('Virtual400 session-scoped Strategy continuity codec', () => {
     )!;
     expect(accepted.lastMeaningfulAnalysis).toMatchObject({
       evaluatedAt: now, status: 'PARTIAL',
-      records: [{ symbol: 'BTC', reasons: ['SYNTHETIC REPLAY'] }],
+      latestBatchSymbols: ['BTC'],
+      records: [{ symbol: 'BTC', evaluatedAt: now, reasons: ['SYNTHETIC REPLAY'] }],
     });
     const restored = restoreVirtualPaper400StrategyContinuity(
       accepted, sessionId, now + 60_000, symbols,
@@ -122,6 +126,24 @@ describe('Virtual400 session-scoped Strategy continuity codec', () => {
     );
     expect(summary).toMatchObject({ lastEnvelopeStatus: 'NOT_EVALUATED',
       lastMeaningfulAnalysis: { status: 'PARTIAL', records: [{ symbol: 'BTC' }] } });
+  });
+
+  it('merges staggered partial symbol batches instead of erasing prior reasons', () => {
+    const missing = restoreVirtualPaper400StrategyContinuity(null, sessionId, now, symbols);
+    const btc = advanceVirtualPaper400StrategyContinuity(
+      sessionId, missing, evaluatedEnvelope(now, 'BTC'), now,
+    )!;
+    const restored = restoreVirtualPaper400StrategyContinuity(
+      btc, sessionId, now + 60_000, symbols,
+    );
+    const eth = advanceVirtualPaper400StrategyContinuity(
+      sessionId, restored, evaluatedEnvelope(now + 60_000, 'ETH'), now + 60_000,
+    )!;
+    expect(eth.lastMeaningfulAnalysis).toMatchObject({
+      evaluatedAt: now + 60_000, status: 'PARTIAL', latestBatchSymbols: ['ETH'],
+      records: [{ symbol: 'BTC', evaluatedAt: now },
+        { symbol: 'ETH', evaluatedAt: now + 60_000 }],
+    });
   });
 
   it('fails closed on malformed durable meaningful-analysis evidence', () => {

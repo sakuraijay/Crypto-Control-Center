@@ -42,7 +42,9 @@ does not, by itself, prove that the continuity gap caused the observed
 - Added read-only continuity evidence to the existing Virtual400 runtime
   snapshot. It does not grant Risk, PAPER, or LIVE execution authority.
 - Preserved the most recent accepted completed-candle analysis and its compact
-  per-symbol reasons across duplicate one-minute worker ticks. The current tick
+  per-symbol reasons across duplicate one-minute worker ticks and staggered
+  partial symbol batches. Each symbol retains its own observation time, while
+  the latest batch identity remains explicit. The current tick
   remains truthfully `NOT_EVALUATED`; the separately timestamped last meaningful
   analysis prevents that duplicate status from erasing the latest 15-minute
   `NO_TRADE` evidence used for diagnosis.

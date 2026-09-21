@@ -27,7 +27,8 @@ export interface VirtualPaper400StrategyContinuityState {
   lastMeaningfulAnalysis: {
     evaluatedAt: number;
     status: 'PARTIAL' | 'EVALUATED';
-    records: Array<Pick<StrategyShadowRecord, 'symbol' | 'sourceCandleCloseTime' | 'regime'
+    latestBatchSymbols: string[];
+    records: Array<Pick<StrategyShadowRecord, 'symbol' | 'evaluatedAt' | 'sourceCandleCloseTime' | 'regime'
       | 'action' | 'strategyId' | 'direction' | 'confidence' | 'lifecycleEligible' | 'reasons'>>;
   } | null;
   strategyEnsembleShadow: {
@@ -60,14 +61,25 @@ function restoreLastMeaningfulAnalysis(
     || !['PARTIAL', 'EVALUATED'].includes(String(analysis.status))
     || !Array.isArray(analysis.records) || analysis.records.length === 0) return { ok: false };
   const allowed = new Set(allowedSymbols.map(symbol => symbol.trim().toUpperCase()));
+  const latestBatchSymbols = analysis.latestBatchSymbols === undefined
+    ? (analysis.records as unknown[]).map(value => object(value)?.symbol)
+    : analysis.latestBatchSymbols;
+  if (!Array.isArray(latestBatchSymbols)) return { ok: false };
+  const normalizedLatestBatchSymbols = latestBatchSymbols.map(symbol =>
+    typeof symbol === 'string' ? symbol.trim().toUpperCase() : '');
+  if (!normalizedLatestBatchSymbols.length
+    || new Set(normalizedLatestBatchSymbols).size !== normalizedLatestBatchSymbols.length
+    || normalizedLatestBatchSymbols.some(symbol => !allowed.has(symbol))) return { ok: false };
   const seen = new Set<string>();
   const records: NonNullable<VirtualPaper400StrategyContinuityState['lastMeaningfulAnalysis']>['records'] = [];
   for (const rawRecord of analysis.records) {
     const record = object(rawRecord);
     const symbol = typeof record?.symbol === 'string' ? record.symbol.trim().toUpperCase() : '';
+    const evaluatedAt = record?.evaluatedAt === undefined ? analysis.evaluatedAt : record.evaluatedAt;
     if (!record || !allowed.has(symbol) || seen.has(symbol)
+      || !finiteInteger(evaluatedAt) || evaluatedAt <= 0 || evaluatedAt > analysis.evaluatedAt
       || !finiteInteger(record.sourceCandleCloseTime) || record.sourceCandleCloseTime <= 0
-      || record.sourceCandleCloseTime > analysis.evaluatedAt
+      || record.sourceCandleCloseTime > evaluatedAt
       || !['TREND_UP', 'TREND_DOWN', 'RANGE', 'BREAKOUT_READY', 'HIGH_VOLATILITY',
         'TRANSITION', 'UNKNOWN'].includes(String(record.regime))
       || !['LONG', 'SHORT', 'NO_TRADE', 'REJECTED', 'DISABLED'].includes(String(record.action))
@@ -83,6 +95,7 @@ function restoreLastMeaningfulAnalysis(
     seen.add(symbol);
     records.push({
       symbol,
+      evaluatedAt,
       sourceCandleCloseTime: record.sourceCandleCloseTime,
       regime: record.regime as StrategyShadowRecord['regime'],
       action: record.action as StrategyShadowRecord['action'],
@@ -93,11 +106,13 @@ function restoreLastMeaningfulAnalysis(
       reasons: [...record.reasons] as string[],
     });
   }
-  if ((analysis.status === 'EVALUATED' && seen.size !== allowed.size)
-    || (analysis.status === 'PARTIAL' && seen.size >= allowed.size)) return { ok: false };
+  if ((analysis.status === 'EVALUATED' && normalizedLatestBatchSymbols.length !== allowed.size)
+    || (analysis.status === 'PARTIAL' && normalizedLatestBatchSymbols.length >= allowed.size)
+    || normalizedLatestBatchSymbols.some(symbol => !seen.has(symbol))) return { ok: false };
   return { ok: true, value: {
     evaluatedAt: analysis.evaluatedAt,
     status: analysis.status as 'PARTIAL' | 'EVALUATED',
+    latestBatchSymbols: normalizedLatestBatchSymbols,
     records,
   } };
 }
@@ -248,12 +263,18 @@ export function advanceVirtualPaper400StrategyContinuity(
     previous.previousRegimes, envelope, capturedAt,
   );
   if (!lifecycleSnapshot || !regimeSnapshot) return null;
-  const lastMeaningfulAnalysis = ['PARTIAL', 'EVALUATED'].includes(envelope.status)
-    && envelope.records.length > 0 ? {
-      evaluatedAt: capturedAt,
-      status: envelope.status as 'PARTIAL' | 'EVALUATED',
-      records: envelope.records.map(record => ({
-        symbol: record.symbol.trim().toUpperCase(),
+  let lastMeaningfulAnalysis = previous.state.lastMeaningfulAnalysis;
+  if (['PARTIAL', 'EVALUATED'].includes(envelope.status) && envelope.records.length > 0) {
+    type AnalysisRecord = NonNullable<VirtualPaper400StrategyContinuityState['lastMeaningfulAnalysis']>['records'][number];
+    const records = new Map<string, AnalysisRecord>();
+    for (const record of previous.state.lastMeaningfulAnalysis?.records ?? []) {
+      records.set(record.symbol, { ...record, reasons: [...record.reasons] });
+    }
+    for (const record of envelope.records) {
+      const symbol = record.symbol.trim().toUpperCase();
+      records.set(symbol, {
+        symbol,
+        evaluatedAt: capturedAt,
         sourceCandleCloseTime: record.sourceCandleCloseTime,
         regime: record.regime,
         action: record.action,
@@ -262,8 +283,15 @@ export function advanceVirtualPaper400StrategyContinuity(
         confidence: record.confidence,
         lifecycleEligible: record.lifecycleEligible,
         reasons: [...record.reasons],
-      })),
-    } : previous.state.lastMeaningfulAnalysis;
+      });
+    }
+    lastMeaningfulAnalysis = {
+      evaluatedAt: capturedAt,
+      status: envelope.status as 'PARTIAL' | 'EVALUATED',
+      latestBatchSymbols: envelope.records.map(record => record.symbol.trim().toUpperCase()).sort(),
+      records: [...records.values()].sort((a, b) => a.symbol.localeCompare(b.symbol)),
+    };
+  }
   return {
     schemaVersion: VIRTUAL_PAPER_400_STRATEGY_CONTINUITY_VERSION,
     sessionId,
