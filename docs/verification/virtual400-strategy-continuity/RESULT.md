@@ -1,6 +1,8 @@
 # Virtual400 strategy continuity verification
 
-Status: local implementation and focused regression PASS; exact-head CI and production runtime verification pending.
+Status: base continuity is deployed and runtime-verified through `4375672`;
+last-meaningful-analysis preservation is locally verified, with exact-head CI and
+production verification pending.
 
 ## Finding
 
@@ -39,6 +41,11 @@ does not, by itself, prove that the continuity gap caused the observed
   before this entry veto and remains active.
 - Added read-only continuity evidence to the existing Virtual400 runtime
   snapshot. It does not grant Risk, PAPER, or LIVE execution authority.
+- Preserved the most recent accepted completed-candle analysis and its compact
+  per-symbol reasons across duplicate one-minute worker ticks. The current tick
+  remains truthfully `NOT_EVALUATED`; the separately timestamped last meaningful
+  analysis prevents that duplicate status from erasing the latest 15-minute
+  `NO_TRADE` evidence used for diagnosis.
 
 No signal, confidence, cost, sizing, leverage, Risk, Standard, Canary, or LIVE
 threshold was changed.
@@ -52,7 +59,9 @@ threshold was changed.
   NOT_EVALUATED preservation, runtime input wiring, and continued protection of
   an existing position while continuity state is corrupt. A duplicate-candle
   regression verifies that the record becomes NOT_EVALUATED and the cursor and
-  hysteresis state do not advance. A v1 migration regression verifies that
+  hysteresis state do not advance, while the prior meaningful analysis remains
+  available. Invalid persisted analysis evidence fails closed. A v1 migration
+  regression verifies that
   contaminated derived evidence is discarded without changing the durable key.
 - `git diff --check`: PASS.
 

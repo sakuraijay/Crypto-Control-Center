@@ -4,8 +4,11 @@ import {
   advanceVirtualPaper400StrategyContinuity,
   filterNewVirtualPaper400StrategyRecords,
   restoreVirtualPaper400StrategyContinuity,
+  summarizeVirtualPaper400StrategyContinuity,
   virtualPaper400StrategyContinuityKey,
 } from '../workers/virtualPaper400StrategyContinuity';
+import { virtualReplaySignal } from './helpers/virtualPaper400Replay';
+import { buildCandleStrategyShadowEvidence } from '../intel/candleStrategyShadowEvidenceV2';
 
 const symbols = ['BTC', 'ETH', 'SOL'];
 const now = 1_800_000_000_000;
@@ -17,6 +20,31 @@ function notEvaluatedEnvelope(at = now) {
     existingAi: { decisionId: `test:${at}`, action: 'NO_TRADE', confidence: 0,
       primarySymbol: null, createdAt: new Date(at).toISOString() },
     notEvaluatedReason: 'no completed candle' });
+}
+
+function evaluatedEnvelope(at = now) {
+  const envelope = notEvaluatedEnvelope(at);
+  const record = virtualReplaySignal(at);
+  const candleSignal = record.candleSignalEvidence!.candleSignal;
+  record.candleSignalEvidence = buildCandleStrategyShadowEvidence({
+    candleSignal,
+    v2Regime: {
+      configVersion: 'regime-engine/v2', symbol: 'BTC', regime: 'TREND_UP', confidence: 80,
+      sinceCandleCloseTime: record.sourceCandleCloseTime, heldCandles: 1,
+      pendingRegime: null, pendingCount: 0, previousRegime: 'UNKNOWN', changed: true,
+      candidateRegime: 'TREND_UP', candidateConfidence: 80,
+      calculatedAt: record.sourceCandleCloseTime, reasons: ['test'], warnings: [], scores: {
+        TREND_UP: 80, TREND_DOWN: 0, RANGE: 0, BREAKOUT_READY: 0,
+        HIGH_VOLATILITY: 0, TRANSITION: 0,
+      },
+    },
+    shadowRecord: { ...record, candleSignalEvidence: undefined },
+  })!;
+  envelope.status = 'PARTIAL';
+  envelope.records = [record];
+  envelope.evaluatedSymbols = ['BTC'];
+  envelope.missingSymbols = ['ETH', 'SOL'];
+  return envelope;
 }
 
 describe('Virtual400 session-scoped Strategy continuity codec', () => {
@@ -70,6 +98,59 @@ describe('Virtual400 session-scoped Strategy continuity codec', () => {
     expect(filtered?.envelope.status).toBe('NOT_EVALUATED');
     expect(filtered?.envelope.records).toEqual([]);
     expect(filtered?.cursors.BTC).toBe(now - 15 * 60_000);
+  });
+
+  it('preserves the last meaningful completed-candle reasons across duplicate worker ticks', () => {
+    const missing = restoreVirtualPaper400StrategyContinuity(null, sessionId, now, symbols);
+    const accepted = advanceVirtualPaper400StrategyContinuity(
+      sessionId, missing, evaluatedEnvelope(), now,
+    )!;
+    expect(accepted.lastMeaningfulAnalysis).toMatchObject({
+      evaluatedAt: now, status: 'PARTIAL',
+      records: [{ symbol: 'BTC', reasons: ['SYNTHETIC REPLAY'] }],
+    });
+    const restored = restoreVirtualPaper400StrategyContinuity(
+      accepted, sessionId, now + 60_000, symbols,
+    );
+    const duplicate = advanceVirtualPaper400StrategyContinuity(
+      sessionId, restored, notEvaluatedEnvelope(now + 60_000), now + 60_000,
+    )!;
+    expect(duplicate.lastEnvelopeStatus).toBe('NOT_EVALUATED');
+    expect(duplicate.lastMeaningfulAnalysis).toEqual(accepted.lastMeaningfulAnalysis);
+    const summary = summarizeVirtualPaper400StrategyContinuity(
+      restoreVirtualPaper400StrategyContinuity(duplicate, sessionId, now + 60_000, symbols),
+    );
+    expect(summary).toMatchObject({ lastEnvelopeStatus: 'NOT_EVALUATED',
+      lastMeaningfulAnalysis: { status: 'PARTIAL', records: [{ symbol: 'BTC' }] } });
+  });
+
+  it('fails closed on malformed durable meaningful-analysis evidence', () => {
+    const missing = restoreVirtualPaper400StrategyContinuity(null, sessionId, now, symbols);
+    const persisted = advanceVirtualPaper400StrategyContinuity(
+      sessionId, missing, evaluatedEnvelope(), now,
+    )!;
+    expect(restoreVirtualPaper400StrategyContinuity({ ...persisted,
+      lastMeaningfulAnalysis: { ...persisted.lastMeaningfulAnalysis!,
+        records: [{ ...persisted.lastMeaningfulAnalysis!.records[0], symbol: 'DOGE' }] } },
+    sessionId, now + 60_000, symbols)).toMatchObject({
+      status: 'BLOCKED', reason: 'STRATEGY_CONTINUITY_ANALYSIS_INVALID',
+    });
+  });
+
+  it('adds the optional diagnostic field to an existing v2 state without resetting continuity', () => {
+    const missing = restoreVirtualPaper400StrategyContinuity(null, sessionId, now, symbols);
+    const persisted = advanceVirtualPaper400StrategyContinuity(
+      sessionId, missing, notEvaluatedEnvelope(), now,
+    )!;
+    const deployedV2 = { ...persisted } as Partial<typeof persisted>;
+    delete deployedV2.lastMeaningfulAnalysis;
+    const restored = restoreVirtualPaper400StrategyContinuity(
+      deployedV2, sessionId, now + 60_000, symbols,
+    );
+    expect(restored.status).toBe('RESTORED');
+    if (restored.status === 'BLOCKED') throw new Error('unexpected blocked additive migration');
+    expect(restored.state.lastMeaningfulAnalysis).toBeNull();
+    expect(restored.state.strategyEnsembleShadow).toEqual(persisted.strategyEnsembleShadow);
   });
 
   it('discards contaminated v1 SHADOW evidence while preserving its completed-candle boundary', () => {

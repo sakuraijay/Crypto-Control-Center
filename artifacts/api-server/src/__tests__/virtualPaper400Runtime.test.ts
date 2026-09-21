@@ -156,6 +156,7 @@ describe('virtual runtime routing and durable account boundary', () => {
       schemaVersion: 'virtual-paper-400-strategy-continuity/v2',
       sessionId: active.session.sessionId,
       lastEnvelopeStatus: 'NOT_EVALUATED',
+      lastMeaningfulAnalysis: null,
     });
     const key = `virtual_paper_400_policy_v1:${active.session.sessionId}`;
     const first = fixture.rows.get(key);
@@ -165,7 +166,8 @@ describe('virtual runtime routing and durable account boundary', () => {
     expect(fixture.rows.get(VIRTUAL_PAPER_400_SESSION_STATE_KEY)).toBe(raw);
     expect(JSON.parse(fixture.rows.get(VIRTUAL_PAPER_400_RUNTIME_KEY)!).policy.maxLeverage).toBe(10);
     expect(JSON.parse(fixture.rows.get(VIRTUAL_PAPER_400_RUNTIME_KEY)!).strategyContinuity)
-      .toMatchObject({ status: 'RESTORED', lifecycleRecords: 0, regimes: [] });
+      .toMatchObject({ status: 'RESTORED', lifecycleRecords: 0, regimes: [],
+        lastMeaningfulAnalysis: null });
   });
   it('fails only new entry closed when session-scoped strategy continuity is corrupt', async () => {
     const active = buildActiveVirtualPaper400SessionState('continuity-corrupt', new Date(Date.now() - 1_000));

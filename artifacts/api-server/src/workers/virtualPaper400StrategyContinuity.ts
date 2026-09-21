@@ -1,6 +1,7 @@
 import type { SignalLifecycleSnapshotV2 } from '../intel/signalLifecycleSnapshotV2';
 import type { RegimeState } from '../intel/regimeEngineV2';
 import type { StrategyShadowWorkerEnvelope } from '../intel/strategyShadowWorkerEnvelopeV2';
+import type { StrategyShadowRecord } from '../intel/strategyShadowAdapterV2';
 import {
   advanceStrategyShadowLifecycleSnapshot,
   advanceStrategyShadowRegimeSnapshot,
@@ -21,6 +22,14 @@ export interface VirtualPaper400StrategyContinuityState {
   updatedAt: number;
   lastEnvelopeStatus: StrategyShadowWorkerEnvelope['status'];
   lastSourceCandleCloseTimeBySymbol: Record<string, number>;
+  /** Last accepted completed-candle analysis. Duplicate one-minute worker ticks
+   * must not erase the reasons from the most recent meaningful 15-minute batch. */
+  lastMeaningfulAnalysis: {
+    evaluatedAt: number;
+    status: 'PARTIAL' | 'EVALUATED';
+    records: Array<Pick<StrategyShadowRecord, 'symbol' | 'sourceCandleCloseTime' | 'regime'
+      | 'action' | 'strategyId' | 'direction' | 'confidence' | 'lifecycleEligible' | 'reasons'>>;
+  } | null;
   strategyEnsembleShadow: {
     lifecycleSnapshot: SignalLifecycleSnapshotV2;
     regimeSnapshot: StrategyRegimeSnapshotV1;
@@ -37,6 +46,61 @@ const object = (value: unknown): Record<string, unknown> | null =>
     ? value as Record<string, unknown> : null;
 const finiteInteger = (value: unknown): value is number =>
   typeof value === 'number' && Number.isFinite(value) && Number.isInteger(value);
+
+function restoreLastMeaningfulAnalysis(
+  raw: unknown,
+  restoredAt: number,
+  allowedSymbols: readonly string[],
+): { ok: true; value: VirtualPaper400StrategyContinuityState['lastMeaningfulAnalysis'] }
+  | { ok: false } {
+  if (raw === undefined || raw === null) return { ok: true, value: null };
+  const analysis = object(raw);
+  if (!analysis || !finiteInteger(analysis.evaluatedAt) || analysis.evaluatedAt <= 0
+    || analysis.evaluatedAt > restoredAt
+    || !['PARTIAL', 'EVALUATED'].includes(String(analysis.status))
+    || !Array.isArray(analysis.records) || analysis.records.length === 0) return { ok: false };
+  const allowed = new Set(allowedSymbols.map(symbol => symbol.trim().toUpperCase()));
+  const seen = new Set<string>();
+  const records: NonNullable<VirtualPaper400StrategyContinuityState['lastMeaningfulAnalysis']>['records'] = [];
+  for (const rawRecord of analysis.records) {
+    const record = object(rawRecord);
+    const symbol = typeof record?.symbol === 'string' ? record.symbol.trim().toUpperCase() : '';
+    if (!record || !allowed.has(symbol) || seen.has(symbol)
+      || !finiteInteger(record.sourceCandleCloseTime) || record.sourceCandleCloseTime <= 0
+      || record.sourceCandleCloseTime > analysis.evaluatedAt
+      || !['TREND_UP', 'TREND_DOWN', 'RANGE', 'BREAKOUT_READY', 'HIGH_VOLATILITY',
+        'TRANSITION', 'UNKNOWN'].includes(String(record.regime))
+      || !['LONG', 'SHORT', 'NO_TRADE', 'REJECTED', 'DISABLED'].includes(String(record.action))
+      || (record.strategyId !== null && !['TREND_PULLBACK', 'VOLATILITY_BREAKOUT',
+        'RANGE_MEAN_REVERSION'].includes(String(record.strategyId)))
+      || !['LONG', 'SHORT', 'NONE'].includes(String(record.direction))
+      || (record.confidence !== null && (typeof record.confidence !== 'number'
+        || !Number.isFinite(record.confidence) || record.confidence < 0 || record.confidence > 100))
+      || (record.lifecycleEligible !== null && typeof record.lifecycleEligible !== 'boolean')
+      || !Array.isArray(record.reasons) || record.reasons.some(reason => typeof reason !== 'string')) {
+      return { ok: false };
+    }
+    seen.add(symbol);
+    records.push({
+      symbol,
+      sourceCandleCloseTime: record.sourceCandleCloseTime,
+      regime: record.regime as StrategyShadowRecord['regime'],
+      action: record.action as StrategyShadowRecord['action'],
+      strategyId: record.strategyId as StrategyShadowRecord['strategyId'],
+      direction: record.direction as StrategyShadowRecord['direction'],
+      confidence: record.confidence as number | null,
+      lifecycleEligible: record.lifecycleEligible as boolean | null,
+      reasons: [...record.reasons] as string[],
+    });
+  }
+  if ((analysis.status === 'EVALUATED' && seen.size !== allowed.size)
+    || (analysis.status === 'PARTIAL' && seen.size >= allowed.size)) return { ok: false };
+  return { ok: true, value: {
+    evaluatedAt: analysis.evaluatedAt,
+    status: analysis.status as 'PARTIAL' | 'EVALUATED',
+    records,
+  } };
+}
 
 export function virtualPaper400StrategyContinuityKey(sessionId: string): string {
   return `virtual_paper_400_strategy_continuity_v1:${sessionId}`;
@@ -64,6 +128,7 @@ function initialState(
       updatedAt: restoredAt,
       lastEnvelopeStatus: 'NOT_EVALUATED',
       lastSourceCandleCloseTimeBySymbol: {},
+      lastMeaningfulAnalysis: null,
       strategyEnsembleShadow: {
         lifecycleSnapshot: lifecycle.snapshot,
         regimeSnapshot: regimes.snapshot,
@@ -148,9 +213,17 @@ export function restoreVirtualPaper400StrategyContinuity(
     const boundary = Math.floor((state.updatedAt as number) / (15 * 60_000)) * 15 * 60_000;
     for (const symbol of Object.keys(validated)) lastSourceCandleCloseTimeBySymbol[symbol] = boundary;
   }
+  const lastMeaningfulAnalysis = restoreLastMeaningfulAnalysis(
+    state.lastMeaningfulAnalysis, restoredAt, allowedSymbols,
+  );
+  if (!lastMeaningfulAnalysis.ok) {
+    return { status: 'BLOCKED', state: null, lifecycleSnapshot: null,
+      previousRegimes: null, reason: 'STRATEGY_CONTINUITY_ANALYSIS_INVALID' };
+  }
   const normalizedState = {
     ...(state as unknown as VirtualPaper400StrategyContinuityState),
     lastSourceCandleCloseTimeBySymbol,
+    lastMeaningfulAnalysis: lastMeaningfulAnalysis.value,
   };
   return {
     status: 'RESTORED',
@@ -175,12 +248,29 @@ export function advanceVirtualPaper400StrategyContinuity(
     previous.previousRegimes, envelope, capturedAt,
   );
   if (!lifecycleSnapshot || !regimeSnapshot) return null;
+  const lastMeaningfulAnalysis = ['PARTIAL', 'EVALUATED'].includes(envelope.status)
+    && envelope.records.length > 0 ? {
+      evaluatedAt: capturedAt,
+      status: envelope.status as 'PARTIAL' | 'EVALUATED',
+      records: envelope.records.map(record => ({
+        symbol: record.symbol.trim().toUpperCase(),
+        sourceCandleCloseTime: record.sourceCandleCloseTime,
+        regime: record.regime,
+        action: record.action,
+        strategyId: record.strategyId,
+        direction: record.direction,
+        confidence: record.confidence,
+        lifecycleEligible: record.lifecycleEligible,
+        reasons: [...record.reasons],
+      })),
+    } : previous.state.lastMeaningfulAnalysis;
   return {
     schemaVersion: VIRTUAL_PAPER_400_STRATEGY_CONTINUITY_VERSION,
     sessionId,
     updatedAt: capturedAt,
     lastEnvelopeStatus: envelope.status,
     lastSourceCandleCloseTimeBySymbol: { ...previous.state.lastSourceCandleCloseTimeBySymbol },
+    lastMeaningfulAnalysis,
     strategyEnsembleShadow: { lifecycleSnapshot, regimeSnapshot },
   };
 }
@@ -233,6 +323,7 @@ export function summarizeVirtualPaper400StrategyContinuity(
     updatedAt: restored.state.updatedAt,
     lastEnvelopeStatus: restored.state.lastEnvelopeStatus,
     lastSourceCandleCloseTimeBySymbol: restored.state.lastSourceCandleCloseTimeBySymbol,
+    lastMeaningfulAnalysis: restored.state.lastMeaningfulAnalysis,
     lifecycleRecords: restored.lifecycleSnapshot.records.length,
     historyEvents: restored.lifecycleSnapshot.historyEvents.length,
     regimes: Object.values(restored.previousRegimes).map(state => ({
