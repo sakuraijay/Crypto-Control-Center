@@ -130,6 +130,26 @@ describe('finalized OPEN → INITIAL_STOP handoff', () => {
     expect(deps.runEmergencyClose).not.toHaveBeenCalled();
   });
 
+  it.each([NaN, Infinity, -Infinity, -1, 15.5, Number.MAX_SAFE_INTEGER + 1])(
+    'rejects invalid confirmation count %s before any execution dependency', async (confirmations) => {
+      const deps = makeDeps();
+      expect((await runConfirmedOpenStopHandoff({ ...evidence, confirmations }, deps)).handled).toBe(false);
+      expect(deps.loadIntent).not.toHaveBeenCalled();
+      expect(deps.createInitialStop).not.toHaveBeenCalled();
+      expect(deps.runEmergencyClose).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([NaN, Infinity, -Infinity, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])(
+    'rejects invalid finality configuration %s before any execution dependency', async (finalityDepth) => {
+      const deps = { ...makeDeps(), finalityDepth };
+      expect((await runConfirmedOpenStopHandoff(evidence, deps)).handled).toBe(false);
+      expect(deps.loadIntent).not.toHaveBeenCalled();
+      expect(deps.createInitialStop).not.toHaveBeenCalled();
+      expect(deps.runEmergencyClose).not.toHaveBeenCalled();
+    },
+  );
+
   it('exact authoritative position key가 없거나 중복이면 Stop/close 제출 계층을 호출하지 않는다', async () => {
     const deps = makeDeps();
     vi.mocked(deps.fetchPositions).mockResolvedValue([
