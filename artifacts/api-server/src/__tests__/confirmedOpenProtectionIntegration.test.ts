@@ -489,6 +489,7 @@ function wireRealHandoff(options: {
         orderType: 'open',
         symbol: 'ETH',
         isLong: true,
+        sizeUsd: 42.5,
       })),
       marketAddressForSymbol: vi.fn(() => MARKET),
       fetchPositions: vi.fn(async () => [{

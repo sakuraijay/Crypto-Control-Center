@@ -951,12 +951,7 @@ export async function runConfirmedOpenInitialStopHandoff(
     },
     decimalsReady: async (marketAddress) =>
       (await resolveIndexTokenDecimalsEvidence(marketAddress)) !== null,
-    executionCostReady: (marketAddress, isLong, nowMs) => {
-      const cost = getExecutionEligibleCostEvidence(nowMs);
-      return cost.fresh && cost.evidence !== null
-        && cost.evidence.market.toLowerCase() === marketAddress.toLowerCase()
-        && cost.evidence.isLong === isLong;
-    },
+    executionCostReady: isConfirmedOpenHandoffCostEvidenceReady,
     actionBudgetReady: async (nowMs) => {
       const canonical = getCanonicalSnapshot();
       if (!canonical?.confirmed || canonical.isSubaccountListed !== true) return false;
@@ -1006,6 +1001,26 @@ export async function runConfirmedOpenInitialStopHandoff(
       now,
     }),
   });
+}
+
+/**
+ * Confirmed OPEN may only hand off to INITIAL_STOP with fresh cost evidence
+ * bound to the durable OPEN intent, not merely another quote for the same
+ * market/direction. The numeric DB column is persisted at four decimals.
+ */
+export function isConfirmedOpenHandoffCostEvidenceReady(input: {
+  marketAddress: string;
+  isLong: boolean;
+  orderType: 'MarketIncrease';
+  notionalUsd: number;
+  nowMs: number;
+}): boolean {
+  const cost = getExecutionEligibleCostEvidence(input.nowMs);
+  return cost.fresh && cost.evidence !== null
+    && cost.evidence.market.toLowerCase() === input.marketAddress.toLowerCase()
+    && cost.evidence.isLong === input.isLong
+    && cost.evidence.orderType === input.orderType
+    && Math.abs(cost.evidence.notionalUsd - input.notionalUsd) <= 0.0001;
 }
 
 /**

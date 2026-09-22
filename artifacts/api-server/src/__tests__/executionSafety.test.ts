@@ -336,6 +336,47 @@ describe('#142 Manual Canary execution evidence integration', () => {
 
     expect(activated).toBe(false);
   });
+
+  it.each([
+    ['exact binding', 'MarketIncrease' as const, 20, true],
+    ['different order type', 'MarketDecrease' as const, 20, false],
+    ['different notional', 'MarketIncrease' as const, 10, false],
+  ])('confirmed OPEN handoff cost gate: %s', async (
+    _name,
+    recordedOrderType,
+    recordedNotionalUsd,
+    expectedReady,
+  ) => {
+    const nowMs = Date.now();
+    const market = '0x' + 'b'.repeat(40);
+    const snapshot = executionSnapshot(nowMs, {
+      market,
+      orderType: recordedOrderType,
+      notionalUsd: recordedNotionalUsd,
+    });
+    const {
+      __resetExecutionEligibleCostEvidenceForTests,
+      recordExecutionEligibleCostEvidence,
+    } = await import('../lib/costSnapshot');
+    const { isConfirmedOpenHandoffCostEvidenceReady } =
+      await import('../workers/liveTestExecutor');
+
+    __resetExecutionEligibleCostEvidenceForTests();
+    expect(recordExecutionEligibleCostEvidence(snapshot, {
+      market,
+      isLong: true,
+      orderType: recordedOrderType,
+      notionalUsd: recordedNotionalUsd,
+    }, nowMs)).toBe(true);
+
+    expect(isConfirmedOpenHandoffCostEvidenceReady({
+      marketAddress: market,
+      isLong: true,
+      orderType: 'MarketIncrease',
+      notionalUsd: 20,
+      nowMs,
+    })).toBe(expectedReady);
+  });
 });
 
 /** 최신 relay 구성 완비 (게이트 통과 시나리오용) — 문서 기준 공식 Arbitrum 주소 */

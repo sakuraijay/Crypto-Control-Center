@@ -8,6 +8,8 @@ export interface HandoffIntent {
   orderType: string;
   symbol: string;
   isLong: boolean;
+  /** Durable OPEN notional (numeric DB columns may be returned as strings). */
+  sizeUsd: number | string;
 }
 
 export interface HandoffPosition {
@@ -72,7 +74,13 @@ export interface ConfirmedOpenStopHandoffDeps {
   fetchPositions(): Promise<HandoffPosition[] | null>;
   loadStopPlan(intentId: string): Promise<{ ok: boolean; plan: HandoffStopPlan | null }>;
   decimalsReady(marketAddress: string): Promise<boolean>;
-  executionCostReady(marketAddress: string, isLong: boolean, nowMs: number): boolean;
+  executionCostReady(input: {
+    marketAddress: string;
+    isLong: boolean;
+    orderType: 'MarketIncrease';
+    notionalUsd: number;
+    nowMs: number;
+  }): boolean;
   actionBudgetReady(nowMs: number): Promise<boolean>;
   signerBindingReady(): Promise<boolean>;
   createInitialStop(input: HandoffStopInput): Promise<HandoffStopResult>;
@@ -135,6 +143,12 @@ export async function runConfirmedOpenStopHandoff(
   const intent = await deps.loadIntent(evidence.intentId);
   if (!intent || intent.orderType !== 'open' || intent.id !== evidence.intentId) {
     return { handled: false, reason: 'OPEN intent 권위 행 조회/결속 실패' };
+  }
+  const intentSizeUsd = typeof intent.sizeUsd === 'string'
+    ? Number(intent.sizeUsd)
+    : intent.sizeUsd;
+  if (!Number.isFinite(intentSizeUsd) || intentSizeUsd <= 0) {
+    return { handled: false, reason: 'OPEN intent 권위 명목 조회/결속 실패' };
   }
   const marketAddress = deps.marketAddressForSymbol(intent.symbol);
   if (!marketAddress) return { handled: false, reason: 'intent symbol의 SDK market 결속 실패' };
@@ -199,7 +213,13 @@ export async function runConfirmedOpenStopHandoff(
   if (!(await deps.decimalsReady(pos.marketAddress))) {
     return convergeFailure(deps, input, 'SDK+온체인 decimals 재검증 실패');
   }
-  if (!deps.executionCostReady(pos.marketAddress, pos.isLong, now.getTime())) {
+  if (!deps.executionCostReady({
+    marketAddress: pos.marketAddress,
+    isLong: pos.isLong,
+    orderType: 'MarketIncrease',
+    notionalUsd: intentSizeUsd,
+    nowMs: now.getTime(),
+  })) {
     return convergeFailure(deps, input, '30초 execution cost evidence 누락/결속 실패');
   }
   if (!(await deps.actionBudgetReady(now.getTime()))) {

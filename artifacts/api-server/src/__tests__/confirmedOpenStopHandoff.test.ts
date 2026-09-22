@@ -30,7 +30,7 @@ function makeDeps(): ConfirmedOpenStopHandoffDeps {
     finalityDepth: 15,
     expectedCollateralToken: '0x' + '6'.repeat(40),
     loadIntent: vi.fn(async () => ({
-      id: INTENT_ID, orderType: 'open', symbol: 'ETH', isLong: true,
+      id: INTENT_ID, orderType: 'open', symbol: 'ETH', isLong: true, sizeUsd: '20.0000',
     })),
     marketAddressForSymbol: vi.fn(() => MARKET),
     fetchPositions: vi.fn(async () => [{
@@ -84,13 +84,20 @@ describe('finalized OPEN → INITIAL_STOP handoff', () => {
       acceptablePriceUsd: 2_955.15,
     }));
     expect(deps.runEmergencyClose).not.toHaveBeenCalled();
+    expect(deps.executionCostReady).toHaveBeenCalledWith({
+      marketAddress: MARKET,
+      isLong: true,
+      orderType: 'MarketIncrease',
+      notionalUsd: 20,
+      nowMs: NOW.getTime(),
+    });
   });
 
   it('일반 intent와 비-Canary symbol도 persisted OPEN/position/plan 결속으로 handoff한다', async () => {
     const deps = makeDeps();
     const generalEvidence = { ...evidence, intentId: GENERAL_INTENT_ID };
     vi.mocked(deps.loadIntent).mockResolvedValue({
-      id: GENERAL_INTENT_ID, orderType: 'open', symbol: 'SOL', isLong: false,
+      id: GENERAL_INTENT_ID, orderType: 'open', symbol: 'SOL', isLong: false, sizeUsd: 37.5,
     });
     vi.mocked(deps.fetchPositions).mockResolvedValue([{
       positionKey: POSITION_KEY, marketAddress: MARKET,
@@ -169,7 +176,7 @@ describe('finalized OPEN → INITIAL_STOP handoff', () => {
       {
         ...deps,
         loadIntent: vi.fn(async () => ({
-          id: GENERAL_INTENT_ID, orderType: 'open', symbol: 'ETH', isLong: true,
+          id: GENERAL_INTENT_ID, orderType: 'open', symbol: 'ETH', isLong: true, sizeUsd: 20,
         })),
       },
     );
@@ -203,6 +210,29 @@ describe('finalized OPEN → INITIAL_STOP handoff', () => {
       expect(deps.runEmergencyClose).toHaveBeenCalledTimes(1);
     });
   }
+
+  it.each([NaN, Infinity, -1, 0, 'not-a-number'])(
+    'invalid durable OPEN notional %s fails before position/cost/protection operations',
+    async (sizeUsd) => {
+      const deps = makeDeps();
+      vi.mocked(deps.loadIntent).mockResolvedValue({
+        id: INTENT_ID,
+        orderType: 'open',
+        symbol: 'ETH',
+        isLong: true,
+        sizeUsd,
+      });
+
+      const result = await runConfirmedOpenStopHandoff(evidence, deps);
+
+      expect(result.handled).toBe(false);
+      expect(result).toMatchObject({ handled: false, reason: expect.stringContaining('권위 명목') });
+      expect(deps.fetchPositions).not.toHaveBeenCalled();
+      expect(deps.executionCostReady).not.toHaveBeenCalled();
+      expect(deps.createInitialStop).not.toHaveBeenCalled();
+      expect(deps.runEmergencyClose).not.toHaveBeenCalled();
+    },
+  );
 
   it('Stop ambiguous/failure → existing emergency-close state machine을 정확히 1회 호출', async () => {
     const deps = makeDeps();
