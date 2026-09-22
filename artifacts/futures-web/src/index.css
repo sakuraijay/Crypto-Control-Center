@@ -342,3 +342,8 @@ button:focus-visible, a:focus-visible, summary:focus-visible, select:focus-visib
 .ccc-ai-events { font-size: 12px; color: #9aabb4; }.ccc-ai-events summary { cursor: pointer; padding: 10px 0; min-height: 44px; }.ccc-ai-events summary:focus-visible { outline: 2px solid #8be0b4; outline-offset: 3px; border-radius: 4px; }
 .ccc-ai-events ol { display: grid; gap: 8px; list-style: none; padding-block: 8px; }.ccc-ai-events li { display: flex; gap: 16px; }.ccc-ai-events time { font-variant-numeric: tabular-nums; }
 @media (max-width: 1020px) { .ccc-ai-activity-heading { align-items: flex-start; flex-direction: column; }.ccc-ai-stages { grid-template-columns: repeat(2,minmax(0,1fr)); }.ccc-ai-symbols { grid-template-columns: 1fr; } }
+
+.ccc-metric > .ccc-initial-capital { margin-top: 15px; color: #a6b9ad; font-size: 12px; }
+.ccc-initial-capital strong { font-weight: 600; font-variant-numeric: tabular-nums; }
+.ccc-metric > .ccc-current-capital-label { margin-top: 13px; color: #b2bcc2; }
+.ccc-current-capital-label + .ccc-metric-value { margin-top: 4px; }

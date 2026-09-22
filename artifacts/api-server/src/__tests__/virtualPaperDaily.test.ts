@@ -25,7 +25,7 @@ describe('explicit aggressive PAPER experiment',()=>{
   expect(evaluateDailyPaperRisk(riskInput()).entryAllowed).toBe(true);
   expect(evaluateDailyPaperRisk({...riskInput(),dailyLossAware:-40}).state).toBe('DAILY_LOSS_LOCKED');
   expect(evaluateDailyPaperRisk({...riskInput(),locks:{...EMPTY_LOCKS,hardStopReason:'existing'}}).entryAllowed).toBe(false);
-  expect(evaluateDailyPaperRisk({...riskInput(),entries:24}).entryAllowed).toBe(false);
+  expect(evaluateDailyPaperRisk({...riskInput(),entries:32}).entryAllowed).toBe(false);
   expect(evaluateDailyPaperRisk({...riskInput(),held:1}).entryAllowed).toBe(false);
   expect(evaluateDailyPaperRisk({...riskInput(),fresh:false}).entryAllowed).toBe(false);
  });

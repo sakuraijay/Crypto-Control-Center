@@ -10,10 +10,11 @@ import { VirtualPerformanceChart } from './VirtualPerformanceChart';
 import { VirtualTradeJournal } from './VirtualTradeJournal';
 import { AiAnalysisActivity } from './AiAnalysisActivity';
 
-function Metric({ label, value, unit = 'USDC', note, icon: Icon, tone = '', featured = false }: {
-  label: string; value: string; unit?: string; note: string; icon: typeof Wallet; tone?: string; featured?: boolean;
+function Metric({ label, value, unit = 'USDC', note, icon: Icon, tone = '', featured = false, initial }: {
+  label: string; value: string; unit?: string; note: string; icon: typeof Wallet; tone?: string; featured?: boolean; initial?: string;
 }) {
   return <div className={`ccc-metric ${featured ? 'ccc-metric-featured' : ''}`}><div className="ccc-metric-label"><span>{label}</span><Icon size={17} /></div>
+    {initial !== undefined && <><p className="ccc-initial-capital">최초 시작금액 <strong data-testid="metric-initial-capital">{initial}</strong> USDC</p><p className="ccc-current-capital-label">현재 가상 평가자산</p></>}
     <div className={`ccc-metric-value ${tone}`} data-testid={`metric-${label}`}>{value}<small>{unit}</small></div><p>{note}</p></div>;
 }
 
@@ -59,10 +60,10 @@ export function VirtualPaper400Card() {
     <div className="ccc-page-heading"><div><div className="ccc-heading-meta"><span className="ccc-eyebrow">YOUR TRADING, AT A GLANCE</span><span className="ccc-paper-tag">PAPER ACCOUNT</span></div><h1>자동매매 오버뷰<span className="ccc-title-dot">.</span></h1><p>복잡한 시장 속에서도, 내 자산과 다음 판단은 명확하게.</p></div>
       <div className="ccc-page-actions"><button className="ccc-icon-button" aria-label="서버 상태 새로고침" disabled={refreshing} onClick={()=>void reload()}><RefreshCw size={17} className={refreshing?'animate-spin':''} /></button><VirtualSessionControls /></div>
     </div>
-    <div className="ccc-session-strip"><span className={`ccc-status-pill ${active&&!blocked?'is-active':blocked?'is-warning':''}`}><i />{status}</span><span>Virtual 400 <span className="ccc-strip-divider">/</span> 실자금 사용 없음</span><span className="ccc-session-time"><Clock3 size={13} />{fresh ? `${timestamp(runtime?.at)} PHT 기준` : '최신 상태 확인 대기'}</span></div>
+    <div className="ccc-session-strip"><span className={`ccc-status-pill ${active&&!blocked?'is-active':blocked?'is-warning':''}`}><i />{status}</span><span>가상 계좌 <span className="ccc-strip-divider">/</span> 실자금 사용 없음</span><span className="ccc-session-time"><Clock3 size={13} />{fresh ? `${timestamp(runtime?.at)} PHT 기준` : '최신 상태 확인 대기'}</span></div>
     {error && <div role="alert" className="ccc-inline-alert"><WifiOff size={17} />{error}</div>}
     <div className="ccc-metric-grid">
-      <Metric label="가상 평가자산" value={amount(account?.equityUsd)} note="가상 정산 잔액 + 미실현 순손익" icon={Wallet} featured />
+      <Metric label="가상 평가자산" value={amount(account?.equityUsd)} initial={amount(account?.ledger.initialEquityUsd)} note={account ? `추가 입금 ${amount(account.ledger.netContributionsUsd ?? 0, true)} USDC · 손익과 별도` : '시작금액·추가 입금 확인 대기'} icon={Wallet} featured />
       <Metric label="비용 차감 실현 손익" value={amount(account?.ledger.realizedNetPnlUsd,true)} note={account?`${account.ledger.settlementCount}건 정산 · 추정 비용 반영`:'정산 기록 확인 대기'} icon={CircleDollarSign} tone={pnlTone(account?.ledger.realizedNetPnlUsd)} />
       <Metric label="미실현 순손익 추정" value={amount(account?.unrealizedNetPnlUsd,true)} note="현재 보유 포지션의 평가 손익" icon={Activity} tone={pnlTone(account?.unrealizedNetPnlUsd)} />
       <Metric label="보유 포지션" value={account?String(account.held.length):'—'} unit="개" note="진입과 보호는 서버에서 실행" icon={Layers3} />
@@ -71,9 +72,9 @@ export function VirtualPaper400Card() {
     <div className="ccc-overview-grid"><VirtualPerformanceChart runtime={runtime} fresh={fresh} />
       <section className="ccc-panel ccc-strategy-panel" aria-label="자동매매 상태와 설정"><div className="ccc-panel-heading"><div><p className="ccc-eyebrow">AUTOMATION</p><h2>자동매매 상태</h2></div><span className={`ccc-radar-icon ${active&&!blocked?'is-active':''}`}><Radar size={20} /></span></div>
         <div className="ccc-strategy-message"><h3>{headline}</h3><p>{stopped?'기존 포지션의 손절·익절 보호는 계속됩니다.':explainReason(runtime?.reason)}</p></div>
-        {policy ? <div className="ccc-policy" data-testid="virtual-active-policy"><div className="ccc-policy-name"><SlidersHorizontal size={15} /><strong>{policy.version==='virtual400-daily/v3'?'적극적 PAPER 시험':['virtual400-active/v1','virtual400-active/v2'].includes(policy.version)?'적극적 가상 매매':'저장된 운용 설정'}</strong><span>서버 적용</span></div><dl><div><dt>1회 위험 예산</dt><dd>{policy.riskPerTradePct}%</dd></div><div><dt>레버리지 {policy.minLeverage ? '범위' : '상한'}</dt><dd>{policy.minLeverage ? `${policy.minLeverage}–${policy.maxLeverage}x` : `최대 ${policy.maxLeverage}x`}</dd></div><div><dt>진입 간격</dt><dd>{policy.cooldownMinutes}분</dd></div></dl><p className="ccc-policy-symbols">{policy.symbols.join(' · ')}</p></div>
+        {policy ? <div className="ccc-policy" data-testid="virtual-active-policy"><div className="ccc-policy-name"><SlidersHorizontal size={15} /><strong>{['virtual400-daily/v3','virtual400-daily/v4'].includes(policy.version)?'적극적 PAPER 시험':['virtual400-active/v1','virtual400-active/v2'].includes(policy.version)?'적극적 가상 매매':'저장된 운용 설정'}</strong><span>서버 적용</span></div><dl><div><dt>1회 위험 예산</dt><dd>{policy.riskPerTradePct}%</dd></div><div><dt>레버리지 {policy.minLeverage ? '범위' : '상한'}</dt><dd>{policy.minLeverage ? `${policy.minLeverage}–${policy.maxLeverage}x` : `최대 ${policy.maxLeverage}x`}</dd></div><div><dt>진입 간격</dt><dd>{policy.cooldownMinutes}분</dd></div></dl><p className="ccc-policy-symbols">{policy.symbols.join(' · ')}</p></div>
         : <div className="ccc-callout">적용된 설정을 확인하고 있습니다. 기본값으로 대체하지 않습니다.</div>}
-        {policy?.version==='virtual400-daily/v3' && <p className="ccc-callout">미검증 모멘텀 시험 · 하루 최대 24회 · 일손실 10% 제한. 일반 전략 성과와 구분하며 손실도 그대로 기록합니다.</p>}
+        {policy && ['virtual400-daily/v3','virtual400-daily/v4'].includes(policy.version) && <p className="ccc-callout">미검증 모멘텀 시험 · 하루 최대 {policy.maxDailyEntries ?? 24}회 · 일손실 10% 제한. 일반 전략 성과와 구분하며 손실도 그대로 기록합니다.</p>}
         <VirtualTradingModeControls />
         <div className="ccc-automation-note"><ShieldCheck size={15} /><span>활성 세션은 웹페이지를 닫아도 서버에서 계속 실행됩니다.</span></div>
       </section>

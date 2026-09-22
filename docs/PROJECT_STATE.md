@@ -1,3 +1,5 @@
+> v17 변경: 기존 가상계좌 사용자승인100 USDC 단발 추가입금 + PAPER45분/최대32회. 시작400과 추가100/매매손익을 분리하고 대시보드 초기금액→현재평가액 순서로 표시한다. 새입금을 수익·재충전·무료500정책 구현으로 취급하지 않는다. 실자금 준비 개발 병행은 유지한다. CI/게시/운영입금 확인은 아직 pending.
+
 # Crypto Control Center — Project State Index
 
 > **운영 주의:** 이 문서는 실시간 상태 스냅샷이 아니다. 현재 HEAD/CI/배포/PAPER/GMX/Owner Approval/Canary readiness 값은 매 실행마다 authoritative source에서 새로 읽어야 한다. 과거 이 파일에 기록되어 있던 진행률, 배포 SHA, 플래그 기본값, 테스트 개수, readiness 상태는 역사 기록일 뿐 현재 상태로 사용하지 않는다.
