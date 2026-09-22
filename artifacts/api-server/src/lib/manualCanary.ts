@@ -602,7 +602,7 @@ export async function runCanaryPreflight(
 
 // ── Daily durable claim ──────────────────────────────────────────────────────
 /** 손상(파싱 실패)은 null과 구분 — 손상 시 어떤 실행 경로도 진행 금지 (fail-closed) */
-async function loadDailyState(deps: Pick<ManualCanaryPreflightDeps, 'loadState'>): Promise<
+async function loadDailyState(deps: Pick<ManualCanaryPreflightDeps, 'loadState' | 'now'>): Promise<
   { corrupt: false; state: DailyCanaryState | null; raw: string | null } | { corrupt: true; state: null; raw: string | null }
 > {
   const raw = await deps.loadState(STATE_KEY_DAILY);
@@ -613,10 +613,17 @@ async function loadDailyState(deps: Pick<ManualCanaryPreflightDeps, 'loadState'>
       value === null || typeof value === 'string';
     const validIsoTime = (value: unknown): value is string =>
       typeof value === 'string' && Number.isFinite(Date.parse(value));
+    const validCalendarDay = (value: unknown): value is string => {
+      if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+      const parsedDay = new Date(`${value}T00:00:00.000Z`);
+      return Number.isFinite(parsedDay.getTime()) && parsedDay.toISOString().slice(0, 10) === value;
+    };
     if (typeof parsed !== 'object'
         || parsed === null
-        || typeof parsed.dayKey !== 'string'
-        || !/^\d{4}-\d{2}-\d{2}$/.test(parsed.dayKey)
+        || !validCalendarDay(parsed.dayKey)
+        // A future PHT day can never be a legitimate persisted predecessor.
+        // Treating it as merely "not today" would reset used opens to zero.
+        || parsed.dayKey > manilaDayKey(deps.now())
         || !Number.isSafeInteger(parsed.opens)
         || (parsed.opens as number) < 0
         || (parsed.opens as number) > MANUAL_CANARY_CAPS.maxOrdersPerDay
