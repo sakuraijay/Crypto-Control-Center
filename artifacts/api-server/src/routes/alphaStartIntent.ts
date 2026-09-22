@@ -209,12 +209,19 @@ router.get('/data/virtual-paper-learning-dataset', requireOperatorAuth, async (_
       const rows = await tx.select().from(tradesTable).where(eq(tradesTable.strategy, identity.strategyTag));
       const raw = await readWorkerStateValue(virtualPaper400RiskKey(identity), tx);
       if (!raw) throw new Error('RISK_EVIDENCE_UNAVAILABLE');
-      evaluateVirtualPaper400Account({session:identity,rows,previous:parseVirtualPaper400RiskState(raw,identity),now:new Date(),quote:()=>null,aggressiveDaily:true});
+      const account = evaluateVirtualPaper400Account({
+        session:identity,rows,previous:parseVirtualPaper400RiskState(raw,identity),
+        now:new Date(),quote:()=>null,aggressiveDaily:true,
+      });
       const ids = [...new Set(rows.filter(r=>r.action==='OPEN').map(r=>r.openDecisionId).filter((id):id is string=>!!id))];
       const records = ids.length ? await tx.select().from(workerStateTable).where(inArray(workerStateTable.key,ids)) : [];
       const audits = new Map<string,unknown>();
       for (const record of records) { try { audits.set(record.key,JSON.parse(record.value)); } catch { /* explicitly excluded by dataset validation */ } }
-      return buildPaperLearningDataset(identity,rows,audits);
+      return buildPaperLearningDataset(identity,rows,audits,{
+        status:'PASS',
+        validator:'evaluateVirtualPaper400Account',
+        settlementRowCount:account.ledger.settlementCount,
+      });
     }, {isolationLevel:'repeatable read',accessMode:'read only'});
     return res.json({ok:true,...dataset});
   } catch { return res.status(503).json({ok:false,code:'PAPER_LEARNING_EVIDENCE_UNAVAILABLE'}); }
