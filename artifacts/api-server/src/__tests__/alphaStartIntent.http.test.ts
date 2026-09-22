@@ -65,6 +65,7 @@ import { WORKER_POLICY_CONTEXT_KEY } from '../workers/workerPolicyContext';
 import { VIRTUAL_PAPER_400_SESSION_STATE_KEY, buildActiveVirtualPaper400SessionState } from '../workers/virtualPaper400SessionState';
 import { virtualPaper400Activity } from '../workers/virtualPaper400Activity';
 import { initialVirtualPaper400RiskState, virtualPaper400RiskKey } from '../workers/virtualPaper400Accounting';
+import { db } from '@workspace/db';
 
 const app = express();
 app.use(express.json());
@@ -224,6 +225,49 @@ describe('alpha start intent HTTP boundary', () => {
 });
 
 describe('virtual PAPER 400 session HTTP boundary', () => {
+  it('authenticates and strictly validates read-only walk-forward count parameters', async () => {
+    const url='/api/data/virtual-paper-learning-walk-forward';
+    expect((await request(app).get(url)).status).toBe(401);
+    const missing=await request(app).get(url).set('x-operator-pin','654321');
+    expect(missing.status).toBe(400);
+    expect(missing.body.code).toBe('PAPER_WALK_FORWARD_PARAMETERS_INVALID');
+    const zero=await request(app).get(url)
+      .query({initialTrainCount:'0',validationCount:'1',testCount:'1',stepCount:'1'})
+      .set('x-operator-pin','654321');
+    expect(zero.status).toBe(400);
+    const decimal=await request(app).get(url)
+      .query({initialTrainCount:'1.5',validationCount:'1',testCount:'1',stepCount:'1'})
+      .set('x-operator-pin','654321');
+    expect(decimal.status).toBe(400);
+    const unknown=await request(app).get(url)
+      .query({initialTrainCount:'1',validationCount:'1',testCount:'1',stepCount:'1',promote:'true'})
+      .set('x-operator-pin','654321');
+    expect(unknown.status).toBe(400);
+
+    const state=buildActiveVirtualPaper400SessionState('walk-forward-http',new Date('2026-09-20T00:00:00Z'));
+    memory.rows.set(VIRTUAL_PAPER_400_SESSION_STATE_KEY,JSON.stringify(state));
+    memory.rows.set(virtualPaper400RiskKey(state.session),JSON.stringify(initialVirtualPaper400RiskState(state.session)));
+    const before=[...memory.rows];
+    const valid=await request(app).get(url)
+      .query({initialTrainCount:'1',validationCount:'1',testCount:'1',stepCount:'1'})
+      .set('x-operator-pin','654321');
+    expect(valid.status).toBe(200);
+    expect(valid.body).toMatchObject({
+      ok:true,status:'OUTCOME_FOLDS_UNAVAILABLE',outcomeFoldsReady:false,
+      unavailableReasons:['INSUFFICIENT_SAMPLES'],foldCount:0,folds:[],
+      semantics:{
+        descriptiveOnly:true,executionAuthorized:false,modelEvaluated:false,
+        outOfSampleStrategyValidated:false,trainingPerformed:false,
+        tuningPerformed:false,automaticPromotionAllowed:false,
+      },
+    });
+    expect(valid.headers['cache-control']).toBe('no-store');
+    expect([...memory.rows]).toEqual(before);
+    expect(vi.mocked(db.transaction).mock.calls.at(-1)?.[1]).toEqual({
+      isolationLevel:'repeatable read',accessMode:'read only',
+    });
+  });
+
   it('requires authenticated explicit chronological boundaries for the read-only learning validation', async () => {
     const url='/api/data/virtual-paper-learning-validation';
     expect((await request(app).get(url)).status).toBe(401);

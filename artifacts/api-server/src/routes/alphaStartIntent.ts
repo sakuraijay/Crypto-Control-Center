@@ -1,5 +1,6 @@
 import { buildPaperLearningDataset } from '../workers/virtualPaperLearningDataset';
 import { evaluatePaperLearningValidation } from '../workers/virtualPaperLearningValidation';
+import { evaluatePaperLearningWalkForward } from '../workers/virtualPaperLearningWalkForward';
 import { evaluateVirtualPaper400Account, parseVirtualPaper400RiskState, virtualPaper400RiskKey } from '../workers/virtualPaper400Accounting';
 import { DAILY_ENTRY_OPTIONS, VIRTUAL_ENTRY_OPTIONS } from '../workers/virtualPaperTradingMode';
 import { randomUUID } from 'node:crypto';
@@ -257,6 +258,36 @@ router.get('/data/virtual-paper-learning-validation', requireOperatorAuth, async
     return res.json({ok:true,...report});
   } catch {
     return res.status(503).json({ok:false,code:'PAPER_LEARNING_VALIDATION_UNAVAILABLE'});
+  }
+});
+
+router.get('/data/virtual-paper-learning-walk-forward', requireOperatorAuth, async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const allowed = ['initialTrainCount', 'validationCount', 'testCount', 'stepCount'] as const;
+  if (Object.keys(req.query).some(key => !allowed.includes(key as typeof allowed[number]))) {
+    return res.status(400).json({ok:false,code:'PAPER_WALK_FORWARD_PARAMETERS_INVALID'});
+  }
+  const parsed = Object.fromEntries(allowed.map(key => {
+    const raw = req.query[key];
+    const value = typeof raw === 'string' && /^[1-9]\d*$/.test(raw) ? Number(raw) : NaN;
+    return [key, value];
+  })) as Record<typeof allowed[number], number>;
+  if (Object.values(parsed).some(value => !Number.isSafeInteger(value) || value <= 0 || value > 100_000)) {
+    return res.status(400).json({ok:false,code:'PAPER_WALK_FORWARD_PARAMETERS_INVALID'});
+  }
+  try {
+    const report = await db.transaction(async tx => {
+      const dataset = await readPaperLearningDataset(tx);
+      return evaluatePaperLearningWalkForward({
+        datasetSha256:dataset.datasetSha256,
+        samples:dataset.samples,
+        config:parsed,
+        nowMs:Date.now(),
+      });
+    }, {isolationLevel:'repeatable read',accessMode:'read only'});
+    return res.json({ok:true,...report});
+  } catch {
+    return res.status(503).json({ok:false,code:'PAPER_WALK_FORWARD_EVIDENCE_UNAVAILABLE'});
   }
 });
 
