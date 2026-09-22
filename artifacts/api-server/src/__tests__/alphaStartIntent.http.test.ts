@@ -48,6 +48,7 @@ vi.mock('@workspace/db', () => {
       insert: vi.fn(() => insertChain()),
     },
     workerStateTable: { key: 'key', value: 'value', updatedAt: 'updatedAt' },
+    tradesTable: { strategy: 'strategy' },
   };
 });
 
@@ -63,6 +64,7 @@ import { ALPHA_START_INTENT_KEY } from '../workers/alphaStartIntent';
 import { WORKER_POLICY_CONTEXT_KEY } from '../workers/workerPolicyContext';
 import { VIRTUAL_PAPER_400_SESSION_STATE_KEY, buildActiveVirtualPaper400SessionState } from '../workers/virtualPaper400SessionState';
 import { virtualPaper400Activity } from '../workers/virtualPaper400Activity';
+import { initialVirtualPaper400RiskState, virtualPaper400RiskKey } from '../workers/virtualPaper400Accounting';
 
 const app = express();
 app.use(express.json());
@@ -222,6 +224,45 @@ describe('alpha start intent HTTP boundary', () => {
 });
 
 describe('virtual PAPER 400 session HTTP boundary', () => {
+  it('exports learning provenance only after repeatable-read ledger validation and fails closed otherwise', async () => {
+    const state = buildActiveVirtualPaper400SessionState('learning-http', new Date('2026-09-22T08:00:00Z'));
+    memory.rows.set(VIRTUAL_PAPER_400_SESSION_STATE_KEY, JSON.stringify(state));
+    const riskKey = virtualPaper400RiskKey(state.session);
+    memory.rows.set(riskKey, JSON.stringify(initialVirtualPaper400RiskState(state.session)));
+
+    const ok = await request(app).get('/api/data/virtual-paper-learning-dataset')
+      .set('x-operator-pin', '654321');
+    expect(ok.status).toBe(200);
+    expect(ok.body).toMatchObject({
+      reviewedOpenCandidateCount: 0,
+      settlementRowCount: 0,
+      sampleExcludedTotal: 0,
+      exclusionRate: 0,
+      eligiblePeriods: {
+        featureAt: { first: null, last: null },
+        openedAt: { first: null, last: null },
+        labelAvailableAt: { first: null, last: null },
+      },
+      ledgerReconciliation: {
+        status: 'PASS',
+        validator: 'evaluateVirtualPaper400Account',
+        scope: {
+          sessionId: state.session.sessionId,
+          strategyTag: state.session.strategyTag,
+          tradeRowCount: 0,
+          reviewedOpenCandidateCount: 0,
+          settlementRowCount: 0,
+        },
+      },
+    });
+
+    memory.rows.set(riskKey, '{"invalid":true}');
+    const failed = await request(app).get('/api/data/virtual-paper-learning-dataset')
+      .set('x-operator-pin', '654321');
+    expect(failed.status).toBe(503);
+    expect(failed.body).toEqual({ok:false,code:'PAPER_LEARNING_EVIDENCE_UNAVAILABLE'});
+  });
+
   it('exposes only the matching session activity through observational GET without financial writes', async () => {
     const session = buildActiveVirtualPaper400SessionState('activity-http', new Date());
     memory.rows.set(VIRTUAL_PAPER_400_SESSION_STATE_KEY, JSON.stringify(session));
