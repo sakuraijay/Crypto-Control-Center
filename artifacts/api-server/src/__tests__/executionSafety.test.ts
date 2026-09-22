@@ -169,18 +169,23 @@ describe('legacy SubaccountRouter 주문 경로 — Production 차단', () => {
 });
 
 describe('#142 Manual Canary execution evidence integration', () => {
-  it('production activator binds matching market/direction and enables the cached stop gate', async () => {
-    const nowMs = Date.now();
-    const at = new Date(nowMs).toISOString();
-    const market = '0x' + 'b'.repeat(40);
-    const expected = {
-      market,
-      isLong: true,
-      orderType: 'MarketIncrease' as const,
-      notionalUsd: 20,
-    };
-    const snapshot = {
-      ...expected,
+  const executionSnapshot = (
+    nowMs: number,
+    overrides: Partial<{
+      market: string;
+      isLong: boolean;
+      orderType: 'MarketIncrease' | 'MarketDecrease';
+      notionalUsd: number;
+      observedAtMs: number;
+    }> = {},
+  ) => {
+    const observedAtMs = overrides.observedAtMs ?? nowMs;
+    const at = new Date(observedAtMs).toISOString();
+    return {
+      market: overrides.market ?? '0x' + 'b'.repeat(40),
+      isLong: overrides.isLong ?? true,
+      orderType: overrides.orderType ?? 'MarketIncrease' as const,
+      notionalUsd: overrides.notionalUsd ?? 20,
       positionFeeUsd: 0.05,
       executionFeeUsd: 0.05,
       estimatedPriceImpactUsd: 0.02,
@@ -195,8 +200,20 @@ describe('#142 Manual Canary execution evidence integration', () => {
       blockNumber: 123,
       apiTimestamp: at,
       fetchedAt: at,
-      expiresAt: new Date(nowMs + 60_000).toISOString(),
+      expiresAt: new Date(observedAtMs + 60_000).toISOString(),
     };
+  };
+
+  it('production activator preserves the exact evidence through stop refresh', async () => {
+    const nowMs = Date.now();
+    const market = '0x' + 'b'.repeat(40);
+    const expected = {
+      market,
+      isLong: true,
+      orderType: 'MarketIncrease' as const,
+      notionalUsd: 20,
+    };
+    const snapshot = executionSnapshot(nowMs, { market });
     const {
       __setStopExecutionAvailabilityForTests,
       isStopExecutionAvailable,
@@ -225,8 +242,99 @@ describe('#142 Manual Canary execution evidence integration', () => {
     expect(isStopExecutionAvailable()).toBe(true);
     expect(getExecutionEligibleCostEvidence(nowMs)).toMatchObject({
       fresh: true,
-      evidence: { market, isLong: true },
+      evidence: {
+        market,
+        isLong: true,
+        orderType: 'MarketIncrease',
+        notionalUsd: 20,
+        observedAtMs: nowMs,
+      },
     });
+  });
+
+  it('production activator accepts an exact evidence rewrite during stop refresh', async () => {
+    const nowMs = Date.now();
+    const market = '0x' + 'b'.repeat(40);
+    const expected = {
+      market,
+      isLong: true,
+      orderType: 'MarketIncrease' as const,
+      notionalUsd: 20,
+    };
+    const snapshot = executionSnapshot(nowMs, { market });
+    const {
+      __resetExecutionEligibleCostEvidenceForTests,
+      recordExecutionEligibleCostEvidence,
+    } = await import('../lib/costSnapshot');
+    const { activateManualCanaryExecutionEvidence } =
+      await import('../lib/manualCanaryExecutionEvidence');
+
+    __resetExecutionEligibleCostEvidenceForTests();
+    const activated = await activateManualCanaryExecutionEvidence(
+      snapshot,
+      expected,
+      nowMs,
+      {
+        refreshStopCapability: async () => {
+          expect(recordExecutionEligibleCostEvidence(snapshot, expected, nowMs)).toBe(true);
+          return { available: true, reasons: [] };
+        },
+        isStopCapabilityAvailable: () => true,
+      },
+    );
+
+    expect(activated).toBe(true);
+  });
+
+  it.each([
+    ['order type', { orderType: 'MarketDecrease' as const }],
+    ['notional', { notionalUsd: 10 }],
+    ['observation time', { observedAtMs: Date.now() - 1_000 }],
+  ])('production activator rejects same-market/direction %s evidence overwrite', async (
+    _name,
+    overwrite,
+  ) => {
+    const nowMs = Date.now();
+    const market = '0x' + 'b'.repeat(40);
+    const expected = {
+      market,
+      isLong: true,
+      orderType: 'MarketIncrease' as const,
+      notionalUsd: 20,
+    };
+    const snapshot = executionSnapshot(nowMs, { market });
+    const {
+      __resetExecutionEligibleCostEvidenceForTests,
+      recordExecutionEligibleCostEvidence,
+    } = await import('../lib/costSnapshot');
+    const { activateManualCanaryExecutionEvidence } =
+      await import('../lib/manualCanaryExecutionEvidence');
+
+    __resetExecutionEligibleCostEvidenceForTests();
+    const activated = await activateManualCanaryExecutionEvidence(
+      snapshot,
+      expected,
+      nowMs,
+      {
+        refreshStopCapability: async () => {
+          const replacement = executionSnapshot(nowMs, { market, ...overwrite });
+          expect(recordExecutionEligibleCostEvidence(
+            replacement,
+            {
+              market,
+              isLong: true,
+              orderType: replacement.orderType,
+              notionalUsd: replacement.notionalUsd,
+            },
+            nowMs,
+          )).toBe(true);
+          return { available: true, reasons: [] };
+        },
+        isStopCapabilityAvailable: () => true,
+      },
+    );
+
+    expect(activated).toBe(false);
   });
 });
 

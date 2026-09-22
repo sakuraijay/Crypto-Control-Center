@@ -197,6 +197,8 @@ export interface LiveCostFetchers {
 export interface ExecutionEligibleCostEvidence {
   readonly market: string;
   readonly isLong: boolean;
+  readonly orderType: CostSnapshotExpectation['orderType'];
+  readonly notionalUsd: number;
   readonly observedAtMs: number;
   readonly effectiveRoundTripCostUsd: number;
 }
@@ -213,6 +215,8 @@ export function recordExecutionEligibleCostEvidence(
   executionEligibleEvidence = Object.freeze({
     market: snap.market,
     isLong: snap.isLong,
+    orderType: snap.orderType,
+    notionalUsd: snap.notionalUsd,
     observedAtMs: Date.parse(snap.apiTimestamp as string),
     effectiveRoundTripCostUsd: valid.effectiveRoundTripCostUsd,
   });
