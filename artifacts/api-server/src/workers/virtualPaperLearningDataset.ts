@@ -31,7 +31,10 @@ export function buildPaperLearningDataset(
 ) {
   const excluded: { openTradeId: string; reason: string }[] = [];
   const samples: Array<Record<string, any> & {
-    positionId: string; featureAt: string; openedAt: string; labelAvailableAt: string;
+    sampleId: string; positionId: string; featureAt: string; openedAt: string; labelAvailableAt: string;
+    labels: Record<string, any> & {
+      grossPnlUsd: number; netPnlUsd: number; estimatedCostsUsd: number; settlementIds: string[];
+    };
   }> = [];
   const opens = rows.filter(r => r.strategy === session.strategyTag && r.action === 'OPEN')
     .sort((a,b) => +new Date(a.timestamp)-+new Date(b.timestamp) || a.id.localeCompare(b.id));

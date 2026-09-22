@@ -224,6 +224,43 @@ describe('alpha start intent HTTP boundary', () => {
 });
 
 describe('virtual PAPER 400 session HTTP boundary', () => {
+  it('requires authenticated explicit chronological boundaries for the read-only learning validation', async () => {
+    const url='/api/data/virtual-paper-learning-validation';
+    expect((await request(app).get(url)).status).toBe(401);
+    const missing=await request(app).get(url).set('x-operator-pin','654321');
+    expect(missing.status).toBe(400);
+    expect(missing.body.code).toBe('PAPER_LEARNING_BOUNDARIES_REQUIRED');
+
+    const state=buildActiveVirtualPaper400SessionState('validation-http',new Date('2026-09-20T00:00:00Z'));
+    memory.rows.set(VIRTUAL_PAPER_400_SESSION_STATE_KEY,JSON.stringify(state));
+    memory.rows.set(virtualPaper400RiskKey(state.session),JSON.stringify(initialVirtualPaper400RiskState(state.session)));
+    const explicit=await request(app).get(url)
+      .query({validationStartAt:'2026-09-20T01:00:00.000Z',testStartAt:'2026-09-20T02:00:00.000Z'})
+      .set('x-operator-pin','654321');
+    expect(explicit.status).toBe(200);
+    expect(explicit.body).toMatchObject({
+      ok:true,status:'PARTITION_BOUNDARIES_UNAVAILABLE',partitionBoundariesReady:false,
+      unavailableReasons:['TEST_SEGMENT_EMPTY','TRAIN_SEGMENT_EMPTY','VALIDATION_SEGMENT_EMPTY'],
+      partitions:{train:{labels:{grossPnlUsd:null,netPnlUsd:null,estimatedCostsUsd:null}}},
+      costEvidence:{storedLabels:{status:'UNAVAILABLE',reason:'NO_RETAINED_SAMPLES_OR_INVALID_LABELS'}},
+      trainingPerformed:false,tuningPerformed:false,automaticPromotionAllowed:false,
+      downstreamEvaluation:{
+        walkForward:{status:'NOT_EVALUATED',executed:false},
+        outOfSample:{status:'NOT_EVALUATED',evaluated:false},
+        statisticalSampleSufficiency:{status:'NOT_EVALUATED',sufficient:false},
+      },
+    });
+    expect(explicit.body).not.toHaveProperty('ready');
+    const malformed=await request(app).get(url)
+      .query({validationStartAt:'not-a-date',testStartAt:'2026-09-20T02:00:00.000Z'})
+      .set('x-operator-pin','654321');
+    expect(malformed.status).toBe(200);
+    expect(malformed.body).toMatchObject({
+      status:'PARTITION_BOUNDARIES_UNAVAILABLE',partitionBoundariesReady:false,
+      unavailableReasons:['VALIDATION_START_INVALID'],
+    });
+  });
+
   it('exports learning provenance only after repeatable-read ledger validation and fails closed otherwise', async () => {
     const state = buildActiveVirtualPaper400SessionState('learning-http', new Date('2026-09-22T08:00:00Z'));
     memory.rows.set(VIRTUAL_PAPER_400_SESSION_STATE_KEY, JSON.stringify(state));
