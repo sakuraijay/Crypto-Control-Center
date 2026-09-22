@@ -7,6 +7,7 @@
  * signing, authorization, or real order submission is reachable from this file.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { pad } from 'viem';
 
 type Row = Record<string, unknown>;
 type Condition =
@@ -205,11 +206,15 @@ const eventState = vi.hoisted(() => ({
   },
 }));
 
-vi.mock('../lib/gmxOrderEvents', () => ({
-  classifyOrderResolutionLogs: vi.fn(() => eventState.resolution),
-  extractOrderKeyFromReceiptLogs: vi.fn(() => ({ ok: false, reason: 'not_found' })),
-  resolveGmxEventEmitterAddress: vi.fn(() => ({ ok: true, address: EMITTER })),
-}));
+vi.mock('../lib/gmxOrderEvents', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../lib/gmxOrderEvents')>();
+  return {
+    ...actual,
+    classifyOrderResolutionLogs: vi.fn(() => eventState.resolution),
+    extractOrderKeyFromReceiptLogs: vi.fn(() => ({ ok: false, reason: 'not_found' })),
+    resolveGmxEventEmitterAddress: vi.fn(() => ({ ok: true, address: EMITTER })),
+  };
+});
 vi.mock('../lib/intentReconciler', () => ({
   createViemOnchainClient: vi.fn(() => { throw new Error('network forbidden in integration test'); }),
 }));
@@ -232,6 +237,14 @@ import {
   type ProtectionSubmitRequest,
 } from '../workers/protectionExecutor';
 import { getProtection } from '../lib/protectionOrders';
+import {
+  evaluateCloseSettlement,
+  type CloseSettlementBinding,
+  type CloseSettlementObservation,
+} from '../lib/closeSettlementEvidence';
+import { computeNetPnl } from '../lib/tradeSettlement';
+import { WETH_ARBITRUM } from '../lib/relayFeeQuote';
+import { mkEventLog1, mkEventLog2 } from './helpers/eventLog2Fixture';
 import type { GmxApiTransport } from '../lib/gmxApiTransport';
 
 const INTENT_ID = 'intent:open:ai/9dc4036f-9083-4670-b28a-e69dfce5fdc3';
@@ -242,7 +255,129 @@ const POSITION_KEY = `0x${'c'.repeat(64)}`;
 const MARKET = `0x${'d'.repeat(40)}`;
 const COLLATERAL = `0x${'6'.repeat(40)}`;
 const EMITTER = `0x${'e'.repeat(40)}`;
+const ACCOUNT = `0x${'1'.repeat(40)}`;
+const CLOSE_ORDER_KEY = `0x${'f'.repeat(64)}`;
+const CLOSE_TX_HASH = `0x${'9'.repeat(64)}`;
+const CLOSE_BLOCK = 200n;
 const NOW = new Date('2026-08-30T12:00:00.000Z');
+const usd30 = (value: number): bigint =>
+  BigInt(Math.round(value * 1_000_000)) * 10n ** 24n;
+
+function closeBinding(): CloseSettlementBinding {
+  return {
+    tradeId: 'settlement:close:intent:close:fixture',
+    intentId: 'intent:close:fixture',
+    relayTaskId: 'task-close-fixture',
+    accountAddress: ACCOUNT,
+    marketAddress: MARKET,
+    collateralTokenAddress: COLLATERAL,
+    positionKey: POSITION_KEY,
+    isLong: true,
+    preCloseSizeUsd30: usd30(42.5),
+    requestedReductionUsd30: usd30(42.5),
+    expectedOrderKey: CLOSE_ORDER_KEY,
+    expectedTxHash: CLOSE_TX_HASH,
+    expectedEmitterAddress: EMITTER,
+    expectedBlockNumber: CLOSE_BLOCK,
+  };
+}
+
+function closeObservation(): CloseSettlementObservation {
+  const terminal = mkEventLog2({
+    name: 'OrderExecuted',
+    orderKey: CLOSE_ORDER_KEY,
+    emitter: EMITTER,
+    account: ACCOUNT,
+    txHash: CLOSE_TX_HASH,
+    blockNumber: CLOSE_BLOCK.toString(),
+  });
+  const decrease = mkEventLog1({
+    name: 'PositionDecrease',
+    topic1: pad(ACCOUNT as `0x${string}`, { size: 32 }),
+    emitter: EMITTER,
+    txHash: CLOSE_TX_HASH,
+    blockNumber: CLOSE_BLOCK.toString(),
+    fields: {
+      addressItems: [
+        { key: 'account', value: ACCOUNT as `0x${string}` },
+        { key: 'market', value: MARKET as `0x${string}` },
+        { key: 'collateralToken', value: COLLATERAL as `0x${string}` },
+      ],
+      uintItems: [
+        { key: 'sizeInUsd', value: 0n },
+        { key: 'sizeDeltaUsd', value: usd30(42.5) },
+      ],
+      intItems: [
+        { key: 'basePnlUsd', value: usd30(10) },
+        { key: 'priceImpactUsd', value: -usd30(0.2) },
+      ],
+      boolItems: [{ key: 'isLong', value: true }],
+      bytes32Items: [
+        { key: 'orderKey', value: CLOSE_ORDER_KEY as `0x${string}` },
+        { key: 'positionKey', value: POSITION_KEY as `0x${string}` },
+      ],
+    },
+  });
+  const fees = mkEventLog1({
+    name: 'PositionFeesCollected',
+    topic1: POSITION_KEY,
+    emitter: EMITTER,
+    txHash: CLOSE_TX_HASH,
+    blockNumber: CLOSE_BLOCK.toString(),
+    fields: {
+      addressItems: [
+        { key: 'market', value: MARKET as `0x${string}` },
+        { key: 'collateralToken', value: COLLATERAL as `0x${string}` },
+      ],
+      uintItems: [
+        { key: 'collateralTokenPrice.min', value: 10n ** 24n },
+        { key: 'tradeSizeUsd', value: usd30(42.5) },
+        { key: 'fundingFeeAmount', value: 500_000n },
+        { key: 'borrowingFeeUsd', value: usd30(0.3) },
+        { key: 'positionFeeAmount', value: 1_000_000n },
+      ],
+      boolItems: [{ key: 'isIncrease', value: false }],
+      bytes32Items: [
+        { key: 'orderKey', value: CLOSE_ORDER_KEY as `0x${string}` },
+        { key: 'positionKey', value: POSITION_KEY as `0x${string}` },
+      ],
+    },
+  });
+  const keeper = mkEventLog1({
+    name: 'KeeperExecutionFee',
+    topic1: pad(ACCOUNT as `0x${string}`, { size: 32 }),
+    emitter: EMITTER,
+    txHash: CLOSE_TX_HASH,
+    blockNumber: CLOSE_BLOCK.toString(),
+    fields: {
+      addressItems: [{ key: 'keeper', value: ACCOUNT as `0x${string}` }],
+      uintItems: [{ key: 'executionFeeAmount', value: 100_000_000_000_000n }],
+    },
+  });
+  const oracle = mkEventLog1({
+    name: 'OraclePriceUpdate',
+    topic1: pad(WETH_ARBITRUM, { size: 32 }),
+    emitter: EMITTER,
+    txHash: CLOSE_TX_HASH,
+    blockNumber: CLOSE_BLOCK.toString(),
+    fields: {
+      addressItems: [{ key: 'token', value: WETH_ARBITRUM }],
+      uintItems: [
+        { key: 'minPrice', value: 3_000n * 10n ** 12n },
+        { key: 'maxPrice', value: 3_000n * 10n ** 12n },
+      ],
+    },
+  });
+  return {
+    receiptStatus: 'success',
+    receiptTxHash: CLOSE_TX_HASH,
+    receiptBlockNumber: CLOSE_BLOCK,
+    receiptLogs: [terminal, decrease, fees, keeper, oracle],
+    latestBlockNumber: CLOSE_BLOCK + 15n,
+    receiptBlockTimestampMs: NOW.getTime() + 60_000,
+    postClosePositions: [],
+  };
+}
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -392,6 +527,90 @@ beforeEach(() => {
 });
 
 describe('finalized OPEN → real initial-stop protection composition', () => {
+  it('체결 확정부터 Stop 인계·재시작 중복방지·CLOSE 비용 정산까지 한 격리 fixture로 연결한다', async () => {
+    const initialSubmit = vi.fn(async (
+      _request: ProtectionSubmitRequest,
+    ): Promise<ProtectionSubmitOutcome> => ({
+      status: 'ACCEPTED',
+      requestId: 'stop-request-lifecycle',
+      typedDataDigest: 'fixture-digest',
+    }));
+    setProtectionSubmitFn(initialSubmit);
+    wireRealHandoff();
+
+    const { summary, transport } = await reconcile();
+    expect(summary.transitioned).toBe(1);
+    expect(initialSubmit).toHaveBeenCalledTimes(1);
+    expect(initialSubmit).toHaveBeenCalledWith(expect.objectContaining({
+      parentOpenIntentId: INTENT_ID,
+      sourceOpenTaskId: TASK_ID,
+      positionKey: POSITION_KEY,
+      purpose: 'INITIAL_STOP',
+      symbol: 'ETH',
+      marketAddress: MARKET,
+      isLong: true,
+      sizeDeltaUsd: 42.5,
+    }));
+    expect(state.relayTasks.get(TASK_ID)).toMatchObject({
+      status: 'CONFIRMED',
+      txHash: TX_HASH,
+      orderKey: ORDER_KEY,
+    });
+    expect((await getProtection(`prot:${INTENT_ID}:INITIAL_STOP`))).toMatchObject({
+      status: 'SUBMITTED',
+      positionKey: POSITION_KEY,
+      submitAttempts: 1,
+    });
+    expect(transport.submissionEnabled).toBe(false);
+
+    // Process restart: module callbacks are reconstructed while durable rows survive.
+    setConfirmedOpenHandoff(null);
+    setProtectionSubmitFn(null);
+    const restartSubmit = vi.fn(async (): Promise<ProtectionSubmitOutcome> => ({
+      status: 'ACCEPTED',
+      requestId: 'must-not-submit',
+      typedDataDigest: null,
+    }));
+    setProtectionSubmitFn(restartSubmit);
+    const duplicate = await createInitialStopAfterOpenConfirmed({
+      open: {
+        parentOpenIntentId: INTENT_ID,
+        sourceOpenTaskId: TASK_ID,
+        evidence: `OrderExecuted tx=${TX_HASH}`,
+        positionKey: POSITION_KEY,
+        symbol: 'ETH',
+        marketAddress: MARKET,
+        isLong: true,
+        confirmedSizeUsd: 42.5,
+      },
+      triggerPriceUsd: 2_970,
+      acceptablePriceUsd: 2_955.15,
+    });
+    expect(duplicate.ok).toBe(false);
+    if (!duplicate.ok) expect(duplicate.reason).toContain('자동 재제출 금지');
+    expect(restartSubmit).not.toHaveBeenCalled();
+    expect((await getProtection(`prot:${INTENT_ID}:INITIAL_STOP`))).toMatchObject({
+      status: 'SUBMITTED',
+      submitAttempts: 1,
+    });
+
+    const close = evaluateCloseSettlement(closeBinding(), closeObservation());
+    expect(close.ok).toBe(true);
+    if (!close.ok) throw new Error(close.reason);
+    expect(close.settlement).toMatchObject({
+      grossPnlUsd: 10,
+      positionFeeUsd: 1,
+      executionFeeUsd: 0.3,
+      priceImpactUsd: 0.2,
+      fundingFeeUsd: 0.5,
+      borrowingFeeUsd: 0.3,
+      confirmations: 15,
+      postCloseSizeUsd30: '0',
+    });
+    const settled = computeNetPnl(close.settlement);
+    expect(settled).toEqual({ ok: true, netPnlUsd: 7.7 });
+  });
+
   it('initial stop durable 처리 완료 전에는 OPEN을 terminal-confirmed하지 않고 exact binding 후에만 해소한다', async () => {
     const pendingSubmit = deferred<ProtectionSubmitOutcome>();
     const submit = vi.fn((request: ProtectionSubmitRequest) => pendingSubmit.promise);
