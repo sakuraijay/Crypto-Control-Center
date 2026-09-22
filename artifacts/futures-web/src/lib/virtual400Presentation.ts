@@ -49,6 +49,7 @@ export const REASON_LABELS: Record<string, string> = {
   MODE_TIME_EXIT: '설정한 최대 보유시간 도달', MODE_PLAN_UNAVAILABLE: '진입 설정 확인 실패에 따른 보호 청산',
 };
 export function explainReason(reason: string | null | undefined): string {
+  if (String(reason).includes('PAPER_DAILY_PROFIT_20_PERCENT')) return '일일 실현 순수익 20% 도달 · 다음 PHT 거래일까지 신규 진입 중지';
   if (!reason) return '서버 판단을 확인하고 있습니다.';
   if (REASON_LABELS[reason]) return REASON_LABELS[reason];
   if (reason.includes('Strategy Arbiter NO TRADE')) return '시장 국면·품질·비용·구조 기준 미충족';

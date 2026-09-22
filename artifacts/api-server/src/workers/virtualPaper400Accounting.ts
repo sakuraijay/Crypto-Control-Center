@@ -161,7 +161,7 @@ export function evaluateVirtualPaper400Account(args: {
     dailyEntryCount: opens.filter(row => new Date(row.timestamp).getTime() >= dayStart).length,
     consecutiveLossCount: losses, lastUpdatedAt: now.toISOString() };
   const evaluation: RiskEvaluationResult = args.aggressiveDaily ? evaluateDailyPaperRisk({equity,dayOpening:risk.startOfDayEquityUsd,
-    dailyLossAware:risk.dailyLossAwareNetPnlUsd,entries:risk.dailyEntryCount,held:held.length,fresh:quotesFresh,locks:risk.locks}) : evaluateRiskState({
+    dailyLossAware:risk.dailyLossAwareNetPnlUsd,dailyRealized:dailyNet,entries:risk.dailyEntryCount,held:held.length,fresh:quotesFresh,locks:risk.locks}) : evaluateRiskState({
     dailyRiskCapitalUsd: Math.min(ledger.fundedCapitalUsd, risk.startOfDayEquityUsd),
     weeklyRiskCapitalUsd: Math.min(ledger.fundedCapitalUsd, risk.startOfWeekEquityUsd),
     currentEquityUsd: equity, newHardStopEvaluationAllowed: true,

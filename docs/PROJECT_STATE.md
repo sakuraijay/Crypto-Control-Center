@@ -1,3 +1,5 @@
+> v19: PAPER profit cap20%/intraday1h 및 학습 후보 데이터 export 구현. 새 모델 학습·실자금 승격은 아직 미완료. 상세 CCC_SUPERVISION 참조; 운영 적용은 별도 release identity로 확인.
+
 > v17 변경: 기존 가상계좌 사용자승인100 USDC 단발 추가입금 + PAPER45분/최대32회. 시작400과 추가100/매매손익을 분리하고 대시보드 초기금액→현재평가액 순서로 표시한다. 새입금을 수익·재충전·무료500정책 구현으로 취급하지 않는다. 실자금 준비 개발 병행은 유지한다. CI/게시/운영입금 확인은 아직 pending.
 
 # Crypto Control Center — Project State Index

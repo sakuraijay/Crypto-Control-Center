@@ -1,3 +1,4 @@
+import { PAPER_LEARNING_CONTRACT } from './virtualPaperLearningDataset';
 import { applyAuthorizedPaperCredit } from './virtualPaperContribution';
 import { DAILY_PAPER_POLICY } from './virtualPaperDailyPolicy';
 import { runVirtualPaperDailyCycle, type DailyCycleDeps } from './virtualPaperDailyCycle';
@@ -77,14 +78,14 @@ export async function maybeRunVirtualPaper400Cycle(args: {
     const policyKey = `virtual_paper_400_policy_v1:${identity.sessionId}`;
     const policyRaw = await read(policyKey);
     let applied = policyRaw ? JSON.parse(policyRaw) as { version: string; appliedAt: string; sessionId: string } : null;
-    if (policyRaw !== null && (!applied || (applied.version !== VIRTUAL_ACTIVE_POLICY.version && applied.version !== VIRTUAL_LEGACY_POLICY.version && applied.version !== DAILY_PAPER_POLICY.version && applied.version !== 'virtual400-daily/v3') || applied.sessionId !== identity.sessionId
+    if (policyRaw !== null && (!applied || (applied.version !== VIRTUAL_ACTIVE_POLICY.version && applied.version !== VIRTUAL_LEGACY_POLICY.version && applied.version !== DAILY_PAPER_POLICY.version && applied.version !== 'virtual400-daily/v3' && applied.version !== 'virtual400-daily/v4') || applied.sessionId !== identity.sessionId
       || !Number.isFinite(Date.parse(applied.appliedAt)) || Date.parse(applied.appliedAt) > now.getTime())) {
       throw new Error('VIRTUAL_POLICY_INVALID');
     }
     const executor = getServerPaperStatus();
-    const dailyRequested = args.dailyExperiment === true || applied?.version === DAILY_PAPER_POLICY.version || applied?.version === 'virtual400-daily/v3';
+    const dailyRequested = args.dailyExperiment === true || applied?.version === DAILY_PAPER_POLICY.version || ['virtual400-daily/v3','virtual400-daily/v4'].includes(applied?.version ?? '');
     const desiredPolicy = dailyRequested ? DAILY_PAPER_POLICY : VIRTUAL_ACTIVE_POLICY;
-    const accountBefore = evaluateVirtualPaper400Account({ session: identity, previous, rows, now, quote: args.quote, aggressiveDaily:applied?.version===DAILY_PAPER_POLICY.version || applied?.version==='virtual400-daily/v3' });
+    const accountBefore = evaluateVirtualPaper400Account({ session: identity, previous, rows, now, quote: args.quote, aggressiveDaily:applied?.version===DAILY_PAPER_POLICY.version || ['virtual400-daily/v3','virtual400-daily/v4'].includes(applied?.version ?? '') });
     const universe = session.active && accountBefore.evaluation.entryAllowed && !executor.pendingClose && !executor.unresolved
       ? await discoverVirtualGmxUniverse() : null;
     const markets = new Map((universe?.complete ? universe.markets : []).map(m => [m.name.split('/')[0], m]));
@@ -135,7 +136,7 @@ export async function maybeRunVirtualPaper400Cycle(args: {
       // remain PAPER estimates, never observed real execution.
       return { ...result.snapshot, source: 'PAPER_GMX_ESTIMATE' };
     };
-    const dailyEnabled=applied?.version===DAILY_PAPER_POLICY.version || applied?.version==='virtual400-daily/v3';
+    const dailyEnabled=applied?.version===DAILY_PAPER_POLICY.version || ['virtual400-daily/v3','virtual400-daily/v4'].includes(applied?.version ?? '');
     const cycleDeps: DailyCycleDeps = { sessionRaw: raw!, policyAppliedAt: applied?.appliedAt, policyVersion: applied?.version,
       tradingMode: selectedMode?.mode, structuralTargets: true, markets,
       entryBlockedReason: executor.unresolved || executor.pendingClose ? 'EXECUTOR_RECOVERY_PENDING'
@@ -271,7 +272,7 @@ export async function maybeRunVirtualPaper400Cycle(args: {
       lastOpenAtMs: final.lastOpenAtMs, sessionStartedAtMs: identity.startedAtMs });
     // Corrupt diagnostic history must neither erase evidence nor disable position protection.
     if (diagnostic.state) await write(diagnosticKey, diagnostic.state);
-    await write(VIRTUAL_PAPER_400_RUNTIME_KEY, { ...result, tradingDiagnostics: diagnostic.summary, universe: universe ? { ...universe, batchSymbols: symbols } : null, analysis, journal, sessionId: identity.sessionId,
+    await write(VIRTUAL_PAPER_400_RUNTIME_KEY, { ...result, learning: { ...PAPER_LEARNING_CONTRACT, settledRows: final.ledger.settlementCount }, tradingDiagnostics: diagnostic.summary, universe: universe ? { ...universe, batchSymbols: symbols } : null, analysis, journal, sessionId: identity.sessionId,
       strategyContinuity: summarizeVirtualPaper400StrategyContinuity(continuity),
       at: new Date().toISOString(), account: { ...result.account, ledger: final.ledger,
         equityUsd: final.equityUsd, unrealizedNetPnlUsd: final.unrealizedNetPnlUsd,

@@ -13,8 +13,8 @@ export async function runVirtualPaperDailyCycle(d:DailyCycleDeps){
   const diagnostics:{symbol:string;reason:string;details?:string[]}[]=[];const entryStages:{symbol:string;stage:string}[]=[];
   const mode=d.tradingMode??'INTRADAY';
   const outcome=(status:string,reason:string|null=null)=>({status,reason,diagnostics,entryStages,
-    policy:{...policy,...(d.policyVersion==='virtual400-daily/v3'?{version:'virtual400-daily/v3',cooldownMinutes:60,maxDailyEntries:24}:{}),symbols:[...(d.markets?.keys()??[])],appliedAt:d.policyAppliedAt},
-    tradingMode:{mode,...DAILY_ENTRY_OPTIONS[mode]},at:d.now.toISOString(),mode:'VIRTUAL_PAPER_400' as const,
+    policy:{...policy,...(d.policyVersion==='virtual400-daily/v3'?{version:'virtual400-daily/v3',cooldownMinutes:60,maxDailyEntries:24}:{}),...(d.policyVersion==='virtual400-daily/v4'?{version:'virtual400-daily/v4'}:{}),symbols:[...(d.markets?.keys()??[])],appliedAt:d.policyAppliedAt},
+    tradingMode:{mode,...DAILY_ENTRY_OPTIONS[mode],...(d.policyVersion!==policy.version&&mode==='INTRADAY'?{maxHoldHours:.5}:{})},at:d.now.toISOString(),mode:'VIRTUAL_PAPER_400' as const,
     realFundsUsed:false,costBasis:'SIMULATED / ESTIMATED' as const,
     account:{...account,held:account.held.map(r=>({id:r.id,symbol:r.symbol,side:r.side,sizeUsd:r.sizeInUsd,entryPrice:r.price,stopPrice:r.stopPriceUsd,takeProfitPrice:r.takeProfitPriceUsd}))}});
   if(d.engineMode!=='PAPER'||!d.shouldContinue())return outcome('BLOCKED','PAPER_MODE_REQUIRED');
@@ -50,7 +50,7 @@ export async function runVirtualPaperDailyCycle(d:DailyCycleDeps){
     const submitNow=d.clock?.()??d.now;const current=d.quote(candidate.symbol);
     if(!cost||cost.source!=='PAPER_GMX_ESTIMATE'||!current||!Number.isFinite(current.priceUsd)||current.priceUsd<=0||Math.abs(current.priceUsd/candidate.referencePrice-1)>.02||!Number.isFinite(current.ageMs)||current.ageMs<0||current.ageMs>60_000){reject('PAPER_EXPERIMENT_COST_OR_QUOTE');continue;}
     const checked=validateExecutionEligibleSnapshot(cost,{market:market.marketToken,isLong:direction===1,orderType:'MarketIncrease',notionalUsd:requested},submitNow.getTime());
-    const holding=modeHoldingCost(cost,mode==='INTRADAY'?.5:4);
+    const holding=modeHoldingCost(cost,mode==='INTRADAY'?1:4);
     const roundTrip=cost.positionFeeUsd+cost.estimatedExitFeeUsd+cost.executionFeeUsd+Math.max(0,cost.estimatedPriceImpactUsd)+Math.max(0,cost.estimatedExitPriceImpactUsd)+(holding??Infinity);
     if(!checked.ok||holding===null||roundTrip>2){reject('PAPER_EXPERIMENT_COST_CAP');continue;}
     const stop=current.priceUsd*(1-direction*distance);
