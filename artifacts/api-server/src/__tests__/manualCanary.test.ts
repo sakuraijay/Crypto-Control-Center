@@ -400,6 +400,38 @@ describe('#135 Manual Controlled Canary — 장애주입', () => {
     expect(r.reason).toContain('fail-closed');
   });
 
+  it('reserve→commit 사이 같은 예약 ID의 intent/주문 결속 변경 → 제출 0회', async () => {
+    const fixture = makeDeps();
+    const body = await preflightThenBody(fixture.deps);
+    const originalCas = fixture.deps.casState;
+    let tampered = false;
+    fixture.deps.casState = async (key, prev, next) => {
+      const ok = await originalCas(key, prev, next);
+      if (ok && key === 'manualCanaryDaily' && !tampered) {
+        const stored = JSON.parse(fixture.state.get(key)!);
+        if (stored.launchReservation) {
+          stored.launchReservation.openIntentId = 'intent:open:tampered';
+          stored.launchReservation.open = {
+            ...stored.launchReservation.open,
+            symbol: 'ETH',
+          };
+          fixture.state.set(key, JSON.stringify(stored));
+          tampered = true;
+        }
+      }
+      return ok;
+    };
+
+    const result = await executeManualCanaryOpen(fixture.deps, body);
+    expect(tampered).toBe(true);
+    expect(result).toMatchObject({ ok: false, phase: 'REJECTED' });
+    expect(result.reason).toContain('intent/주문 결속 변경');
+    expect(fixture.executeOrder).not.toHaveBeenCalled();
+    const daily = JSON.parse(fixture.state.get('manualCanaryDaily')!);
+    expect(daily.opens).toBe(0);
+    expect(daily.launchReservation).toBeNull();
+  });
+
   it('상태 조회: OPEN CONFIRMED + stop ACTIVE + close CONFIRMED → 5단계 진행 표시', async () => {
     const { deps, state } = makeDeps();
     state.set('manualCanaryDaily', JSON.stringify({

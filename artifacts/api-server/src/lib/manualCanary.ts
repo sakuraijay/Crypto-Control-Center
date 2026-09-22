@@ -398,6 +398,17 @@ function validateStoredOpenBinding(value: unknown):
   };
 }
 
+function sameOpenBinding(
+  left: NonNullable<DailyCanaryState['open']>,
+  right: NonNullable<DailyCanaryState['open']>,
+): boolean {
+  return left.symbol === right.symbol
+    && left.direction === right.direction
+    && left.collateralUsd === right.collateralUsd
+    && left.leverage === right.leverage
+    && left.requestedSizeUsd === right.requestedSizeUsd;
+}
+
 /**
  * #142: evaluateAllChecks는 ManualCanaryPreflightDeps만 사용.
  * 실행 능력(executeOrder 등)은 구조적으로 접근 불가.
@@ -716,6 +727,8 @@ async function reserveDailyLaunch(
 async function commitDailyLaunch(
   deps: ManualCanaryDeps,
   reservationId: string,
+  expectedOpenIntentId: string,
+  expectedOpenBinding: NonNullable<DailyCanaryState['open']>,
 ): Promise<DailyClaimResult> {
   const dayKey = manilaDayKey(deps.now());
   const loaded = await loadDailyState(deps);
@@ -726,6 +739,13 @@ async function commitDailyLaunch(
   const reservation = current.launchReservation;
   if (!reservation || reservation.id !== reservationId) {
     return { ok: false, reason: 'Canary 실행 예약 소유권 불일치 — 제출 0회 (fail-closed)' };
+  }
+  // Reservation ID만으로 소유권을 인정하면 reserve와 commit 사이에 같은 ID를
+  // 유지한 채 intent/주문 결속을 바꾼 영속 상태가 최종 OPEN으로 승격될 수 있다.
+  // 호출자가 reserve한 원본 계약 전체를 다시 결속해 TOCTOU 변경을 차단한다.
+  if (reservation.openIntentId !== expectedOpenIntentId
+      || !sameOpenBinding(reservation.open, expectedOpenBinding)) {
+    return { ok: false, reason: 'Canary 실행 예약 intent/주문 결속 변경 — 제출 0회 (fail-closed)' };
   }
   if (current.opens >= MANUAL_CANARY_CAPS.maxOrdersPerDay) {
     return { ok: false, reason: `일일 ${MANUAL_CANARY_CAPS.maxOrdersPerDay}회 소진 (${dayKey})` };
@@ -778,7 +798,7 @@ export async function claimDailyBudget(
   const reservationId = `claim:${deps.randomId()}`;
   const reserved = await reserveDailyLaunch(deps, reservationId, openIntentId, binding);
   if (!reserved.ok) return reserved;
-  const committed = await commitDailyLaunch(deps, reservationId);
+  const committed = await commitDailyLaunch(deps, reservationId, openIntentId, binding);
   if (!committed.ok) {
     await releaseDailyLaunch(deps, reservationId).catch(() => false);
   }
@@ -895,7 +915,7 @@ export async function executeManualCanaryOpen(deps: ManualCanaryDeps, body: {
   }
 
   // Evidence가 준비된 동일 reservation owner만 일일 1회 claim을 확정한다.
-  const committed = await commitDailyLaunch(deps, reservationId);
+  const committed = await commitDailyLaunch(deps, reservationId, intentId, openBinding);
   if (!committed.ok) {
     await releaseDailyLaunch(deps, reservationId).catch(() => false);
     return reject(committed.reason);
