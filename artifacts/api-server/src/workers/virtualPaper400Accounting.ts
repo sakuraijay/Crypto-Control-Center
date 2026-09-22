@@ -1,3 +1,5 @@
+import { validatePaperContributions, type PaperContribution } from './virtualPaperContribution';
+import { evaluateDailyPaperRisk } from './virtualPaperDailyPolicy';
 import type { DbTrade } from '@workspace/db';
 import { accrueHoldingCostsFromEntryRates } from '../lib/holdingCosts';
 import { initialRiskEngineState, rollRiskPeriods, type PersistedRiskEngineState } from '../lib/riskEngineState';
@@ -16,6 +18,7 @@ export function virtualPaper400RiskKey(session: VirtualPaper400SessionV1): strin
 
 export interface VirtualPaper400RiskState {
   version: 1;
+  contributions?: PaperContribution[];
   sessionId: string;
   strategyTag: string;
   equityHwmUsd: number;
@@ -34,6 +37,8 @@ export function parseVirtualPaper400RiskState(raw: string, session: VirtualPaper
     || typeof v.settlementSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(v.settlementSha256)) {
     throw new Error('VIRTUAL_RISK_STATE_INVALID');
   }
+  const contributions = validatePaperContributions(v.contributions, session);
+  if (v.equityHwmUsd < 400 + contributions.reduce((sum, c) => sum + c.amountUsd, 0)) throw Error('PAPER_CONTRIBUTION_HWM_INVALID');
   return v;
 }
 
@@ -52,6 +57,7 @@ export function evaluateVirtualPaper400Account(args: {
   previous: VirtualPaper400RiskState;
   quote: PriceLookup;
   now: Date;
+  aggressiveDaily?: boolean;
 }) {
   const { session, rows, now, quote } = args;
   const previous = parseVirtualPaper400RiskState(JSON.stringify(args.previous), session);
@@ -95,7 +101,12 @@ export function evaluateVirtualPaper400Account(args: {
   }
   const ledgerResult = deriveVirtualPaper400Ledger(session, closes);
   if (!ledgerResult.ok) throw new Error(ledgerResult.reason);
-  const ledger = ledgerResult.value;
+  const contributions = validatePaperContributions(previous.contributions, session);
+  if (contributions.some(c => Date.parse(c.appliedAt) > nowMs)) throw Error('PAPER_CONTRIBUTION_FUTURE');
+  const contributed = contributions.reduce((sum, c) => sum + c.amountUsd, 0);
+  const ledger = { ...ledgerResult.value, netContributionsUsd: contributed,
+    fundedCapitalUsd: 400 + contributed, contributions,
+    realizedEquityUsd: ledgerResult.value.realizedEquityUsd + contributed };
   const dayStart = Date.parse(manilaDayStartIso(now));
   const weekStart = Date.parse(manilaWeekStartIso(now));
   let cumulative = 400;
@@ -105,15 +116,17 @@ export function evaluateVirtualPaper400Account(args: {
   let dailyNet = 0;
   let weeklyNet = 0;
   let losses = 0;
-  for (const row of closes) {
-    const net = fixedBetaNumber(row.netPnlEstimatedUsd);
-    const at = new Date(row.timestamp).getTime();
+  const cashFlows = [
+    ...closes.map(row => ({ at: new Date(row.timestamp).getTime(), net: fixedBetaNumber(row.netPnlEstimatedUsd), contribution: false })),
+    ...contributions.map(c => ({ at: Date.parse(c.appliedAt), net: c.amountUsd, contribution: true })),
+  ].sort((a, b) => a.at - b.at);
+  for (const { at, net, contribution } of cashFlows) {
     cumulative += net;
     hwm = Math.max(hwm, cumulative);
     if (at < dayStart) dayOpening += net;
-    else { dailyNet += net; losses = net < 0 ? losses + 1 : 0; }
+    else if (!contribution) { dailyNet += net; losses = net < 0 ? losses + 1 : 0; }
     if (at < weekStart) weekOpening += net;
-    else weeklyNet += net;
+    else if (!contribution) weeklyNet += net;
   }
   const held = opens.filter(row => row.closeTime === 0);
   let unrealizedNet = 0;
@@ -147,9 +160,10 @@ export function evaluateVirtualPaper400Account(args: {
     weeklyRealizedNetPnlUsd: weeklyNet,
     dailyEntryCount: opens.filter(row => new Date(row.timestamp).getTime() >= dayStart).length,
     consecutiveLossCount: losses, lastUpdatedAt: now.toISOString() };
-  const evaluation: RiskEvaluationResult = evaluateRiskState({
-    dailyRiskCapitalUsd: Math.min(400, risk.startOfDayEquityUsd),
-    weeklyRiskCapitalUsd: Math.min(400, risk.startOfWeekEquityUsd),
+  const evaluation: RiskEvaluationResult = args.aggressiveDaily ? evaluateDailyPaperRisk({equity,dayOpening:risk.startOfDayEquityUsd,
+    dailyLossAware:risk.dailyLossAwareNetPnlUsd,entries:risk.dailyEntryCount,held:held.length,fresh:quotesFresh,locks:risk.locks}) : evaluateRiskState({
+    dailyRiskCapitalUsd: Math.min(ledger.fundedCapitalUsd, risk.startOfDayEquityUsd),
+    weeklyRiskCapitalUsd: Math.min(ledger.fundedCapitalUsd, risk.startOfWeekEquityUsd),
     currentEquityUsd: equity, newHardStopEvaluationAllowed: true,
     hardStopPolicyReferenceCapitalUsd: hwm,
     hardStopPolicyEquityUsd: hwm * RISK_POLICY.hardStopEquityUsd / RISK_POLICY.initialCapitalUsd,

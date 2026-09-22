@@ -7,6 +7,7 @@
  * signing, authorization, or real order submission is reachable from this file.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { pad } from 'viem';
 
 type Row = Record<string, unknown>;
 type Condition =
@@ -44,11 +45,30 @@ const state = vi.hoisted(() => {
     status: column('status'),
     transportGen: column('transportGen'),
   };
+  const tradesTable = {
+    __table: 'trades',
+    id: column('id'),
+    action: column('action'),
+    testMode: column('testMode'),
+    settlementStatus: column('settlementStatus'),
+    settlementIntentId: column('settlementIntentId'),
+    preCloseSizeUsd30: column('preCloseSizeUsd30'),
+    requestedReductionUsd30: column('requestedReductionUsd30'),
+    evidenceTxHash: column('evidenceTxHash'),
+  };
+  const executionIntentsTable = {
+    __table: 'intents',
+    id: column('id'),
+  };
   return {
     protectionOrdersTable,
     relayTasksTable,
+    tradesTable,
+    executionIntentsTable,
     protections: new Map<string, Row>(),
     relayTasks: new Map<string, Row>(),
+    trades: new Map<string, Row>(),
+    executionIntents: new Map<string, Row>(),
     protectionStatusHistory: [] as string[],
     relayStatusHistory: [] as string[],
     relayTransitionFailures: 0,
@@ -75,89 +95,103 @@ vi.mock('drizzle-orm', () => ({
     values,
   }),
   and: (...conditions: Condition[]): Condition => ({ kind: 'and', conditions }),
+  isNotNull: (column: { __column: string }): Condition => ({
+    kind: 'in',
+    column: column.__column,
+    values: [...state.trades.values()]
+      .map((row) => row[column.__column])
+      .filter((value) => value !== null && value !== undefined),
+  }),
   sql: () => ({ __increment: true }),
 }));
 
 vi.mock('@workspace/db', () => {
   function rowsFor(table: { __table: string }): Row[] {
-    return table.__table === 'protections'
-      ? [...state.protections.values()]
-      : [...state.relayTasks.values()];
+    if (table.__table === 'protections') return [...state.protections.values()];
+    if (table.__table === 'relay') return [...state.relayTasks.values()];
+    if (table.__table === 'trades') return [...state.trades.values()];
+    if (table.__table === 'intents') return [...state.executionIntents.values()];
+    throw new Error(`unexpected table ${table.__table}`);
   }
+
+  const db: any = {
+    select: () => ({
+      from: (table: { __table: string }) => ({
+        where: (condition: Condition) => {
+          const rows = rowsFor(table).filter((row) => matches(row, condition));
+          return {
+            then: <TResult1 = Row[], TResult2 = never>(
+              onfulfilled?: ((value: Row[]) => TResult1 | PromiseLike<TResult1>) | null,
+              onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
+            ) => Promise.resolve(rows).then(onfulfilled, onrejected),
+            limit: async (count: number) => rows.slice(0, count),
+          };
+        },
+      }),
+    }),
+    insert: (table: { __table: string }) => ({
+      values: async (value: Row) => {
+        if (table.__table !== 'protections') throw new Error('unexpected non-protection insert');
+        const id = String(value.id);
+        if (state.protections.has(id)) throw new Error('duplicate');
+        for (const row of state.protections.values()) {
+          if (row.positionKey === value.positionKey
+              && row.purpose === value.purpose
+              && !['EXECUTED', 'CANCELLED'].includes(String(row.status))) {
+            throw new Error('unique active protection');
+          }
+        }
+        state.protections.set(id, {
+          requestId: null,
+          orderKey: null,
+          typedDataDigest: null,
+          evidence: null,
+          error: null,
+          submitAttempts: 0,
+          updatedAt: new Date(),
+          ...value,
+        });
+        state.protectionStatusHistory.push(String(value.status));
+      },
+    }),
+    update: (table: { __table: string }) => ({
+      set: (patch: Row) => ({
+        where: (condition: Condition) => {
+          let applied: Row[] | null = null;
+          const execute = (): Row[] => {
+            if (applied) return applied;
+            applied = rowsFor(table).filter((row) => matches(row, condition));
+            for (const row of applied) {
+              for (const [key, value] of Object.entries(patch)) {
+                row[key] = value && typeof value === 'object' && '__increment' in value
+                  ? Number(row[key] ?? 0) + 1
+                  : value;
+              }
+              if (table.__table === 'protections' && typeof patch.status === 'string') {
+                state.protectionStatusHistory.push(patch.status);
+              }
+            }
+            return applied;
+          };
+          return {
+            then: <TResult1 = Row[], TResult2 = never>(
+              onfulfilled?: ((value: Row[]) => TResult1 | PromiseLike<TResult1>) | null,
+              onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
+            ) => Promise.resolve(execute()).then(onfulfilled, onrejected),
+            returning: async () => execute().map((row) => ({ id: row.id })),
+          };
+        },
+      }),
+    }),
+    transaction: async <T>(run: (tx: typeof db) => Promise<T>): Promise<T> => run(db),
+  };
 
   return {
     protectionOrdersTable: state.protectionOrdersTable,
     relayTasksTable: state.relayTasksTable,
-    db: {
-      select: () => ({
-        from: (table: { __table: string }) => ({
-          where: (condition: Condition) => {
-            const rows = rowsFor(table).filter((row) => matches(row, condition));
-            return {
-              then: <TResult1 = Row[], TResult2 = never>(
-                onfulfilled?: ((value: Row[]) => TResult1 | PromiseLike<TResult1>) | null,
-                onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
-              ) => Promise.resolve(rows).then(onfulfilled, onrejected),
-              limit: async (count: number) => rows.slice(0, count),
-            };
-          },
-        }),
-      }),
-      insert: (table: { __table: string }) => ({
-        values: async (value: Row) => {
-          if (table.__table !== 'protections') throw new Error('unexpected relay insert');
-          const id = String(value.id);
-          if (state.protections.has(id)) throw new Error('duplicate');
-          for (const row of state.protections.values()) {
-            if (row.positionKey === value.positionKey
-                && row.purpose === value.purpose
-                && !['EXECUTED', 'CANCELLED'].includes(String(row.status))) {
-              throw new Error('unique active protection');
-            }
-          }
-          state.protections.set(id, {
-            requestId: null,
-            orderKey: null,
-            typedDataDigest: null,
-            evidence: null,
-            error: null,
-            submitAttempts: 0,
-            updatedAt: new Date(),
-            ...value,
-          });
-          state.protectionStatusHistory.push(String(value.status));
-        },
-      }),
-      update: (table: { __table: string }) => ({
-        set: (patch: Row) => ({
-          where: (condition: Condition) => {
-            let applied: Row[] | null = null;
-            const execute = (): Row[] => {
-              if (applied) return applied;
-              applied = rowsFor(table).filter((row) => matches(row, condition));
-              for (const row of applied) {
-                for (const [key, value] of Object.entries(patch)) {
-                  row[key] = value && typeof value === 'object' && '__increment' in value
-                    ? Number(row[key] ?? 0) + 1
-                    : value;
-                }
-                if (table.__table === 'protections' && typeof patch.status === 'string') {
-                  state.protectionStatusHistory.push(patch.status);
-                }
-              }
-              return applied;
-            };
-            return {
-              then: <TResult1 = Row[], TResult2 = never>(
-                onfulfilled?: ((value: Row[]) => TResult1 | PromiseLike<TResult1>) | null,
-                onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
-              ) => Promise.resolve(execute()).then(onfulfilled, onrejected),
-              returning: async () => execute().map((row) => ({ id: row.id })),
-            };
-          },
-        }),
-      }),
-    },
+    tradesTable: state.tradesTable,
+    executionIntentsTable: state.executionIntentsTable,
+    db,
   };
 });
 
@@ -205,11 +239,15 @@ const eventState = vi.hoisted(() => ({
   },
 }));
 
-vi.mock('../lib/gmxOrderEvents', () => ({
-  classifyOrderResolutionLogs: vi.fn(() => eventState.resolution),
-  extractOrderKeyFromReceiptLogs: vi.fn(() => ({ ok: false, reason: 'not_found' })),
-  resolveGmxEventEmitterAddress: vi.fn(() => ({ ok: true, address: EMITTER })),
-}));
+vi.mock('../lib/gmxOrderEvents', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../lib/gmxOrderEvents')>();
+  return {
+    ...actual,
+    classifyOrderResolutionLogs: vi.fn(() => eventState.resolution),
+    extractOrderKeyFromReceiptLogs: vi.fn(() => ({ ok: false, reason: 'not_found' })),
+    resolveGmxEventEmitterAddress: vi.fn(() => ({ ok: true, address: EMITTER })),
+  };
+});
 vi.mock('../lib/intentReconciler', () => ({
   createViemOnchainClient: vi.fn(() => { throw new Error('network forbidden in integration test'); }),
 }));
@@ -232,6 +270,14 @@ import {
   type ProtectionSubmitRequest,
 } from '../workers/protectionExecutor';
 import { getProtection } from '../lib/protectionOrders';
+import {
+  evaluateCloseSettlement,
+  type CloseSettlementBinding,
+  type CloseSettlementObservation,
+} from '../lib/closeSettlementEvidence';
+import { recordTradeSettlement } from '../lib/tradeSettlement';
+import { WETH_ARBITRUM } from '../lib/relayFeeQuote';
+import { mkEventLog1, mkEventLog2 } from './helpers/eventLog2Fixture';
 import type { GmxApiTransport } from '../lib/gmxApiTransport';
 
 const INTENT_ID = 'intent:open:ai/9dc4036f-9083-4670-b28a-e69dfce5fdc3';
@@ -242,7 +288,129 @@ const POSITION_KEY = `0x${'c'.repeat(64)}`;
 const MARKET = `0x${'d'.repeat(40)}`;
 const COLLATERAL = `0x${'6'.repeat(40)}`;
 const EMITTER = `0x${'e'.repeat(40)}`;
+const ACCOUNT = `0x${'1'.repeat(40)}`;
+const CLOSE_ORDER_KEY = `0x${'f'.repeat(64)}`;
+const CLOSE_TX_HASH = `0x${'9'.repeat(64)}`;
+const CLOSE_BLOCK = 200n;
 const NOW = new Date('2026-08-30T12:00:00.000Z');
+const usd30 = (value: number): bigint =>
+  BigInt(Math.round(value * 1_000_000)) * 10n ** 24n;
+
+function closeBinding(): CloseSettlementBinding {
+  return {
+    tradeId: 'settlement:close:intent:close:fixture',
+    intentId: 'intent:close:fixture',
+    relayTaskId: 'task-close-fixture',
+    accountAddress: ACCOUNT,
+    marketAddress: MARKET,
+    collateralTokenAddress: COLLATERAL,
+    positionKey: POSITION_KEY,
+    isLong: true,
+    preCloseSizeUsd30: usd30(42.5),
+    requestedReductionUsd30: usd30(42.5),
+    expectedOrderKey: CLOSE_ORDER_KEY,
+    expectedTxHash: CLOSE_TX_HASH,
+    expectedEmitterAddress: EMITTER,
+    expectedBlockNumber: CLOSE_BLOCK,
+  };
+}
+
+function closeObservation(): CloseSettlementObservation {
+  const terminal = mkEventLog2({
+    name: 'OrderExecuted',
+    orderKey: CLOSE_ORDER_KEY,
+    emitter: EMITTER,
+    account: ACCOUNT,
+    txHash: CLOSE_TX_HASH,
+    blockNumber: CLOSE_BLOCK.toString(),
+  });
+  const decrease = mkEventLog1({
+    name: 'PositionDecrease',
+    topic1: pad(ACCOUNT as `0x${string}`, { size: 32 }),
+    emitter: EMITTER,
+    txHash: CLOSE_TX_HASH,
+    blockNumber: CLOSE_BLOCK.toString(),
+    fields: {
+      addressItems: [
+        { key: 'account', value: ACCOUNT as `0x${string}` },
+        { key: 'market', value: MARKET as `0x${string}` },
+        { key: 'collateralToken', value: COLLATERAL as `0x${string}` },
+      ],
+      uintItems: [
+        { key: 'sizeInUsd', value: 0n },
+        { key: 'sizeDeltaUsd', value: usd30(42.5) },
+      ],
+      intItems: [
+        { key: 'basePnlUsd', value: usd30(10) },
+        { key: 'priceImpactUsd', value: -usd30(0.2) },
+      ],
+      boolItems: [{ key: 'isLong', value: true }],
+      bytes32Items: [
+        { key: 'orderKey', value: CLOSE_ORDER_KEY as `0x${string}` },
+        { key: 'positionKey', value: POSITION_KEY as `0x${string}` },
+      ],
+    },
+  });
+  const fees = mkEventLog1({
+    name: 'PositionFeesCollected',
+    topic1: POSITION_KEY,
+    emitter: EMITTER,
+    txHash: CLOSE_TX_HASH,
+    blockNumber: CLOSE_BLOCK.toString(),
+    fields: {
+      addressItems: [
+        { key: 'market', value: MARKET as `0x${string}` },
+        { key: 'collateralToken', value: COLLATERAL as `0x${string}` },
+      ],
+      uintItems: [
+        { key: 'collateralTokenPrice.min', value: 10n ** 24n },
+        { key: 'tradeSizeUsd', value: usd30(42.5) },
+        { key: 'fundingFeeAmount', value: 500_000n },
+        { key: 'borrowingFeeUsd', value: usd30(0.3) },
+        { key: 'positionFeeAmount', value: 1_000_000n },
+      ],
+      boolItems: [{ key: 'isIncrease', value: false }],
+      bytes32Items: [
+        { key: 'orderKey', value: CLOSE_ORDER_KEY as `0x${string}` },
+        { key: 'positionKey', value: POSITION_KEY as `0x${string}` },
+      ],
+    },
+  });
+  const keeper = mkEventLog1({
+    name: 'KeeperExecutionFee',
+    topic1: pad(ACCOUNT as `0x${string}`, { size: 32 }),
+    emitter: EMITTER,
+    txHash: CLOSE_TX_HASH,
+    blockNumber: CLOSE_BLOCK.toString(),
+    fields: {
+      addressItems: [{ key: 'keeper', value: ACCOUNT as `0x${string}` }],
+      uintItems: [{ key: 'executionFeeAmount', value: 100_000_000_000_000n }],
+    },
+  });
+  const oracle = mkEventLog1({
+    name: 'OraclePriceUpdate',
+    topic1: pad(WETH_ARBITRUM, { size: 32 }),
+    emitter: EMITTER,
+    txHash: CLOSE_TX_HASH,
+    blockNumber: CLOSE_BLOCK.toString(),
+    fields: {
+      addressItems: [{ key: 'token', value: WETH_ARBITRUM }],
+      uintItems: [
+        { key: 'minPrice', value: 3_000n * 10n ** 12n },
+        { key: 'maxPrice', value: 3_000n * 10n ** 12n },
+      ],
+    },
+  });
+  return {
+    receiptStatus: 'success',
+    receiptTxHash: CLOSE_TX_HASH,
+    receiptBlockNumber: CLOSE_BLOCK,
+    receiptLogs: [terminal, decrease, fees, keeper, oracle],
+    latestBlockNumber: CLOSE_BLOCK + 15n,
+    receiptBlockTimestampMs: NOW.getTime() + 60_000,
+    postClosePositions: [],
+  };
+}
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -374,6 +542,8 @@ async function reconcile(transport = makeTransport()) {
 beforeEach(() => {
   state.protections.clear();
   state.relayTasks.clear();
+  state.trades.clear();
+  state.executionIntents.clear();
   state.protectionStatusHistory.length = 0;
   state.relayStatusHistory.length = 0;
   state.relayTransitionFailures = 0;
@@ -392,6 +562,156 @@ beforeEach(() => {
 });
 
 describe('finalized OPEN → real initial-stop protection composition', () => {
+  it('체결 확정부터 Stop 인계·재시작 중복방지·CLOSE 비용 정산까지 한 격리 fixture로 연결한다', async () => {
+    const initialSubmit = vi.fn(async (
+      _request: ProtectionSubmitRequest,
+    ): Promise<ProtectionSubmitOutcome> => ({
+      status: 'ACCEPTED',
+      requestId: 'stop-request-lifecycle',
+      typedDataDigest: 'fixture-digest',
+    }));
+    setProtectionSubmitFn(initialSubmit);
+    wireRealHandoff();
+
+    const { summary, transport } = await reconcile();
+    expect(summary.transitioned).toBe(1);
+    expect(initialSubmit).toHaveBeenCalledTimes(1);
+    expect(initialSubmit).toHaveBeenCalledWith(expect.objectContaining({
+      parentOpenIntentId: INTENT_ID,
+      sourceOpenTaskId: TASK_ID,
+      positionKey: POSITION_KEY,
+      purpose: 'INITIAL_STOP',
+      symbol: 'ETH',
+      marketAddress: MARKET,
+      isLong: true,
+      sizeDeltaUsd: 42.5,
+    }));
+    expect(state.relayTasks.get(TASK_ID)).toMatchObject({
+      status: 'CONFIRMED',
+      txHash: TX_HASH,
+      orderKey: ORDER_KEY,
+    });
+    expect((await getProtection(`prot:${INTENT_ID}:INITIAL_STOP`))).toMatchObject({
+      status: 'SUBMITTED',
+      positionKey: POSITION_KEY,
+      submitAttempts: 1,
+    });
+    expect(transport.submissionEnabled).toBe(false);
+
+    // Process restart: module callbacks are reconstructed while durable rows survive.
+    setConfirmedOpenHandoff(null);
+    setProtectionSubmitFn(null);
+    const restartSubmit = vi.fn(async (): Promise<ProtectionSubmitOutcome> => ({
+      status: 'ACCEPTED',
+      requestId: 'must-not-submit',
+      typedDataDigest: null,
+    }));
+    setProtectionSubmitFn(restartSubmit);
+    const duplicate = await createInitialStopAfterOpenConfirmed({
+      open: {
+        parentOpenIntentId: INTENT_ID,
+        sourceOpenTaskId: TASK_ID,
+        evidence: `OrderExecuted tx=${TX_HASH}`,
+        positionKey: POSITION_KEY,
+        symbol: 'ETH',
+        marketAddress: MARKET,
+        isLong: true,
+        confirmedSizeUsd: 42.5,
+      },
+      triggerPriceUsd: 2_970,
+      acceptablePriceUsd: 2_955.15,
+    });
+    expect(duplicate.ok).toBe(false);
+    if (!duplicate.ok) expect(duplicate.reason).toContain('자동 재제출 금지');
+    expect(restartSubmit).not.toHaveBeenCalled();
+    expect((await getProtection(`prot:${INTENT_ID}:INITIAL_STOP`))).toMatchObject({
+      status: 'SUBMITTED',
+      submitAttempts: 1,
+    });
+
+    const close = evaluateCloseSettlement(closeBinding(), closeObservation());
+    expect(close.ok).toBe(true);
+    if (!close.ok) throw new Error(close.reason);
+    expect(close.settlement).toMatchObject({
+      grossPnlUsd: 10,
+      positionFeeUsd: 1,
+      executionFeeUsd: 0.3,
+      priceImpactUsd: 0.2,
+      fundingFeeUsd: 0.5,
+      borrowingFeeUsd: 0.3,
+      confirmations: 15,
+      postCloseSizeUsd30: '0',
+    });
+    const binding = closeBinding();
+    state.trades.set(binding.tradeId, {
+      id: binding.tradeId,
+      action: 'CLOSE',
+      testMode: true,
+      settlementStatus: 'UNSETTLED',
+      settlementIntentId: binding.intentId,
+      settlementAccount: binding.accountAddress,
+      settlementMarketAddress: binding.marketAddress,
+      settlementCollateralToken: binding.collateralTokenAddress,
+      settlementPositionKey: binding.positionKey,
+      preCloseSizeUsd30: binding.preCloseSizeUsd30.toString(),
+      requestedReductionUsd30: binding.requestedReductionUsd30.toString(),
+      evidenceTxHash: null,
+    });
+    state.executionIntents.set(binding.intentId, {
+      id: binding.intentId,
+      orderType: 'close',
+      status: 'CONFIRMED',
+      receiptStatus: 'success',
+      closeSettlementTradeId: binding.tradeId,
+      orderKey: binding.expectedOrderKey,
+      resolutionTxHash: binding.expectedTxHash,
+      resolutionBlock: binding.expectedBlockNumber.toString(),
+      orderEmitterAddress: binding.expectedEmitterAddress,
+      closeAccount: binding.accountAddress,
+      closeMarketAddress: binding.marketAddress,
+      closeCollateralToken: binding.collateralTokenAddress,
+      closePositionKey: binding.positionKey,
+      closePreSizeUsd30: binding.preCloseSizeUsd30.toString(),
+      closeRequestedReductionUsd30: binding.requestedReductionUsd30.toString(),
+    });
+    state.relayTasks.set(binding.relayTaskId, {
+      id: binding.relayTaskId,
+      kind: 'CLOSE',
+      status: 'CONFIRMED',
+      intentId: binding.intentId,
+      gmxExecutionTxHash: binding.expectedTxHash,
+      gmxOrderKeys: JSON.stringify([binding.expectedOrderKey]),
+    });
+
+    const settlementInput = {
+      tradeId: binding.tradeId,
+      ...close.settlement,
+      intentId: binding.intentId,
+      relayTaskId: binding.relayTaskId,
+    };
+    const settled = await recordTradeSettlement(settlementInput);
+    expect(settled).toEqual({ ok: true, netPnlUsd: 7.7, estimateDeltaUsd: null });
+    expect(state.trades.get(binding.tradeId)).toMatchObject({
+      settlementStatus: 'SETTLED',
+      grossPnlUsd: '10',
+      positionFeeUsd: '1',
+      executionFeeUsd: '0.3',
+      priceImpactUsd: '0.2',
+      fundingFeeUsd: '0.5',
+      borrowingFeeUsd: '0.3',
+      netPnlUsd: '7.7',
+      pnl: '7.7',
+      evidenceTxHash: binding.expectedTxHash,
+    });
+
+    const duplicateSettlement = await recordTradeSettlement(settlementInput);
+    expect(duplicateSettlement.ok).toBe(false);
+    expect(state.trades.get(binding.tradeId)).toMatchObject({
+      settlementStatus: 'SETTLED',
+      netPnlUsd: '7.7',
+    });
+  });
+
   it('initial stop durable 처리 완료 전에는 OPEN을 terminal-confirmed하지 않고 exact binding 후에만 해소한다', async () => {
     const pendingSubmit = deferred<ProtectionSubmitOutcome>();
     const submit = vi.fn((request: ProtectionSubmitRequest) => pendingSubmit.promise);

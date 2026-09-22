@@ -163,6 +163,13 @@ const EMERGENCY_STOP_KEY = 'emergencyStopActive';
 // 재시작 reconciliation 완료 여부 (인메모리)
 let _reconciled = false;
 let _emergencyStop = false;
+// All cached Stop capability refreshes share one chain. A slower, older
+// refresh must never overwrite evidence collected by a later reconciliation.
+let _stopCapabilityRefreshChain: Promise<void> = Promise.resolve();
+let _stopCapabilityCollectorOverride:
+  ((freshFeeQuote: boolean) => Promise<StopCapabilityResult>) | null = null;
+let _protectionPassOverride:
+  ((source: 'startup' | 'periodic') => Promise<void>) | null = null;
 
 // ── 감사로그 타입 ──────────────────────────────────────────────────────────────
 
@@ -631,17 +638,44 @@ export async function evaluateManualCanaryStopCapability(
 }
 
 export async function refreshStopExecutionCapability(): Promise<StopCapabilityResult> {
-  const testOverride = getStopExecutionAvailabilityTestOverride();
-  const derived = testOverride === null
-    ? await collectStopExecutionCapability(
-      getExecutionEligibleCostEvidence(Date.now()).fresh,
-    )
-    : {
-      available: testOverride,
-      reasons: testOverride ? [] : ['테스트 override: stop 실행 능력 비활성'],
-    };
-  setStopExecutionCapability(derived);
-  return derived;
+  let result: StopCapabilityResult | null = null;
+  const refresh = async (): Promise<void> => {
+    try {
+      const testOverride = getStopExecutionAvailabilityTestOverride();
+      result = testOverride === null
+        ? await (_stopCapabilityCollectorOverride ?? collectStopExecutionCapability)(
+          getExecutionEligibleCostEvidence(Date.now()).fresh,
+        )
+        : {
+          available: testOverride,
+          reasons: testOverride ? [] : ['테스트 override: stop 실행 능력 비활성'],
+        };
+    } catch (e) {
+      result = {
+        available: false,
+        reasons: [`stop 실행 능력 재평가 실패: ${(e as Error).message}`],
+      };
+    }
+    setStopExecutionCapability(result);
+  };
+
+  const queued = _stopCapabilityRefreshChain.then(refresh, refresh);
+  _stopCapabilityRefreshChain = queued.then(() => undefined, () => undefined);
+  await queued;
+  return result ?? {
+    available: false,
+    reasons: ['stop 실행 능력 재평가 결과 없음'],
+  };
+}
+
+/** Test-only seam for exercising refresh ordering, failures, and recovery. */
+export function __setStopCapabilityCollectorForTests(
+  collector: ((freshFeeQuote: boolean) => Promise<StopCapabilityResult>) | null,
+): void {
+  if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
+    throw new Error('__setStopCapabilityCollectorForTests는 테스트 런타임 전용 — 프로덕션 호출 금지');
+  }
+  _stopCapabilityCollectorOverride = collector;
 }
 
 /**
@@ -1218,6 +1252,7 @@ export async function countInFlightReservedActions(): Promise<number | null> {
 }
 
 export async function runProtectionPass(source: 'startup' | 'periodic' = 'periodic'): Promise<void> {
+  if (_protectionPassOverride) return _protectionPassOverride(source);
   wireProtectionExecution();
   if (_protectionReconOverride) { _protectionRecon = _protectionReconOverride; return; }
   try {
@@ -1304,17 +1339,30 @@ export async function runProtectionPass(source: 'startup' | 'periodic' = 'period
   }
 }
 
+/** Test-only seam used to prove the production periodic function's ordering. */
+export function __setProtectionPassForTests(
+  pass: ((source: 'startup' | 'periodic') => Promise<void>) | null,
+): void {
+  if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
+    throw new Error('__setProtectionPassForTests는 테스트 런타임 전용 — 프로덕션 호출 금지');
+  }
+  _protectionPassOverride = pass;
+}
+
 export async function runPeriodicIntentReconciliation(): Promise<void> {
-  // §11 — stop 실행 능력 주기 재평가 (실패해도 Worker 계속, 능력은 fail-closed 유지)
-  try { await refreshStopExecutionCapability(); } catch { /* fail-closed 유지 */ }
-  // 6H-2B §6·§9 — 보호 주문 coverage·재판정 pass
-  try { await runProtectionPass(); } catch { /* fail-closed 유지 */ }
+  // 먼저 authoritative protection/intent 상태를 생산하고, 그 invocation의
+  // 마지막에 cached Stop capability를 재평가한다. 반대 순서는 새 보호 실패를
+  // 다음 5분 주기까지 available로 남길 수 있다.
+  try { await runProtectionPass(); } catch { /* runProtectionPass도 내부 fail-closed */ }
   try {
-    if (!(await hasBlockingIntents())) return;
-    const summary = await reconcileBlockingIntentsOnchain();
-    await applyIntentResolutionsToAuditLog(summary.resolutions);
-    if (summary.resolutions.length === 0) return;
-    // 해소된 것이 있으면 차단 플래그 재평가 (감사로그+intent 모두 깨끗해야 해제)
+    if (await hasBlockingIntents()) {
+      const summary = await reconcileBlockingIntentsOnchain();
+      await applyIntentResolutionsToAuditLog(summary.resolutions);
+      console.info(`[LiveTestExecutor] 주기 reconciliation: ${summary.resolutions.length}건 판정`);
+    }
+
+    // blocking intent가 이미 사라진 경우도 매 주기 재평가한다. 그렇지 않으면
+    // 이전 _reconciled=false가 정상 복구 뒤에도 영구적으로 남을 수 있다.
     const auditLoaded = await loadAuditLogStrict();
     const auditBlocked = !auditLoaded.ok ||
       auditLoaded.entries.some(e => e.status === 'SUBMITTED' || e.status === 'UNRESOLVED');
@@ -1324,9 +1372,21 @@ export async function runPeriodicIntentReconciliation(): Promise<void> {
     await db.insert(workerStateTable)
       .values({ key: RECONCILED_KEY, value: String(_reconciled), updatedAt: now })
       .onConflictDoUpdate({ target: workerStateTable.key, set: { value: String(_reconciled), updatedAt: now } });
-    console.info(`[LiveTestExecutor] 주기 reconciliation: ${summary.resolutions.length}건 해소, 차단=${stillBlocked}`);
+    console.info(`[LiveTestExecutor] 주기 reconciliation 상태 갱신: 차단=${stillBlocked}`);
   } catch (e) {
+    _reconciled = false;
     console.error('[LiveTestExecutor] 주기 intent reconciliation 오류 (차단 유지, Worker 계속):', e);
+  } finally {
+    if (process.env.WORKER_ENGINE_MODE === 'PAPER') {
+      // PAPER worker가 주기적으로 LIVE 실행 capability를 available로 게시하지
+      // 못하게 한다. Manual Canary의 명시적 preflight와도 분리된 진단 상태다.
+      setStopExecutionCapability({
+        available: false,
+        reasons: ['PAPER mode: 주기 LIVE stop capability 재평가 비활성'],
+      });
+    } else {
+      await refreshStopExecutionCapability();
+    }
   }
 }
 

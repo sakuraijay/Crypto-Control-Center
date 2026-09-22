@@ -559,3 +559,39 @@ describe('E2E §6 — 중복 진입 차단', () => {
     expect(opens.every(row => row['riskProfileSnapshot'] === profile)).toBe(true);
   });
 });
+
+describe('daily PAPER experiment through actual executor',()=>{
+ it.each(['profit','loss','expiry','cost_changed','live'] as const)('persists and settles %s',async scenario=>{
+  const {runVirtualPaperDailyCycle}=await import('../workers/virtualPaperDailyCycle');
+  const {DAILY_PAPER_POLICY}=await import('../workers/virtualPaperDailyPolicy');
+  const {MARKET_BY_SYMBOL_SERVER}=await import('../lib/gmxMarkets');
+  const now=Date.parse('2026-09-22T03:00:10Z');
+  const session=buildActiveVirtualPaper400SessionState('daily-e2e',new Date(now-1000));
+  process.env.WORKER_ENGINE_MODE=scenario==='live'?'LIVE':'PAPER';
+  let saved=initialVirtualPaper400RiskState(session.session);
+  vi.mocked(getPaperCostBinding).mockReturnValue({...BINDING,estEntryCostUsd:.02,estExitCostUsd:.01,
+    fundingRatePerHourFraction:.00001,borrowingRatePerHourFraction:.00001});
+  try {
+  const result=await runVirtualPaperDailyCycle({sessionRaw:JSON.stringify(session),policyAppliedAt:new Date(now).toISOString(),
+    policyVersion:DAILY_PAPER_POLICY.version,tradingMode:'INTRADAY',engineMode:'PAPER',previous:saved,rows:[],now:new Date(now),
+    markets:MARKET_BY_SYMBOL_SERVER,quote:quoteFn(50000),shouldContinue:()=>true,persistRisk:async s=>{saved=s;},readSignals:async()=>[],
+    readDailyCandidates:async()=>[{symbol:'BTC',source:'gmx-official-api',closedAt:now-10000,evaluatedAt:now,side:'LONG',referencePrice:50000,stopFraction:.006,momentum:.001,purpose:'AGGRESSIVE_PAPER_EXPERIMENT'}],
+    readCost:async(_s,_l,n)=>virtualReplayCost(now,n),claim:async(id,audit)=>{if(store.workerState.has(id))return false;store.workerState.set(id,JSON.stringify(audit));return true;},
+    open:async args=>{if(scenario==='cost_changed')vi.mocked(getPaperCostBinding).mockReturnValue({...BINDING,estEntryCostUsd:1});return openServerPaperPosition(args);},
+    close:async()=>false,reduce:async()=>false});
+  if(scenario==='cost_changed'||scenario==='live'){expect(result.status).toBe('BLOCKED');expect(store.trades).toHaveLength(0);return;}
+  expect(result.status).toBe('OPENED');expect(store.trades).toHaveLength(1);
+  const open=store.trades[0];expect(Number(open.sizeInUsd)).toBeCloseTo(1000);
+  expect(store.workerState.get(String(open.openDecisionId))).toContain('PAPER_DAILY_MOMENTUM_EXPERIMENT');
+  __resetServerPaperStateForTests();
+  const price=scenario==='profit'?50700:scenario==='loss'?49500:50001;
+  const at=now+(scenario==='expiry'?31:5)*60000;
+  await manageServerPaperTick(quoteFn(price),at);await manageServerPaperTick(quoteFn(price),at+1000);
+  expect(closeRows()).toHaveLength(1);
+  const close=closeRows()[0];expect(close.closeReason).toBe(scenario==='profit'?'TAKE_PROFIT':scenario==='loss'?'STOP_LOSS':'MODE_TIME_EXIT');
+  expect(Number(close.netPnlEstimatedUsd)).toBeCloseTo(Number(close.pnl)-Number(close.estEntryCostUsd)-Number(close.estExitCostUsd)-Number(close.estHoldingCostUsd));
+  const restored=evaluateVirtualPaper400Account({session:session.session,previous:saved,rows:store.trades as unknown as DbTrade[],now:new Date(at+1000),quote:quoteFn(price),aggressiveDaily:true});
+  expect(restored.ledger.settlementCount).toBe(1);if(scenario==='loss')expect(restored.ledger.realizedEquityUsd).toBeLessThan(390);
+  } finally {process.env.WORKER_ENGINE_MODE='PAPER';}
+ });
+});

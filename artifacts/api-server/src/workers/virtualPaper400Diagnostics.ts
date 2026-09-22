@@ -4,7 +4,8 @@ import type { StrategyShadowRecord } from '../intel/strategyShadowAdapterV2';
 const HOUR = 3_600_000;
 const VERSION = 'virtual-diagnostics/v1';
 type Counts = Record<string, number>;
-interface Bucket { hour: number; counts: Counts }
+interface Incident { minute: number; kind: string; symbol: string; detail: string }
+interface Bucket { hour: number; counts: Counts; incidents?: Incident[] }
 interface State {
   version: typeof VERSION; sessionId: string; since: number; lastMinute: number;
   cursors: Record<string, number>; buckets: Bucket[];
@@ -14,6 +15,11 @@ const finite = (n: unknown): n is number => typeof n === 'number' && Number.isFi
 const symbolOk = (s: string) => /^[A-Z0-9_]{1,24}$/.test(s);
 const countKeyOk = (s: string) => /^[A-Z0-9_:.-]{1,120}$/.test(s);
 const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
+const incidentOk = (v: unknown, now: number): v is Incident => object(v)
+  && Number.isSafeInteger(v.minute) && (v.minute as number) >= 0 && (v.minute as number) <= Math.floor(now / 60_000)
+  && typeof v.kind === 'string' && countKeyOk(v.kind)
+  && typeof v.symbol === 'string' && symbolOk(v.symbol)
+  && typeof v.detail === 'string' && v.detail.length <= 500;
 function restore(raw: string | null, sessionId: string, now: number): State | null {
   if (raw === null) return { version: VERSION, sessionId, since: now, lastMinute: -1, cursors: {}, buckets: [] };
   try {
@@ -27,7 +33,11 @@ function restore(raw: string | null, sessionId: string, now: number): State | nu
     for (const b of s.buckets) {
       if (!object(b) || !finite(b.hour) || b.hour % HOUR !== 0 || b.hour <= previous || b.hour > now
         || !object(b.counts) || Object.keys(b.counts).length > 128
-        || Object.entries(b.counts).some(([k,v]) => !countKeyOk(k) || !Number.isSafeInteger(v) || (v as number) < 0)) return null;
+        || Object.entries(b.counts).some(([k,v]) => !countKeyOk(k) || !Number.isSafeInteger(v) || (v as number) < 0)
+        || (b.incidents !== undefined && (!Array.isArray(b.incidents) || b.incidents.length > 64
+          || b.incidents.some(incident => !incidentOk(incident, now)
+            || incident.minute * 60_000 < (b.hour as number)
+            || incident.minute * 60_000 >= (b.hour as number) + HOUR)))) return null;
       previous = b.hour;
     }
     return s as unknown as State;
@@ -46,12 +56,19 @@ export function advanceVirtualDiagnostics(input: {
   if (!s) return { state: null, summary: { status: 'UNAVAILABLE', reason: 'DIAGNOSTICS_STATE_INVALID', historyReconstructed: false } };
   const hour = Math.floor(input.now / HOUR) * HOUR;
   s.buckets = s.buckets.filter(b => b.hour >= hour - 23 * HOUR);
-  if (s.buckets.at(-1)?.hour !== hour) s.buckets.push({ hour, counts: {} });
-  const counts = s.buckets.at(-1)!.counts;
+  if (s.buckets.at(-1)?.hour !== hour) s.buckets.push({ hour, counts: {}, incidents: [] });
+  const bucket = s.buckets.at(-1)!;
+  bucket.incidents ??= [];
+  const counts = bucket.counts;
   const increment = (key: string) => {
     const safe = countKeyOk(key) ? key : 'OTHER';
     const bounded = Object.hasOwn(counts, safe) || Object.keys(counts).length < 127 ? safe : 'OTHER';
     counts[bounded] = (counts[bounded] ?? 0) + 1;
+  };
+  const incident = (kind: string, symbol: string, detail: string, minute: number) => {
+    if (!countKeyOk(kind) || !symbolOk(symbol) || bucket.incidents!.length >= 64) return;
+    bucket.incidents!.push({ minute, kind, symbol,
+      detail: sanitizeCostError(detail).slice(0, 500) });
   };
   // Cycle availability and evaluated completed candles are different denominators.
   const minute = Math.floor(input.now / 60_000);
@@ -59,8 +76,32 @@ export function advanceVirtualDiagnostics(input: {
     s.lastMinute = minute;
     increment('OBSERVED_MINUTE'); increment(`CYCLE:${input.status}`);
     if (input.reason) increment(`CYCLE_REASON:${input.reason}`);
+    for (const d of input.diagnostics.filter(d=>d.reason.startsWith('PAPER_EXPERIMENT_')||d.reason.startsWith('DAILY_PLAN_'))) {
+      increment(`EXPERIMENT_REJECT:${d.reason}`); incident('PAPER_EXPERIMENT_REJECT',d.symbol,d.reason,minute);
+    }
+    for (const stage of input.entryStages?.filter(s=>s.stage==='PAPER_EXPERIMENT_CLAIMED')??[]) increment('PAPER_EXPERIMENT_CLAIMED');
     for (const a of input.analysis) {
-      if (a.reason.includes('COST_UNAVAILABLE')) increment('ANALYSIS_COST_UNAVAILABLE');
+      if (!symbolOk(a.symbol)) continue;
+      if(a.reason.startsWith('AGGRESSIVE_PAPER_EXPERIMENT:'))increment(`EXPERIMENT_CANDIDATE:${a.symbol}`);
+      if(a.reason==='PAPER_EXPERIMENT_CANDLE_UNAVAILABLE'){increment(`EXPERIMENT_CANDLE_UNAVAILABLE:${a.symbol}`);incident('PAPER_EXPERIMENT_CANDLE_UNAVAILABLE',a.symbol,a.reason,minute);}
+      if (a.reason.includes('COST_UNAVAILABLE')) {
+        increment('ANALYSIS_COST_UNAVAILABLE');
+        increment(`ANALYSIS_COST_UNAVAILABLE:${a.symbol}`);
+        incident('ANALYSIS_COST_UNAVAILABLE', a.symbol, a.reason, minute);
+      }
+      const record = input.records.find(r => r.symbol === a.symbol);
+      if (!record && a.reason.startsWith('ANALYSIS_')) {
+        increment(`ANALYSIS_NOT_EVALUATED:${a.symbol}`);
+        const newestAcceptedClose = Math.max(0, ...input.records
+          .filter(r => finite(r.sourceCandleCloseTime) && r.sourceCandleCloseTime <= input.now)
+          .map(r => r.sourceCandleCloseTime));
+        const lastAcceptedClose = s.cursors[a.symbol] ?? 0;
+        if (newestAcceptedClose > lastAcceptedClose) {
+          increment(`SOURCE_CANDLE_NOT_ACCEPTED:${a.symbol}`);
+          incident('SOURCE_CANDLE_NOT_ACCEPTED', a.symbol,
+            `lastAcceptedClose=${lastAcceptedClose || 'NONE'}; newestBatchClose=${newestAcceptedClose}; ${a.reason}`, minute);
+        }
+      }
     }
   }
   for (const r of input.records) {
@@ -71,10 +112,16 @@ export function advanceVirtualDiagnostics(input: {
     increment('EVALUATED_CANDLE'); increment(`REGIME:${r.regime}`); increment(`ACTION:${r.action}`);
     if (r.action === 'LONG' || r.action === 'SHORT') increment('DIRECTIONAL_CANDIDATE');
     for (const stage of input.entryStages?.filter(s => s.symbol === r.symbol) ?? []) increment(`STAGE:${stage.stage}`);
-    for (const d of input.diagnostics.filter(d => d.symbol === r.symbol)) increment(`ENTRY_REJECT:${d.reason}`);
+    for (const d of input.diagnostics.filter(d => d.symbol === r.symbol)) {
+      increment(`ENTRY_REJECT:${d.reason}`);
+      incident('ENTRY_REJECT', r.symbol, d.reason, Math.floor(input.now / 60_000));
+    }
   }
   const totals: Counts = {};
   for (const b of s.buckets) for (const [key,value] of Object.entries(b.counts)) totals[key] = (totals[key] ?? 0) + value;
+  const recentIncidents = s.buckets.flatMap(b => b.incidents ?? []).slice(-24).map(row => ({
+    at: new Date(row.minute * 60_000).toISOString(), kind: row.kind, symbol: row.symbol, detail: row.detail,
+  }));
   const recentReasons = input.analysis.slice(0, 3).map(a => ({ symbol: a.symbol,
     reason: sanitizeCostError(a.reason).slice(0, 500),
     strategies: input.records.find(r => r.symbol === a.symbol)?.rejectedStrategies?.slice(0, 3).map(r => ({
@@ -85,7 +132,7 @@ export function advanceVirtualDiagnostics(input: {
     recordingStartedAt: new Date(s.since).toISOString(),
     windowStart: new Date(Math.max(s.since, hour - 23 * HOUR)).toISOString(),
     windowBasis: 'UP_TO_24_UTC_HOURLY_BUCKETS', historyReconstructed: false,
-    counts: totals, recentReasons, ledger: { opens: input.openCount, closes: input.closeCount },
+    counts: totals, recentReasons, recentIncidents, ledger: { opens: input.openCount, closes: input.closeCount },
     minutesWithoutNewEntry: Math.max(0, Math.floor((input.now - (input.lastOpenAtMs ?? input.sessionStartedAtMs)) / 60_000)),
   } };
 }

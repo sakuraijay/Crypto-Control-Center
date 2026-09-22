@@ -123,7 +123,13 @@ export function buildPublicReadinessAttestation(input: {
     ...costs.ETH.blockerIds,
     ...stopBlockerIds,
   ];
-  const canaryBlockerIds = input.canaryReady
+  const publicCostBlockerIds = [
+    ...costs.BTC.blockerIds,
+    ...costs.ETH.blockerIds,
+  ];
+  const publicCanaryReady =
+    input.canaryReady && publicCostBlockerIds.length === 0;
+  const canaryBlockerIds = publicCanaryReady
     ? []
     : diagnosticCanaryBlockerIds.length > 0
       ? diagnosticCanaryBlockerIds
@@ -135,7 +141,7 @@ export function buildPublicReadinessAttestation(input: {
     costs,
     canary: {
       // Observational parity only: this never grants execution authorization.
-      ready: input.canaryReady,
+      ready: publicCanaryReady,
       blockerIds: [...new Set(canaryBlockerIds)],
     },
     stop: {

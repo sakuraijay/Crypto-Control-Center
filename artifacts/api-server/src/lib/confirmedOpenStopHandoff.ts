@@ -123,7 +123,9 @@ export async function runConfirmedOpenStopHandoff(
   evidence: ConfirmedOpenHandoffInput,
   deps: ConfirmedOpenStopHandoffDeps,
 ): Promise<ConfirmedOpenHandoffResult> {
-  if (evidence.confirmations < deps.finalityDepth
+  if (!Number.isSafeInteger(deps.finalityDepth) || deps.finalityDepth <= 0
+      || !Number.isSafeInteger(evidence.confirmations) || evidence.confirmations < 0
+      || evidence.confirmations < deps.finalityDepth
       || !hasBytes32(evidence.orderKey)
       || !hasBytes32(evidence.executionTxHash)
       || !hasAddress(evidence.emitterAddress)) {

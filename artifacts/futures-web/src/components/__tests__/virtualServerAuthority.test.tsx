@@ -49,6 +49,18 @@ describe('server authority after retiring the browser trading engine', () => {
   expect(screen.getByRole('dialog').textContent).toContain('1.5');
   expect(fetcher.mock.calls.every((call:any)=>!call[1]?.method)).toBe(true);
  });
+ it('labels daily experimental policy and actual short holding horizons without profit claims',async()=>{
+  const data=snapshot();data.tradingModeSelection={version:'virtual-trading-mode/v1',mode:'INTRADAY',sessionId:'ui',updatedAt:at};
+  data.runtime!.policy={...data.runtime!.policy!,version:'virtual400-daily/v3',riskPerTradePct:2,minLeverage:5,maxLeverage:10,cooldownMinutes:60};
+  const spec={minTargetRoePct:5,maxTargetRoePct:10,targetRoePct:null,stopRoePct:10,exitBasis:'PAPER_EXPERIMENT_PRICE_TARGET'};
+  data.tradingModeOptions={INTRADAY:{...spec,label:'단타',maxHoldHours:.5},SWING:{...spec,label:'스윙',maxHoldHours:4}};
+  vi.stubGlobal('fetch',vi.fn(async()=>({ok:true,json:async()=>data})));mount();await flush();
+  expect(screen.getByTestId('virtual-active-policy').textContent).toContain('적극적 PAPER 시험');
+  fireEvent.click(screen.getByRole('button',{name:'매매 방식 선택'}));
+  expect(screen.getByRole('dialog').textContent).toContain('최대 30분');
+  expect(screen.getByRole('dialog').textContent).toContain('최대 4시간');
+  expect(screen.getByRole('dialog').textContent).toContain('수익 보장이 아닙니다');
+ });
  it('restores the applied 5–10x range after remount without browser writes', async () => {
   const data = snapshot(); data.runtime!.policy = { ...data.runtime!.policy!, version: 'virtual400-active/v2', minLeverage: 5, maxLeverage: 10 };
   const fetcher = vi.fn(async () => ({ ok: true, json: async () => data })); vi.stubGlobal('fetch', fetcher);
@@ -117,4 +129,21 @@ describe('server authority after retiring the browser trading engine', () => {
   expect(fetcher.mock.calls.every((call: any) => !call[1]?.method)).toBe(true);
   expect(fetcher).toHaveBeenCalledTimes(2);
  });
+});
+
+it('shows immutable initial capital above current equity, and separates a contribution from profit', async () => {
+ const data=snapshot();data.runtime!.account.equityUsd=497;
+ Object.assign(data.runtime!.account.ledger,{initialEquityUsd:400,netContributionsUsd:100,fundedCapitalUsd:500,realizedEquityUsd:497});
+ data.runtime!.policy={...data.runtime!.policy!,version:'virtual400-daily/v4',cooldownMinutes:45,maxDailyEntries:32};
+ const fetcher=vi.fn(async()=>({ok:true,json:async()=>data}));vi.stubGlobal('fetch',fetcher);
+ const view=mount();await flush();
+ const initial=screen.getByTestId('metric-initial-capital');const current=screen.getByTestId('metric-가상 평가자산');
+ expect(initial.textContent).toBe('400.00');expect(current.textContent).toContain('497.00');
+ expect(initial.compareDocumentPosition(current)&Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+ expect(screen.getByText(/추가 입금.*100.00/).textContent).toContain('손익과 별도');
+ expect(screen.getByTestId('metric-비용 차감 실현 손익').textContent).toContain('-3.00');
+ expect(screen.getByTestId('virtual-active-policy').textContent).toContain('45분');
+ expect(screen.getByText(/하루 최대 32회/)).toBeTruthy();
+ view.unmount();mount();await flush();expect(screen.getByTestId('metric-initial-capital').textContent).toBe('400.00');
+ expect(fetcher.mock.calls.every((c:any)=>!c[1]?.method)).toBe(true);
 });

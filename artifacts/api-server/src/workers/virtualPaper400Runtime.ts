@@ -1,3 +1,7 @@
+import { applyAuthorizedPaperCredit } from './virtualPaperContribution';
+import { DAILY_PAPER_POLICY } from './virtualPaperDailyPolicy';
+import { runVirtualPaperDailyCycle, type DailyCycleDeps } from './virtualPaperDailyCycle';
+import { dailyPaperCandidate } from './virtualPaperDailyCandidate';
 import { advanceVirtualDiagnostics, virtualDiagnosticsKey } from './virtualPaper400Diagnostics';
 import type { StrategyShadowRecord } from '../intel/strategyShadowAdapterV2';
 import { discoverVirtualGmxUniverse, selectVirtualAnalysisBatch, VIRTUAL_GMX_SYMBOLS } from '../lib/virtualGmxUniverse';
@@ -28,7 +32,7 @@ export const VIRTUAL_PAPER_400_RUNTIME_KEY = 'virtual_paper_400_runtime_v1';
 /** Returns false only for an absent session. A stopped/invalid virtual session
  * must not silently fall back to Standard entries. No financial modules are called. */
 export async function maybeRunVirtualPaper400Cycle(args: {
-  cycleNumber: number; quote: PriceLookup; shouldContinue(): boolean;
+  cycleNumber: number; quote: PriceLookup; shouldContinue(): boolean; dailyExperiment?: boolean;
 }): Promise<boolean> {
   const { db, workerStateTable, tradesTable } = await import('@workspace/db');
   const observed = await db.select().from(workerStateTable)
@@ -66,18 +70,21 @@ export async function maybeRunVirtualPaper400Cycle(args: {
     const riskRaw = await read(riskKey);
     // Missing risk state may initialize only a completely unused virtual ledger.
     if (riskRaw === null && rows.length !== 0) throw new Error('VIRTUAL_RISK_STATE_MISSING_WITH_HISTORY');
-    const previous = riskRaw === null ? initialVirtualPaper400RiskState(identity)
+    let previous = riskRaw === null ? initialVirtualPaper400RiskState(identity)
       : parseVirtualPaper400RiskState(riskRaw, identity);
     const now = new Date();
+    previous = applyAuthorizedPaperCredit(previous, identity, now, process.env.WORKER_ENGINE_MODE ?? 'PAPER', session.active);
     const policyKey = `virtual_paper_400_policy_v1:${identity.sessionId}`;
     const policyRaw = await read(policyKey);
     let applied = policyRaw ? JSON.parse(policyRaw) as { version: string; appliedAt: string; sessionId: string } : null;
-    if (policyRaw !== null && (!applied || (applied.version !== VIRTUAL_ACTIVE_POLICY.version && applied.version !== VIRTUAL_LEGACY_POLICY.version) || applied.sessionId !== identity.sessionId
+    if (policyRaw !== null && (!applied || (applied.version !== VIRTUAL_ACTIVE_POLICY.version && applied.version !== VIRTUAL_LEGACY_POLICY.version && applied.version !== DAILY_PAPER_POLICY.version && applied.version !== 'virtual400-daily/v3') || applied.sessionId !== identity.sessionId
       || !Number.isFinite(Date.parse(applied.appliedAt)) || Date.parse(applied.appliedAt) > now.getTime())) {
       throw new Error('VIRTUAL_POLICY_INVALID');
     }
     const executor = getServerPaperStatus();
-    const accountBefore = evaluateVirtualPaper400Account({ session: identity, previous, rows, now, quote: args.quote });
+    const dailyRequested = args.dailyExperiment === true || applied?.version === DAILY_PAPER_POLICY.version || applied?.version === 'virtual400-daily/v3';
+    const desiredPolicy = dailyRequested ? DAILY_PAPER_POLICY : VIRTUAL_ACTIVE_POLICY;
+    const accountBefore = evaluateVirtualPaper400Account({ session: identity, previous, rows, now, quote: args.quote, aggressiveDaily:applied?.version===DAILY_PAPER_POLICY.version || applied?.version==='virtual400-daily/v3' });
     const universe = session.active && accountBefore.evaluation.entryAllowed && !executor.pendingClose && !executor.unresolved
       ? await discoverVirtualGmxUniverse() : null;
     const markets = new Map((universe?.complete ? universe.markets : []).map(m => [m.name.split('/')[0], m]));
@@ -101,8 +108,8 @@ export async function maybeRunVirtualPaper400Cycle(args: {
       selectedMode = { version: MODE_VERSION, mode: 'INTRADAY', sessionId: identity.sessionId, updatedAt: now.toISOString() };
       await write(modeKey, selectedMode);
     }
-    if (applied?.version !== VIRTUAL_ACTIVE_POLICY.version && session.active && !accountBefore.held.length && !executor.pendingClose && !executor.unresolved) {
-      applied = { version: VIRTUAL_ACTIVE_POLICY.version, appliedAt: now.toISOString(), sessionId: identity.sessionId };
+    if (applied?.version !== desiredPolicy.version && session.active && !accountBefore.held.length && !executor.pendingClose && !executor.unresolved) {
+      applied = { version: desiredPolicy.version, appliedAt: now.toISOString(), sessionId: identity.sessionId };
       await write(policyKey, applied);
     }
     let analysis: { symbol: string; reason: string }[] = [];
@@ -128,10 +135,11 @@ export async function maybeRunVirtualPaper400Cycle(args: {
       // remain PAPER estimates, never observed real execution.
       return { ...result.snapshot, source: 'PAPER_GMX_ESTIMATE' };
     };
-    const result = await runVirtualPaper400Cycle({ sessionRaw: raw!, policyAppliedAt: applied?.appliedAt, policyVersion: applied?.version,
+    const dailyEnabled=applied?.version===DAILY_PAPER_POLICY.version || applied?.version==='virtual400-daily/v3';
+    const cycleDeps: DailyCycleDeps = { sessionRaw: raw!, policyAppliedAt: applied?.appliedAt, policyVersion: applied?.version,
       tradingMode: selectedMode?.mode, structuralTargets: true, markets,
       entryBlockedReason: executor.unresolved || executor.pendingClose ? 'EXECUTOR_RECOVERY_PENDING'
-        : continuity.status === 'BLOCKED' ? continuity.reason
+        : !dailyEnabled && continuity.status === 'BLOCKED' ? continuity.reason
         : !applied ? 'POLICY_SAFE_BOUNDARY_PENDING'
         : rotationInvalid ? 'VIRTUAL_UNIVERSE_ROTATION_INVALID'
         : universe && !universe.complete ? universe.reason ?? 'UNIVERSE_UNAVAILABLE'
@@ -142,6 +150,18 @@ export async function maybeRunVirtualPaper400Cycle(args: {
       readCost: async (symbol, isLong, notionalUsd) => {
         activity.stage(run, 'CHECKING_ENTRY', [symbol]);
         return readCost(symbol, isLong, notionalUsd);
+      },
+      readDailyCandidates: async () => {
+        if (!universe?.complete || !symbols.length || !args.shouldContinue()) return [];
+        await write(rotationKey,{...rotation,...Object.fromEntries(symbols.map(s=>[s,Date.now()]))});
+        activity.stage(run,'ANALYZING_MARKETS',symbols);
+        const {fetchGmxCandles}=await import('../routes/gmx');
+        const candidates=await Promise.all(symbols.map(async symbol=>dailyPaperCandidate(symbol,await fetchGmxCandles(symbol,'15m',20),Date.now())));
+        analysis=symbols.map((symbol,i)=>({symbol,reason:candidates[i]
+          ? `AGGRESSIVE_PAPER_EXPERIMENT: ${candidates[i]!.side}; completed-candle momentum ${candidates[i]!.momentum}; 미검증 시험 거래`
+          : 'PAPER_EXPERIMENT_CANDLE_UNAVAILABLE'}));
+        activity.analyzed(run,analysis.map((r,i)=>({...r,evaluated:!!candidates[i]})));
+        return candidates.filter((c):c is NonNullable<typeof c>=>c!==null);
       },
       readSignals: async () => {
         if (getServerPaperStatus().unresolved) return [];
@@ -214,14 +234,15 @@ export async function maybeRunVirtualPaper400Cycle(args: {
         return (await reduceServerPaper70({ openRow: row, quote: args.quote(row.symbol),
           shouldContinue: args.shouldContinue })).ok;
       },
-    });
+    };
+    const result = await (dailyEnabled ? runVirtualPaperDailyCycle(cycleDeps) : runVirtualPaper400Cycle(cycleDeps));
     activity.decisions(run, result.diagnostics);
     activity.stage(run, 'RECONCILING');
     // Read back the durable executor rows after OPEN/CLOSE/REDUCE. No invented PnL.
     const finalRows = await loadTrades();
     const currentRisk = parseVirtualPaper400RiskState((await read(riskKey))!, identity);
     const final = evaluateVirtualPaper400Account({ session: identity, rows: finalRows,
-      previous: currentRisk, now: new Date(), quote: args.quote });
+      previous: currentRisk, now: new Date(), quote: args.quote, aggressiveDaily:dailyEnabled });
     await write(riskKey, final.next);
     const journal = await Promise.all([...finalRows].filter(row => row.action === 'CLOSE')
       .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()).slice(0, 10).map(async close => {

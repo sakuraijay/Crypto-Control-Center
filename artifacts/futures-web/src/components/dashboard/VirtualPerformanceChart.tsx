@@ -6,6 +6,7 @@ export function VirtualPerformanceChart({ runtime, fresh }: { runtime: VirtualRu
   const [metric, setMetric] = useState<'balance' | 'net'>('balance');
   const [selected, setSelected] = useState<number | null>(null);
   const gradient = useId().replaceAll(':', '');
+  const balanceLabel = (runtime?.account.ledger.netContributionsUsd ?? 0) > 0 ? '입금 제외 잔액' : '정산 잔액';
   const series = fresh ? settlementSeries(runtime) : [];
   const points = metric === 'net' ? series.slice(1) : series;
   const values = points.map(point => point[metric]);
@@ -19,14 +20,14 @@ export function VirtualPerformanceChart({ runtime, fresh }: { runtime: VirtualRu
   return <section className="ccc-panel ccc-performance" aria-label="가상 계정 성과">
     <div className="ccc-panel-heading"><div><p className="ccc-eyebrow">PERFORMANCE</p><h2>가상 계정 성과</h2></div>
       <div className="ccc-segment" aria-label="차트 표시 기준">
-        <button aria-pressed={metric === 'balance'} onClick={() => { setMetric('balance'); setSelected(null); }}>정산 잔액</button>
+        <button aria-pressed={metric === 'balance'} onClick={() => { setMetric('balance'); setSelected(null); }}>{balanceLabel}</button>
         <button aria-pressed={metric === 'net'} onClick={() => { setMetric('net'); setSelected(null); }}>거래별 손익</button>
       </div>
     </div>
     {points.length ? <>
       <div className="ccc-chart-readout"><strong>{amount(points[focus]?.[metric], metric === 'net')} <small>USDC</small></strong>
         <span>{points[focus]?.label} · 표시된 정산 구간</span></div>
-      <svg viewBox="0 0 680 214" role="img" aria-label={`최근 ${series.length - 1}건 ${metric === 'balance' ? '정산 잔액' : '거래별 순손익'} 차트`} className="ccc-chart">
+      <svg viewBox="0 0 680 214" role="img" aria-label={`최근 ${series.length - 1}건 ${metric === 'balance' ? balanceLabel : '거래별 순손익'} 차트`} className="ccc-chart">
         <defs><linearGradient id={gradient} x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#8be0b4" stopOpacity=".16" /><stop offset="100%" stopColor="#8be0b4" stopOpacity="0" /></linearGradient></defs>
         {[0,1,2,3].map(i => <g key={i}><line x1="28" y1={28+i*49} x2="632" y2={28+i*49} stroke="currentColor" className="ccc-gridline" /><text x="642" y={32+i*49} className="ccc-axis">{amount(max-(max-min)*i/3, false, 0)}</text></g>)}
         {metric === 'balance' && <path d={`${line} L632,180 L28,180 Z`} fill={`url(#${gradient})`} />}
@@ -45,6 +46,6 @@ export function VirtualPerformanceChart({ runtime, fresh }: { runtime: VirtualRu
       <p>{!fresh ? '최신 상태가 확인되면 성과를 표시합니다.' : '거래가 정산되면 실제 가상 손익으로 차트가 만들어집니다.'}</p>
       <span className="ccc-subtle-tag"><CircleDashed size={12} /> {fresh ? `${runtime?.account.ledger.settlementCount ?? 0}건 정산 완료` : '상태 미확인'}</span>
     </div>}
-    <footer className="ccc-panel-footer"><span><i className="ccc-legend" />비용 차감 후 정산 기록</span><span>최근 최대 10건 · 추정 비용 반영</span></footer>
+    <footer className="ccc-panel-footer"><span><i className="ccc-legend" />비용 차감 후 정산 기록 · 추가 입금 제외</span><span>최근 최대 10건 · 추정 비용 반영</span></footer>
   </section>;
 }
