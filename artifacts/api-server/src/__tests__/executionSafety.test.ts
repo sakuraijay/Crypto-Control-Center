@@ -7,7 +7,7 @@
  * 실제 온체인·DB I/O 없음 (mock 전용).
  */
 
-import { describe, expect, it, vi, beforeEach, afterAll } from 'vitest';
+import { describe, expect, it, vi, beforeEach, afterEach, afterAll } from 'vitest';
 
 // ── @workspace/db 모킹 (감사로그 상태 주입 가능) ───────────────────────────────
 let auditLogRows: { value: string }[] = [];
@@ -272,6 +272,16 @@ beforeEach(async () => {
     atMs: Date.now(), confirmed: true, reason: null, approvalNonce: '1',
     isSubaccountListed: true, expiresAt: String(Math.floor(Date.now() / 1000) + 3600), remaining: '8',
   });
+});
+afterEach(async () => {
+  const {
+    __setProtectionPassForTests,
+    __setProtectionReconStateForTests,
+    __setStopCapabilityCollectorForTests,
+  } = await import('../workers/liveTestExecutor');
+  __setProtectionPassForTests(null);
+  __setProtectionReconStateForTests(null);
+  __setStopCapabilityCollectorForTests(null);
 });
 afterAll(() => {
   for (const k of ENV_KEYS) {
@@ -712,5 +722,138 @@ describe('reconcileOnRestart — fail-closed (UNRESOLVED)', () => {
     expect(isReconciled()).toBe(true);
     // SIMULATED 항목은 재작성되지 않음 (audit log 쓰기는 SUBMITTED 존재 시에만)
     expect(savedValues.filter(v => v.key === 'orderAuditLog').length).toBe(0);
+  });
+});
+
+describe('주기 Stop capability sequencing — actual executor function', () => {
+  function protectionState(blockNewOpens: boolean) {
+    return {
+      lastRunAtMs: Date.now(),
+      complete: !blockNewOpens,
+      anomalies: null,
+      blockNewOpens,
+      lastPositionsFetchOkAtMs: Date.now(),
+      ambiguousCount: 0,
+      ambiguousReasons: blockNewOpens ? ['fixture protection failure'] : [],
+      lastSource: 'periodic' as const,
+      confirmationDepth: 15,
+    };
+  }
+
+  it('보호 실패를 같은 invocation의 마지막 capability 평가에 반영하고 다음 invocation에서 복구한다', async () => {
+    process.env.WORKER_ENGINE_MODE = 'LIVE';
+    const {
+      __setProtectionPassForTests,
+      __setProtectionReconStateForTests,
+      __setStopCapabilityCollectorForTests,
+      __setStopExecutionAvailabilityForTests,
+      getProtectionReconState,
+      getStopExecutionCapability,
+      runPeriodicIntentReconciliation,
+    } = await import('../workers/liveTestExecutor');
+    __setStopExecutionAvailabilityForTests(null);
+    __setStopCapabilityCollectorForTests(async () => {
+      const protection = getProtectionReconState();
+      return protection.complete && !protection.blockNewOpens
+        ? { available: true, reasons: [] }
+        : { available: false, reasons: ['보호 주문 reconciliation 미완료/불일치 존재 (§5)'] };
+    });
+
+    __setProtectionPassForTests(async () => {
+      __setProtectionReconStateForTests(protectionState(true));
+    });
+    await runPeriodicIntentReconciliation();
+    expect(getStopExecutionCapability()).toMatchObject({
+      available: false,
+      reasons: ['보호 주문 reconciliation 미완료/불일치 존재 (§5)'],
+    });
+
+    __setProtectionPassForTests(async () => {
+      __setProtectionReconStateForTests(protectionState(false));
+    });
+    await runPeriodicIntentReconciliation();
+    expect(getStopExecutionCapability()).toMatchObject({ available: true, reasons: [] });
+  });
+
+  it('차단 intent가 사라진 주기에 reconciled=true를 durable 상태와 함께 복구한다', async () => {
+    process.env.WORKER_ENGINE_MODE = 'PAPER';
+    const { isReconciled, runPeriodicIntentReconciliation } =
+      await import('../workers/liveTestExecutor');
+
+    intentState.blocking = true;
+    await runPeriodicIntentReconciliation();
+    expect(isReconciled()).toBe(false);
+
+    intentState.blocking = false;
+    await runPeriodicIntentReconciliation();
+    expect(isReconciled()).toBe(true);
+    const reconWrites = savedValues.filter(v => v.key === 'liveTestReconciled');
+    expect(reconWrites.at(-1)?.value).toBe('true');
+  });
+
+  it('PAPER 주기는 LIVE collector를 호출하지 않고 unavailable 진단을 유지한다', async () => {
+    process.env.WORKER_ENGINE_MODE = 'PAPER';
+    const {
+      __setStopCapabilityCollectorForTests,
+      __setStopExecutionAvailabilityForTests,
+      getStopExecutionCapability,
+      runPeriodicIntentReconciliation,
+    } = await import('../workers/liveTestExecutor');
+    __setStopExecutionAvailabilityForTests(null);
+    const collector = vi.fn(async () => ({ available: true, reasons: [] }));
+    __setStopCapabilityCollectorForTests(collector);
+
+    await runPeriodicIntentReconciliation();
+
+    expect(collector).not.toHaveBeenCalled();
+    expect(getStopExecutionCapability()).toMatchObject({
+      available: false,
+      reasons: ['PAPER mode: 주기 LIVE stop capability 재평가 비활성'],
+    });
+  });
+
+  it('동시 refresh를 직렬화하고 마지막 평가 결과만 cache에 남긴다', async () => {
+    const {
+      __setStopCapabilityCollectorForTests,
+      __setStopExecutionAvailabilityForTests,
+      getStopExecutionCapability,
+      refreshStopExecutionCapability,
+    } = await import('../workers/liveTestExecutor');
+    __setStopExecutionAvailabilityForTests(null);
+    const releases: Array<(result: { available: boolean; reasons: string[] }) => void> = [];
+    const starts: number[] = [];
+    __setStopCapabilityCollectorForTests(async () => {
+      starts.push(starts.length + 1);
+      return new Promise(resolve => releases.push(resolve));
+    });
+
+    const first = refreshStopExecutionCapability();
+    const second = refreshStopExecutionCapability();
+    await vi.waitFor(() => expect(starts).toEqual([1]));
+    releases[0]({ available: false, reasons: ['older'] });
+    await vi.waitFor(() => expect(starts).toEqual([1, 2]));
+    releases[1]({ available: true, reasons: [] });
+    await Promise.all([first, second]);
+
+    expect(getStopExecutionCapability()).toMatchObject({ available: true, reasons: [] });
+  });
+
+  it('collector 예외를 fail-closed로 기록하고 다음 refresh에서 복구한다', async () => {
+    const {
+      __setStopCapabilityCollectorForTests,
+      __setStopExecutionAvailabilityForTests,
+      getStopExecutionCapability,
+      refreshStopExecutionCapability,
+    } = await import('../workers/liveTestExecutor');
+    __setStopExecutionAvailabilityForTests(null);
+    const collector = vi.fn()
+      .mockRejectedValueOnce(new Error('fixture collector failed'))
+      .mockResolvedValueOnce({ available: true, reasons: [] });
+    __setStopCapabilityCollectorForTests(collector);
+
+    await expect(refreshStopExecutionCapability()).resolves.toMatchObject({ available: false });
+    expect(getStopExecutionCapability().reasons.join(' ')).toContain('fixture collector failed');
+    await expect(refreshStopExecutionCapability()).resolves.toMatchObject({ available: true });
+    expect(getStopExecutionCapability()).toMatchObject({ available: true, reasons: [] });
   });
 });
