@@ -585,7 +585,12 @@ describe('daily PAPER experiment through actual executor',()=>{
   expect(store.workerState.get(String(open.openDecisionId))).toContain('PAPER_DAILY_MOMENTUM_EXPERIMENT');
   __resetServerPaperStateForTests();
   const price=scenario==='profit'?50700:scenario==='loss'?49500:50001;
-  const at=now+(scenario==='expiry'?31:5)*60000;
+  if(scenario==='expiry'){
+    await manageServerPaperTick(quoteFn(price),now+31*60000);
+    expect(closeRows()).toHaveLength(0);
+    __resetServerPaperStateForTests();
+  }
+  const at=now+(scenario==='expiry'?61:5)*60000;
   await manageServerPaperTick(quoteFn(price),at);await manageServerPaperTick(quoteFn(price),at+1000);
   expect(closeRows()).toHaveLength(1);
   const close=closeRows()[0];expect(close.closeReason).toBe(scenario==='profit'?'TAKE_PROFIT':scenario==='loss'?'STOP_LOSS':'MODE_TIME_EXIT');
