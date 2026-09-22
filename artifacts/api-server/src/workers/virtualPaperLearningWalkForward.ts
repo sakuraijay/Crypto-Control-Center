@@ -51,31 +51,59 @@ function duplicateValues(values: readonly string[]): string[] {
 }
 
 function summarizeOutcomes(samples: readonly PaperLearningValidationSample[]) {
-  const observedGrossPnlUsd = round(samples.reduce((sum, sample) =>
-    sum + sample.labels.grossPnlUsd, 0));
-  const observedModeledCostUsd = round(samples.reduce((sum, sample) =>
-    sum + sample.labels.estimatedCostsUsd, 0));
-  const observedNetPnlUsd = round(observedGrossPnlUsd - observedModeledCostUsd);
-  const twoXCostStressNetPnlUsd = round(observedGrossPnlUsd - 2 * observedModeledCostUsd);
+  let grossSum = 0;
+  let costSum = 0;
+  for (const sample of samples) {
+    grossSum += sample.labels.grossPnlUsd;
+    costSum += sample.labels.estimatedCostsUsd;
+    if (!finite(grossSum) || !finite(costSum)) return { ok: false as const };
+  }
+  const observedGrossPnlUsd = round(grossSum);
+  const observedModeledCostUsd = round(costSum);
+  const baselineNet = observedGrossPnlUsd - observedModeledCostUsd;
+  const doubledCost = 2 * observedModeledCostUsd;
+  const stressedNet = observedGrossPnlUsd - doubledCost;
+  if (![observedGrossPnlUsd, observedModeledCostUsd, baselineNet, doubledCost, stressedNet].every(finite)) {
+    return { ok: false as const };
+  }
+  const observedNetPnlUsd = round(baselineNet);
+  const twoXCostStressNetPnlUsd = round(stressedNet);
+  const realizedOrder = [...samples].sort((a, b) =>
+    Date.parse(a.labelAvailableAt) - Date.parse(b.labelAvailableAt)
+    || Date.parse(a.openedAt) - Date.parse(b.openedAt)
+    || ordinal(a.sampleId, b.sampleId));
   let cumulative = 0;
   let peak = 0;
   let maxDrawdownUsd = 0;
-  for (const sample of samples) {
-    cumulative = round(cumulative + sample.labels.grossPnlUsd - sample.labels.estimatedCostsUsd);
+  for (const sample of realizedOrder) {
+    const sampleNet = sample.labels.grossPnlUsd - sample.labels.estimatedCostsUsd;
+    const nextCumulative = cumulative + sampleNet;
+    if (!finite(sampleNet) || !finite(nextCumulative)) return { ok: false as const };
+    cumulative = round(nextCumulative);
     peak = Math.max(peak, cumulative);
-    maxDrawdownUsd = Math.max(maxDrawdownUsd, peak - cumulative);
+    const drawdown = peak - cumulative;
+    if (!finite(cumulative) || !finite(peak) || !finite(drawdown)) return { ok: false as const };
+    maxDrawdownUsd = Math.max(maxDrawdownUsd, drawdown);
+    if (!finite(maxDrawdownUsd)) return { ok: false as const };
   }
-  return {
+  const expectancyPerTradeUsd = round(observedNetPnlUsd / samples.length);
+  const winRate = round(samples.filter(sample =>
+    sample.labels.grossPnlUsd - sample.labels.estimatedCostsUsd > 0).length / samples.length);
+  const roundedMaxDrawdownUsd = round(maxDrawdownUsd);
+  if (![observedNetPnlUsd, twoXCostStressNetPnlUsd, expectancyPerTradeUsd,
+    winRate, roundedMaxDrawdownUsd].every(finite)) return { ok: false as const };
+  return { ok: true as const, value: {
     sampleCount: samples.length,
     observedGrossPnlUsd,
     observedModeledCostUsd,
     observedNetPnlUsd,
     twoXCostStressNetPnlUsd,
-    expectancyPerTradeUsd: round(observedNetPnlUsd / samples.length),
-    winRate: round(samples.filter(sample =>
-      sample.labels.grossPnlUsd - sample.labels.estimatedCostsUsd > 0).length / samples.length),
-    maxDrawdownUsd: round(maxDrawdownUsd),
-  };
+    expectancyPerTradeUsd,
+    winRate,
+    maxDrawdownUsd: roundedMaxDrawdownUsd,
+    drawdownBasis: 'LABEL_AVAILABLE_AT' as const,
+    drawdownSampleIds: realizedOrder.map(sample => sample.sampleId),
+  } };
 }
 
 function reportHash(value: object): string {
@@ -143,6 +171,10 @@ export function evaluatePaperLearningWalkForward(input: PaperLearningWalkForward
       unavailableReasons.push('MODELED_COST_MISSING_OR_INVALID');
     } else if (finite(sample.labels?.grossPnlUsd) && finite(sample.labels?.netPnlUsd)) {
       const recomputedNet = sample.labels.grossPnlUsd - sample.labels.estimatedCostsUsd;
+      if (!finite(recomputedNet)) {
+        unavailableReasons.push('SAMPLE_ARITHMETIC_NON_FINITE');
+        continue;
+      }
       const tolerance = Math.max(1e-9, Math.abs(recomputedNet) * 1e-9);
       if (Math.abs(sample.labels.netPnlUsd - recomputedNet) > tolerance) {
         unavailableReasons.push('STORED_NET_COST_ARITHMETIC_MISMATCH');
@@ -173,8 +205,8 @@ export function evaluatePaperLearningWalkForward(input: PaperLearningWalkForward
     };
     boundaries: { validationStartAt: string; testStartAt: string };
     train: { sampleIds: string[]; sampleCount: number };
-    validation: ReturnType<typeof summarizeOutcomes> & { sampleIds: string[] };
-    test: ReturnType<typeof summarizeOutcomes> & { sampleIds: string[] };
+    validation: NonNullable<ReturnType<typeof summarizeOutcomes>['value']> & { sampleIds: string[] };
+    test: NonNullable<ReturnType<typeof summarizeOutcomes>['value']> & { sampleIds: string[] };
     purged: PurgedSample[];
   }> = [];
 
@@ -210,6 +242,11 @@ export function evaluatePaperLearningWalkForward(input: PaperLearningWalkForward
       if (validation.length === 0) unavailableReasons.push(`FOLD_${foldIndex}_VALIDATION_SEGMENT_EMPTY`);
       if (test.length === 0) unavailableReasons.push(`FOLD_${foldIndex}_TEST_SEGMENT_EMPTY`);
       if (train.length === 0 || validation.length === 0 || test.length === 0) continue;
+      const validationSummary = summarizeOutcomes(validation);
+      const testSummary = summarizeOutcomes(test);
+      if (!validationSummary.ok) unavailableReasons.push(`FOLD_${foldIndex}_VALIDATION_ARITHMETIC_NON_FINITE`);
+      if (!testSummary.ok) unavailableReasons.push(`FOLD_${foldIndex}_TEST_ARITHMETIC_NON_FINITE`);
+      if (!validationSummary.ok || !testSummary.ok) continue;
       folds.push({
         foldIndex,
         rawRanges: {
@@ -219,8 +256,8 @@ export function evaluatePaperLearningWalkForward(input: PaperLearningWalkForward
         },
         boundaries: { validationStartAt, testStartAt },
         train: { sampleIds: train.map(sample => sample.sampleId), sampleCount: train.length },
-        validation: { sampleIds: validation.map(sample => sample.sampleId), ...summarizeOutcomes(validation) },
-        test: { sampleIds: test.map(sample => sample.sampleId), ...summarizeOutcomes(test) },
+        validation: { sampleIds: validation.map(sample => sample.sampleId), ...validationSummary.value },
+        test: { sampleIds: test.map(sample => sample.sampleId), ...testSummary.value },
         purged,
       });
     }

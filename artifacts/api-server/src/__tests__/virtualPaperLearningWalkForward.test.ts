@@ -104,12 +104,57 @@ describe('PAPER learning expanding walk-forward outcome evaluator', () => {
       sampleCount:3,observedGrossPnlUsd:9,observedModeledCostUsd:4,
       observedNetPnlUsd:5,twoXCostStressNetPnlUsd:1,
       expectancyPerTradeUsd:1.66666666667,winRate:.666666666667,maxDrawdownUsd:6,
+      drawdownBasis:'LABEL_AVAILABLE_AT',
+      drawdownSampleIds:['sample-3','sample-4','sample-5'],
     });
     expect(report.folds[0].test).toMatchObject({
       sampleCount:2,observedGrossPnlUsd:18,observedModeledCostUsd:8,
       observedNetPnlUsd:10,twoXCostStressNetPnlUsd:2,
       expectancyPerTradeUsd:5,winRate:.5,maxDrawdownUsd:5,
     });
+  });
+
+  it('orders realized drawdown by label availability while keeping fold assignment by entry time', () => {
+    const reverseCloseOrder=[
+      sample(1),sample(2),
+      sample(3,12,2,5.9),sample(4,-7,1,5.8),sample(5,6,1,5.7),
+      sample(6),sample(7),
+    ];
+    const report=evaluatePaperLearningWalkForward({
+      ...input,samples:reverseCloseOrder,
+      config:{initialTrainCount:2,validationCount:3,testCount:2,stepCount:1},
+    });
+    expect(report.folds[0].validation).toMatchObject({
+      sampleIds:['sample-3','sample-4','sample-5'],
+      drawdownBasis:'LABEL_AVAILABLE_AT',
+      drawdownSampleIds:['sample-5','sample-4','sample-3'],
+      maxDrawdownUsd:8,
+    });
+  });
+
+  it('fails closed when finite values overflow aggregate or 2x stress arithmetic', () => {
+    const aggregateOverflow=[
+      sample(1),sample(2),
+      sample(3,Number.MAX_VALUE,0),sample(4,Number.MAX_VALUE,0),
+      sample(5),sample(6),
+    ];
+    const aggregate=evaluatePaperLearningWalkForward({...input,samples:aggregateOverflow});
+    expect(aggregate).toMatchObject({
+      status:'OUTCOME_FOLDS_UNAVAILABLE',outcomeFoldsReady:false,foldCount:0,folds:[],
+    });
+    expect(aggregate.unavailableReasons).toContain('FOLD_0_VALIDATION_ARITHMETIC_NON_FINITE');
+
+    const stressValue=Number.MAX_VALUE * .75;
+    const stressOverflow=[
+      sample(1),sample(2),sample(3,stressValue,stressValue),sample(4),sample(5),
+    ];
+    const stress=evaluatePaperLearningWalkForward({
+      ...input,samples:stressOverflow,
+      config:{initialTrainCount:2,validationCount:1,testCount:2,stepCount:1},
+    });
+    expect(stress.outcomeFoldsReady).toBe(false);
+    expect(stress.unavailableReasons).toContain('FOLD_0_VALIDATION_ARITHMETIC_NON_FINITE');
+    expect(JSON.stringify(stress)).not.toContain(':null');
   });
 
   it('fails closed on invalid counts and insufficient samples', () => {
