@@ -11,7 +11,8 @@ export const VIRTUAL_TRADING_MODES = {
 } as const;
 export type VirtualTradingMode = keyof typeof VIRTUAL_TRADING_MODES;
 export const MODE_VERSION = 'virtual-trading-mode/v1';
-export const DAILY_PLAN_VERSION = 'virtual-daily-experiment/v3';
+export const LEGACY_DAILY_PLAN_VERSION = 'virtual-daily-experiment/v3';
+export const DAILY_PLAN_VERSION = 'virtual-daily-experiment/v4';
 export const STRUCTURAL_PLAN_VERSION = 'virtual-structural-plan/v2';
 export const VIRTUAL_ENTRY_OPTIONS = Object.fromEntries(Object.entries(VIRTUAL_TRADING_MODES).map(([key, spec]) =>
   [key, { ...spec, targetRoePct: null, stopRoePct: 10, exitBasis: 'STRATEGY_PRICE_TARGET',
@@ -30,7 +31,7 @@ export function readTradingMode(raw: string | null, sessionId: string): TradingM
   return value;
 }
 export interface VirtualTradePlan {
-  version: typeof MODE_VERSION | typeof STRUCTURAL_PLAN_VERSION | typeof DAILY_PLAN_VERSION; mode: VirtualTradingMode; basis: 'INITIAL_POSITION_MARGIN_NET_ESTIMATED';
+  version: typeof MODE_VERSION | typeof STRUCTURAL_PLAN_VERSION | typeof DAILY_PLAN_VERSION | typeof LEGACY_DAILY_PLAN_VERSION; mode: VirtualTradingMode; basis: 'INITIAL_POSITION_MARGIN_NET_ESTIMATED';
   targetRoePct: number; stopRoePct: number; maxHoldHours: number;
   entryPrice: number; structuralStop: number; notionalUsd: number; leverage: number;
   collateralUsd: number; costReserveUsd: number; plannedRiskUsd: number; tpPrice: number;
@@ -108,7 +109,7 @@ export function buildStructuralTradePlan(input: { mode: VirtualTradingMode; entr
 }
 
 export function buildDailyTradePlan(input:{mode:VirtualTradingMode;entryPrice:number;structuralStop:number;
-  notionalUsd:number;maxLeverage:number;estimatedRoundTripCostUsd:number;riskBudgetUsd:number;openedAtMs:number}):
+  notionalUsd:number;maxLeverage:number;estimatedRoundTripCostUsd:number;riskBudgetUsd:number;openedAtMs:number}, legacy = false):
   {ok:true;plan:VirtualTradePlan}|{ok:false;reason:string} {
   if(!isTradingMode(input.mode)||![input.entryPrice,input.structuralStop,input.notionalUsd,input.maxLeverage,input.riskBudgetUsd,input.openedAtMs].every(finitePositive)
     ||!Number.isFinite(input.estimatedRoundTripCostUsd)||input.estimatedRoundTripCostUsd<0||input.estimatedRoundTripCostUsd>2
@@ -119,10 +120,10 @@ export function buildDailyTradePlan(input:{mode:VirtualTradingMode;entryPrice:nu
   const leverage=Math.floor(Math.min(10,input.maxLeverage,input.notionalUsd*.1/risk)+1e-10);
   const collateral=input.notionalUsd/leverage;
   if(leverage<5||!finitePositive(collateral)||collateral<1.1||collateral>100)return {ok:false,reason:'DAILY_PLAN_MARGIN_CAP'};
-  const maxHoldHours=input.mode==='INTRADAY'?.5:4;
+  const maxHoldHours=input.mode==='INTRADAY'?(legacy?.5:1):4;
   const direction=input.structuralStop<input.entryPrice?1:-1;
   const tpPrice=input.entryPrice*(1+direction*2*distance);
-  return {ok:true,plan:{version:DAILY_PLAN_VERSION,mode:input.mode,basis:'INITIAL_POSITION_MARGIN_NET_ESTIMATED',
+  return {ok:true,plan:{version:legacy?LEGACY_DAILY_PLAN_VERSION:DAILY_PLAN_VERSION,mode:input.mode,basis:'INITIAL_POSITION_MARGIN_NET_ESTIMATED',
     targetRoePct:(input.notionalUsd*distance*2-input.estimatedRoundTripCostUsd)/collateral*100,
     stopRoePct:10,maxHoldHours,entryPrice:input.entryPrice,structuralStop:input.structuralStop,
     notionalUsd:input.notionalUsd,leverage,collateralUsd:collateral,costReserveUsd:2,plannedRiskUsd:risk,tpPrice,
@@ -130,19 +131,19 @@ export function buildDailyTradePlan(input:{mode:VirtualTradingMode;entryPrice:nu
 }
 export const DAILY_ENTRY_OPTIONS = Object.fromEntries(Object.entries(VIRTUAL_ENTRY_OPTIONS).map(([mode,spec])=>
   [mode,{...spec,exitBasis:'PAPER_EXPERIMENT_PRICE_TARGET',minimumNetRewardRisk:null,
-    maxHoldHours:mode==='INTRADAY'?.5:4,purpose:'AGGRESSIVE_PAPER_EXPERIMENT'}]));
+    dailyAccountTargetPct:[5,10],dailyProfitCapPct:20,maxHoldHours:mode==='INTRADAY'?1:4,purpose:'AGGRESSIVE_PAPER_EXPERIMENT'}]));
 
 /** Rebuild rather than trust serialized ROE/TP/expiry values. Never repair malformed evidence silently. */
 export function parseVirtualTradePlan(value: unknown): VirtualTradePlan | null {
   if (!value || typeof value !== 'object') return null;
   const p = value as VirtualTradePlan;
   if (!isTradingMode(p.mode)) return null;
-  if (p.version !== MODE_VERSION && p.version !== STRUCTURAL_PLAN_VERSION && p.version !== DAILY_PLAN_VERSION) return null;
+  if (p.version !== MODE_VERSION && p.version !== STRUCTURAL_PLAN_VERSION && p.version !== DAILY_PLAN_VERSION && p.version !== LEGACY_DAILY_PLAN_VERSION) return null;
   const args = { mode: p.mode, entryPrice: p.entryPrice, structuralStop: p.structuralStop,
     notionalUsd: p.notionalUsd, maxLeverage: p.leverage, costReserveUsd: p.costReserveUsd,
     riskBudgetUsd: p.plannedRiskUsd, openedAtMs: p.openedAtMs };
-  const rebuilt = p.version === DAILY_PLAN_VERSION
-    ? buildDailyTradePlan({...args,estimatedRoundTripCostUsd:p.estimatedRoundTripCostUsd!})
+  const rebuilt = (p.version === DAILY_PLAN_VERSION || p.version === LEGACY_DAILY_PLAN_VERSION)
+    ? buildDailyTradePlan({...args,estimatedRoundTripCostUsd:p.estimatedRoundTripCostUsd!},p.version===LEGACY_DAILY_PLAN_VERSION)
     : p.version === STRUCTURAL_PLAN_VERSION
     ? buildStructuralTradePlan({ ...args, targetPrice: p.tpPrice, estimatedRoundTripCostUsd: p.estimatedRoundTripCostUsd! })
     : buildVirtualTradePlan(args);
@@ -173,7 +174,7 @@ export function tradingModeExit(row: DbTrade, rawPlan: unknown, price: number, n
   const net = size * (price / entry - 1) * (row.side === 'SHORT' ? -1 : 1) - entryCost - exitCost - holding.totalUsd;
   const roe = net / margin * 100;
   if (roe <= -plan.stopRoePct) return 'MODE_NET_STOP';
-  if ((plan.version === STRUCTURAL_PLAN_VERSION || plan.version === DAILY_PLAN_VERSION) && (row.side === 'SHORT' ? price <= plan.tpPrice : price >= plan.tpPrice))
+  if ((plan.version === STRUCTURAL_PLAN_VERSION || plan.version === DAILY_PLAN_VERSION || plan.version === LEGACY_DAILY_PLAN_VERSION) && (row.side === 'SHORT' ? price <= plan.tpPrice : price >= plan.tpPrice))
     return 'TAKE_PROFIT';
   if (plan.version === MODE_VERSION && roe >= plan.targetRoePct) return 'MODE_NET_TAKE_PROFIT';
   return null;

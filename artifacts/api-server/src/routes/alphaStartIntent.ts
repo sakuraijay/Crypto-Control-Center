@@ -1,8 +1,10 @@
+import { buildPaperLearningDataset } from '../workers/virtualPaperLearningDataset';
+import { evaluateVirtualPaper400Account, parseVirtualPaper400RiskState, virtualPaper400RiskKey } from '../workers/virtualPaper400Accounting';
 import { DAILY_ENTRY_OPTIONS, VIRTUAL_ENTRY_OPTIONS } from '../workers/virtualPaperTradingMode';
 import { randomUUID } from 'node:crypto';
 import { Router } from 'express';
-import { db, workerStateTable } from '@workspace/db';
-import { eq, sql } from 'drizzle-orm';
+import { db, workerStateTable, tradesTable } from '@workspace/db';
+import { eq, sql, inArray } from 'drizzle-orm';
 import { requireOperatorAuth } from '../lib/operatorAuthGuard';
 import {
   ALPHA_START_INTENT_KEY,
@@ -197,6 +199,27 @@ router.put('/data/alpha-start-intent', requireOperatorAuth, async (req, res) => 
  * VIRTUAL/PAPER 400 control-plane state is deliberately independent of the
  * real-money FIXED_BETA domain. GET is observational and never bootstraps state.
  */
+router.get('/data/virtual-paper-learning-dataset', requireOperatorAuth, async (_req, res) => {
+  res.set('Cache-Control', 'no-store');
+  try {
+    const dataset = await db.transaction(async tx => {
+      const session = evaluateVirtualPaper400SessionState(await readWorkerStateValue(VIRTUAL_PAPER_400_SESSION_STATE_KEY, tx));
+      if (!session.state) throw new Error('SESSION_UNAVAILABLE');
+      const identity = session.state.session;
+      const rows = await tx.select().from(tradesTable).where(eq(tradesTable.strategy, identity.strategyTag));
+      const raw = await readWorkerStateValue(virtualPaper400RiskKey(identity), tx);
+      if (!raw) throw new Error('RISK_EVIDENCE_UNAVAILABLE');
+      evaluateVirtualPaper400Account({session:identity,rows,previous:parseVirtualPaper400RiskState(raw,identity),now:new Date(),quote:()=>null,aggressiveDaily:true});
+      const ids = [...new Set(rows.filter(r=>r.action==='OPEN').map(r=>r.openDecisionId).filter((id):id is string=>!!id))];
+      const records = ids.length ? await tx.select().from(workerStateTable).where(inArray(workerStateTable.key,ids)) : [];
+      const audits = new Map<string,unknown>();
+      for (const record of records) { try { audits.set(record.key,JSON.parse(record.value)); } catch { /* explicitly excluded by dataset validation */ } }
+      return buildPaperLearningDataset(identity,rows,audits);
+    }, {isolationLevel:'repeatable read',accessMode:'read only'});
+    return res.json({ok:true,...dataset});
+  } catch { return res.status(503).json({ok:false,code:'PAPER_LEARNING_EVIDENCE_UNAVAILABLE'}); }
+});
+
 router.get('/data/virtual-paper-400-session', async (_req, res) => {
   res.set('Cache-Control', 'no-store');
   try {
@@ -220,7 +243,7 @@ router.get('/data/virtual-paper-400-session', async (_req, res) => {
       session,
       runtime,
       tradingModeSelection,
-      tradingModeOptions: ['virtual400-daily/v3', 'virtual400-daily/v4'].includes(runtime?.policy?.version) ? DAILY_ENTRY_OPTIONS : VIRTUAL_ENTRY_OPTIONS,
+      tradingModeOptions: ['virtual400-daily/v3', 'virtual400-daily/v4', 'virtual400-daily/v5'].includes(runtime?.policy?.version) ? DAILY_ENTRY_OPTIONS : VIRTUAL_ENTRY_OPTIONS,
       runtimeFresh: Number.isFinite(age) && age >= 0 && age <= 120_000,
       ...virtualPaper400Activity.read(session.state?.session.sessionId ?? null),
     };

@@ -15,7 +15,7 @@ export interface VirtualPaper400Snapshot {
     targetRoePct: number | null; stopRoePct: number; maxHoldHours: number; exitBasis?: string }>;
   runtime: null | {
     tradingMode?: { mode: 'INTRADAY' | 'SWING'; targetRoePct: number | null; stopRoePct: number; maxHoldHours: number } | null;
-    policy?: { version: string; appliedAt: string; symbols: string[]; riskPerTradePct: number; minLeverage?: number; maxLeverage: number; cooldownMinutes: number; maxDailyEntries?: number } | null;
+    policy?: { version: string; appliedAt: string; symbols: string[]; riskPerTradePct: number; minLeverage?: number; maxLeverage: number; cooldownMinutes: number; maxDailyEntries?: number; dailyProfitCapPct?: number } | null;
     diagnostics?: { symbol: string; reason: string; details?: string[] }[];
     analysis?: { symbol: string; reason: string }[];
     journal?: { id: string; symbol: string; side: string; openedAt: string | null; closedAt: string;

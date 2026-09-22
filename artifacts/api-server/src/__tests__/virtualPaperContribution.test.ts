@@ -31,6 +31,21 @@ describe('authorized PAPER contribution with immutable trading history',()=>{
   expect(tomorrow.next.risk.startOfDayEquityUsd).toBe(490);
   expect(tomorrow.next.risk.dailyRealizedNetPnlUsd).toBe(0);
  });
+ it('excludes deposits and unrealized gains from profit cap and resets only the daily cap at PHT midnight',()=>{
+  const rows=lossRows();rows[1].pnl='82';rows[1].netPnlEstimatedUsd='80';
+  const base=applyAuthorizedPaperCredit(initialVirtualPaper400RiskState(session),session,now,'PAPER',true);
+  const capped=evaluateVirtualPaper400Account({session,rows,previous:base,quote,now,aggressiveDaily:true});
+  expect(capped.next.risk.startOfDayEquityUsd).toBe(400);
+  expect(capped.next.risk.dailyRealizedNetPnlUsd).toBe(80);
+  expect(capped.evaluation.state).toBe('PROFIT_CAP_LOCKED');
+  expect(capped.evaluation.actions).toEqual([]);
+  const restart=parseVirtualPaper400RiskState(JSON.stringify(capped.next),session);
+  expect(evaluateVirtualPaper400Account({session,rows,previous:restart,quote,now,aggressiveDaily:true}).evaluation.entryAllowed).toBe(false);
+  const tomorrow=evaluateVirtualPaper400Account({session,rows,previous:restart,quote,now:new Date('2026-09-22T16:00:00Z'),aggressiveDaily:true});
+  expect(tomorrow.evaluation.entryAllowed).toBe(true);expect(tomorrow.next.risk.startOfDayEquityUsd).toBe(580);
+  const depositOnly=evaluateVirtualPaper400Account({session,rows:[],previous:base,quote,now,aggressiveDaily:true});
+  expect(depositOnly.evaluation.entryAllowed).toBe(true);
+ });
  it('preserves daily/hard locks and refuses LIVE, STOP, another session or malformed/duplicate credits',()=>{
   const base=initialVirtualPaper400RiskState(session);base.risk.locks.hardStopReason='existing';base.risk.locks.dailyLockState='DAILY_LOSS_LOCKED';
   const credit=applyAuthorizedPaperCredit(base,session,now,'PAPER',true);
