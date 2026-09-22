@@ -45,11 +45,30 @@ const state = vi.hoisted(() => {
     status: column('status'),
     transportGen: column('transportGen'),
   };
+  const tradesTable = {
+    __table: 'trades',
+    id: column('id'),
+    action: column('action'),
+    testMode: column('testMode'),
+    settlementStatus: column('settlementStatus'),
+    settlementIntentId: column('settlementIntentId'),
+    preCloseSizeUsd30: column('preCloseSizeUsd30'),
+    requestedReductionUsd30: column('requestedReductionUsd30'),
+    evidenceTxHash: column('evidenceTxHash'),
+  };
+  const executionIntentsTable = {
+    __table: 'intents',
+    id: column('id'),
+  };
   return {
     protectionOrdersTable,
     relayTasksTable,
+    tradesTable,
+    executionIntentsTable,
     protections: new Map<string, Row>(),
     relayTasks: new Map<string, Row>(),
+    trades: new Map<string, Row>(),
+    executionIntents: new Map<string, Row>(),
     protectionStatusHistory: [] as string[],
     relayStatusHistory: [] as string[],
     relayTransitionFailures: 0,
@@ -76,89 +95,103 @@ vi.mock('drizzle-orm', () => ({
     values,
   }),
   and: (...conditions: Condition[]): Condition => ({ kind: 'and', conditions }),
+  isNotNull: (column: { __column: string }): Condition => ({
+    kind: 'in',
+    column: column.__column,
+    values: [...state.trades.values()]
+      .map((row) => row[column.__column])
+      .filter((value) => value !== null && value !== undefined),
+  }),
   sql: () => ({ __increment: true }),
 }));
 
 vi.mock('@workspace/db', () => {
   function rowsFor(table: { __table: string }): Row[] {
-    return table.__table === 'protections'
-      ? [...state.protections.values()]
-      : [...state.relayTasks.values()];
+    if (table.__table === 'protections') return [...state.protections.values()];
+    if (table.__table === 'relay') return [...state.relayTasks.values()];
+    if (table.__table === 'trades') return [...state.trades.values()];
+    if (table.__table === 'intents') return [...state.executionIntents.values()];
+    throw new Error(`unexpected table ${table.__table}`);
   }
+
+  const db: any = {
+    select: () => ({
+      from: (table: { __table: string }) => ({
+        where: (condition: Condition) => {
+          const rows = rowsFor(table).filter((row) => matches(row, condition));
+          return {
+            then: <TResult1 = Row[], TResult2 = never>(
+              onfulfilled?: ((value: Row[]) => TResult1 | PromiseLike<TResult1>) | null,
+              onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
+            ) => Promise.resolve(rows).then(onfulfilled, onrejected),
+            limit: async (count: number) => rows.slice(0, count),
+          };
+        },
+      }),
+    }),
+    insert: (table: { __table: string }) => ({
+      values: async (value: Row) => {
+        if (table.__table !== 'protections') throw new Error('unexpected non-protection insert');
+        const id = String(value.id);
+        if (state.protections.has(id)) throw new Error('duplicate');
+        for (const row of state.protections.values()) {
+          if (row.positionKey === value.positionKey
+              && row.purpose === value.purpose
+              && !['EXECUTED', 'CANCELLED'].includes(String(row.status))) {
+            throw new Error('unique active protection');
+          }
+        }
+        state.protections.set(id, {
+          requestId: null,
+          orderKey: null,
+          typedDataDigest: null,
+          evidence: null,
+          error: null,
+          submitAttempts: 0,
+          updatedAt: new Date(),
+          ...value,
+        });
+        state.protectionStatusHistory.push(String(value.status));
+      },
+    }),
+    update: (table: { __table: string }) => ({
+      set: (patch: Row) => ({
+        where: (condition: Condition) => {
+          let applied: Row[] | null = null;
+          const execute = (): Row[] => {
+            if (applied) return applied;
+            applied = rowsFor(table).filter((row) => matches(row, condition));
+            for (const row of applied) {
+              for (const [key, value] of Object.entries(patch)) {
+                row[key] = value && typeof value === 'object' && '__increment' in value
+                  ? Number(row[key] ?? 0) + 1
+                  : value;
+              }
+              if (table.__table === 'protections' && typeof patch.status === 'string') {
+                state.protectionStatusHistory.push(patch.status);
+              }
+            }
+            return applied;
+          };
+          return {
+            then: <TResult1 = Row[], TResult2 = never>(
+              onfulfilled?: ((value: Row[]) => TResult1 | PromiseLike<TResult1>) | null,
+              onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
+            ) => Promise.resolve(execute()).then(onfulfilled, onrejected),
+            returning: async () => execute().map((row) => ({ id: row.id })),
+          };
+        },
+      }),
+    }),
+    transaction: async <T>(run: (tx: typeof db) => Promise<T>): Promise<T> => run(db),
+  };
 
   return {
     protectionOrdersTable: state.protectionOrdersTable,
     relayTasksTable: state.relayTasksTable,
-    db: {
-      select: () => ({
-        from: (table: { __table: string }) => ({
-          where: (condition: Condition) => {
-            const rows = rowsFor(table).filter((row) => matches(row, condition));
-            return {
-              then: <TResult1 = Row[], TResult2 = never>(
-                onfulfilled?: ((value: Row[]) => TResult1 | PromiseLike<TResult1>) | null,
-                onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
-              ) => Promise.resolve(rows).then(onfulfilled, onrejected),
-              limit: async (count: number) => rows.slice(0, count),
-            };
-          },
-        }),
-      }),
-      insert: (table: { __table: string }) => ({
-        values: async (value: Row) => {
-          if (table.__table !== 'protections') throw new Error('unexpected relay insert');
-          const id = String(value.id);
-          if (state.protections.has(id)) throw new Error('duplicate');
-          for (const row of state.protections.values()) {
-            if (row.positionKey === value.positionKey
-                && row.purpose === value.purpose
-                && !['EXECUTED', 'CANCELLED'].includes(String(row.status))) {
-              throw new Error('unique active protection');
-            }
-          }
-          state.protections.set(id, {
-            requestId: null,
-            orderKey: null,
-            typedDataDigest: null,
-            evidence: null,
-            error: null,
-            submitAttempts: 0,
-            updatedAt: new Date(),
-            ...value,
-          });
-          state.protectionStatusHistory.push(String(value.status));
-        },
-      }),
-      update: (table: { __table: string }) => ({
-        set: (patch: Row) => ({
-          where: (condition: Condition) => {
-            let applied: Row[] | null = null;
-            const execute = (): Row[] => {
-              if (applied) return applied;
-              applied = rowsFor(table).filter((row) => matches(row, condition));
-              for (const row of applied) {
-                for (const [key, value] of Object.entries(patch)) {
-                  row[key] = value && typeof value === 'object' && '__increment' in value
-                    ? Number(row[key] ?? 0) + 1
-                    : value;
-                }
-                if (table.__table === 'protections' && typeof patch.status === 'string') {
-                  state.protectionStatusHistory.push(patch.status);
-                }
-              }
-              return applied;
-            };
-            return {
-              then: <TResult1 = Row[], TResult2 = never>(
-                onfulfilled?: ((value: Row[]) => TResult1 | PromiseLike<TResult1>) | null,
-                onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
-              ) => Promise.resolve(execute()).then(onfulfilled, onrejected),
-              returning: async () => execute().map((row) => ({ id: row.id })),
-            };
-          },
-        }),
-      }),
-    },
+    tradesTable: state.tradesTable,
+    executionIntentsTable: state.executionIntentsTable,
+    db,
   };
 });
 
@@ -242,7 +275,7 @@ import {
   type CloseSettlementBinding,
   type CloseSettlementObservation,
 } from '../lib/closeSettlementEvidence';
-import { computeNetPnl } from '../lib/tradeSettlement';
+import { recordTradeSettlement } from '../lib/tradeSettlement';
 import { WETH_ARBITRUM } from '../lib/relayFeeQuote';
 import { mkEventLog1, mkEventLog2 } from './helpers/eventLog2Fixture';
 import type { GmxApiTransport } from '../lib/gmxApiTransport';
@@ -509,6 +542,8 @@ async function reconcile(transport = makeTransport()) {
 beforeEach(() => {
   state.protections.clear();
   state.relayTasks.clear();
+  state.trades.clear();
+  state.executionIntents.clear();
   state.protectionStatusHistory.length = 0;
   state.relayStatusHistory.length = 0;
   state.relayTransitionFailures = 0;
@@ -607,8 +642,74 @@ describe('finalized OPEN → real initial-stop protection composition', () => {
       confirmations: 15,
       postCloseSizeUsd30: '0',
     });
-    const settled = computeNetPnl(close.settlement);
-    expect(settled).toEqual({ ok: true, netPnlUsd: 7.7 });
+    const binding = closeBinding();
+    state.trades.set(binding.tradeId, {
+      id: binding.tradeId,
+      action: 'CLOSE',
+      testMode: true,
+      settlementStatus: 'UNSETTLED',
+      settlementIntentId: binding.intentId,
+      settlementAccount: binding.accountAddress,
+      settlementMarketAddress: binding.marketAddress,
+      settlementCollateralToken: binding.collateralTokenAddress,
+      settlementPositionKey: binding.positionKey,
+      preCloseSizeUsd30: binding.preCloseSizeUsd30.toString(),
+      requestedReductionUsd30: binding.requestedReductionUsd30.toString(),
+      evidenceTxHash: null,
+    });
+    state.executionIntents.set(binding.intentId, {
+      id: binding.intentId,
+      orderType: 'close',
+      status: 'CONFIRMED',
+      receiptStatus: 'success',
+      closeSettlementTradeId: binding.tradeId,
+      orderKey: binding.expectedOrderKey,
+      resolutionTxHash: binding.expectedTxHash,
+      resolutionBlock: binding.expectedBlockNumber.toString(),
+      orderEmitterAddress: binding.expectedEmitterAddress,
+      closeAccount: binding.accountAddress,
+      closeMarketAddress: binding.marketAddress,
+      closeCollateralToken: binding.collateralTokenAddress,
+      closePositionKey: binding.positionKey,
+      closePreSizeUsd30: binding.preCloseSizeUsd30.toString(),
+      closeRequestedReductionUsd30: binding.requestedReductionUsd30.toString(),
+    });
+    state.relayTasks.set(binding.relayTaskId, {
+      id: binding.relayTaskId,
+      kind: 'CLOSE',
+      status: 'CONFIRMED',
+      intentId: binding.intentId,
+      gmxExecutionTxHash: binding.expectedTxHash,
+      gmxOrderKeys: JSON.stringify([binding.expectedOrderKey]),
+    });
+
+    const settlementInput = {
+      tradeId: binding.tradeId,
+      ...close.settlement,
+      intentId: binding.intentId,
+      relayTaskId: binding.relayTaskId,
+    };
+    const settled = await recordTradeSettlement(settlementInput);
+    expect(settled).toEqual({ ok: true, netPnlUsd: 7.7, estimateDeltaUsd: null });
+    expect(state.trades.get(binding.tradeId)).toMatchObject({
+      settlementStatus: 'SETTLED',
+      grossPnlUsd: '10',
+      positionFeeUsd: '1',
+      executionFeeUsd: '0.3',
+      priceImpactUsd: '0.2',
+      fundingFeeUsd: '0.5',
+      borrowingFeeUsd: '0.3',
+      netPnlUsd: '7.7',
+      pnl: '7.7',
+      evidenceTxHash: binding.expectedTxHash,
+    });
+
+    const duplicateSettlement = await recordTradeSettlement(settlementInput);
+    expect(duplicateSettlement.ok).toBe(false);
+    expect(state.trades.get(binding.tradeId)).toMatchObject({
+      settlementStatus: 'SETTLED',
+      netPnlUsd: '7.7',
+    });
   });
 
   it('initial stop durable 처리 완료 전에는 OPEN을 terminal-confirmed하지 않고 exact binding 후에만 해소한다', async () => {
