@@ -239,18 +239,25 @@ describe('virtual PAPER 400 session HTTP boundary', () => {
       .set('x-operator-pin','654321');
     expect(explicit.status).toBe(200);
     expect(explicit.body).toMatchObject({
-      ok:true,status:'UNAVAILABLE',ready:false,
+      ok:true,status:'PARTITION_BOUNDARIES_UNAVAILABLE',partitionBoundariesReady:false,
       unavailableReasons:['TEST_SEGMENT_EMPTY','TRAIN_SEGMENT_EMPTY','VALIDATION_SEGMENT_EMPTY'],
       partitions:{train:{labels:{grossPnlUsd:null,netPnlUsd:null,estimatedCostsUsd:null}}},
       costEvidence:{storedLabels:{status:'UNAVAILABLE',reason:'NO_RETAINED_SAMPLES_OR_INVALID_LABELS'}},
       trainingPerformed:false,tuningPerformed:false,automaticPromotionAllowed:false,
+      downstreamEvaluation:{
+        walkForward:{status:'NOT_EVALUATED',executed:false},
+        outOfSample:{status:'NOT_EVALUATED',evaluated:false},
+        statisticalSampleSufficiency:{status:'NOT_EVALUATED',sufficient:false},
+      },
     });
+    expect(explicit.body).not.toHaveProperty('ready');
     const malformed=await request(app).get(url)
       .query({validationStartAt:'not-a-date',testStartAt:'2026-09-20T02:00:00.000Z'})
       .set('x-operator-pin','654321');
     expect(malformed.status).toBe(200);
     expect(malformed.body).toMatchObject({
-      status:'UNAVAILABLE',ready:false,unavailableReasons:['VALIDATION_START_INVALID'],
+      status:'PARTITION_BOUNDARIES_UNAVAILABLE',partitionBoundariesReady:false,
+      unavailableReasons:['VALIDATION_START_INVALID'],
     });
   });
 

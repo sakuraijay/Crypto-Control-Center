@@ -33,7 +33,8 @@ describe('PAPER learning chronological validation boundary', () => {
   it('deterministically partitions by openedAt and purges prior labels overlapping each boundary', () => {
     const report=evaluatePaperLearningValidation(input);
     expect(report).toMatchObject({
-      status:'READY',ready:true,unavailableReasons:[],
+      schemaVersion:'paper-learning-validation/v2',
+      status:'PARTITION_BOUNDARIES_READY',partitionBoundariesReady:true,unavailableReasons:[],
       partitions:{
         train:{sampleIds:['train-kept'],count:1,labels:{grossPnlUsd:10,netPnlUsd:8,estimatedCostsUsd:2}},
         validation:{sampleIds:['validation-kept'],count:1},
@@ -48,13 +49,20 @@ describe('PAPER learning chronological validation boundary', () => {
         funding:{status:'UNAVAILABLE',reason:'FUNDING_DETAIL_NOT_EXPORTED'},
       },
       trainingPerformed:false,tuningPerformed:false,automaticPromotionAllowed:false,
+      downstreamEvaluation:{
+        walkForward:{status:'NOT_EVALUATED',executed:false},
+        outOfSample:{status:'NOT_EVALUATED',evaluated:false},
+        statisticalSampleSufficiency:{status:'NOT_EVALUATED',sufficient:false},
+      },
     });
+    expect(report).not.toHaveProperty('ready');
     expect(evaluatePaperLearningValidation({...input,samples:[...samples].reverse()})).toEqual(report);
   });
 
   it('fails closed on duplicate identities and future or inverted sample evidence', () => {
     const duplicate=evaluatePaperLearningValidation({...input,samples:[samples[0],{...samples[1],sampleId:samples[0].sampleId}]});
-    expect(duplicate.ready).toBe(false);
+    expect(duplicate.partitionBoundariesReady).toBe(false);
+    expect(duplicate.status).toBe('PARTITION_BOUNDARIES_UNAVAILABLE');
     expect(duplicate.unavailableReasons).toContain('DUPLICATE_SAMPLE_ID');
     const duplicatePosition=evaluatePaperLearningValidation({...input,samples:[
       samples[0],{...samples[1],positionId:samples[0].positionId},

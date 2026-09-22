@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-export const PAPER_LEARNING_VALIDATION_VERSION = 'paper-learning-validation/v1' as const;
+export const PAPER_LEARNING_VALIDATION_VERSION = 'paper-learning-validation/v2' as const;
 
 export interface PaperLearningValidationSample {
   sampleId: string;
@@ -180,8 +180,10 @@ export function evaluatePaperLearningValidation(input: PaperLearningValidationIn
     schemaVersion: PAPER_LEARNING_VALIDATION_VERSION,
     sourceDatasetSha256: input.datasetSha256,
     boundaries: { validationStartAt: input.validationStartAt, testStartAt: input.testStartAt },
-    status: unavailableReasons.length === 0 ? 'READY' as const : 'UNAVAILABLE' as const,
-    ready: unavailableReasons.length === 0,
+    status: unavailableReasons.length === 0
+      ? 'PARTITION_BOUNDARIES_READY' as const
+      : 'PARTITION_BOUNDARIES_UNAVAILABLE' as const,
+    partitionBoundariesReady: unavailableReasons.length === 0,
     unavailableReasons: [...new Set(unavailableReasons)].sort(),
     partitions,
     purged: purged.sort((a, b) => a.sampleId.localeCompare(b.sampleId)),
@@ -199,6 +201,11 @@ export function evaluatePaperLearningValidation(input: PaperLearningValidationIn
     trainingPerformed: false as const,
     tuningPerformed: false as const,
     automaticPromotionAllowed: false as const,
+    downstreamEvaluation: {
+      walkForward: { status: 'NOT_EVALUATED' as const, executed: false as const },
+      outOfSample: { status: 'NOT_EVALUATED' as const, evaluated: false as const },
+      statisticalSampleSufficiency: { status: 'NOT_EVALUATED' as const, sufficient: false as const },
+    },
   };
   return { ...core, validationSha256: validationHash(core) };
 }
