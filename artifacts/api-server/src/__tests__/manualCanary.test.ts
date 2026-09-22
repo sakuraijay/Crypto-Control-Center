@@ -452,6 +452,34 @@ describe('durable/CAS fail-closed 보강 (리뷰 후속)', () => {
     expect(close.reason).toContain('손상');
   });
 
+  it.each([
+    ['음수', -1],
+    ['소수', 0.5],
+    ['문자열', '0'],
+    ['상한 초과', MANUAL_CANARY_CAPS.maxOrdersPerDay + 1],
+  ])('일일 opens %s 손상(%s) → 1회 제한 우회 없이 fail-closed', async (_label, opens) => {
+    const { deps, state, executeOrder } = makeDeps();
+    state.set('manualCanaryDaily', JSON.stringify({
+      dayKey: DAY,
+      opens,
+      openIntentId: null,
+      closeIntentId: null,
+      emergencyCloseUsed: false,
+      openedAt: null,
+      open: null,
+      launchReservation: null,
+    }));
+
+    const pf = await runCanaryPreflight(deps, 'BTC', 'LONG');
+    expect(pf.items.find(i => i.id === 'daily_budget')).toMatchObject({ ok: false });
+    const claim = await claimDailyBudget(deps, 'intent:x');
+    expect(claim.ok).toBe(false);
+    const close = await executeManualCanaryClose(deps, { confirm: CANARY_CONFIRM_CLOSE });
+    expect(close.phase).toBe('REJECTED');
+    expect(close.reason).toContain('손상');
+    expect(executeOrder).not.toHaveBeenCalled();
+  });
+
   it('preflight: 왕복 비용 null(산정 불가) → 통과 금지 (하위 계층 위임 금지)', async () => {
     const { deps } = makeDeps({ costSnapshot: async () => ({ ok: true, snapshot: {} as never, roundTripCostUsd: null }) });
     const pf = await runCanaryPreflight(deps, 'BTC', 'LONG');

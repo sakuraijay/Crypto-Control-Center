@@ -608,11 +608,48 @@ async function loadDailyState(deps: Pick<ManualCanaryPreflightDeps, 'loadState'>
   const raw = await deps.loadState(STATE_KEY_DAILY);
   if (!raw) return { corrupt: false, state: null, raw: null };
   try {
-    const parsed = JSON.parse(raw) as DailyCanaryState;
-    if (typeof parsed !== 'object' || parsed === null || typeof parsed.dayKey !== 'string') {
+    const parsed = JSON.parse(raw) as Partial<DailyCanaryState>;
+    const nullableString = (value: unknown): value is string | null =>
+      value === null || typeof value === 'string';
+    const validIsoTime = (value: unknown): value is string =>
+      typeof value === 'string' && Number.isFinite(Date.parse(value));
+    if (typeof parsed !== 'object'
+        || parsed === null
+        || typeof parsed.dayKey !== 'string'
+        || !/^\d{4}-\d{2}-\d{2}$/.test(parsed.dayKey)
+        || !Number.isSafeInteger(parsed.opens)
+        || (parsed.opens as number) < 0
+        || (parsed.opens as number) > MANUAL_CANARY_CAPS.maxOrdersPerDay
+        || !nullableString(parsed.openIntentId)
+        || !nullableString(parsed.closeIntentId)
+        || typeof parsed.emergencyCloseUsed !== 'boolean'
+        || !(parsed.openedAt === null || validIsoTime(parsed.openedAt))) {
       return { corrupt: true, state: null, raw };
     }
-    return { corrupt: false, state: parsed, raw };
+
+    // `open` was absent in legacy records. Preserve read compatibility so a
+    // previous-day legacy record can roll over. CLOSE validates this binding
+    // separately and returns its more specific fail-closed diagnostic.
+    const open = parsed.open === undefined ? null : parsed.open;
+
+    const launchReservation = parsed.launchReservation ?? null;
+    if (launchReservation !== null) {
+      if (typeof launchReservation !== 'object'
+          || typeof launchReservation.id !== 'string'
+          || launchReservation.id.length === 0
+          || typeof launchReservation.openIntentId !== 'string'
+          || launchReservation.openIntentId.length === 0
+          || !validIsoTime(launchReservation.reservedAt)
+          || !validateStoredOpenBinding(launchReservation.open).ok) {
+        return { corrupt: true, state: null, raw };
+      }
+    }
+
+    return {
+      corrupt: false,
+      state: { ...parsed, open, launchReservation } as DailyCanaryState,
+      raw,
+    };
   } catch { return { corrupt: true, state: null, raw }; }
 }
 
