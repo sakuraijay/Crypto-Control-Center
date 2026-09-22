@@ -100,4 +100,88 @@ describe('public readiness observational parity', () => {
       'SANITIZED_READ_ONLY_NOT_EXECUTION_AUTHORIZATION',
     );
   });
+
+  it.each([
+    ['stale', {
+      fresh: false,
+      observationalFresh: false,
+      executionSnapshot: { fresh: false },
+    }, 'PUBLIC_COST_BTC_STALE'],
+    ['unavailable', {
+      state: 'failed',
+      observedAtMs: null,
+    }, 'PUBLIC_COST_BTC_UNAVAILABLE'],
+    ['failed', {
+      state: 'failed',
+    }, 'PUBLIC_COST_BTC_UNAVAILABLE'],
+    ['not-evaluated', {
+      state: 'not_evaluated',
+      observedAtMs: null,
+    }, 'PUBLIC_COST_BTC_UNAVAILABLE'],
+  ] as const)(
+    'BTC evidence가 %s이면 상위 ready=true도 public Canary를 fail-closed한다',
+    (_case, patch, blocker) => {
+      const paper = paperSnapshot();
+      paper.costs.BTC = {
+        ...paper.costs.BTC,
+        ...patch,
+        executionSnapshot: {
+          ...paper.costs.BTC.executionSnapshot,
+          ...('executionSnapshot' in patch ? patch.executionSnapshot : {}),
+        },
+      } as typeof paper.costs.BTC;
+
+      const attestation = buildPublicReadinessAttestation({
+        nowMs: 1_788_000_001_000,
+        paper,
+        stop: {
+          available: true,
+          reasons: [],
+          evaluatedAt: '2026-08-28T10:01:30.000Z',
+        },
+        canaryReady: true,
+      });
+
+      expect(attestation.canary.ready).toBe(false);
+      expect(attestation.canary.blockerIds).toContain(blocker);
+    },
+  );
+
+  it('한 종목 stale 후 BTC/ETH 새 generation이 모두 fresh이면 비용 blocker와 fail-closed가 해제된다', () => {
+    const stale = paperSnapshot();
+    stale.costs.ETH = {
+      ...stale.costs.ETH,
+      fresh: false,
+      observationalFresh: false,
+      executionSnapshot: {
+        ...stale.costs.ETH.executionSnapshot,
+        fresh: false,
+      },
+    };
+    const stop = {
+      available: true,
+      reasons: [],
+      evaluatedAt: '2026-08-28T10:01:30.000Z',
+    };
+
+    const beforeRefresh = buildPublicReadinessAttestation({
+      nowMs: 1_788_000_001_000,
+      paper: stale,
+      stop,
+      canaryReady: true,
+    });
+    expect(beforeRefresh.canary.ready).toBe(false);
+    expect(beforeRefresh.canary.blockerIds).toContain('PUBLIC_COST_ETH_STALE');
+
+    const afterRefresh = buildPublicReadinessAttestation({
+      nowMs: 1_788_000_002_000,
+      paper: paperSnapshot(),
+      stop,
+      canaryReady: true,
+    });
+    expect(afterRefresh.costs.BTC.fresh).toBe(true);
+    expect(afterRefresh.costs.ETH.fresh).toBe(true);
+    expect(afterRefresh.canary.ready).toBe(true);
+    expect(afterRefresh.canary.blockerIds).toEqual([]);
+  });
 });
