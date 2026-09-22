@@ -22,13 +22,18 @@ export async function activateManualCanaryExecutionEvidence(
   gate: ManualCanaryExecutionEvidenceGate,
 ): Promise<boolean> {
   if (!recordExecutionEligibleCostEvidence(snapshot, expected, nowMs)) return false;
+  const activatedEvidence = getExecutionEligibleCostEvidence(nowMs).evidence;
+  if (!activatedEvidence) return false;
 
   const refreshed = await gate.refreshStopCapability();
   const readback = getExecutionEligibleCostEvidence(nowMs);
   const matchingEvidence = readback.fresh
     && readback.evidence !== null
-    && readback.evidence.market.toLowerCase() === expected.market.toLowerCase()
-    && readback.evidence.isLong === expected.isLong;
+    && readback.evidence.market.toLowerCase() === activatedEvidence.market.toLowerCase()
+    && readback.evidence.isLong === activatedEvidence.isLong
+    && readback.evidence.orderType === activatedEvidence.orderType
+    && readback.evidence.notionalUsd === activatedEvidence.notionalUsd
+    && readback.evidence.observedAtMs === activatedEvidence.observedAtMs;
 
   return refreshed.available
     && gate.isStopCapabilityAvailable()
