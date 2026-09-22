@@ -13,7 +13,7 @@ export async function runVirtualPaperDailyCycle(d:DailyCycleDeps){
   const diagnostics:{symbol:string;reason:string;details?:string[]}[]=[];const entryStages:{symbol:string;stage:string}[]=[];
   const mode=d.tradingMode??'INTRADAY';
   const outcome=(status:string,reason:string|null=null)=>({status,reason,diagnostics,entryStages,
-    policy:{...policy,symbols:[...(d.markets?.keys()??[])],appliedAt:d.policyAppliedAt},
+    policy:{...policy,...(d.policyVersion==='virtual400-daily/v3'?{version:'virtual400-daily/v3',cooldownMinutes:60,maxDailyEntries:24}:{}),symbols:[...(d.markets?.keys()??[])],appliedAt:d.policyAppliedAt},
     tradingMode:{mode,...DAILY_ENTRY_OPTIONS[mode]},at:d.now.toISOString(),mode:'VIRTUAL_PAPER_400' as const,
     realFundsUsed:false,costBasis:'SIMULATED / ESTIMATED' as const,
     account:{...account,held:account.held.map(r=>({id:r.id,symbol:r.symbol,side:r.side,sizeUsd:r.sizeInUsd,entryPrice:r.price,stopPrice:r.stopPriceUsd,takeProfitPrice:r.takeProfitPriceUsd}))}});
@@ -27,7 +27,7 @@ export async function runVirtualPaperDailyCycle(d:DailyCycleDeps){
   if(d.policyVersion!==policy.version)return outcome('BLOCKED','DAILY_POLICY_NOT_APPLIED');
   if(d.entryBlockedReason)return outcome('BLOCKED',d.entryBlockedReason);
   if(!account.evaluation.entryAllowed)return outcome(account.held.length?'NO_TRADE':'BLOCKED',account.evaluation.blockReasons.join('; '));
-  if(account.lastOpenAtMs!==null&&d.now.getTime()-account.lastOpenAtMs<policy.cooldownMinutes*60_000)return outcome('NO_TRADE','PAPER_HOURLY_COOLDOWN');
+  if(account.lastOpenAtMs!==null&&d.now.getTime()-account.lastOpenAtMs<policy.cooldownMinutes*60_000)return outcome('NO_TRADE','PAPER_ENTRY_COOLDOWN');
   const profile=dailyPaperProfile(account.equityUsd??0,d.policyAppliedAt!);
   const remainingDailyLoss=Math.max(0,account.next.risk.startOfDayEquityUsd*.1+account.next.risk.dailyLossAwareNetPnlUsd);
   const budget=Math.min(profile.derivedLimits.maxRiskPerTradeUsd,remainingDailyLoss);

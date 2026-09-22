@@ -130,3 +130,20 @@ describe('server authority after retiring the browser trading engine', () => {
   expect(fetcher).toHaveBeenCalledTimes(2);
  });
 });
+
+it('shows immutable initial capital above current equity, and separates a contribution from profit', async () => {
+ const data=snapshot();data.runtime!.account.equityUsd=497;
+ Object.assign(data.runtime!.account.ledger,{initialEquityUsd:400,netContributionsUsd:100,fundedCapitalUsd:500,realizedEquityUsd:497});
+ data.runtime!.policy={...data.runtime!.policy!,version:'virtual400-daily/v4',cooldownMinutes:45,maxDailyEntries:32};
+ const fetcher=vi.fn(async()=>({ok:true,json:async()=>data}));vi.stubGlobal('fetch',fetcher);
+ const view=mount();await flush();
+ const initial=screen.getByTestId('metric-initial-capital');const current=screen.getByTestId('metric-가상 평가자산');
+ expect(initial.textContent).toBe('400.00');expect(current.textContent).toContain('497.00');
+ expect(initial.compareDocumentPosition(current)&Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+ expect(screen.getByText(/추가 입금.*100.00/).textContent).toContain('손익과 별도');
+ expect(screen.getByTestId('metric-비용 차감 실현 손익').textContent).toContain('-3.00');
+ expect(screen.getByTestId('virtual-active-policy').textContent).toContain('45분');
+ expect(screen.getByText(/하루 최대 32회/)).toBeTruthy();
+ view.unmount();mount();await flush();expect(screen.getByTestId('metric-initial-capital').textContent).toBe('400.00');
+ expect(fetcher.mock.calls.every((c:any)=>!c[1]?.method)).toBe(true);
+});

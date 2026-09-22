@@ -16,3 +16,9 @@ describe('financial presentation without fabricated history', () => {
  it('exports actual losses, units, simulation label, missing fields and safe text', () => {const r=row('=HYPERLINK("bad")','2026-09-20T14:00:00Z','-3'); const csv=settlementCsv([r]);expect(csv).toContain('SIMULATED / ESTIMATED'); expect(csv).toContain('"-3"'); expect(csv).toContain('"UNAVAILABLE"'); expect(csv).toContain("\"'=HYPERLINK"); expect(csv).toContain('Net USDC');});
  it('shows explicit PHT time and rejects malformed timestamps', () => { expect(timestamp('2026-09-20T14:00:00Z')).toBe('22:00:00'); expect(timestamp('bad')).toBe('미확인'); });
 });
+
+it('excludes new capital from the performance curve instead of manufacturing a profit jump',()=>{
+ const before=runtime();const funded=runtime();funded.account.ledger.realizedEquityUsd+=100;
+ funded.account.ledger.netContributionsUsd=100;
+ expect(settlementSeries(funded)).toEqual(settlementSeries(before));
+});

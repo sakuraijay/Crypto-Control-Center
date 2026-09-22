@@ -21,6 +21,9 @@ export function timestamp(value: string | null | undefined, date = false): strin
     hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
 }
 export const REASON_LABELS: Record<string, string> = {
+  PAPER_ENTRY_COOLDOWN: '다음 진입 간격을 기다리고 있습니다.',
+  PAPER_HOURLY_COOLDOWN: '다음 진입 간격을 기다리고 있습니다.',
+  PAPER_POSITION_HELD: '보유 포지션의 손절·익절을 관리하고 있습니다.',
   NO_ELIGIBLE_CLOSED_CANDLE_SIGNAL: '진입 기준에 맞는 확정 신호를 기다리고 있습니다.',
   COST_UNAVAILABLE: '거래 비용 확인 대기', COST_INVALID_OR_OVER_CAP: '거래 비용 한도 초과',
   VIRTUAL_COOLDOWN: '다음 진입 간격 대기', DUPLICATE_SIGNAL: '이미 처리한 신호',
@@ -63,7 +66,7 @@ export function settlementSeries(runtime: VirtualRuntime | null) {
   const equity = finite(runtime?.account.ledger.realizedEquityUsd);
   if (equity === null || !rows.length || new Set(rows.map(row => row.id)).size !== rows.length
     || rows.some(row => finite(row.netPnlUsd) === null || !Number.isFinite(Date.parse(row.closedAt)))) return [];
-  let balance = equity - rows.reduce((sum, row) => sum + Number(row.netPnlUsd), 0);
+  let balance = equity - (finite(runtime?.account.ledger.netContributionsUsd) ?? 0) - rows.reduce((sum, row) => sum + Number(row.netPnlUsd), 0);
   if (!Number.isFinite(balance)) return [];
   const points = [{ label: '직전 잔액', balance, net: 0, id: 'baseline' }];
   for (const row of rows) {

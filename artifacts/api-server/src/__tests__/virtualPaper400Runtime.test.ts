@@ -98,11 +98,11 @@ describe('virtual runtime routing and durable account boundary', () => {
     const raw=JSON.stringify(active);fixture.rows.set(VIRTUAL_PAPER_400_SESSION_STATE_KEY,raw);
     await maybeRunVirtualPaper400Cycle({...args,dailyExperiment:true});
     const key=`virtual_paper_400_policy_v1:${active.session.sessionId}`;
-    expect(JSON.parse(fixture.rows.get(key)!).version).toBe('virtual400-daily/v3');
+    expect(JSON.parse(fixture.rows.get(key)!).version).toBe('virtual400-daily/v4');
     expect(JSON.parse(fixture.rows.get(VIRTUAL_PAPER_400_RUNTIME_KEY)!).reason).toBe('PAPER_EXPERIMENT_CANDLE_UNAVAILABLE');
     expect(runStrategyShadowWorkerReadOnly).not.toHaveBeenCalled();
     await maybeRunVirtualPaper400Cycle(args);
-    expect(JSON.parse(fixture.rows.get(key)!).version).toBe('virtual400-daily/v3');
+    expect(JSON.parse(fixture.rows.get(key)!).version).toBe('virtual400-daily/v4');
     expect(fixture.rows.get(VIRTUAL_PAPER_400_SESSION_STATE_KEY)).toBe(raw);
   });
   it('retains the 2x policy and protection of existing inventory until it is settled', async () => {
@@ -310,4 +310,27 @@ it('routes a discovered XRP batch into cost/strategy/runtime without resetting t
   expect(runtime.universe.totalMarkets).toBe(134); expect(runtime.policy.symbols).toEqual(['XRP']);
   expect(fixture.rows.get(VIRTUAL_PAPER_400_SESSION_STATE_KEY)).toBe(raw);
   expect(runtime.account.equityUsd).toBe(400);
+});
+
+
+it('credits only the authorized session once under the shared worker lock, restores credit and upgrades v3', async () => {
+  vi.useFakeTimers(); vi.setSystemTime(new Date('2026-09-22T08:00:00Z'));
+  try {
+    const active=buildActiveVirtualPaper400SessionState('vp400-8fca5a3d-e988-4c98-b4a3-f9953ff54289',new Date('2026-09-20T14:21:14.615Z'));
+    const raw=JSON.stringify(active);fixture.rows.set(VIRTUAL_PAPER_400_SESSION_STATE_KEY,raw);
+    const policyKey=`virtual_paper_400_policy_v1:${active.session.sessionId}`;
+    fixture.rows.set(policyKey,JSON.stringify({version:'virtual400-daily/v3',sessionId:active.session.sessionId,appliedAt:active.session.startedAt}));
+    fixture.acquired=false;await maybeRunVirtualPaper400Cycle({...args,dailyExperiment:true});
+    expect(fixture.rows.has(virtualPaper400RiskKey(active.session))).toBe(false);
+    fixture.acquired=true;await maybeRunVirtualPaper400Cycle({...args,dailyExperiment:true});
+    const first=JSON.parse(fixture.rows.get(VIRTUAL_PAPER_400_RUNTIME_KEY)!);
+    expect(first.account.ledger).toMatchObject({initialEquityUsd:400,netContributionsUsd:100,realizedEquityUsd:500,realizedNetPnlUsd:0});
+    expect(first.policy).toMatchObject({version:'virtual400-daily/v4',cooldownMinutes:45,maxDailyEntries:32});
+    await maybeRunVirtualPaper400Cycle(args);
+    const restored=JSON.parse(fixture.rows.get(VIRTUAL_PAPER_400_RUNTIME_KEY)!);
+    expect(restored.account.ledger.realizedEquityUsd).toBe(500);
+    expect(restored.account.ledger.contributions).toHaveLength(1);
+    expect(restored.account.next.equityHwmUsd).toBe(500);
+    expect(fixture.rows.get(VIRTUAL_PAPER_400_SESSION_STATE_KEY)).toBe(raw);
+  } finally {vi.useRealTimers();}
 });

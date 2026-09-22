@@ -15,7 +15,7 @@ export interface VirtualPaper400Snapshot {
     targetRoePct: number | null; stopRoePct: number; maxHoldHours: number; exitBasis?: string }>;
   runtime: null | {
     tradingMode?: { mode: 'INTRADAY' | 'SWING'; targetRoePct: number | null; stopRoePct: number; maxHoldHours: number } | null;
-    policy?: { version: string; appliedAt: string; symbols: string[]; riskPerTradePct: number; minLeverage?: number; maxLeverage: number; cooldownMinutes: number } | null;
+    policy?: { version: string; appliedAt: string; symbols: string[]; riskPerTradePct: number; minLeverage?: number; maxLeverage: number; cooldownMinutes: number; maxDailyEntries?: number } | null;
     diagnostics?: { symbol: string; reason: string; details?: string[] }[];
     analysis?: { symbol: string; reason: string }[];
     journal?: { id: string; symbol: string; side: string; openedAt: string | null; closedAt: string;
@@ -25,7 +25,7 @@ export interface VirtualPaper400Snapshot {
       plannedRiskUsd: number | null; netR: number | null; closeKind: string }[];
     status: string; reason: string | null; at: string;
     account: { equityUsd: number | null; unrealizedNetPnlUsd: number | null;
-      ledger: { realizedEquityUsd: number; realizedNetPnlUsd: number; settlementCount: number };
+      ledger: { initialEquityUsd?: number; netContributionsUsd?: number; fundedCapitalUsd?: number; realizedEquityUsd: number; realizedNetPnlUsd: number; settlementCount: number };
       held: { id: string; symbol: string; side: string; sizeUsd: string; entryPrice: string;
         stopPrice: string; takeProfitPrice: string | null }[] };
   };
