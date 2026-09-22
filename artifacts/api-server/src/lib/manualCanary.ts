@@ -354,6 +354,50 @@ export function validateCanaryRequest(symbol: unknown, direction: unknown):
   return { ok: true, symbol, direction };
 }
 
+function validateStoredOpenBinding(value: unknown):
+  { ok: true; binding: NonNullable<DailyCanaryState['open']> } | { ok: false; reason: string } {
+  if (typeof value !== 'object' || value === null) {
+    return { ok: false, reason: 'OPEN 결속 기록 없음/손상' };
+  }
+  const candidate = value as Partial<NonNullable<DailyCanaryState['open']>>;
+  const request = validateCanaryRequest(candidate.symbol, candidate.direction);
+  if (!request.ok) return { ok: false, reason: `OPEN 결속 기록 손상 — ${request.reason}` };
+
+  const collateralUsd = candidate.collateralUsd;
+  const leverage = candidate.leverage;
+  const requestedSizeUsd = candidate.requestedSizeUsd;
+  if (typeof collateralUsd !== 'number'
+      || !Number.isFinite(collateralUsd)
+      || collateralUsd <= 0
+      || collateralUsd > MANUAL_CANARY_CAPS.maxCollateralUsd) {
+    return { ok: false, reason: 'OPEN 결속 기록 손상 — 담보 범위 불일치' };
+  }
+  if (typeof leverage !== 'number'
+      || !Number.isFinite(leverage)
+      || leverage < 1
+      || leverage > MANUAL_CANARY_CAPS.maxLeverage) {
+    return { ok: false, reason: 'OPEN 결속 기록 손상 — 레버리지 범위 불일치' };
+  }
+  const expectedSizeUsd = Math.min(collateralUsd * leverage, MANUAL_CANARY_CAPS.maxNotionalUsd);
+  if (typeof requestedSizeUsd !== 'number'
+      || !Number.isFinite(requestedSizeUsd)
+      || requestedSizeUsd <= 0
+      || requestedSizeUsd > MANUAL_CANARY_CAPS.maxNotionalUsd
+      || Math.abs(requestedSizeUsd - expectedSizeUsd) > 1e-9) {
+    return { ok: false, reason: 'OPEN 결속 기록 손상 — 명목 크기 불일치' };
+  }
+  return {
+    ok: true,
+    binding: {
+      symbol: request.symbol,
+      direction: request.direction,
+      collateralUsd,
+      leverage,
+      requestedSizeUsd,
+    },
+  };
+}
+
 /**
  * #142: evaluateAllChecks는 ManualCanaryPreflightDeps만 사용.
  * 실행 능력(executeOrder 등)은 구조적으로 접근 불가.
@@ -857,6 +901,11 @@ export async function executeManualCanaryClose(deps: ManualCanaryDeps, body: {
   const daily = loaded.state;
   if (!daily?.openIntentId) return reject('오늘 실행된 canary OPEN 없음');
 
+  // 영속 상태는 런타임 타입을 신뢰하지 않는다. 특히 손상된 direction을
+  // `LONG`이 아니므로 SHORT로 간주하면 다른 포지션을 선택할 수 있다.
+  const storedOpen = validateStoredOpenBinding(daily.open);
+  if (!storedOpen.ok) return reject(`${storedOpen.reason} — close 진행 금지 (fail-closed)`);
+
   const open = await deps.intentStatus(daily.openIntentId);
   if (!open) return reject('OPEN intent 조회 실패 (fail-closed)');
   if (open.status !== 'CONFIRMED') return reject(`OPEN 미확정 (${open.status}) — 온체인 CONFIRMED 후에만 close 가능`);
@@ -867,9 +916,8 @@ export async function executeManualCanaryClose(deps: ManualCanaryDeps, body: {
 
   // CLOSE와 emergency close 모두 durable OPEN binding 없이는 어느 포지션도
   // 선택하지 않는다. 단순히 authoritative 배열의 첫 항목을 사용하는 경로 금지.
-  if (!daily.open) return reject('OPEN 결속 기록 없음 — close 진행 금지 (fail-closed)');
-  const sym = daily.open.symbol;
-  const isLong = daily.open.direction === 'LONG';
+  const sym = storedOpen.binding.symbol;
+  const isLong = storedOpen.binding.direction === 'LONG';
   const marketAddress = deps.marketAddress(sym);
   if (!marketAddress) return reject('OPEN 결속 시장 주소 미확인 — 제출 0회');
 

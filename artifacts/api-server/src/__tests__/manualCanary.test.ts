@@ -224,6 +224,7 @@ describe('#135 Manual Controlled Canary — 장애주입', () => {
     state.set('manualCanaryDaily', JSON.stringify({
       dayKey: DAY, opens: 1, openIntentId: 'intent:open:manual-canary:' + DAY,
       closeIntentId: null, emergencyCloseUsed: false, openedAt: NOW.toISOString(),
+      open: { symbol: 'BTC', direction: 'LONG', collateralUsd: 10, leverage: 2, requestedSizeUsd: 20 },
     }));
     expect(failedIds((await runCanaryPreflight(deps, 'BTC', 'LONG')).items)).toContain('daily_budget');
     const claim = await claimDailyBudget(deps, 'intent:x');
@@ -357,6 +358,7 @@ describe('#135 Manual Controlled Canary — 장애주입', () => {
     state.set('manualCanaryDaily', JSON.stringify({
       dayKey: DAY, opens: 1, openIntentId: 'intent:open:manual-canary:' + DAY,
       closeIntentId: null, emergencyCloseUsed: false, openedAt: NOW.toISOString(),
+      open: { symbol: 'BTC', direction: 'LONG', collateralUsd: 10, leverage: 2, requestedSizeUsd: 20 },
     }));
     const r = await executeManualCanaryClose(deps, { confirm: CANARY_CONFIRM_CLOSE });
     expect(r.phase).toBe('REJECTED');
@@ -542,6 +544,38 @@ describe('durable/CAS fail-closed 보강 (리뷰 후속)', () => {
     );
     expect(emergency.phase).toBe('REJECTED');
     expect(runEmergencyClose).not.toHaveBeenCalled();
+  });
+
+  it('close: 손상된 OPEN 결속은 SHORT로 해석하지 않고 일반/emergency 모두 제출 전 차단', async () => {
+    for (const open of [
+      { symbol: 'BTC', direction: 'BROKEN', collateralUsd: 10, leverage: 2, requestedSizeUsd: 20 },
+      { symbol: 'BTC', direction: 'LONG', collateralUsd: 10, leverage: 2, requestedSizeUsd: Number.NaN },
+      { symbol: 'BTC', direction: 'LONG', collateralUsd: 10, leverage: 2, requestedSizeUsd: 19 },
+    ]) {
+      const intentStatus = vi.fn<ManualCanaryDeps['intentStatus']>(async () => ({
+        status: 'CONFIRMED', orderKey: '0xkey', txHash: '0xabc',
+      }));
+      const openPositions = vi.fn<ManualCanaryDeps['openPositions']>(async () => []);
+      const { deps, state, closePosition, runEmergencyClose } = makeDeps({ intentStatus, openPositions });
+      state.set('manualCanaryDaily', JSON.stringify({
+        dayKey: DAY, opens: 1, openIntentId: 'intent:open:manual-canary:' + DAY,
+        closeIntentId: null, emergencyCloseUsed: false, openedAt: NOW.toISOString(), open,
+      }));
+
+      const normal = await executeManualCanaryClose(deps, { confirm: CANARY_CONFIRM_CLOSE });
+      const emergency = await executeManualCanaryClose(
+        deps,
+        { confirm: CANARY_CONFIRM_CLOSE, mode: 'emergency' },
+      );
+
+      expect(normal.phase).toBe('REJECTED');
+      expect(emergency.phase).toBe('REJECTED');
+      expect(normal.reason).toContain('결속 기록 손상');
+      expect(intentStatus).not.toHaveBeenCalled();
+      expect(openPositions).not.toHaveBeenCalled();
+      expect(closePosition).not.toHaveBeenCalled();
+      expect(runEmergencyClose).not.toHaveBeenCalled();
+    }
   });
 
   it('emergency close: 결속 포지션이 복수·불일치면 제출과 durable 사용 표시를 모두 차단', async () => {
