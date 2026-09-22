@@ -34,7 +34,7 @@ function makeDeps(overrides: Partial<ManualCanaryDeps> = {}) {
   const closePosition = vi.fn<ManualCanaryDeps['closePosition']>(async (_params) => ({
     ok: true, txHash: '0xdef', orderKey: '0xkey2', simulated: false, executedAt: NOW.toISOString(),
   }));
-  const runEmergencyClose = vi.fn<ManualCanaryDeps['runEmergencyClose']>(async (_reason) => OK);
+  const runEmergencyClose = vi.fn<ManualCanaryDeps['runEmergencyClose']>(async (_input) => OK);
   let idSeq = 0;
   const deps: ManualCanaryDeps = {
     now: () => NOW,
@@ -323,6 +323,7 @@ describe('#135 Manual Controlled Canary — 장애주입', () => {
     state.set('manualCanaryDaily', JSON.stringify({
       dayKey: DAY, opens: 1, openIntentId: 'intent:open:manual-canary:' + DAY,
       closeIntentId: null, emergencyCloseUsed: false, openedAt: NOW.toISOString(),
+      open: { symbol: 'BTC', direction: 'LONG', collateralUsd: 10, leverage: 2, requestedSizeUsd: 20 },
     }));
     const r = await executeManualCanaryClose(deps, { confirm: CANARY_CONFIRM_CLOSE });
     expect(r.phase).toBe('REJECTED');
@@ -332,6 +333,18 @@ describe('#135 Manual Controlled Canary — 장애주입', () => {
     const e1 = await executeManualCanaryClose(deps, { confirm: CANARY_CONFIRM_CLOSE, mode: 'emergency' });
     expect(e1.ok).toBe(true);
     expect(runEmergencyClose).toHaveBeenCalledTimes(1);
+    expect(runEmergencyClose).toHaveBeenCalledWith(expect.objectContaining({
+      openIntentId: 'intent:open:manual-canary:' + DAY,
+      symbol: 'BTC',
+      marketAddress: '0x47c031236e19d024b42f8ae6780e44a573170703',
+      isLong: true,
+      exactPosition: expect.objectContaining({
+        positionKey: '0xposkey1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab',
+        account: '0x46c27887c5ec5e36b2a21e1ec1bc69e7a593950e',
+        collateralToken: '0xaf88d065e77c8cc2239327c5edb3a432268e5831',
+        preSizeUsd: 18.4,
+      }),
+    }));
     const e2 = await executeManualCanaryClose(deps, { confirm: CANARY_CONFIRM_CLOSE, mode: 'emergency' });
     expect(e2.phase).toBe('REJECTED');
     expect(runEmergencyClose).toHaveBeenCalledTimes(1);
@@ -513,8 +526,8 @@ describe('durable/CAS fail-closed 보강 (리뷰 후속)', () => {
     expect(c.closePosition).not.toHaveBeenCalled();
   });
 
-  it('close: OPEN 결속 기록 없는 레거시 상태 → 일반 close 거부 (emergency만)', async () => {
-    const { deps, state, closePosition } = makeDeps();
+  it('close: OPEN 결속 기록 없는 레거시 상태 → 일반/emergency 모두 거부', async () => {
+    const { deps, state, closePosition, runEmergencyClose } = makeDeps();
     state.set('manualCanaryDaily', JSON.stringify({
       dayKey: DAY, opens: 1, openIntentId: 'intent:open:manual-canary:' + DAY,
       closeIntentId: null, emergencyCloseUsed: false, openedAt: NOW.toISOString(),
@@ -523,5 +536,42 @@ describe('durable/CAS fail-closed 보강 (리뷰 후속)', () => {
     expect(r.phase).toBe('REJECTED');
     expect(r.reason).toContain('결속');
     expect(closePosition).not.toHaveBeenCalled();
+    const emergency = await executeManualCanaryClose(
+      deps,
+      { confirm: CANARY_CONFIRM_CLOSE, mode: 'emergency' },
+    );
+    expect(emergency.phase).toBe('REJECTED');
+    expect(runEmergencyClose).not.toHaveBeenCalled();
+  });
+
+  it('emergency close: 결속 포지션이 복수·불일치면 제출과 durable 사용 표시를 모두 차단', async () => {
+    const position = {
+      positionKey: '0xposkey1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab',
+      accountAddress: '0x46c27887c5ec5e36b2a21e1ec1bc69e7a593950e',
+      marketAddress: '0x47c031236e19d024b42f8ae6780e44a573170703',
+      collateralToken: '0xaf88d065e77c8cc2239327c5edb3a432268e5831',
+      isLong: true,
+      sizeUsd: 18.4,
+      sizeUsd30: '18400000000000000000000000000000',
+    };
+    const { deps, state, runEmergencyClose } = makeDeps({
+      initialStopStatus: async () => ({ status: 'SUBMITTED', orderKey: null }),
+      openPositions: async () => [position, { ...position, positionKey: '0xother' }],
+    });
+    state.set('manualCanaryDaily', JSON.stringify({
+      dayKey: DAY, opens: 1, openIntentId: 'intent:open:manual-canary:' + DAY,
+      closeIntentId: null, emergencyCloseUsed: false, openedAt: NOW.toISOString(),
+      open: { symbol: 'BTC', direction: 'LONG', collateralUsd: 10, leverage: 2, requestedSizeUsd: 20 },
+    }));
+
+    const r = await executeManualCanaryClose(
+      deps,
+      { confirm: CANARY_CONFIRM_CLOSE, mode: 'emergency' },
+    );
+
+    expect(r.phase).toBe('REJECTED');
+    expect(r.reason).toContain('유일하게');
+    expect(runEmergencyClose).not.toHaveBeenCalled();
+    expect(JSON.parse(state.get('manualCanaryDaily')!).emergencyCloseUsed).toBe(false);
   });
 });

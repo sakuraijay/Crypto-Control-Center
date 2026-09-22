@@ -15,7 +15,7 @@ import { verifySdkRouterPin } from './gmxLivePreflight';
 import { getDeploymentVerificationState, getCanonicalSnapshot } from './relayActivationStatus';
 import { getUsdcAllowanceForSpender } from './gmxSubaccount';
 import { resolveSdkSyntheticsRouter, EXPECTED_CANARY_SIGNER, CANARY_ALLOWANCE_AMOUNT_UNITS } from './canaryAllowanceInfo';
-import { countBlockingIntentsOrNull, listRecentIntents } from './executionIntents';
+import { countBlockingIntentsOrNull, getExecutionIntent, listRecentIntents } from './executionIntents';
 import { countOpenRelayTasksOrNull, listUnresolvedTasks } from './relayLifecycle';
 import {
   type CostSnapshot,
@@ -270,16 +270,46 @@ export function buildDefaultCanaryDeps(): ManualCanaryDeps {
     closePosition: closeLiveTestPosition,
 
     // 단일 emergency close — authoritative 포지션 증거 기반 (runProtectionPass와 동일 규칙)
-    runEmergencyClose: async (openIntentId: string) => {
+    runEmergencyClose: async (input) => {
       try {
+        const intent = await getExecutionIntent(input.openIntentId);
+        const intentSizeUsd = Number(intent?.sizeUsd);
+        const expectedMarket = MARKET_BY_SYMBOL_SERVER.get(input.symbol)?.marketToken ?? null;
+        if (!intent
+            || intent.id !== input.openIntentId
+            || intent.orderType !== 'open'
+            || intent.status !== 'CONFIRMED'
+            || intent.symbol !== input.symbol
+            || intent.isLong !== input.isLong
+            || !Number.isFinite(intentSizeUsd)
+            || intentSizeUsd <= 0
+            || expectedMarket?.toLowerCase() !== input.marketAddress.toLowerCase()
+            || Math.abs(intentSizeUsd - input.exactPosition.preSizeUsd) > 0.0001) {
+          return outcome(false, 'durable OPEN intent/position 결속 실패 — emergency close 제출 0회 (fail-closed)');
+        }
         const positions = await fetchAuthoritativeOpenPositions();
         if (positions === null) return outcome(false, 'authoritative 포지션 조회 실패 — 제출 0회 (fail-closed)');
-        if (positions.length === 0) return outcome(false, '열린 포지션 없음 — emergency close 불필요');
-        const p = positions[0];
-        const positionKey = `${p.marketAddress.toLowerCase()}:${p.isLong ? 'L' : 'S'}`;
+        const expected = input.exactPosition;
+        const matched = positions.filter((p) =>
+          typeof p.positionKey === 'string'
+          && typeof p.accountAddress === 'string'
+          && typeof p.collateralToken === 'string'
+          && typeof p.sizeUsd30 === 'string'
+          && p.positionKey === expected.positionKey
+          && p.accountAddress.toLowerCase() === expected.account
+          && p.marketAddress.toLowerCase() === expected.marketAddress
+          && p.collateralToken.toLowerCase() === expected.collateralToken
+          && p.isLong === input.isLong
+          && p.sizeUsd30 === expected.preSizeUsd30
+          && Math.abs(p.sizeUsd - expected.preSizeUsd) <= 0.0001
+        );
+        if (matched.length !== 1) {
+          return outcome(false, 'exact canary 포지션 재검증 실패 — emergency close 제출 0회 (fail-closed)');
+        }
+        const p = matched[0];
         const r = await runEmergencyClose({
-          parentOpenIntentId: openIntentId, positionKey,
-          symbol: p.marketAddress, marketAddress: p.marketAddress, isLong: p.isLong,
+          parentOpenIntentId: input.openIntentId, positionKey: expected.positionKey,
+          symbol: input.symbol, marketAddress: input.marketAddress, isLong: input.isLong,
           fullSizeUsd: p.sizeUsd, reason: '#135 manual canary emergency close (운영자 요청)',
           manualCanary: true,
         });

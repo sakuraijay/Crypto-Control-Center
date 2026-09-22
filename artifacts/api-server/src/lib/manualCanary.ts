@@ -298,7 +298,13 @@ export interface ManualCanaryDeps extends ManualCanaryPreflightDeps {
     /** 0030: exact 포지션 결속 — manualCanary 경로는 반드시 제공해야 한다 */
     exactPosition?: ClosePositionBinding | null;
   }): Promise<LiveOrderResult>;
-  runEmergencyClose(openIntentId: string): Promise<CheckOutcome>;
+  runEmergencyClose(input: {
+    openIntentId: string;
+    symbol: string;
+    marketAddress: string;
+    isLong: boolean;
+    exactPosition: ClosePositionBinding;
+  }): Promise<CheckOutcome>;
   /**
    * #142: 실행 직전 전용 비용 증거 기록 + stop capability 원자적 재평가.
    * 실행 증거/stop gate 갱신 불가 시 fail-closed (제출 0회).
@@ -859,16 +865,53 @@ export async function executeManualCanaryClose(deps: ManualCanaryDeps, body: {
   const stopActive = stop.status === 'ACTIVE' && !!stop.orderKey;
   const emergency = body.mode === 'emergency';
 
+  // CLOSE와 emergency close 모두 durable OPEN binding 없이는 어느 포지션도
+  // 선택하지 않는다. 단순히 authoritative 배열의 첫 항목을 사용하는 경로 금지.
+  if (!daily.open) return reject('OPEN 결속 기록 없음 — close 진행 금지 (fail-closed)');
+  const sym = daily.open.symbol;
+  const isLong = daily.open.direction === 'LONG';
+  const marketAddress = deps.marketAddress(sym);
+  if (!marketAddress) return reject('OPEN 결속 시장 주소 미확인 — 제출 0회');
+
   if (!stopActive && !emergency) {
     return reject('Stop-Loss ACTIVE 미확인 — 일반 close 금지, emergency close 경로만 허용');
   }
   if (emergency) {
     if (daily.emergencyCloseUsed) return reject('emergency close 이미 1회 사용 — 재제출 금지');
+
+    const positions = await deps.openPositions();
+    if (positions === null) return reject('온체인 포지션 조회 실패 — emergency close 제출 0회 (fail-closed)');
+    const account = deps.mainAddress().toLowerCase();
+    const matched = positions.filter(p =>
+      p.marketAddress.toLowerCase() === marketAddress.toLowerCase()
+      && p.isLong === isLong
+      && p.accountAddress.toLowerCase() === account
+    );
+    const pos = matched.length === 1 ? matched[0] : null;
+    if (!pos || !(pos.sizeUsd > 0)) {
+      return reject('결속된 canary 포지션을 온체인에서 유일하게 확인 불가 — emergency close 제출 0회');
+    }
+    const exactPosition: ClosePositionBinding = {
+      account,
+      marketAddress: pos.marketAddress.toLowerCase(),
+      collateralToken: pos.collateralToken.toLowerCase(),
+      positionKey: pos.positionKey,
+      preSizeUsd: pos.sizeUsd,
+      preSizeUsd30: pos.sizeUsd30,
+      requestedReductionUsd: pos.sizeUsd,
+      requestedReductionUsd30: pos.sizeUsd30,
+    };
     const prevRaw = loaded.raw;
     const next = { ...daily, emergencyCloseUsed: true };
     const cas = await deps.casState(STATE_KEY_DAILY, prevRaw, JSON.stringify(next));
     if (!cas) return reject('durable 상태 갱신 실패 — 제출 0회 (fail-closed)');
-    const r = await deps.runEmergencyClose(daily.openIntentId);
+    const r = await deps.runEmergencyClose({
+      openIntentId: daily.openIntentId,
+      symbol: sym,
+      marketAddress,
+      isLong,
+      exactPosition,
+    });
     return r.ok
       ? { ok: true, phase: 'SUBMITTED', reason: `emergency close: ${r.detail}`, intentId: daily.openIntentId, failures: [] }
       : { ok: false, phase: 'ERROR', reason: r.detail, intentId: daily.openIntentId, failures: [] };
@@ -878,12 +921,8 @@ export async function executeManualCanaryClose(deps: ManualCanaryDeps, body: {
   const dayKey = manilaDayKey(deps.now());
   const decisionId = `${buildCanaryDecisionId(dayKey)}:close`;
   // 심볼/방향 = OPEN claim 시점 durable 결속 (전역 preflight 상태 사용 금지)
-  if (!daily.open) return reject('OPEN 결속 기록 없음 — emergency close 사용 (fail-closed)');
-  const sym = daily.open.symbol;
-  const isLong = daily.open.direction === 'LONG';
-  const marketAddress = deps.marketAddress(sym);
   const price = await deps.currentPriceUsd(sym);
-  if (!marketAddress || price === null) return reject('시장/가격 확인 불가 — 제출 0회');
+  if (price === null) return reject('시장/가격 확인 불가 — 제출 0회');
 
   // close 크기 및 exact 포지션 결속 = authoritative 온체인 포지션 실측 (요청/고정값 사용 금지)
   // positionKey + collateralToken을 포함한 full identity를 lower 계층에 넘겨
