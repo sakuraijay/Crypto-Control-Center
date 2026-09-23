@@ -149,7 +149,10 @@ export function evaluateActionBudget(input: ActionBudgetInput): ActionBudgetResu
   const required = requiredActionsBeforeOpen();
   let remaining: number | null = null;
   try {
-    if (input.remaining === null) throw new Error('none');
+    // Canonical readback is an unsigned base-10 integer string. BigInt itself
+    // also accepts whitespace, signs, and hexadecimal prefixes, which would
+    // let a damaged/non-canonical snapshot pass this safety boundary.
+    if (input.remaining === null || !/^\d+$/.test(input.remaining)) throw new Error('none');
     const v = BigInt(input.remaining);
     remaining = v > BigInt(Number.MAX_SAFE_INTEGER) ? Number.MAX_SAFE_INTEGER : Number(v);
     if (remaining < 0) throw new Error('neg');
@@ -158,14 +161,18 @@ export function evaluateActionBudget(input: ActionBudgetInput): ActionBudgetResu
     reasons.push('remaining actions 조회 불가 — OPEN 차단 (fail-closed)');
   }
   try {
-    if (input.expiresAt === null) throw new Error('none');
-    if (Number(input.expiresAt) * 1000 <= input.nowMs) reasons.push('approval 만료 — OPEN 차단');
+    // Number("1e999") is Infinity, so Number coercion would treat malformed
+    // expiration evidence as indefinitely valid. Compare strict decimal
+    // integer seconds as bigint and reject an invalid local clock as well.
+    if (input.expiresAt === null || !/^\d+$/.test(input.expiresAt)) throw new Error('none');
+    if (!Number.isSafeInteger(input.nowMs) || input.nowMs < 0) throw new Error('clock');
+    if (BigInt(input.expiresAt) * 1000n <= BigInt(input.nowMs)) reasons.push('approval 만료 — OPEN 차단');
   } catch {
     reasons.push('approval 만료시각 불명 — OPEN 차단 (fail-closed)');
   }
   let inFlight: number | null;
   if (input.inFlightReservedActions === undefined || input.inFlightReservedActions === null
-      || !Number.isFinite(input.inFlightReservedActions) || input.inFlightReservedActions < 0) {
+      || !Number.isSafeInteger(input.inFlightReservedActions) || input.inFlightReservedActions < 0) {
     inFlight = null;
     reasons.push('진행 중 예약분 조회 불가 — OPEN 차단 (fail-closed)');
   } else {
