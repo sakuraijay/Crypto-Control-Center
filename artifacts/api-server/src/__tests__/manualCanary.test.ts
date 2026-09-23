@@ -423,7 +423,7 @@ describe('#135 Manual Controlled Canary — 장애주입', () => {
     expect(r.reason).toContain('fail-closed');
   });
 
-  it('reserve→commit 사이 같은 예약 ID의 intent/주문 결속 변경 → 제출 0회', async () => {
+  it('reserve→commit 사이 같은 예약 ID의 intent/주문 결속 변경 → 제출 0회·변경 예약 보존', async () => {
     const fixture = makeDeps();
     const body = await preflightThenBody(fixture.deps);
     const originalCas = fixture.deps.casState;
@@ -452,7 +452,10 @@ describe('#135 Manual Controlled Canary — 장애주입', () => {
     expect(fixture.executeOrder).not.toHaveBeenCalled();
     const daily = JSON.parse(fixture.state.get('manualCanaryDaily')!);
     expect(daily.opens).toBe(0);
-    expect(daily.launchReservation).toBeNull();
+    expect(daily.launchReservation).toMatchObject({
+      openIntentId: 'intent:open:tampered',
+      open: { symbol: 'ETH', direction: 'LONG' },
+    });
   });
 
   it('상태 조회: OPEN CONFIRMED + stop ACTIVE + close CONFIRMED → 5단계 진행 표시', async () => {

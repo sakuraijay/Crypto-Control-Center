@@ -769,11 +769,19 @@ async function commitDailyLaunch(
 async function releaseDailyLaunch(
   deps: ManualCanaryDeps,
   reservationId: string,
+  expectedOpenIntentId: string,
+  expectedOpenBinding: NonNullable<DailyCanaryState['open']>,
 ): Promise<boolean> {
   const loaded = await loadDailyState(deps);
   if (loaded.corrupt || !loaded.state) return false;
   const current = loaded.state;
-  if (!current.launchReservation || current.launchReservation.id !== reservationId) return false;
+  const reservation = current.launchReservation;
+  if (!reservation || reservation.id !== reservationId) return false;
+  // 실패한 요청이 reservation ID만 알고 있다는 이유로, reserve 이후 같은 ID에
+  // 다른 intent/주문 결속이 기록된 예약까지 해제하면 새 소유자의 claim을 지울 수
+  // 있다. Commit과 동일하게 원본 계약 전체를 확인한 owner만 release할 수 있다.
+  if (reservation.openIntentId !== expectedOpenIntentId
+      || !sameOpenBinding(reservation.open, expectedOpenBinding)) return false;
   const next: DailyCanaryState = {
     ...current,
     launchReservation: null,
@@ -801,7 +809,7 @@ export async function claimDailyBudget(
   if (!reserved.ok) return reserved;
   const committed = await commitDailyLaunch(deps, reservationId, openIntentId, binding);
   if (!committed.ok) {
-    await releaseDailyLaunch(deps, reservationId).catch(() => false);
+    await releaseDailyLaunch(deps, reservationId, openIntentId, binding).catch(() => false);
   }
   return committed;
 }
@@ -936,14 +944,14 @@ export async function executeManualCanaryOpen(deps: ManualCanaryDeps, body: {
     evidenceRecorded = false;
   }
   if (!evidenceRecorded) {
-    await releaseDailyLaunch(deps, reservationId).catch(() => false);
+    await releaseDailyLaunch(deps, reservationId, intentId, openBinding).catch(() => false);
     return reject('실행 직전 비용 증거/stop capability 갱신 실패 — 제출 0회 (fail-closed)');
   }
 
   // Evidence가 준비된 동일 reservation owner만 일일 1회 claim을 확정한다.
   const committed = await commitDailyLaunch(deps, reservationId, intentId, openBinding);
   if (!committed.ok) {
-    await releaseDailyLaunch(deps, reservationId).catch(() => false);
+    await releaseDailyLaunch(deps, reservationId, intentId, openBinding).catch(() => false);
     return reject(committed.reason);
   }
 
