@@ -72,7 +72,10 @@ import {
   startPaperRuntimeReadinessScheduler,
   stopPaperRuntimeReadinessScheduler,
 } from '../lib/paperRuntimeReadiness';
-import { getStopExecutionCapability } from '../lib/stopExecutionCapabilityState';
+import {
+  getStopExecutionCapability,
+  setStopExecutionCapability,
+} from '../lib/stopExecutionCapabilityState';
 import {
   __resetPaperStopReadinessEvidenceForTests,
   getPaperStopReadinessEvidence,
@@ -178,6 +181,10 @@ afterEach(() => {
   __resetPaperRuntimeReadinessForTests();
   __resetPaperStopReadinessEvidenceForTests();
   __setManualCanaryReadonlyReadersForTests(null);
+  setStopExecutionCapability({
+    available: false,
+    reasons: ['test reset — unevaluated'],
+  }, null);
 });
 afterAll(() => {
   for (const [key, value] of savedEnv) {
@@ -190,6 +197,29 @@ describe('GET /api/executor/gmx-api/status', () => {
   it('PIN 없음 → 401 (운영자 인증 필수)', async () => {
     const res = await request(app).get('/api/executor/gmx-api/status');
     expect(res.status).toBe(401);
+  });
+
+  it('만료된 raw Stop true를 인증 상태에서도 available=false로 표시한다', async () => {
+    const staleEvaluatedAt = new Date(Date.now() - 30_001).toISOString();
+    setStopExecutionCapability({
+      available: true,
+      reasons: [],
+    }, staleEvaluatedAt);
+
+    const res = await request(app)
+      .get('/api/executor/gmx-api/status')
+      .set('x-operator-pin', PIN);
+
+    expect(res.status).toBe(200);
+    expect(getStopExecutionCapability()).toMatchObject({
+      available: true,
+      evaluatedAt: staleEvaluatedAt,
+    });
+    expect(res.body.status.stopExecutionAvailable).toBe(false);
+    expect(res.body.status.stopCapability).toMatchObject({
+      available: false,
+      evaluatedAt: staleEvaluatedAt,
+    });
   });
 
   it('인증 성공 → 서버 파생 상태 반환 (fail-closed 기본값)', async () => {

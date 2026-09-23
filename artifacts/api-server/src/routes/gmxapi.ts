@@ -591,7 +591,9 @@ export async function buildGmxApiStatusSnapshot() {
     stopExecutionAvailable,
     // ── 6H-2B §12 — stop capability·보호 주문·action 예산 관측값 ─────────────
     stopCapability: {
-      available: stopCapability.available,
+      // Expose the same freshness-aware result used by the execution gate.
+      // The cached raw value may remain true after its 30s evidence window.
+      available: stopExecutionAvailable,
       reasons: stopCapability.reasons,
       evaluatedAt: stopCapability.evaluatedAt,
       scope: 'LIVE_STOP_EXECUTION',
