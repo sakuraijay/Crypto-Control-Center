@@ -420,6 +420,44 @@ describe('#142 Manual Canary execution evidence integration', () => {
       isConfirmedOpenHandoffCanonicalAuthorizationReady(nowMs),
     ).resolves.toBe(expectedReady);
   });
+
+  it.each([
+    ['fresh canonical evidence', 0, false, false, '8', true, true],
+    ['stale readback', 60_001, false, false, '8', false, false],
+    ['future readback', -1, false, false, '8', false, false],
+    ['feature disabled', 0, true, false, '8', false, false],
+    ['integration disabled', 0, false, true, '8', false, false],
+    ['non-canonical remaining', 0, false, false, '1e3', true, false],
+    ['zero remaining', 0, false, false, '0', true, false],
+  ])('executor common canonical gate: %s', async (
+    _name,
+    ageMs,
+    featureDisabled,
+    integrationDisabled,
+    remaining,
+    expectedAuthorized,
+    expectedRemaining,
+  ) => {
+    const nowMs = Date.now();
+    const { evaluateExecutorCanonicalAuthorization } =
+      await import('../workers/liveTestExecutor');
+    const result = evaluateExecutorCanonicalAuthorization({
+      atMs: nowMs - ageMs,
+      confirmed: true,
+      reason: null,
+      approvalNonce: '1',
+      isSubaccountListed: true,
+      featureDisabled,
+      integrationDisabled,
+      expiresAt: String(Math.floor(nowMs / 1000) + 3600),
+      remaining,
+    }, nowMs);
+
+    expect(result).toEqual({
+      canonicalAuthorized: expectedAuthorized,
+      approvalRemainingOk: expectedRemaining,
+    });
+  });
 });
 
 /** 최신 relay 구성 완비 (게이트 통과 시나리오용) — 문서 기준 공식 Arbitrum 주소 */
