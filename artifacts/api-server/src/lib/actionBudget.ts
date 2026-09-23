@@ -165,7 +165,7 @@ export function evaluateActionBudget(input: ActionBudgetInput): ActionBudgetResu
     // expiration evidence as indefinitely valid. Compare strict decimal
     // integer seconds as bigint and reject an invalid local clock as well.
     if (input.expiresAt === null || !/^\d+$/.test(input.expiresAt)) throw new Error('none');
-    if (!Number.isSafeInteger(input.nowMs) || input.nowMs < 0) throw new Error('clock');
+    if (!Number.isSafeInteger(input.nowMs) || input.nowMs <= 0) throw new Error('clock');
     if (BigInt(input.expiresAt) * 1000n <= BigInt(input.nowMs)) reasons.push('approval 만료 — OPEN 차단');
   } catch {
     reasons.push('approval 만료시각 불명 — OPEN 차단 (fail-closed)');

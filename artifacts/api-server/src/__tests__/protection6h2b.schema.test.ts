@@ -191,6 +191,7 @@ describe('§7 action 예산', () => {
     ['Infinity expiresAt', '10', 'Infinity', now, 0],
     ['소수 expiresAt', '10', `${Math.floor(now / 1000) + 3600}.5`, now, 0],
     ['비정상 clock', '10', future, Number.NaN, 0],
+    ['0 clock', '10', future, 0, 0],
     ['소수 예약분', '10', future, now, 0.5],
     ['unsafe 예약분', '10', future, now, Number.MAX_SAFE_INTEGER + 1],
   ])('%s → action budget fail-closed', (_label, remaining, expiresAt, nowMs, inFlightReservedActions) => {
