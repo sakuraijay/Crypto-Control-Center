@@ -23,9 +23,15 @@ vi.mock('../lib/relayActivationStatus', () => ({ deriveRelayEnvFlags: mocks.rela
 vi.mock('../lib/gmxDeploymentManifest', () => ({
   validateEnvAgainstManifest: mocks.validateManifest,
 }));
-vi.mock('../lib/stopExecutionCapabilityState', () => ({
-  getStopExecutionCapability: mocks.stop,
-}));
+vi.mock('../lib/stopExecutionCapabilityState', async (importOriginal) => {
+  const actual = await importOriginal<
+    typeof import('../lib/stopExecutionCapabilityState')
+  >();
+  return {
+    ...actual,
+    getStopExecutionCapability: mocks.stop,
+  };
+});
 vi.mock('../routes/gmxapi', () => ({
   buildGmxApiStatusSnapshot: mocks.gmxStatus,
 }));
@@ -246,6 +252,22 @@ describe('read-only release attestation routes', () => {
     expect(mocks.dbEvidence).toHaveBeenCalledTimes(1);
     expect(mocks.gmxStatus).toHaveBeenCalledTimes(1);
     expect(mocks.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports a stale raw available=true Stop cache as unavailable', async () => {
+    mocks.stop.mockReturnValue({
+      available: true,
+      reasons: [],
+      evaluatedAt: '2026-08-28T10:01:00.000Z',
+    });
+
+    const response = await request(app()).get('/api/release/safety');
+
+    expect(response.status).toBe(200);
+    expect(response.body.runtime.stopExecution).toEqual({
+      available: false,
+      evaluatedAt: '2026-08-28T10:01:00.000Z',
+    });
   });
 
   it('nulls unavailable or stale cost values and exposes only stable blocker IDs', async () => {
