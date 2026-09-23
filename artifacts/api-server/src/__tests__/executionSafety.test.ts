@@ -386,6 +386,40 @@ describe('#142 Manual Canary execution evidence integration', () => {
       nowMs,
     })).toBe(expectedReady);
   });
+
+  it.each([
+    ['fresh authorization', 0, false, false, true],
+    ['stale readback', 60_001, false, false, false],
+    ['future readback', -1, false, false, false],
+    ['feature disabled', 0, true, false, false],
+    ['integration disabled', 0, false, true, false],
+  ])('confirmed OPEN initial-stop canonical gate: %s', async (
+    _name,
+    ageMs,
+    featureDisabled,
+    integrationDisabled,
+    expectedReady,
+  ) => {
+    const nowMs = Date.now();
+    const { recordCanonicalSnapshot } = await import('../lib/relayActivationStatus');
+    recordCanonicalSnapshot({
+      atMs: nowMs - ageMs,
+      confirmed: true,
+      reason: null,
+      approvalNonce: '1',
+      isSubaccountListed: true,
+      featureDisabled,
+      integrationDisabled,
+      expiresAt: String(Math.floor(nowMs / 1000) + 3600),
+      remaining: '8',
+    });
+    const { isConfirmedOpenHandoffCanonicalAuthorizationReady } =
+      await import('../workers/liveTestExecutor');
+
+    await expect(
+      isConfirmedOpenHandoffCanonicalAuthorizationReady(nowMs),
+    ).resolves.toBe(expectedReady);
+  });
 });
 
 /** 최신 relay 구성 완비 (게이트 통과 시나리오용) — 문서 기준 공식 Arbitrum 주소 */
@@ -428,7 +462,8 @@ beforeEach(async () => {
   const { recordCanonicalSnapshot } = await import('../lib/relayActivationStatus');
   recordCanonicalSnapshot({
     atMs: Date.now(), confirmed: true, reason: null, approvalNonce: '1',
-    isSubaccountListed: true, expiresAt: String(Math.floor(Date.now() / 1000) + 3600), remaining: '8',
+    isSubaccountListed: true, featureDisabled: false, integrationDisabled: false,
+    expiresAt: String(Math.floor(Date.now() / 1000) + 3600), remaining: '8',
   });
 });
 afterEach(async () => {

@@ -102,6 +102,7 @@ export {
   isStopExecutionAvailable,
 } from '../lib/stopExecutionCapabilityState';
 import { evaluateActionBudget } from '../lib/actionBudget';
+import { evaluateManualCanaryCanonicalAuthorization } from '../lib/manualCanaryCanonicalAuthorization';
 import {
   listBlockingProtections, listActiveProtections, recordProtectionEvidenceFields,
   getProtectionLineageForPosition,
@@ -952,17 +953,7 @@ export async function runConfirmedOpenInitialStopHandoff(
     decimalsReady: async (marketAddress) =>
       (await resolveIndexTokenDecimalsEvidence(marketAddress)) !== null,
     executionCostReady: isConfirmedOpenHandoffCostEvidenceReady,
-    actionBudgetReady: async (nowMs) => {
-      const canonical = getCanonicalSnapshot();
-      if (!canonical?.confirmed || canonical.isSubaccountListed !== true) return false;
-      const budget = evaluateActionBudget({
-        remaining: canonical.remaining,
-        expiresAt: canonical.expiresAt,
-        nowMs,
-        inFlightReservedActions: await countInFlightReservedActions(),
-      });
-      return budget.sufficient;
-    },
+    actionBudgetReady: isConfirmedOpenHandoffCanonicalAuthorizationReady,
     signerBindingReady: async () => {
       const canonical = getCanonicalSnapshot();
       const owner = getConfiguredMainAccount();
@@ -1001,6 +992,21 @@ export async function runConfirmedOpenInitialStopHandoff(
       now,
     }),
   });
+}
+
+/**
+ * INITIAL_STOP 제출도 OPEN과 동일한 최신 canonical authorization/action-budget
+ * 증거를 요구한다. 만료 전 remaining 값만 남은 오래된 readback이나 비활성화된
+ * feature/integration 상태로 보호 주문을 제출하지 않는다.
+ */
+export async function isConfirmedOpenHandoffCanonicalAuthorizationReady(
+  nowMs: number,
+): Promise<boolean> {
+  return evaluateManualCanaryCanonicalAuthorization(
+    getCanonicalSnapshot(),
+    nowMs,
+    await countInFlightReservedActions(),
+  ).ok;
 }
 
 /**
