@@ -249,6 +249,29 @@ describe('#135 Manual Controlled Canary — 장애주입', () => {
     expect(executeOrder).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['미래 시각', (stored: Record<string, unknown>) => { stored.atMs = NOW.getTime() + 1; }],
+    ['문자형 시각', (stored: Record<string, unknown>) => { stored.atMs = String(NOW.getTime()); }],
+    ['null 시각', (stored: Record<string, unknown>) => { stored.atMs = null; }],
+    ['문자형 가격', (stored: Record<string, unknown>) => { stored.priceUsd = '60000'; }],
+    ['0 가격', (stored: Record<string, unknown>) => { stored.priceUsd = 0; }],
+    ['null 가격', (stored: Record<string, unknown>) => { stored.priceUsd = null; }],
+  ])('F13b durable preflight %s 손상 → 재평가·증거기록·제출 전 fail-closed', async (_label, corrupt) => {
+    const { deps, state, executeOrder, recordCostEvidenceForExecution } = makeDeps();
+    const body = await preflightThenBody(deps);
+    const stored = JSON.parse(state.get('manualCanaryPreflight')!) as Record<string, unknown>;
+    corrupt(stored);
+    state.set('manualCanaryPreflight', JSON.stringify(stored));
+
+    const r = await executeManualCanaryOpen(deps, body);
+
+    expect(r.phase).toBe('REJECTED');
+    expect(r.reason).toMatch(/preflight .*손상|preflight 시각/);
+    expect(recordCostEvidenceForExecution).not.toHaveBeenCalled();
+    expect(executeOrder).not.toHaveBeenCalled();
+    expect(state.has('manualCanaryDaily')).toBe(false);
+  });
+
   it('F14 허용 외 시장/방향 → 거부', async () => {
     expect(validateCanaryRequest('SOL', 'LONG').ok).toBe(false);
     expect(validateCanaryRequest('BTC', 'BOTH').ok).toBe(false);

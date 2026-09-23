@@ -844,9 +844,28 @@ export async function executeManualCanaryOpen(deps: ManualCanaryDeps, body: {
   let stored: StoredPreflight | null = null;
   try { stored = JSON.parse(storedRaw) as StoredPreflight; } catch { stored = null; }
   const nowMs = deps.now().getTime();
-  if (!stored || stored.id !== body.preflightId || !stored.ok) return reject('preflightId 불일치/무효 — 재수행 필요');
+  if (!Number.isSafeInteger(nowMs) || nowMs < 0) {
+    return reject('서버 시각 불명 — preflight 재수행 필요 (fail-closed)');
+  }
+  if (!stored
+      || typeof stored.id !== 'string'
+      || stored.id.length === 0
+      || stored.id !== body.preflightId
+      || stored.ok !== true) {
+    return reject('preflightId 불일치/무효 — 재수행 필요');
+  }
+  // JSON parse 성공만으로 durable token을 신뢰하지 않는다. 미래·문자형 시각은
+  // TTL 비교를 NaN/음수로 만들어 만료 검사를 우회할 수 있으므로 명시 차단한다.
+  if (!Number.isSafeInteger(stored.atMs) || stored.atMs < 0 || stored.atMs > nowMs) {
+    return reject('preflight 시각 손상/미래값 — 재수행 필요 (fail-closed)');
+  }
   if (nowMs - stored.atMs > MANUAL_CANARY_CAPS.preflightTtlMs) return reject('preflight 만료(120초) — 재수행 필요');
   if (stored.symbol !== req.symbol || stored.direction !== req.direction) return reject('preflight와 시장/방향 불일치 — 재수행 필요');
+  if (typeof stored.priceUsd !== 'number'
+      || !Number.isFinite(stored.priceUsd)
+      || stored.priceUsd <= 0) {
+    return reject('preflight 가격 손상 — 재수행 필요 (fail-closed)');
+  }
 
   // 실행 직전 전 조건 서버 재평가 (fail-closed)
   const re = await evaluateAllChecks(deps, req.symbol, req.direction);
@@ -854,7 +873,7 @@ export async function executeManualCanaryOpen(deps: ManualCanaryDeps, body: {
   if (failures.length > 0) return reject('실행 직전 재평가 실패 — 제출 0회', failures);
 
   // 시장가 추격 방지: preflight 대비 가격 드리프트 상한
-  if (stored.priceUsd === null || re.priceUsd === null) return reject('가격 확인 불가 — 제출 0회');
+  if (re.priceUsd === null) return reject('가격 확인 불가 — 제출 0회');
   const drift = Math.abs(re.priceUsd - stored.priceUsd) / stored.priceUsd;
   if (drift > MANUAL_CANARY_CAPS.maxPriceDriftFraction) {
     return reject(`가격 드리프트 ${(drift * 100).toFixed(2)}% > ${(MANUAL_CANARY_CAPS.maxPriceDriftFraction * 100).toFixed(1)}% — 추격 금지, preflight 재수행`);
