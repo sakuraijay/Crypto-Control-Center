@@ -428,6 +428,7 @@ describe('#142 Manual Canary execution evidence integration', () => {
     ['feature disabled', 0, true, false, '8', false, false],
     ['integration disabled', 0, false, true, '8', false, false],
     ['non-canonical remaining', 0, false, false, '1e3', true, false],
+    ['uint256 초과 remaining', 0, false, false, (1n << 256n).toString(), true, false],
     ['zero remaining', 0, false, false, '0', true, false],
   ])('executor common canonical gate: %s', async (
     _name,

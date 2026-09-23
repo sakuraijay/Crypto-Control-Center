@@ -84,7 +84,12 @@ describe('Manual Canary canonical authorization preflight', () => {
   });
 
   it('fails closed when authorization is expired or expiry is unknown', () => {
-    for (const expiresAt of [String(Math.floor(NOW_MS / 1000)), null, 'invalid']) {
+    for (const expiresAt of [
+      String(Math.floor(NOW_MS / 1000)),
+      null,
+      'invalid',
+      (1n << 256n).toString(),
+    ]) {
       const result = evaluateManualCanaryCanonicalAuthorization(
         snapshot({ expiresAt }),
         NOW_MS,

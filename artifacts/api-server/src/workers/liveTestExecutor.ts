@@ -103,7 +103,7 @@ export {
   getStopExecutionCapability,
   isStopExecutionAvailable,
 } from '../lib/stopExecutionCapabilityState';
-import { evaluateActionBudget } from '../lib/actionBudget';
+import { evaluateActionBudget, parseCanonicalUint256Decimal } from '../lib/actionBudget';
 import { evaluateManualCanaryCanonicalAuthorization } from '../lib/manualCanaryCanonicalAuthorization';
 import {
   listBlockingProtections, listActiveProtections, recordProtectionEvidenceFields,
@@ -760,11 +760,13 @@ export function evaluateExecutorCanonicalAuthorization(
     return { canonicalAuthorized: false, approvalRemainingOk: false };
   }
   try {
-    if (!/^\d+$/.test(snapshot.remaining ?? '') || !/^\d+$/.test(snapshot.expiresAt ?? '')) {
+    const remaining = parseCanonicalUint256Decimal(snapshot.remaining);
+    const expiresAt = parseCanonicalUint256Decimal(snapshot.expiresAt);
+    if (remaining === null || expiresAt === null) {
       return { canonicalAuthorized: true, approvalRemainingOk: false };
     }
-    const approvalRemainingOk = BigInt(snapshot.remaining!) > 0n
-      && BigInt(snapshot.expiresAt!) * 1000n > BigInt(nowMs);
+    const approvalRemainingOk = remaining > 0n
+      && expiresAt * 1000n > BigInt(nowMs);
     return { canonicalAuthorized: true, approvalRemainingOk };
   } catch {
     return { canonicalAuthorized: true, approvalRemainingOk: false };

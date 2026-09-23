@@ -47,7 +47,7 @@ import {
   isEmergencyStopActive, isReconciled, isStopExecutionAvailable, getStopExecutionCapability,
   refreshStopExecutionCapability,
   STOP_EXECUTION_UNAVAILABLE, getProtectionReconState, countInFlightReservedActions,
-  verifyPriceConversionGolden,
+  verifyPriceConversionGolden, evaluateExecutorCanonicalAuthorization,
 } from '../workers/liveTestExecutor';
 import { getDecimalsCacheSnapshot } from '../lib/indexTokenDecimals';
 import { resolveGmxEventEmitterAddress } from '../lib/gmxOrderEvents';
@@ -118,13 +118,8 @@ export async function buildGmxApiStatusSnapshot() {
   const workerStatus = getWorkerStatus();
   const serverPaperStatus = getServerPaperStatus();
   const snap = paperMode ? null : getCanonicalSnapshot();
-  const canonicalAuthorized = !!snap && snap.confirmed && snap.isSubaccountListed === true;
-  let approvalRemainingOk = false;
-  if (snap?.remaining && snap?.expiresAt) {
-    try {
-      approvalRemainingOk = BigInt(snap.remaining) > 0n && Number(snap.expiresAt) * 1000 > Date.now();
-    } catch { approvalRemainingOk = false; }
-  }
+  const { canonicalAuthorized, approvalRemainingOk } =
+    evaluateExecutorCanonicalAuthorization(snap, nowMs);
 
   const [blockingIntents, openRelayTasks] = await Promise.all([
     countBlockingIntentsOrNull(),
