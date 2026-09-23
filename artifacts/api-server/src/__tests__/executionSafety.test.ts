@@ -458,6 +458,39 @@ describe('#142 Manual Canary execution evidence integration', () => {
       approvalRemainingOk: expectedRemaining,
     });
   });
+
+  it.each([
+    ['stale readback', 60_001, false, false],
+    ['future readback', -1, false, false],
+    ['feature disabled', 0, true, false],
+    ['integration disabled', 0, false, true],
+  ])('Stop capability collector rejects %s canonical authorization', async (
+    _name,
+    ageMs,
+    featureDisabled,
+    integrationDisabled,
+  ) => {
+    const nowMs = Date.now();
+    const { recordCanonicalSnapshot } = await import('../lib/relayActivationStatus');
+    recordCanonicalSnapshot({
+      atMs: nowMs - ageMs,
+      confirmed: true,
+      reason: null,
+      approvalNonce: '1',
+      isSubaccountListed: true,
+      featureDisabled,
+      integrationDisabled,
+      expiresAt: String(Math.floor(nowMs / 1000) + 3600),
+      remaining: '8',
+    });
+    const { evaluateManualCanaryStopCapability } =
+      await import('../workers/liveTestExecutor');
+
+    const result = await evaluateManualCanaryStopCapability(true);
+
+    expect(result.available).toBe(false);
+    expect(result.reasons).toContain('canonical delegated authorization 미확인/미신선');
+  });
 });
 
 /** 최신 relay 구성 완비 (게이트 통과 시나리오용) — 문서 기준 공식 Arbitrum 주소 */

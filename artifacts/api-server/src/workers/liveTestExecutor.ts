@@ -582,13 +582,21 @@ async function collectStopExecutionCapability(
     const cov = await loadStopCoverage();
     if (cov.ok) uncoveredCount = listUncovered(cov.map).length;
   } catch { /* fail-closed */ }
-  // action 예산 — canonical snapshot remaining (§7)
+  // canonical delegated authorization + action 예산 (§7). 숫자 remaining만으로는
+  // stale/future/비활성 readback을 실행 능력 증거로 승격할 수 없다.
   const snap = getCanonicalSnapshot();
+  const nowMs = Date.now();
+  const inFlightReservedActions = await countInFlightReservedActions();
+  const canonicalAuthorization = evaluateManualCanaryCanonicalAuthorization(
+    snap,
+    nowMs,
+    inFlightReservedActions,
+  );
   const budget = evaluateActionBudget({
     remaining: snap?.remaining ?? null,
     expiresAt: snap?.expiresAt ?? null,
-    nowMs: Date.now(),
-    inFlightReservedActions: await countInFlightReservedActions(),
+    nowMs,
+    inFlightReservedActions,
   });
   const manualCanary = isManualCanarySignerRestoreAllowed(process.env).allowed;
   let noBlockingIntents = false;
@@ -608,6 +616,7 @@ async function collectStopExecutionCapability(
     signerReady: isDelegatedSignerEnabled() && isSignerInitialized(),
     durableStoreOk,
     reconciliationOk: _reconciled && noBlockingIntents,
+    canonicalAuthorizationReady: canonicalAuthorization.ok,
     actionBudgetSufficient: budget.sufficient,
     actionBudgetRemaining: budget.remainingActions,
     freshFeeQuote,

@@ -23,6 +23,8 @@ export interface StopCapabilityInput {
   durableStoreOk: boolean;
   /** §9 — reconciliation 완료 (blocking intent 0 + startup reconcile ok) */
   reconciliationOk: boolean;
+  /** 최신 canonical delegated-authorization readback이 활성·신선한지 */
+  canonicalAuthorizationReady: boolean;
   /** §7 — action 예산 충분 (remaining ≥ MIN_SAFE_ACTION_BUDGET) */
   actionBudgetSufficient: boolean;
   actionBudgetRemaining: number | null;
@@ -60,6 +62,7 @@ export function deriveStopExecutionCapability(input: StopCapabilityInput): StopC
   if (!input.signerReady) reasons.push('delegated signer 비활성/미초기화');
   if (!input.durableStoreOk) reasons.push('durable 보호 주문 저장소 접근 불가');
   if (!input.reconciliationOk) reasons.push('reconciliation 미완료/차단 intent 존재');
+  if (!input.canonicalAuthorizationReady) reasons.push('canonical delegated authorization 미확인/미신선');
   if (!input.actionBudgetSufficient) {
     reasons.push(`action 예산 부족 (remaining=${input.actionBudgetRemaining ?? '조회불가'} < ${MIN_SAFE_ACTION_BUDGET})`);
   }

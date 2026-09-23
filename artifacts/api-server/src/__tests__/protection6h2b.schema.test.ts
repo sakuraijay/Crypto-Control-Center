@@ -254,6 +254,7 @@ describe('§11 stop 실행 능력 파생', () => {
     initialStopHandoffReady: true,
     schemaVerified: true, transportConfigured: true, signerReady: true,
     durableStoreOk: true, reconciliationOk: true,
+    canonicalAuthorizationReady: true,
     actionBudgetSufficient: true, actionBudgetRemaining: 10,
     freshFeeQuote: true, uncoveredCount: 0, blockingProtectionCount: 0,
     executionUnlocked: true,
@@ -269,7 +270,8 @@ describe('§11 stop 실행 능력 파생', () => {
     for (const [k, v] of [
       ['schemaVerified', false], ['transportConfigured', false], ['signerReady', false],
       ['initialStopHandoffReady', false],
-      ['durableStoreOk', false], ['reconciliationOk', false], ['actionBudgetSufficient', false],
+      ['durableStoreOk', false], ['reconciliationOk', false], ['canonicalAuthorizationReady', false],
+      ['actionBudgetSufficient', false],
       ['freshFeeQuote', false], ['uncoveredCount', 1], ['uncoveredCount', null],
       ['blockingProtectionCount', 2], ['blockingProtectionCount', null], ['executionUnlocked', false],
     ] as const) {

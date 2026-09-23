@@ -22,6 +22,7 @@ function completeStopInput(): StopCapabilityInput {
     signerReady: true,
     durableStoreOk: true,
     reconciliationOk: true,
+    canonicalAuthorizationReady: true,
     actionBudgetSufficient: true,
     actionBudgetRemaining: 8,
     freshFeeQuote: true,
