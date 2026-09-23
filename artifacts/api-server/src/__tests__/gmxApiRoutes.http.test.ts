@@ -220,6 +220,9 @@ describe('GET /api/executor/gmx-api/status', () => {
       available: false,
       evaluatedAt: staleEvaluatedAt,
     });
+    expect(res.body.status.stopCapability.reasons).toContain(
+      'STOP_EXECUTION_CAPABILITY_EVIDENCE_NOT_FRESH',
+    );
   });
 
   it('인증 성공 → 서버 파생 상태 반환 (fail-closed 기본값)', async () => {

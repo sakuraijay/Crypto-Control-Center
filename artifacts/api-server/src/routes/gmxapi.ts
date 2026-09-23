@@ -255,7 +255,16 @@ export async function buildGmxApiStatusSnapshot() {
 
   // ── 6H-2A §10 — Canary 적격 조건 확장 (전부 fail-closed) ────────────────────
   // stop 실행 능력 (§7) — 경로 구현 여부가 아니라 현재 capability/evidence로 판정
+  const stopCapability = getStopExecutionCapability();
   const stopExecutionAvailable = isStopExecutionAvailable();
+  const stopCapabilityDiagnosticReasons = stopExecutionAvailable
+    ? stopCapability.reasons
+    : stopCapability.available
+      ? Array.from(new Set([
+        ...stopCapability.reasons,
+        'STOP_EXECUTION_CAPABILITY_EVIDENCE_NOT_FRESH',
+      ]))
+      : stopCapability.reasons;
   if (!stopExecutionAvailable) {
     blockedReasons.push(`${STOP_EXECUTION_UNAVAILABLE} — Stop-Loss 경로 구현됨, 현재 capability/evidence 미충족`);
   }
@@ -291,7 +300,6 @@ export async function buildGmxApiStatusSnapshot() {
   if (!readonlyEnabled) blockedReasons.push('COST_DATA_UNAVAILABLE — readonly 비용 조회 경로 비활성');
 
   // ── 6H-2B §12 — 보호 주문(durable protection) 관측값 (조회 전용) ────────────
-  const stopCapability = getStopExecutionCapability();
   const paperStopReadinessEvidence = getPaperStopReadinessEvidence(Date.now(), env);
   let protectionCounts: Record<string, number> | null = null;
   let blockingProtectionCount: number | null = null;
@@ -594,7 +602,7 @@ export async function buildGmxApiStatusSnapshot() {
       // Expose the same freshness-aware result used by the execution gate.
       // The cached raw value may remain true after its 30s evidence window.
       available: stopExecutionAvailable,
-      reasons: stopCapability.reasons,
+      reasons: stopCapabilityDiagnosticReasons,
       evaluatedAt: stopCapability.evaluatedAt,
       scope: 'LIVE_STOP_EXECUTION',
       boundary: 'READ_ONLY_STATUS_NOT_EXECUTION_AUTHORIZATION',
