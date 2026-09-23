@@ -75,6 +75,7 @@ export interface ConfirmedOpenStopHandoffDeps {
   loadStopPlan(intentId: string): Promise<{ ok: boolean; plan: HandoffStopPlan | null }>;
   decimalsReady(marketAddress: string): Promise<boolean>;
   executionCostReady(input: {
+    parentOpenIntentId: string;
     marketAddress: string;
     isLong: boolean;
     orderType: 'MarketIncrease';
@@ -214,6 +215,7 @@ export async function runConfirmedOpenStopHandoff(
     return convergeFailure(deps, input, 'SDK+온체인 decimals 재검증 실패');
   }
   if (!deps.executionCostReady({
+    parentOpenIntentId: evidence.intentId,
     marketAddress: pos.marketAddress,
     isLong: pos.isLong,
     orderType: 'MarketIncrease',

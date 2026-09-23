@@ -212,6 +212,7 @@ describe('#142 Manual Canary execution evidence integration', () => {
       isLong: true,
       orderType: 'MarketIncrease' as const,
       notionalUsd: 20,
+      executionScopeId: 'intent:open:manual-canary:2026-08-19',
     };
     const snapshot = executionSnapshot(nowMs, { market });
     const {
@@ -248,6 +249,7 @@ describe('#142 Manual Canary execution evidence integration', () => {
         orderType: 'MarketIncrease',
         notionalUsd: 20,
         observedAtMs: nowMs,
+        executionScopeId: 'intent:open:manual-canary:2026-08-19',
       },
     });
   });
@@ -260,6 +262,7 @@ describe('#142 Manual Canary execution evidence integration', () => {
       isLong: true,
       orderType: 'MarketIncrease' as const,
       notionalUsd: 20,
+      executionScopeId: 'intent:open:manual-canary:2026-08-19',
     };
     const snapshot = executionSnapshot(nowMs, { market });
     const {
@@ -301,6 +304,7 @@ describe('#142 Manual Canary execution evidence integration', () => {
       isLong: true,
       orderType: 'MarketIncrease' as const,
       notionalUsd: 20,
+      executionScopeId: 'intent:open:manual-canary:2026-08-19',
     };
     const snapshot = executionSnapshot(nowMs, { market });
     const {
@@ -325,6 +329,7 @@ describe('#142 Manual Canary execution evidence integration', () => {
               isLong: true,
               orderType: replacement.orderType,
               notionalUsd: replacement.notionalUsd,
+              executionScopeId: expected.executionScopeId,
             },
             nowMs,
           )).toBe(true);
@@ -338,13 +343,15 @@ describe('#142 Manual Canary execution evidence integration', () => {
   });
 
   it.each([
-    ['exact binding', 'MarketIncrease' as const, 20, true],
-    ['different order type', 'MarketDecrease' as const, 20, false],
-    ['different notional', 'MarketIncrease' as const, 10, false],
+    ['exact binding', 'MarketIncrease' as const, 20, 'intent:open:manual-canary:2026-08-19', true],
+    ['different order type', 'MarketDecrease' as const, 20, 'intent:open:manual-canary:2026-08-19', false],
+    ['different notional', 'MarketIncrease' as const, 10, 'intent:open:manual-canary:2026-08-19', false],
+    ['different OPEN intent', 'MarketIncrease' as const, 20, 'intent:open:manual-canary:other', false],
   ])('confirmed OPEN handoff cost gate: %s', async (
     _name,
     recordedOrderType,
     recordedNotionalUsd,
+    recordedScopeId,
     expectedReady,
   ) => {
     const nowMs = Date.now();
@@ -367,9 +374,11 @@ describe('#142 Manual Canary execution evidence integration', () => {
       isLong: true,
       orderType: recordedOrderType,
       notionalUsd: recordedNotionalUsd,
+      executionScopeId: recordedScopeId,
     }, nowMs)).toBe(true);
 
     expect(isConfirmedOpenHandoffCostEvidenceReady({
+      parentOpenIntentId: 'intent:open:manual-canary:2026-08-19',
       marketAddress: market,
       isLong: true,
       orderType: 'MarketIncrease',

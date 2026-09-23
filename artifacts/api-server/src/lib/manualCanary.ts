@@ -312,6 +312,7 @@ export interface ManualCanaryDeps extends ManualCanaryPreflightDeps {
    */
   recordCostEvidenceForExecution(snapshot: CostSnapshot, args: {
     market: string; isLong: boolean; orderType: 'MarketIncrease' | 'MarketDecrease'; notionalUsd: number;
+    executionScopeId: string;
   }, nowMs: number): Promise<boolean>; // execution-only — structurally unavailable in preflight/status
 }
 
@@ -903,7 +904,13 @@ export async function executeManualCanaryOpen(deps: ManualCanaryDeps, body: {
   try {
     evidenceRecorded = await deps.recordCostEvidenceForExecution(
       cost.snapshot,
-      { market: marketAddress, isLong, orderType: 'MarketIncrease', notionalUsd: sizeUsd },
+      {
+        market: marketAddress,
+        isLong,
+        orderType: 'MarketIncrease',
+        notionalUsd: sizeUsd,
+        executionScopeId: intentId,
+      },
       deps.now().getTime(),
     );
   } catch {

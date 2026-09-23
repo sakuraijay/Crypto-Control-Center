@@ -257,7 +257,7 @@ export function buildDefaultCanaryDeps(): ManualCanaryDeps {
      */
     recordCostEvidenceForExecution: async (
       snapshot: CostSnapshot,
-      args: CostSnapshotExpectation,
+      args: CostSnapshotExpectation & { executionScopeId: string },
       nowMs: number,
     ): Promise<boolean> => {
       return activateManualCanaryExecutionEvidence(snapshot, args, nowMs, {

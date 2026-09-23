@@ -85,6 +85,7 @@ describe('finalized OPEN → INITIAL_STOP handoff', () => {
     }));
     expect(deps.runEmergencyClose).not.toHaveBeenCalled();
     expect(deps.executionCostReady).toHaveBeenCalledWith({
+      parentOpenIntentId: INTENT_ID,
       marketAddress: MARKET,
       isLong: true,
       orderType: 'MarketIncrease',
