@@ -14,6 +14,9 @@ export type StopExecutionCapabilitySnapshot = StopCapabilityResult & {
   evaluatedAt: string | null;
 };
 
+/** OPEN 제출에 허용되는 process-local Stop capability 증거의 최대 수명. */
+export const STOP_EXECUTION_CAPABILITY_MAX_AGE_MS = 30_000;
+
 const UNEVALUATED_REASON =
   'stop 실행 능력 미평가 — refreshStopExecutionCapability 필요 (fail-closed)';
 
@@ -30,14 +33,27 @@ export function getStopExecutionCapability(): StopExecutionCapabilitySnapshot {
   return stopCapability;
 }
 
-export function isStopExecutionAvailable(): boolean {
-  return stopCapabilityTestOverride ?? stopCapability.available;
+export function isFreshStopExecutionCapability(
+  capability: Pick<StopExecutionCapabilitySnapshot, 'available' | 'evaluatedAt'>,
+  nowMs: number,
+): boolean {
+  if (!capability.available || !Number.isSafeInteger(nowMs) || nowMs <= 0) return false;
+  if (typeof capability.evaluatedAt !== 'string') return false;
+  const evaluatedAtMs = Date.parse(capability.evaluatedAt);
+  return Number.isFinite(evaluatedAtMs)
+    && evaluatedAtMs <= nowMs
+    && nowMs - evaluatedAtMs <= STOP_EXECUTION_CAPABILITY_MAX_AGE_MS;
+}
+
+export function isStopExecutionAvailable(nowMs = Date.now()): boolean {
+  return stopCapabilityTestOverride
+    ?? isFreshStopExecutionCapability(stopCapability, nowMs);
 }
 
 /** Store a freshly derived result together with the time at which it was evaluated. */
 export function setStopExecutionCapability(
   result: StopCapabilityResult,
-  evaluatedAt = new Date().toISOString(),
+  evaluatedAt: string | null = new Date().toISOString(),
 ): StopExecutionCapabilitySnapshot {
   stopCapability = {
     available: result.available,

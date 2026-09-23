@@ -2,7 +2,10 @@ import type {
   PaperCostEvidenceView,
   PaperRuntimeReadinessView,
 } from './paperRuntimeReadiness';
-import type { StopExecutionCapabilitySnapshot } from './stopExecutionCapabilityState';
+import {
+  isFreshStopExecutionCapability,
+  type StopExecutionCapabilitySnapshot,
+} from './stopExecutionCapabilityState';
 
 export const PUBLIC_READINESS_COST_CAP_USD = 0.4 as const;
 
@@ -114,7 +117,8 @@ export function buildPublicReadinessAttestation(input: {
     BTC: projectCost(input.paper.costs.BTC, 'BTC'),
     ETH: projectCost(input.paper.costs.ETH, 'ETH'),
   };
-  const stopBlockerIds = input.stop.available
+  const stopReady = isFreshStopExecutionCapability(input.stop, input.nowMs);
+  const stopBlockerIds = stopReady
     ? []
     : ['PUBLIC_STOP_CAPABILITY_UNAVAILABLE'];
   const diagnosticCanaryBlockerIds = [
@@ -128,7 +132,7 @@ export function buildPublicReadinessAttestation(input: {
     ...costs.ETH.blockerIds,
   ];
   const publicCanaryReady =
-    input.canaryReady && publicCostBlockerIds.length === 0;
+    input.canaryReady && publicCostBlockerIds.length === 0 && stopReady;
   const canaryBlockerIds = publicCanaryReady
     ? []
     : diagnosticCanaryBlockerIds.length > 0
@@ -145,7 +149,7 @@ export function buildPublicReadinessAttestation(input: {
       blockerIds: [...new Set(canaryBlockerIds)],
     },
     stop: {
-      ready: input.stop.available,
+      ready: stopReady,
       evaluatedAt: input.stop.evaluatedAt,
       blockerIds: stopBlockerIds,
     },

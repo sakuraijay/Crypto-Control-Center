@@ -38,4 +38,26 @@ describe('Stop execution capability state', () => {
     state.__setStopExecutionAvailabilityForTests(null);
     expect(state.isStopExecutionAvailable()).toBe(false);
   });
+
+  it.each([
+    ['missing evaluation time', null, 1_777_000_000_000],
+    ['malformed evaluation time', 'malformed', 1_777_000_000_000],
+    ['future evaluation time', new Date(1_777_000_000_001).toISOString(), 1_777_000_000_000],
+    ['expired evaluation time', new Date(1_776_999_969_999).toISOString(), 1_777_000_000_000],
+    ['invalid local clock', new Date(1_776_999_999_000).toISOString(), Number.NaN],
+  ])('rejects an available cached capability with %s', async (_case, evaluatedAt, nowMs) => {
+    const state = await import('../lib/stopExecutionCapabilityState');
+    state.setStopExecutionCapability({ available: true, reasons: [] }, evaluatedAt);
+
+    expect(state.isStopExecutionAvailable(nowMs)).toBe(false);
+  });
+
+  it('accepts a freshly evaluated capability at the exact age boundary', async () => {
+    const state = await import('../lib/stopExecutionCapabilityState');
+    const nowMs = 1_777_000_000_000;
+    state.setStopExecutionCapability({ available: true, reasons: [] },
+      new Date(nowMs - state.STOP_EXECUTION_CAPABILITY_MAX_AGE_MS).toISOString());
+
+    expect(state.isStopExecutionAvailable(nowMs)).toBe(true);
+  });
 });

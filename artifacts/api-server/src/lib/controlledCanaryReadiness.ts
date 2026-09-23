@@ -1,6 +1,11 @@
 import { MANUAL_CANARY_CAPS } from './manualCanaryCaps';
+import {
+  isFreshStopExecutionCapability,
+  STOP_EXECUTION_CAPABILITY_MAX_AGE_MS,
+} from './stopExecutionCapabilityState';
 
-export const CONTROLLED_CANARY_STOP_CAPABILITY_MAX_AGE_MS = 30_000;
+export const CONTROLLED_CANARY_STOP_CAPABILITY_MAX_AGE_MS =
+  STOP_EXECUTION_CAPABILITY_MAX_AGE_MS;
 
 export interface ControlledCanaryReadinessInput {
   readonlyEnabled: boolean;
@@ -46,12 +51,7 @@ export function isFreshControlledCanaryStopCapability(
   capability: ControlledCanaryReadinessInput['stopCapability'],
   nowMs: number,
 ): boolean {
-  if (!capability.available || !Number.isFinite(nowMs) || nowMs <= 0) return false;
-  if (typeof capability.evaluatedAt !== 'string') return false;
-  const evaluatedAtMs = Date.parse(capability.evaluatedAt);
-  return Number.isFinite(evaluatedAtMs)
-    && evaluatedAtMs <= nowMs
-    && nowMs - evaluatedAtMs <= CONTROLLED_CANARY_STOP_CAPABILITY_MAX_AGE_MS;
+  return isFreshStopExecutionCapability(capability, nowMs);
 }
 
 /**
