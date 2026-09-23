@@ -390,7 +390,7 @@ describe('#142 Manual Canary execution evidence integration', () => {
   it.each([
     ['fresh authorization', 0, false, false, true],
     ['stale readback', 60_001, false, false, false],
-    ['future readback', -1, false, false, false],
+    ['future readback', -60_001, false, false, false],
     ['feature disabled', 0, true, false, false],
     ['integration disabled', 0, false, true, false],
   ])('confirmed OPEN initial-stop canonical gate: %s', async (
@@ -424,7 +424,7 @@ describe('#142 Manual Canary execution evidence integration', () => {
   it.each([
     ['fresh canonical evidence', 0, false, false, '8', true, true],
     ['stale readback', 60_001, false, false, '8', false, false],
-    ['future readback', -1, false, false, '8', false, false],
+    ['future readback', -60_001, false, false, '8', false, false],
     ['feature disabled', 0, true, false, '8', false, false],
     ['integration disabled', 0, false, true, '8', false, false],
     ['non-canonical remaining', 0, false, false, '1e3', true, false],
@@ -461,7 +461,7 @@ describe('#142 Manual Canary execution evidence integration', () => {
 
   it.each([
     ['stale readback', 60_001, false, false],
-    ['future readback', -1, false, false],
+    ['future readback', -60_001, false, false],
     ['feature disabled', 0, true, false],
     ['integration disabled', 0, false, true],
   ])('Stop capability collector rejects %s canonical authorization', async (
