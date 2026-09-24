@@ -274,7 +274,7 @@ export async function maybeRunVirtualPaper400Cycle(args: {
     if (diagnostic.state) await write(diagnosticKey, diagnostic.state);
     await write(VIRTUAL_PAPER_400_RUNTIME_KEY, { ...result, learning: { ...PAPER_LEARNING_CONTRACT, settledRows: final.ledger.settlementCount }, tradingDiagnostics: diagnostic.summary, universe: universe ? { ...universe, batchSymbols: symbols } : null, analysis, journal, sessionId: identity.sessionId,
       strategyContinuity: summarizeVirtualPaper400StrategyContinuity(continuity),
-      at: new Date().toISOString(), account: { ...result.account, ledger: final.ledger,
+      at: new Date().toISOString(), account: { ...result.account, ledger: final.ledger, dailyBudget: final.dailyBudget,
         equityUsd: final.equityUsd, unrealizedNetPnlUsd: final.unrealizedNetPnlUsd,
         evaluation: final.evaluation, next: final.next,
         held: final.held.map(row => ({ id: row.id, symbol: row.symbol, side: row.side,

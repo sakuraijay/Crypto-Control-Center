@@ -76,6 +76,22 @@ function stoppedSession() {
   fixture.rows.set(VIRTUAL_PAPER_400_SESSION_STATE_KEY, JSON.stringify(state)); return state.session;
 }
 describe('virtual runtime routing and durable account boundary', () => {
+  it('publishes the final daily loss budget when the quote changes within a cycle',async()=>{
+    const active=buildActiveVirtualPaper400SessionState('budget-final',new Date(Date.now()-60_000));
+    fixture.rows.set(VIRTUAL_PAPER_400_SESSION_STATE_KEY,JSON.stringify(active));
+    fixture.rows.set(virtualPaper400RiskKey(active.session),JSON.stringify(initialVirtualPaper400RiskState(active.session)));
+    fixture.rows.set(`virtual_paper_400_policy_v1:${active.session.sessionId}`,JSON.stringify({version:'virtual400-daily/v6',appliedAt:active.session.startedAt,sessionId:active.session.sessionId}));
+    fixture.trades=[{id:'held-budget',strategy:active.session.strategyTag,symbol:'BTC',side:'LONG',action:'OPEN',
+      timestamp:new Date(Date.now()-30_000),closeTime:0,managedBy:'SERVER',testMode:false,
+      settlementStatus:'PAPER_ESTIMATED',costSource:'PAPER_GMX_ESTIMATE',price:'50000',sizeInUsd:'1000',leverage:'10',
+      stopPriceUsd:'49000',takeProfitPriceUsd:'52000',estEntryCostUsd:'1',estExitCostUsd:'1',fundingRatePerHour:'0',borrowingRatePerHour:'0'}];
+    let calls=0;
+    await maybeRunVirtualPaper400Cycle({...args,quote:()=>({priceUsd:50000-100*calls++,ageMs:0})});
+    expect(calls).toBeGreaterThan(1);
+    const account=JSON.parse(fixture.rows.get(VIRTUAL_PAPER_400_RUNTIME_KEY)!).account;
+    expect(account.dailyBudget.lossAwareNetPnlUsd).toBe(account.next.risk.dailyLossAwareNetPnlUsd);
+    expect(account.dailyBudget.remainingLossBudgetUsd).toBe(40+account.next.risk.dailyLossAwareNetPnlUsd);
+  });
   it('persists diagnostic coverage across cycles and preserves corrupt evidence without disabling the runtime', async () => {
     const active = buildActiveVirtualPaper400SessionState('diagnostic-restore', new Date(Date.now() - 60_000));
     const raw = JSON.stringify(active); fixture.rows.set(VIRTUAL_PAPER_400_SESSION_STATE_KEY, raw);
