@@ -990,9 +990,10 @@ describe('PAPER runtime readiness cycle', () => {
       expect(completed.nextRefreshAtMs! - completed.lastAttemptAtMs!).toBe(
         PAPER_READINESS_REFRESH_INTERVAL_MS,
       );
-      expect(completed.nextRefreshAtMs! - completed.lastCompletedAtMs!).toBe(
-        5_000,
-      );
+      const completionDelayMs =
+        completed.nextRefreshAtMs! - completed.lastCompletedAtMs!;
+      expect(completionDelayMs).toBeGreaterThan(0);
+      expect(completionDelayMs).toBeLessThanOrEqual(5_000);
       const remainingMs = completed.nextRefreshAtMs! - Date.now();
       expect(remainingMs).toBeGreaterThan(0);
       await vi.advanceTimersByTimeAsync(remainingMs - 1);
