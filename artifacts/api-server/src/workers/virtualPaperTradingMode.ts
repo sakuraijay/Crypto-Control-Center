@@ -131,7 +131,7 @@ export function buildDailyTradePlan(input:{mode:VirtualTradingMode;entryPrice:nu
 }
 export const DAILY_ENTRY_OPTIONS = Object.fromEntries(Object.entries(VIRTUAL_ENTRY_OPTIONS).map(([mode,spec])=>
   [mode,{...spec,exitBasis:'PAPER_EXPERIMENT_PRICE_TARGET',minimumNetRewardRisk:null,
-    dailyAccountTargetPct:[5,10],dailyProfitCapPct:20,maxHoldHours:mode==='INTRADAY'?1:4,purpose:'AGGRESSIVE_PAPER_EXPERIMENT'}]));
+    dailyAccountTargetPct:[5,20],dailyProfitCapPct:20,maxHoldHours:mode==='INTRADAY'?1:4,purpose:'AGGRESSIVE_PAPER_EXPERIMENT'}]));
 
 /** Rebuild rather than trust serialized ROE/TP/expiry values. Never repair malformed evidence silently. */
 export function parseVirtualTradePlan(value: unknown): VirtualTradePlan | null {

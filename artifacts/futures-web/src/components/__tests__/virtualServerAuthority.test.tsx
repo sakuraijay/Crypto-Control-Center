@@ -147,3 +147,16 @@ it('shows immutable initial capital above current equity, and separates a contri
  view.unmount();mount();await flush();expect(screen.getByTestId('metric-initial-capital').textContent).toBe('400.00');
  expect(fetcher.mock.calls.every((c:any)=>!c[1]?.method)).toBe(true);
 });
+
+it('shows server-funded daily goals independently of current equity without funding or order writes', async () => {
+ const data=snapshot();data.runtime!.account.equityUsd=1019.61;
+ data.runtime!.account.dailyBudget={version:'funded-principal/v1',basis:'FUNDED_PRINCIPAL',referenceCapitalUsd:1000,
+  profitTargetMinPct:5,profitCapPct:20,lossLimitPct:10,profitTargetMinUsd:50,profitCapUsd:200,lossLimitUsd:100,remainingLossBudgetUsd:43.08};
+ const fetcher=vi.fn(async()=>({ok:true,json:async()=>data}));vi.stubGlobal('fetch',fetcher);
+ mount();await flush();
+ const text=screen.getByTestId('virtual-daily-budget').textContent;
+ expect(text).toContain('투입 원금 1,000.00');expect(text).toContain('50.00–200.00');
+ expect(text).toContain('10% (100.00');expect(text).toContain('43.08');
+ expect(fetcher.mock.calls.every((c:any)=>!c[1]?.method)).toBe(true);
+ expect(trade.placeOrder).not.toHaveBeenCalled();
+});

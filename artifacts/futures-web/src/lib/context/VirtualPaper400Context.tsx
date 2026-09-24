@@ -24,7 +24,7 @@ export interface VirtualPaper400Snapshot {
       entryCostUsd: string | null; exitCostUsd: string | null; holdingCostUsd: string | null;
       plannedRiskUsd: number | null; netR: number | null; closeKind: string }[];
     status: string; reason: string | null; at: string;
-    account: { equityUsd: number | null; unrealizedNetPnlUsd: number | null;
+    account: { dailyBudget?: { version: string; basis: 'FUNDED_PRINCIPAL'; referenceCapitalUsd: number; profitTargetMinPct: number; profitCapPct: number; lossLimitPct: number; profitTargetMinUsd: number; profitCapUsd: number; lossLimitUsd: number; remainingLossBudgetUsd: number } | null; equityUsd: number | null; unrealizedNetPnlUsd: number | null;
       ledger: { initialEquityUsd?: number; netContributionsUsd?: number; fundedCapitalUsd?: number; realizedEquityUsd: number; realizedNetPnlUsd: number; settlementCount: number };
       held: { id: string; symbol: string; side: string; sizeUsd: string; entryPrice: string;
         stopPrice: string; takeProfitPrice: string | null }[] };

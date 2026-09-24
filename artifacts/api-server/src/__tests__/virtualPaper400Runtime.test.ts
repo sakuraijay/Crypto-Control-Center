@@ -96,13 +96,15 @@ describe('virtual runtime routing and durable account boundary', () => {
   it('promotes explicit production daily mode at a safe boundary and retains that policy on restart',async()=>{
     const active=buildActiveVirtualPaper400SessionState('daily-runtime',new Date(Date.now()-1000));
     const raw=JSON.stringify(active);fixture.rows.set(VIRTUAL_PAPER_400_SESSION_STATE_KEY,raw);
+    fixture.rows.set(`virtual_paper_400_policy_v1:${active.session.sessionId}`,JSON.stringify({version:'virtual400-daily/v5',appliedAt:active.session.startedAt,sessionId:active.session.sessionId}));
     await maybeRunVirtualPaper400Cycle({...args,dailyExperiment:true});
     const key=`virtual_paper_400_policy_v1:${active.session.sessionId}`;
-    expect(JSON.parse(fixture.rows.get(key)!).version).toBe('virtual400-daily/v5');
+    expect(JSON.parse(fixture.rows.get(key)!).version).toBe('virtual400-daily/v6');
     expect(JSON.parse(fixture.rows.get(VIRTUAL_PAPER_400_RUNTIME_KEY)!).reason).toBe('PAPER_EXPERIMENT_CANDLE_UNAVAILABLE');
+    expect(JSON.parse(fixture.rows.get(VIRTUAL_PAPER_400_RUNTIME_KEY)!).account.dailyBudget).toMatchObject({basis:'FUNDED_PRINCIPAL',referenceCapitalUsd:400,profitTargetMinUsd:20,profitCapUsd:80,lossLimitUsd:40});
     expect(runStrategyShadowWorkerReadOnly).not.toHaveBeenCalled();
     await maybeRunVirtualPaper400Cycle(args);
-    expect(JSON.parse(fixture.rows.get(key)!).version).toBe('virtual400-daily/v5');
+    expect(JSON.parse(fixture.rows.get(key)!).version).toBe('virtual400-daily/v6');
     expect(fixture.rows.get(VIRTUAL_PAPER_400_SESSION_STATE_KEY)).toBe(raw);
   });
   it('retains the 2x policy and protection of existing inventory until it is settled', async () => {
@@ -325,7 +327,7 @@ it('credits only the authorized session once under the shared worker lock, resto
     fixture.acquired=true;await maybeRunVirtualPaper400Cycle({...args,dailyExperiment:true});
     const first=JSON.parse(fixture.rows.get(VIRTUAL_PAPER_400_RUNTIME_KEY)!);
     expect(first.account.ledger).toMatchObject({initialEquityUsd:400,netContributionsUsd:100,realizedEquityUsd:500,realizedNetPnlUsd:0});
-    expect(first.policy).toMatchObject({version:'virtual400-daily/v5',dailyProfitCapPct:20,cooldownMinutes:45,maxDailyEntries:32});
+    expect(first.policy).toMatchObject({version:'virtual400-daily/v6',dailyProfitCapPct:20,cooldownMinutes:45,maxDailyEntries:32});
     await maybeRunVirtualPaper400Cycle(args);
     const restored=JSON.parse(fixture.rows.get(VIRTUAL_PAPER_400_RUNTIME_KEY)!);
     expect(restored.account.ledger.realizedEquityUsd).toBe(500);

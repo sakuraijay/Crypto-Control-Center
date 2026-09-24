@@ -32,6 +32,7 @@ describe('authorized PAPER contribution with immutable trading history',()=>{
   expect(after.next.risk.startOfDayEquityUsd).toBe(before.next.risk.startOfDayEquityUsd);
   expect(after.next.risk.dailyRealizedNetPnlUsd).toBe(before.next.risk.dailyRealizedNetPnlUsd);
   expect(after.evaluation.state).toBe('DAILY_LOSS_LOCKED');
+  expect(after.dailyBudget).toMatchObject({referenceCapitalUsd:1000,profitTargetMinUsd:50,profitCapUsd:200,lossLimitUsd:100});
   const restored=parseVirtualPaper400RiskState(JSON.stringify(after.next),session);
   expect(applyAuthorizedPaperCredit(restored,session,new Date(later.getTime()+60000),'PAPER',true)).toBe(restored);
   const tomorrow=evaluateVirtualPaper400Account({session,rows:lossRows(),previous:restored,quote,now:new Date('2026-09-24T16:00:00Z'),aggressiveDaily:true});
@@ -77,17 +78,18 @@ describe('authorized PAPER contribution with immutable trading history',()=>{
   expect(tomorrow.next.risk.dailyRealizedNetPnlUsd).toBe(0);
  });
  it('excludes deposits and unrealized gains from profit cap and resets only the daily cap at PHT midnight',()=>{
-  const rows=lossRows();rows[1].pnl='82';rows[1].netPnlEstimatedUsd='80';
+  const rows=lossRows();rows[1].pnl='102';rows[1].netPnlEstimatedUsd='100';
   const base=applyAuthorizedPaperCredit(initialVirtualPaper400RiskState(session),session,now,'PAPER',true);
   const capped=evaluateVirtualPaper400Account({session,rows,previous:base,quote,now,aggressiveDaily:true});
   expect(capped.next.risk.startOfDayEquityUsd).toBe(400);
-  expect(capped.next.risk.dailyRealizedNetPnlUsd).toBe(80);
+  expect(capped.next.risk.dailyRealizedNetPnlUsd).toBe(100);
+  expect(capped.dailyBudget).toMatchObject({referenceCapitalUsd:500,profitCapUsd:100,lossLimitUsd:50});
   expect(capped.evaluation.state).toBe('PROFIT_CAP_LOCKED');
   expect(capped.evaluation.actions).toEqual([]);
   const restart=parseVirtualPaper400RiskState(JSON.stringify(capped.next),session);
   expect(evaluateVirtualPaper400Account({session,rows,previous:restart,quote,now,aggressiveDaily:true}).evaluation.entryAllowed).toBe(false);
   const tomorrow=evaluateVirtualPaper400Account({session,rows,previous:restart,quote,now:new Date('2026-09-22T16:00:00Z'),aggressiveDaily:true});
-  expect(tomorrow.evaluation.entryAllowed).toBe(true);expect(tomorrow.next.risk.startOfDayEquityUsd).toBe(580);
+  expect(tomorrow.evaluation.entryAllowed).toBe(true);expect(tomorrow.next.risk.startOfDayEquityUsd).toBe(600);
   const depositOnly=evaluateVirtualPaper400Account({session,rows:[],previous:base,quote,now,aggressiveDaily:true});
   expect(depositOnly.evaluation.entryAllowed).toBe(true);
  });

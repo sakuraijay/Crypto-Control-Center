@@ -1,5 +1,22 @@
 # Approved PAPER funding experiment — 2026-09-24
 
+## Subsequent approved proportional daily policy (supersedes day-opening budget below)
+
+Policy `virtual400-daily/v6` uses **funded principal**, not current equity or day-opening equity,
+for daily goals: 5% research target, 20% net realized profit entry cap, 10% daily loss limit.
+At funded 1000 these are 50 / 200 / 100 USDC. At 2000 they are 100 / 400 / 200.
+This is not a promise of daily profit or an exact execution-loss ceiling.
+The entry budget and account stop evaluation share this principal basis. Deposits increase the
+reference immediately but do not erase accrued daily losses or persistent locks; a lock already
+reached stays until the normal PHT day boundary. Daily PnL resets at that boundary, not on deposit.
+Cost-inclusive realized PnL and unrealized losses consume the loss budget; unrealized gains do not.
+The server exposes the reference, percentages, amounts and remaining loss budget to the dashboard.
+5% is a goal, not a trigger for forced entry or stopping; reaching 20% stops new entries while existing
+position protection continues. Daily loss threshold retains close-all protection. No contribution,
+live-money permission, leverage, order-size cap or one-hour position contract is changed by v6.
+
+## Original funding approval and historical verification
+
 The user approved adding **500 virtual USDC once** to the existing session
 `vp400-8fca5a3d-e988-4c98-b4a3-f9953ff54289`. This is not a real transfer.
 

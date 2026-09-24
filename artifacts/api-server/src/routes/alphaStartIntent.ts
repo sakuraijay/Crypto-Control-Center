@@ -314,7 +314,7 @@ router.get('/data/virtual-paper-400-session', async (_req, res) => {
       session,
       runtime,
       tradingModeSelection,
-      tradingModeOptions: ['virtual400-daily/v3', 'virtual400-daily/v4', 'virtual400-daily/v5'].includes(runtime?.policy?.version) ? DAILY_ENTRY_OPTIONS : VIRTUAL_ENTRY_OPTIONS,
+      tradingModeOptions: ['virtual400-daily/v3', 'virtual400-daily/v4', 'virtual400-daily/v5', 'virtual400-daily/v6'].includes(runtime?.policy?.version) ? DAILY_ENTRY_OPTIONS : VIRTUAL_ENTRY_OPTIONS,
       runtimeFresh: Number.isFinite(age) && age >= 0 && age <= 120_000,
       ...virtualPaper400Activity.read(session.state?.session.sessionId ?? null),
     };

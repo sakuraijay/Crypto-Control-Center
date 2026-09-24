@@ -78,14 +78,14 @@ export async function maybeRunVirtualPaper400Cycle(args: {
     const policyKey = `virtual_paper_400_policy_v1:${identity.sessionId}`;
     const policyRaw = await read(policyKey);
     let applied = policyRaw ? JSON.parse(policyRaw) as { version: string; appliedAt: string; sessionId: string } : null;
-    if (policyRaw !== null && (!applied || (applied.version !== VIRTUAL_ACTIVE_POLICY.version && applied.version !== VIRTUAL_LEGACY_POLICY.version && applied.version !== DAILY_PAPER_POLICY.version && applied.version !== 'virtual400-daily/v3' && applied.version !== 'virtual400-daily/v4') || applied.sessionId !== identity.sessionId
+    if (policyRaw !== null && (!applied || (applied.version !== VIRTUAL_ACTIVE_POLICY.version && applied.version !== VIRTUAL_LEGACY_POLICY.version && applied.version !== DAILY_PAPER_POLICY.version && applied.version !== 'virtual400-daily/v3' && applied.version !== 'virtual400-daily/v4' && applied.version !== 'virtual400-daily/v5') || applied.sessionId !== identity.sessionId
       || !Number.isFinite(Date.parse(applied.appliedAt)) || Date.parse(applied.appliedAt) > now.getTime())) {
       throw new Error('VIRTUAL_POLICY_INVALID');
     }
     const executor = getServerPaperStatus();
-    const dailyRequested = args.dailyExperiment === true || applied?.version === DAILY_PAPER_POLICY.version || ['virtual400-daily/v3','virtual400-daily/v4'].includes(applied?.version ?? '');
+    const dailyRequested = args.dailyExperiment === true || applied?.version === DAILY_PAPER_POLICY.version || ['virtual400-daily/v3','virtual400-daily/v4','virtual400-daily/v5'].includes(applied?.version ?? '');
     const desiredPolicy = dailyRequested ? DAILY_PAPER_POLICY : VIRTUAL_ACTIVE_POLICY;
-    const accountBefore = evaluateVirtualPaper400Account({ session: identity, previous, rows, now, quote: args.quote, aggressiveDaily:applied?.version===DAILY_PAPER_POLICY.version || ['virtual400-daily/v3','virtual400-daily/v4'].includes(applied?.version ?? '') });
+    const accountBefore = evaluateVirtualPaper400Account({ session: identity, previous, rows, now, quote: args.quote, aggressiveDaily:applied?.version===DAILY_PAPER_POLICY.version || ['virtual400-daily/v3','virtual400-daily/v4','virtual400-daily/v5'].includes(applied?.version ?? '') });
     const universe = session.active && accountBefore.evaluation.entryAllowed && !executor.pendingClose && !executor.unresolved
       ? await discoverVirtualGmxUniverse() : null;
     const markets = new Map((universe?.complete ? universe.markets : []).map(m => [m.name.split('/')[0], m]));
@@ -136,7 +136,7 @@ export async function maybeRunVirtualPaper400Cycle(args: {
       // remain PAPER estimates, never observed real execution.
       return { ...result.snapshot, source: 'PAPER_GMX_ESTIMATE' };
     };
-    const dailyEnabled=applied?.version===DAILY_PAPER_POLICY.version || ['virtual400-daily/v3','virtual400-daily/v4'].includes(applied?.version ?? '');
+    const dailyEnabled=applied?.version===DAILY_PAPER_POLICY.version || ['virtual400-daily/v3','virtual400-daily/v4','virtual400-daily/v5'].includes(applied?.version ?? '');
     const cycleDeps: DailyCycleDeps = { sessionRaw: raw!, policyAppliedAt: applied?.appliedAt, policyVersion: applied?.version,
       tradingMode: selectedMode?.mode, structuralTargets: true, markets,
       entryBlockedReason: executor.unresolved || executor.pendingClose ? 'EXECUTOR_RECOVERY_PENDING'
