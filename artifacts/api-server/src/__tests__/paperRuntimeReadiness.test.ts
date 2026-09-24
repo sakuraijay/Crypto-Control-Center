@@ -20,6 +20,7 @@ import {
 } from '../lib/paperRuntimeReadiness';
 import {
   __resetExecutionEligibleCostEvidenceForTests,
+  EXECUTION_ELIGIBLE_MAX_AGE_MS,
   getExecutionEligibleCostEvidence,
   type CostSnapshot,
 } from '../lib/costSnapshot';
@@ -956,7 +957,7 @@ describe('PAPER runtime readiness cycle', () => {
     expect(maxActiveReads).toBe(1);
   });
 
-  it('완료 시점부터 최소 60초 뒤에만 다음 scheduled collection을 시작한다', async () => {
+  it('완료 시점부터 execution freshness 예산 안에 다음 scheduled collection을 시작한다', async () => {
     vi.useFakeTimers();
     const deps = depsFrom(canaryResult({ roundTripCostUsd: 0.4 }));
     deps.nowMs = () => Date.now();
@@ -968,7 +969,10 @@ describe('PAPER runtime readiness cycle', () => {
         getPaperRuntimeReadinessSnapshot(NOW, ENV).scheduler.inFlight,
       ).toBe(false));
 
-      expect(PAPER_READINESS_REFRESH_INTERVAL_MS).toBe(60_000);
+      expect(PAPER_READINESS_REFRESH_INTERVAL_MS).toBe(20_000);
+      expect(PAPER_READINESS_REFRESH_INTERVAL_MS).toBeLessThan(
+        EXECUTION_ELIGIBLE_MAX_AGE_MS,
+      );
       const completed = getPaperRuntimeReadinessSnapshot(
         Date.now(),
         ENV,

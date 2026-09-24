@@ -45,7 +45,7 @@ import {
 } from './boundedCanaryEconomics';
 
 /** Minimum delay from one completed PAPER readiness run to the next run. */
-export const PAPER_READINESS_REFRESH_INTERVAL_MS = 60_000;
+export const PAPER_READINESS_REFRESH_INTERVAL_MS = 20_000;
 export const PAPER_DEPLOYMENT_REFRESH_INTERVAL_MS = 5 * 60_000;
 export const PAPER_DEPLOYMENT_EVIDENCE_MAX_AGE_MS = 10 * 60_000;
 export const PAPER_COST_HOLDING_HOURS = 1;
