@@ -1,3 +1,4 @@
+import { buildVirtualPaperCalendar } from './virtualPaperCalendar';
 import { PAPER_LEARNING_CONTRACT } from './virtualPaperLearningDataset';
 import { applyAuthorizedPaperCredit } from './virtualPaperContribution';
 import { DAILY_PAPER_POLICY } from './virtualPaperDailyPolicy';
@@ -272,7 +273,7 @@ export async function maybeRunVirtualPaper400Cycle(args: {
       lastOpenAtMs: final.lastOpenAtMs, sessionStartedAtMs: identity.startedAtMs });
     // Corrupt diagnostic history must neither erase evidence nor disable position protection.
     if (diagnostic.state) await write(diagnosticKey, diagnostic.state);
-    await write(VIRTUAL_PAPER_400_RUNTIME_KEY, { ...result, learning: { ...PAPER_LEARNING_CONTRACT, settledRows: final.ledger.settlementCount }, tradingDiagnostics: diagnostic.summary, universe: universe ? { ...universe, batchSymbols: symbols } : null, analysis, journal, sessionId: identity.sessionId,
+    await write(VIRTUAL_PAPER_400_RUNTIME_KEY, { ...result, learning: { ...PAPER_LEARNING_CONTRACT, settledRows: final.ledger.settlementCount }, tradingDiagnostics: diagnostic.summary, universe: universe ? { ...universe, batchSymbols: symbols } : null, analysis, journal, calendar: buildVirtualPaperCalendar(identity, finalRows, new Date()), sessionId: identity.sessionId,
       strategyContinuity: summarizeVirtualPaper400StrategyContinuity(continuity),
       at: new Date().toISOString(), account: { ...result.account, ledger: final.ledger, dailyBudget: final.dailyBudget,
         equityUsd: final.equityUsd, unrealizedNetPnlUsd: final.unrealizedNetPnlUsd,

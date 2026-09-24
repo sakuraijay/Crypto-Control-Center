@@ -1,9 +1,10 @@
-import { LayoutDashboard, Radar, SlidersHorizontal, History, FlaskConical, HeartPulse, Settings2, PanelsTopLeft, Layers3, BrainCircuit } from 'lucide-react';
+import { CalendarDays, LayoutDashboard, Radar, SlidersHorizontal, History, FlaskConical, HeartPulse, Settings2, PanelsTopLeft, Layers3, BrainCircuit } from 'lucide-react';
 export const NAV_GROUPS = [
   { label: 'WORKSPACE', items: [
     { href: '/', label: '오버뷰', english: 'Overview', icon: LayoutDashboard, testId: 'dashboard' },
     { href: '/watchlist', label: '시장 탐색', english: 'Markets', icon: Radar, testId: 'watchlist' },
     { href: '/activity', label: '거래 기록', english: 'Activity', icon: History, testId: 'activity' },
+    { href: '/calendar', label: '수익 달력', english: 'PnL Calendar', icon: CalendarDays, testId: 'calendar' },
   ] },
   { label: 'RESEARCH & CONTROL', items: [
     { href: '/strategy', label: 'Standard 전략', english: 'Strategy · Standard', icon: SlidersHorizontal, testId: 'strategy' },

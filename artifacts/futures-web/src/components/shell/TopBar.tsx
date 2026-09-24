@@ -129,6 +129,7 @@ function RpcBadge({ connected, chainId }: { connected: boolean | null; chainId: 
 const PAGE_META: Record<string, { title: string; subtitle: string }> = {
   '/': { title: '오버뷰', subtitle: 'Virtual 400' },
   '/activity': { title: '거래 기록', subtitle: 'Virtual 400' },
+  '/calendar': { title: '수익 달력', subtitle: 'PAPER · PHT' },
   '/system': { title: '시스템 진단', subtitle: 'Operations' },
   '/standard': { title: 'Standard 계정', subtitle: 'Separate workspace' },
   '/positions': { title: 'Positions', subtitle: 'PAPER positions and authoritative GMX read-only account state' },
