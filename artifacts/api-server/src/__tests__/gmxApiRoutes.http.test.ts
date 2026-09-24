@@ -68,6 +68,7 @@ import {
 import {
   __resetPaperRuntimeReadinessForTests,
   getPaperRuntimeReadinessSnapshot,
+  PAPER_READINESS_REFRESH_INTERVAL_MS,
   runPaperRuntimeReadinessCycle,
   startPaperRuntimeReadinessScheduler,
   stopPaperRuntimeReadinessScheduler,
@@ -886,7 +887,7 @@ describe('POST /api/executor/gmx-api/readiness/refresh', () => {
           failureId: 'PAPER_READINESS_PEER_FAILED',
         });
 
-      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.advanceTimersByTimeAsync(PAPER_READINESS_REFRESH_INTERVAL_MS);
       await vi.waitFor(() => {
         expect(getJson).toHaveBeenCalledTimes(2);
         expect(__getGmxApiReadinessCoordinatorStateForTests().active).toBe(false);
