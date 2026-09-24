@@ -44,7 +44,7 @@ import {
   type BoundedCanaryEconomicResult,
 } from './boundedCanaryEconomics';
 
-/** Minimum delay from one completed PAPER readiness run to the next run. */
+/** Target start-to-start interval for non-overlapping PAPER readiness runs. */
 export const PAPER_READINESS_REFRESH_INTERVAL_MS = 20_000;
 export const PAPER_DEPLOYMENT_REFRESH_INTERVAL_MS = 5 * 60_000;
 export const PAPER_DEPLOYMENT_EVIDENCE_MAX_AGE_MS = 10 * 60_000;
@@ -1360,15 +1360,19 @@ export function getPaperRuntimeReadinessSnapshot(
 function scheduleNext(
   generation: number,
   options: PaperReadinessCycleOptions,
+  cycleStartedAtMs: number,
 ): void {
   if (!running || generation !== schedulerGeneration) return;
-  nextRefreshAtMs = Date.now() + PAPER_READINESS_REFRESH_INTERVAL_MS;
+  const completedAtMs = Date.now();
+  const elapsedMs = Math.max(0, completedAtMs - cycleStartedAtMs);
+  const delayMs = Math.max(0, PAPER_READINESS_REFRESH_INTERVAL_MS - elapsedMs);
+  nextRefreshAtMs = completedAtMs + delayMs;
   timer = setTimeout(() => {
     if (!running || generation !== schedulerGeneration) return;
     timer = null;
     nextRefreshAtMs = null;
     launchScheduledCycle(generation, options);
-  }, PAPER_READINESS_REFRESH_INTERVAL_MS);
+  }, delayMs);
   if (typeof timer.unref === 'function') timer.unref();
 }
 
@@ -1377,6 +1381,7 @@ function launchScheduledCycle(
   options: PaperReadinessCycleOptions,
 ): void {
   if (!running || generation !== schedulerGeneration) return;
+  const cycleStartedAtMs = Date.now();
   const scheduledRun = options.deps
     ? runPaperRuntimeReadinessCycle(options)
     : import('./gmxApiReadinessCoordinator')
@@ -1388,7 +1393,7 @@ function launchScheduledCycle(
       .then((result) => result.paperRuntimeReadiness);
   void scheduledRun
     .catch(() => undefined)
-    .finally(() => scheduleNext(generation, options));
+    .finally(() => scheduleNext(generation, options, cycleStartedAtMs));
 }
 
 export function startPaperRuntimeReadinessScheduler(

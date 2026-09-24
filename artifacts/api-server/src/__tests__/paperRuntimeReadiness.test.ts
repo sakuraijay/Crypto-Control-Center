@@ -957,9 +957,19 @@ describe('PAPER runtime readiness cycle', () => {
     expect(maxActiveReads).toBe(1);
   });
 
-  it('완료 시점부터 execution freshness 예산 안에 다음 scheduled collection을 시작한다', async () => {
+  it('느린 collection도 시작 시점 기준 interval로 재예약한다', async () => {
     vi.useFakeTimers();
-    const deps = depsFrom(canaryResult({ roundTripCostUsd: 0.4 }));
+    const result = canaryResult({ roundTripCostUsd: 0.4 });
+    const deps = depsFrom(result);
+    let refreshCount = 0;
+    deps.refreshCanary = vi.fn(async () => {
+      refreshCount += 1;
+      if (refreshCount === 1) vi.setSystemTime(NOW + 15_000);
+      return {
+        decimals: result.decimals,
+        costs: result.costs,
+      };
+    });
     deps.nowMs = () => Date.now();
     vi.setSystemTime(NOW);
     try {
@@ -977,8 +987,11 @@ describe('PAPER runtime readiness cycle', () => {
         Date.now(),
         ENV,
       ).scheduler;
-      expect(completed.nextRefreshAtMs! - completed.lastCompletedAtMs!).toBe(
+      expect(completed.nextRefreshAtMs! - completed.lastAttemptAtMs!).toBe(
         PAPER_READINESS_REFRESH_INTERVAL_MS,
+      );
+      expect(completed.nextRefreshAtMs! - completed.lastCompletedAtMs!).toBe(
+        5_000,
       );
       const remainingMs = completed.nextRefreshAtMs! - Date.now();
       expect(remainingMs).toBeGreaterThan(0);
