@@ -5,7 +5,7 @@ export const DAILY_PAPER_POLICY = Object.freeze({ version: 'virtual400-daily/v5'
   cooldownMinutes: 45, maxDailyEntries: 32, dailyLossPct: 10, dailyProfitCapPct: 20, maxRoundTripCostUsd: 2,
   purpose: 'AGGRESSIVE_PAPER_EXPERIMENT', confidence: null });
 export function dailyPaperProfile(capital: number, appliedAt: string): AppliedRiskProfileSnapshot {
-  const c = Math.max(0, Math.min(500, capital));
+  const c = Math.max(0, Math.min(1000, capital));
   return { name:'aggressive',version:'risk-profile/v1',appliedAt,derivedLimits:{
     immediateEntryThreshold:0,maxRiskPerTradePct:2,reserveCashPct:20,
     maxMarginPerTradeUsd:Math.min(100,c*.8),maxConcurrentPositions:1,cooldownMinutes:45,
