@@ -75,7 +75,10 @@ import { buildPaperRelayEvidence } from '../lib/paperRelayEvidence';
 import {
   deriveControlledCanaryReadiness,
 } from '../lib/controlledCanaryReadiness';
-import { evaluateManualCanaryCanonicalAuthorization } from '../lib/manualCanaryCanonicalAuthorization';
+import {
+  buildCanonicalActionBudgetEvidenceBinding,
+  evaluateManualCanaryCanonicalAuthorization,
+} from '../lib/manualCanaryCanonicalAuthorization';
 import { EXPECTED_CANARY_SIGNER } from '../lib/canaryAllowanceInfo';
 import { deriveOperationalDiagnostics } from '../lib/operationalDiagnostics';
 import { getReleaseIdentity } from '../lib/releaseIdentity';
@@ -395,7 +398,12 @@ export async function buildGmxApiStatusSnapshot() {
     stopCapability: {
       available: stopExecutionAvailable,
       evaluatedAt: stopCapability.evaluatedAt,
+      evidenceBinding: stopCapability.evidenceBinding,
     },
+    canonicalActionBudgetEvidence: buildCanonicalActionBudgetEvidenceBinding(
+      snap,
+      inFlightReservedActions,
+    ),
     nowMs,
     uncoveredStopCount,
     settlementComplete,

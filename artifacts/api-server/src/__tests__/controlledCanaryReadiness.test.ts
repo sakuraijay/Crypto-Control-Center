@@ -13,6 +13,13 @@ import {
 } from '../lib/costSnapshot';
 
 const NOW = 1_777_000_000_000;
+const EVIDENCE_BINDING = {
+  canonicalAtMs: NOW - 1_000,
+  approvalNonce: '7',
+  expiresAt: String(Math.floor(NOW / 1000) + 3_600),
+  remaining: '8',
+  inFlightReservedActions: 0,
+};
 
 function completeStopInput(): StopCapabilityInput {
   return {
@@ -62,7 +69,9 @@ function readyInput(): ControlledCanaryReadinessInput {
     stopCapability: {
       available: true,
       evaluatedAt: new Date(NOW - 1_000).toISOString(),
+      evidenceBinding: EVIDENCE_BINDING,
     },
+    canonicalActionBudgetEvidence: EVIDENCE_BINDING,
     nowMs: NOW,
     uncoveredStopCount: 0,
     settlementComplete: true,
@@ -95,6 +104,7 @@ describe('Controlled Canary readiness composition', () => {
       stopCapability: {
         available: stop.available,
         evaluatedAt: new Date(NOW - 1_000).toISOString(),
+        evidenceBinding: EVIDENCE_BINDING,
       },
       uncoveredStopCount: 1,
     })).toBe(false);
@@ -120,7 +130,7 @@ describe('Controlled Canary readiness composition', () => {
   ])('blocks an otherwise available Stop capability with %s', (_name, evaluatedAt) => {
     expect(deriveControlledCanaryReadiness({
       ...readyInput(),
-      stopCapability: { available: true, evaluatedAt },
+      stopCapability: { available: true, evaluatedAt, evidenceBinding: EVIDENCE_BINDING },
     })).toBe(false);
   });
 
@@ -187,7 +197,7 @@ describe('Controlled Canary readiness composition', () => {
       ...readyInput(),
       canonicalAuthorizationReady: false,
       ownerApprovalReady: false,
-      stopCapability: { available: false, evaluatedAt: null },
+      stopCapability: { available: false, evaluatedAt: null, evidenceBinding: null },
       executionCostEvidence: { fresh: false, effectiveRoundTripCostUsd: null },
     });
 
@@ -206,5 +216,15 @@ describe('Controlled Canary readiness composition', () => {
     expect(source).not.toMatch(
       /\b(?:prepare|sign|submit|relay|placeOrder|createOrder|transferFunds)\s*\(/,
     );
+  });
+
+  it('blocks Stop capability evaluated from a different canonical/action-budget snapshot', () => {
+    expect(deriveControlledCanaryReadiness({
+      ...readyInput(),
+      canonicalActionBudgetEvidence: {
+        ...EVIDENCE_BINDING,
+        remaining: '7',
+      },
+    })).toBe(false);
   });
 });

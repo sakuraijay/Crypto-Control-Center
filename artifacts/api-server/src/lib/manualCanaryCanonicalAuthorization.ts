@@ -2,6 +2,31 @@ import { evaluateActionBudget, parseCanonicalUint256Decimal } from './actionBudg
 import { evaluateCanonicalAuthorizationFreshness } from './canonicalAuthorizationFreshness';
 import type { CanonicalSnapshot } from './relayActivationStatus';
 import type { CheckOutcome } from './manualCanary';
+import type { StopCapabilityEvidenceBinding } from './stopExecutionCapabilityState';
+
+/**
+ * Stop capability와 최종 OPEN gate가 동일 canonical/action-budget 증거를
+ * 사용했는지 대조하기 위한 값 객체. 하나라도 비정규면 결속을 만들지 않는다.
+ */
+export function buildCanonicalActionBudgetEvidenceBinding(
+  snapshot: CanonicalSnapshot | null,
+  inFlightReservedActions: number | null,
+): StopCapabilityEvidenceBinding | null {
+  if (!snapshot || !Number.isSafeInteger(snapshot.atMs) || snapshot.atMs <= 0) return null;
+  if (parseCanonicalUint256Decimal(snapshot.approvalNonce) === null
+      || parseCanonicalUint256Decimal(snapshot.expiresAt) === null
+      || parseCanonicalUint256Decimal(snapshot.remaining) === null) return null;
+  if (typeof inFlightReservedActions !== 'number'
+      || !Number.isSafeInteger(inFlightReservedActions)
+      || inFlightReservedActions < 0) return null;
+  return {
+    canonicalAtMs: snapshot.atMs,
+    approvalNonce: snapshot.approvalNonce!,
+    expiresAt: snapshot.expiresAt!,
+    remaining: snapshot.remaining!,
+    inFlightReservedActions,
+  };
+}
 
 /**
  * Manual Canary OPEN 전용 canonical delegated-authorization 판정.

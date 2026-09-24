@@ -8,7 +8,11 @@
 
 import { validateEnvAgainstManifest } from './gmxDeploymentManifest';
 import { getCanonicalSnapshot } from './relayActivationStatus';
-import { evaluateManualCanaryCanonicalAuthorization } from './manualCanaryCanonicalAuthorization';
+import {
+  buildCanonicalActionBudgetEvidenceBinding,
+  evaluateManualCanaryCanonicalAuthorization,
+} from './manualCanaryCanonicalAuthorization';
+import { isStopExecutionAvailableForEvidence } from './stopExecutionCapabilityState';
 
 export interface ActivationGateInput {
   env: NodeJS.ProcessEnv;
@@ -67,12 +71,21 @@ export function evaluateActivationGate(input: ActivationGateInput): ActivationGa
   // 저장 canonical readback의 freshness + 실제 authorization 의미 + 기존 action budget을
   // 최종 activation gate에서 다시 확인한다. 모순/누락이면 prepare·서명·제출 0회.
   if (input.manualCanary === true && input.kind === 'OPEN') {
+    const snapshot = getCanonicalSnapshot();
+    const nowMs = input.nowMs ?? Date.now();
     const canonical = evaluateManualCanaryCanonicalAuthorization(
-      getCanonicalSnapshot(),
-      input.nowMs ?? Date.now(),
+      snapshot,
+      nowMs,
       input.canonicalInFlightReservedActions ?? null,
     );
     if (!canonical.ok) missing.push(`canonical authorization evidence 미충족: ${canonical.detail}`);
+    const evidenceBinding = buildCanonicalActionBudgetEvidenceBinding(
+      snapshot,
+      input.canonicalInFlightReservedActions ?? null,
+    );
+    if (canonical.ok && !isStopExecutionAvailableForEvidence(evidenceBinding, nowMs)) {
+      missing.push('Stop capability가 현재 canonical/action-budget 증거와 불일치·미신선');
+    }
   }
 
   // 6C §6 — env 주소가 감사된 manifest와 다르면 LIVE fail-closed (자동 대입 없음)

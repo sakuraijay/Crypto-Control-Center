@@ -88,6 +88,7 @@ describe('public readiness observational parity', () => {
         available: true,
         reasons: [],
         evaluatedAt: new Date(1_788_000_000_000).toISOString(),
+        evidenceBinding: null,
       },
       canaryReady: ready,
     });
@@ -138,6 +139,7 @@ describe('public readiness observational parity', () => {
           available: true,
           reasons: [],
           evaluatedAt: new Date(1_788_000_000_000).toISOString(),
+          evidenceBinding: null,
         },
         canaryReady: true,
       });
@@ -162,6 +164,7 @@ describe('public readiness observational parity', () => {
       available: true,
       reasons: [],
       evaluatedAt: new Date(1_788_000_000_000).toISOString(),
+      evidenceBinding: null,
     };
 
     const beforeRefresh = buildPublicReadinessAttestation({
@@ -195,7 +198,7 @@ describe('public readiness observational parity', () => {
       const attestation = buildPublicReadinessAttestation({
         nowMs: 1_788_000_001_000,
         paper: paperSnapshot(),
-        stop: { available: true, reasons: [], evaluatedAt },
+        stop: { available: true, reasons: [], evaluatedAt, evidenceBinding: null },
         canaryReady: true,
       });
 

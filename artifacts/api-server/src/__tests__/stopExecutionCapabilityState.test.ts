@@ -14,6 +14,7 @@ describe('Stop execution capability state', () => {
         'stop 실행 능력 미평가 — refreshStopExecutionCapability 필요 (fail-closed)',
       ],
       evaluatedAt: null,
+      evidenceBinding: null,
     });
     expect(state.isStopExecutionAvailable()).toBe(false);
   });
@@ -31,6 +32,7 @@ describe('Stop execution capability state', () => {
       available: false,
       reasons: ['derived blocker'],
       evaluatedAt,
+      evidenceBinding: null,
     });
     state.__setStopExecutionAvailabilityForTests(true);
     expect(state.isStopExecutionAvailable()).toBe(true);
@@ -59,5 +61,31 @@ describe('Stop execution capability state', () => {
       new Date(nowMs - state.STOP_EXECUTION_CAPABILITY_MAX_AGE_MS).toISOString());
 
     expect(state.isStopExecutionAvailable(nowMs)).toBe(true);
+  });
+
+  it('requires the current canonical/action-budget evidence to match the Stop evaluation', async () => {
+    const state = await import('../lib/stopExecutionCapabilityState');
+    const nowMs = 1_777_000_000_000;
+    const binding = {
+      canonicalAtMs: nowMs - 1_000,
+      approvalNonce: '7',
+      expiresAt: String(Math.floor(nowMs / 1000) + 3_600),
+      remaining: '8',
+      inFlightReservedActions: 0,
+    };
+    state.setStopExecutionCapability(
+      { available: true, reasons: [] },
+      new Date(nowMs - 1_000).toISOString(),
+      binding,
+    );
+
+    expect(state.isStopExecutionAvailableForEvidence(binding, nowMs)).toBe(true);
+    const exposed = state.getStopExecutionCapability();
+    exposed.evidenceBinding!.remaining = '0';
+    expect(state.isStopExecutionAvailableForEvidence(binding, nowMs)).toBe(true);
+    expect(state.isStopExecutionAvailableForEvidence({
+      ...binding,
+      inFlightReservedActions: 1,
+    }, nowMs)).toBe(false);
   });
 });

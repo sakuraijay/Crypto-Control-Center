@@ -97,6 +97,7 @@ import {
   getStopExecutionCapability,
   isStopExecutionAvailable,
   setStopExecutionCapability,
+  type StopCapabilityEvidenceBinding,
 } from '../lib/stopExecutionCapabilityState';
 export {
   __setStopExecutionAvailabilityForTests,
@@ -104,7 +105,10 @@ export {
   isStopExecutionAvailable,
 } from '../lib/stopExecutionCapabilityState';
 import { evaluateActionBudget, parseCanonicalUint256Decimal } from '../lib/actionBudget';
-import { evaluateManualCanaryCanonicalAuthorization } from '../lib/manualCanaryCanonicalAuthorization';
+import {
+  buildCanonicalActionBudgetEvidenceBinding,
+  evaluateManualCanaryCanonicalAuthorization,
+} from '../lib/manualCanaryCanonicalAuthorization';
 import {
   listBlockingProtections, listActiveProtections, recordProtectionEvidenceFields,
   getProtectionLineageForPosition,
@@ -568,7 +572,7 @@ async function verifyStopSchemaAgainstSdk(): Promise<boolean> {
  */
 async function collectStopExecutionCapability(
   freshFeeQuote: boolean,
-): Promise<StopCapabilityResult> {
+): Promise<StopCapabilityResult & { evidenceBinding: StopCapabilityEvidenceBinding | null }> {
   // durable 저장소 + 차단 보호 주문
   let blockingProtectionCount: number | null = null;
   let durableStoreOk = false;
@@ -635,7 +639,13 @@ async function collectStopExecutionCapability(
       _protectionRecon.lastPositionsFetchOkAtMs !== null &&
       Date.now() - _protectionRecon.lastPositionsFetchOkAtMs < 10 * 60_000,
   });
-  return derived;
+  return {
+    ...derived,
+    evidenceBinding: buildCanonicalActionBudgetEvidenceBinding(
+      snap,
+      inFlightReservedActions,
+    ),
+  };
 }
 
 /**
@@ -650,7 +660,9 @@ export async function evaluateManualCanaryStopCapability(
 }
 
 export async function refreshStopExecutionCapability(): Promise<StopCapabilityResult> {
-  let result: StopCapabilityResult | null = null;
+  let result: (StopCapabilityResult & {
+    evidenceBinding?: StopCapabilityEvidenceBinding | null;
+  }) | null = null;
   const refresh = async (): Promise<void> => {
     // Bind cache freshness to when this evaluation actually started. A slow
     // collector must not renew an already-aged result for another full TTL at
@@ -672,7 +684,11 @@ export async function refreshStopExecutionCapability(): Promise<StopCapabilityRe
         reasons: [`stop 실행 능력 재평가 실패: ${(e as Error).message}`],
       };
     }
-    setStopExecutionCapability(result, new Date(evaluatedAtMs).toISOString());
+    setStopExecutionCapability(
+      result,
+      new Date(evaluatedAtMs).toISOString(),
+      result.evidenceBinding ?? null,
+    );
   };
 
   const queued = _stopCapabilityRefreshChain.then(refresh, refresh);
