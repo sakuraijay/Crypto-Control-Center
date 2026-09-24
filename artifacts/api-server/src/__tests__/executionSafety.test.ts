@@ -1103,6 +1103,38 @@ describe('주기 Stop capability sequencing — actual executor function', () =>
     expect(getStopExecutionCapability()).toMatchObject({ available: true, reasons: [] });
   });
 
+  it('느린 collector 완료 시각으로 capability TTL을 갱신하지 않는다', async () => {
+    const {
+      __setStopCapabilityCollectorForTests,
+      __setStopExecutionAvailabilityForTests,
+      getStopExecutionCapability,
+      isStopExecutionAvailable,
+      refreshStopExecutionCapability,
+    } = await import('../workers/liveTestExecutor');
+    const { STOP_EXECUTION_CAPABILITY_MAX_AGE_MS } =
+      await import('../lib/stopExecutionCapabilityState');
+    __setStopExecutionAvailabilityForTests(null);
+
+    let nowMs = 1_777_000_000_000;
+    const startedAtMs = nowMs;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => nowMs);
+    try {
+      __setStopCapabilityCollectorForTests(async () => {
+        nowMs += STOP_EXECUTION_CAPABILITY_MAX_AGE_MS + 1;
+        return { available: true, reasons: [] };
+      });
+
+      await expect(refreshStopExecutionCapability()).resolves.toMatchObject({ available: true });
+      expect(getStopExecutionCapability()).toMatchObject({
+        available: true,
+        evaluatedAt: new Date(startedAtMs).toISOString(),
+      });
+      expect(isStopExecutionAvailable()).toBe(false);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
   it('collector 예외를 fail-closed로 기록하고 다음 refresh에서 복구한다', async () => {
     const {
       __setStopCapabilityCollectorForTests,

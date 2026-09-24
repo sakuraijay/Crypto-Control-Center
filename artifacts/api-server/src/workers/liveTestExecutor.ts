@@ -652,6 +652,10 @@ export async function evaluateManualCanaryStopCapability(
 export async function refreshStopExecutionCapability(): Promise<StopCapabilityResult> {
   let result: StopCapabilityResult | null = null;
   const refresh = async (): Promise<void> => {
+    // Bind cache freshness to when this evaluation actually started. A slow
+    // collector must not renew an already-aged result for another full TTL at
+    // completion.
+    const evaluatedAtMs = Date.now();
     try {
       const testOverride = getStopExecutionAvailabilityTestOverride();
       result = testOverride === null
@@ -668,7 +672,7 @@ export async function refreshStopExecutionCapability(): Promise<StopCapabilityRe
         reasons: [`stop 실행 능력 재평가 실패: ${(e as Error).message}`],
       };
     }
-    setStopExecutionCapability(result);
+    setStopExecutionCapability(result, new Date(evaluatedAtMs).toISOString());
   };
 
   const queued = _stopCapabilityRefreshChain.then(refresh, refresh);
