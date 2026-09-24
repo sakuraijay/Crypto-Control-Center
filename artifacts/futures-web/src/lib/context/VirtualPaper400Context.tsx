@@ -14,6 +14,7 @@ export interface VirtualPaper400Snapshot {
   tradingModeOptions?: Record<'INTRADAY' | 'SWING', { label: string; minTargetRoePct: number; maxTargetRoePct: number;
     targetRoePct: number | null; stopRoePct: number; maxHoldHours: number; exitBasis?: string }>;
   runtime: null | {
+    calendar?: { version: 'paper-calendar/v1'; status: 'AVAILABLE' | 'UNAVAILABLE'; timezone: 'Asia/Manila'; coverageStart: string | null; throughDate: string | null; observedAt: string | null; days: { date: string; netPnlUsd: number; grossPnlUsd: number; costUsd: number; entries: number; completedTrades: number; settlements: number }[] };
     tradingMode?: { mode: 'INTRADAY' | 'SWING'; targetRoePct: number | null; stopRoePct: number; maxHoldHours: number } | null;
     policy?: { version: string; appliedAt: string; symbols: string[]; riskPerTradePct: number; minLeverage?: number; maxLeverage: number; cooldownMinutes: number; maxDailyEntries?: number; dailyProfitCapPct?: number } | null;
     diagnostics?: { symbol: string; reason: string; details?: string[] }[];

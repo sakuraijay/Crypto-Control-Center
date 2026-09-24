@@ -12,6 +12,7 @@ import { RiskAlertMonitor } from '@/components/trading/RiskAlertMonitor';
 import StandardWorkspace from '@/pages/standard';
 import SystemPage from '@/pages/system';
 import ActivityPage from '@/pages/activity';
+import CalendarPage from '@/pages/calendar';
 
 import Dashboard from '@/pages/dashboard';
 import Positions from '@/pages/positions';
@@ -64,6 +65,7 @@ export function AppRouter() {
           <Route path="/standard" component={StandardWorkspace} />
           <Route path="/system" component={SystemPage} />
           <Route path="/activity" component={ActivityPage} />
+          <Route path="/calendar" component={CalendarPage} />
           <Route path="/positions" component={Positions} />
           <Route path="/watchlist" component={Watchlist} />
           <Route path="/strategy" component={Strategy} />
