@@ -65,6 +65,8 @@ describe('Manual Canary Owner Approval stored-signer binding', () => {
     ['future snapshot', { ...CANONICAL, atMs: NOW + 1 }],
     ['unconfirmed snapshot', { ...CANONICAL, confirmed: false }],
     ['missing nonce', { ...CANONICAL, approvalNonce: null }],
+    ['leading-zero nonce', { ...CANONICAL, approvalNonce: '07' }],
+    ['uint256-overflow nonce', { ...CANONICAL, approvalNonce: (1n << 256n).toString() }],
   ])('fails closed before READY lookup for %s', async (_name, snapshot) => {
     const getReadySession = vi.fn(async () => READY);
     const result = await checkManualCanaryOwnerApproval(

@@ -223,6 +223,7 @@ describe('isolated PAPER runtime readiness', () => {
           'stop 실행 능력 미평가 — refreshStopExecutionCapability 필요 (fail-closed)',
         ],
         evaluatedAt: null,
+        evidenceBinding: null,
       });
       expect(stopState.isStopExecutionAvailable()).toBe(false);
       expect(process.env.DATABASE_URL).toBeUndefined();

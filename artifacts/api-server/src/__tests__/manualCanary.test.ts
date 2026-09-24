@@ -34,7 +34,7 @@ function makeDeps(overrides: Partial<ManualCanaryDeps> = {}) {
   const closePosition = vi.fn<ManualCanaryDeps['closePosition']>(async (_params) => ({
     ok: true, txHash: '0xdef', orderKey: '0xkey2', simulated: false, executedAt: NOW.toISOString(),
   }));
-  const runEmergencyClose = vi.fn<ManualCanaryDeps['runEmergencyClose']>(async (_reason) => OK);
+  const runEmergencyClose = vi.fn<ManualCanaryDeps['runEmergencyClose']>(async (_input) => OK);
   let idSeq = 0;
   const deps: ManualCanaryDeps = {
     now: () => NOW,
@@ -224,6 +224,7 @@ describe('#135 Manual Controlled Canary — 장애주입', () => {
     state.set('manualCanaryDaily', JSON.stringify({
       dayKey: DAY, opens: 1, openIntentId: 'intent:open:manual-canary:' + DAY,
       closeIntentId: null, emergencyCloseUsed: false, openedAt: NOW.toISOString(),
+      open: { symbol: 'BTC', direction: 'LONG', collateralUsd: 10, leverage: 2, requestedSizeUsd: 20 },
     }));
     expect(failedIds((await runCanaryPreflight(deps, 'BTC', 'LONG')).items)).toContain('daily_budget');
     const claim = await claimDailyBudget(deps, 'intent:x');
@@ -246,6 +247,29 @@ describe('#135 Manual Controlled Canary — 장애주입', () => {
     expect(r.phase).toBe('REJECTED');
     expect(r.reason).toContain('만료');
     expect(executeOrder).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['미래 시각', (stored: Record<string, unknown>) => { stored.atMs = NOW.getTime() + 1; }],
+    ['문자형 시각', (stored: Record<string, unknown>) => { stored.atMs = String(NOW.getTime()); }],
+    ['null 시각', (stored: Record<string, unknown>) => { stored.atMs = null; }],
+    ['문자형 가격', (stored: Record<string, unknown>) => { stored.priceUsd = '60000'; }],
+    ['0 가격', (stored: Record<string, unknown>) => { stored.priceUsd = 0; }],
+    ['null 가격', (stored: Record<string, unknown>) => { stored.priceUsd = null; }],
+  ])('F13b durable preflight %s 손상 → 재평가·증거기록·제출 전 fail-closed', async (_label, corrupt) => {
+    const { deps, state, executeOrder, recordCostEvidenceForExecution } = makeDeps();
+    const body = await preflightThenBody(deps);
+    const stored = JSON.parse(state.get('manualCanaryPreflight')!) as Record<string, unknown>;
+    corrupt(stored);
+    state.set('manualCanaryPreflight', JSON.stringify(stored));
+
+    const r = await executeManualCanaryOpen(deps, body);
+
+    expect(r.phase).toBe('REJECTED');
+    expect(r.reason).toMatch(/preflight .*손상|preflight 시각/);
+    expect(recordCostEvidenceForExecution).not.toHaveBeenCalled();
+    expect(executeOrder).not.toHaveBeenCalled();
+    expect(state.has('manualCanaryDaily')).toBe(false);
   });
 
   it('F14 허용 외 시장/방향 → 거부', async () => {
@@ -323,6 +347,7 @@ describe('#135 Manual Controlled Canary — 장애주입', () => {
     state.set('manualCanaryDaily', JSON.stringify({
       dayKey: DAY, opens: 1, openIntentId: 'intent:open:manual-canary:' + DAY,
       closeIntentId: null, emergencyCloseUsed: false, openedAt: NOW.toISOString(),
+      open: { symbol: 'BTC', direction: 'LONG', collateralUsd: 10, leverage: 2, requestedSizeUsd: 20 },
     }));
     const r = await executeManualCanaryClose(deps, { confirm: CANARY_CONFIRM_CLOSE });
     expect(r.phase).toBe('REJECTED');
@@ -332,6 +357,18 @@ describe('#135 Manual Controlled Canary — 장애주입', () => {
     const e1 = await executeManualCanaryClose(deps, { confirm: CANARY_CONFIRM_CLOSE, mode: 'emergency' });
     expect(e1.ok).toBe(true);
     expect(runEmergencyClose).toHaveBeenCalledTimes(1);
+    expect(runEmergencyClose).toHaveBeenCalledWith(expect.objectContaining({
+      openIntentId: 'intent:open:manual-canary:' + DAY,
+      symbol: 'BTC',
+      marketAddress: '0x47c031236e19d024b42f8ae6780e44a573170703',
+      isLong: true,
+      exactPosition: expect.objectContaining({
+        positionKey: '0xposkey1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab',
+        account: '0x46c27887c5ec5e36b2a21e1ec1bc69e7a593950e',
+        collateralToken: '0xaf88d065e77c8cc2239327c5edb3a432268e5831',
+        preSizeUsd: 18.4,
+      }),
+    }));
     const e2 = await executeManualCanaryClose(deps, { confirm: CANARY_CONFIRM_CLOSE, mode: 'emergency' });
     expect(e2.phase).toBe('REJECTED');
     expect(runEmergencyClose).toHaveBeenCalledTimes(1);
@@ -344,6 +381,7 @@ describe('#135 Manual Controlled Canary — 장애주입', () => {
     state.set('manualCanaryDaily', JSON.stringify({
       dayKey: DAY, opens: 1, openIntentId: 'intent:open:manual-canary:' + DAY,
       closeIntentId: null, emergencyCloseUsed: false, openedAt: NOW.toISOString(),
+      open: { symbol: 'BTC', direction: 'LONG', collateralUsd: 10, leverage: 2, requestedSizeUsd: 20 },
     }));
     const r = await executeManualCanaryClose(deps, { confirm: CANARY_CONFIRM_CLOSE });
     expect(r.phase).toBe('REJECTED');
@@ -383,6 +421,41 @@ describe('#135 Manual Controlled Canary — 장애주입', () => {
     expect(r.ok).toBe(false);
     if (r.ok) throw new Error('expected fail-closed claim rejection');
     expect(r.reason).toContain('fail-closed');
+  });
+
+  it('reserve→commit 사이 같은 예약 ID의 intent/주문 결속 변경 → 제출 0회·변경 예약 보존', async () => {
+    const fixture = makeDeps();
+    const body = await preflightThenBody(fixture.deps);
+    const originalCas = fixture.deps.casState;
+    let tampered = false;
+    fixture.deps.casState = async (key, prev, next) => {
+      const ok = await originalCas(key, prev, next);
+      if (ok && key === 'manualCanaryDaily' && !tampered) {
+        const stored = JSON.parse(fixture.state.get(key)!);
+        if (stored.launchReservation) {
+          stored.launchReservation.openIntentId = 'intent:open:tampered';
+          stored.launchReservation.open = {
+            ...stored.launchReservation.open,
+            symbol: 'ETH',
+          };
+          fixture.state.set(key, JSON.stringify(stored));
+          tampered = true;
+        }
+      }
+      return ok;
+    };
+
+    const result = await executeManualCanaryOpen(fixture.deps, body);
+    expect(tampered).toBe(true);
+    expect(result).toMatchObject({ ok: false, phase: 'REJECTED' });
+    expect(result.reason).toContain('intent/주문 결속 변경');
+    expect(fixture.executeOrder).not.toHaveBeenCalled();
+    const daily = JSON.parse(fixture.state.get('manualCanaryDaily')!);
+    expect(daily.opens).toBe(0);
+    expect(daily.launchReservation).toMatchObject({
+      openIntentId: 'intent:open:tampered',
+      open: { symbol: 'ETH', direction: 'LONG' },
+    });
   });
 
   it('상태 조회: OPEN CONFIRMED + stop ACTIVE + close CONFIRMED → 5단계 진행 표시', async () => {
@@ -435,6 +508,57 @@ describe('durable/CAS fail-closed 보강 (리뷰 후속)', () => {
     const close = await executeManualCanaryClose(deps, { confirm: CANARY_CONFIRM_CLOSE });
     expect(close.phase).toBe('REJECTED');
     expect(close.reason).toContain('손상');
+  });
+
+  it.each([
+    ['음수', -1],
+    ['소수', 0.5],
+    ['문자열', '0'],
+    ['상한 초과', MANUAL_CANARY_CAPS.maxOrdersPerDay + 1],
+  ])('일일 opens %s 손상(%s) → 1회 제한 우회 없이 fail-closed', async (_label, opens) => {
+    const { deps, state, executeOrder } = makeDeps();
+    state.set('manualCanaryDaily', JSON.stringify({
+      dayKey: DAY,
+      opens,
+      openIntentId: null,
+      closeIntentId: null,
+      emergencyCloseUsed: false,
+      openedAt: null,
+      open: null,
+      launchReservation: null,
+    }));
+
+    const pf = await runCanaryPreflight(deps, 'BTC', 'LONG');
+    expect(pf.items.find(i => i.id === 'daily_budget')).toMatchObject({ ok: false });
+    const claim = await claimDailyBudget(deps, 'intent:x');
+    expect(claim.ok).toBe(false);
+    const close = await executeManualCanaryClose(deps, { confirm: CANARY_CONFIRM_CLOSE });
+    expect(close.phase).toBe('REJECTED');
+    expect(close.reason).toContain('손상');
+    expect(executeOrder).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['미래 PHT 날짜', '2026-08-20'],
+    ['불가능한 달력 날짜', '2026-02-30'],
+  ])('일일 dayKey %s(%s) 손상 → 오늘 예산 재개방 없이 fail-closed', async (_label, dayKey) => {
+    const { deps, state, executeOrder } = makeDeps();
+    state.set('manualCanaryDaily', JSON.stringify({
+      dayKey,
+      opens: MANUAL_CANARY_CAPS.maxOrdersPerDay,
+      openIntentId: 'intent:open:manual-canary:corrupt-day',
+      closeIntentId: null,
+      emergencyCloseUsed: false,
+      openedAt: NOW.toISOString(),
+      open: { symbol: 'BTC', direction: 'LONG', collateralUsd: 10, leverage: 2, requestedSizeUsd: 20 },
+      launchReservation: null,
+    }));
+
+    const pf = await runCanaryPreflight(deps, 'BTC', 'LONG');
+    expect(pf.items.find(i => i.id === 'daily_budget')).toMatchObject({ ok: false });
+    expect(await claimDailyBudget(deps, 'intent:x')).toMatchObject({ ok: false });
+    expect((await executeManualCanaryClose(deps, { confirm: CANARY_CONFIRM_CLOSE })).reason).toContain('손상');
+    expect(executeOrder).not.toHaveBeenCalled();
   });
 
   it('preflight: 왕복 비용 null(산정 불가) → 통과 금지 (하위 계층 위임 금지)', async () => {
@@ -513,8 +637,8 @@ describe('durable/CAS fail-closed 보강 (리뷰 후속)', () => {
     expect(c.closePosition).not.toHaveBeenCalled();
   });
 
-  it('close: OPEN 결속 기록 없는 레거시 상태 → 일반 close 거부 (emergency만)', async () => {
-    const { deps, state, closePosition } = makeDeps();
+  it('close: OPEN 결속 기록 없는 레거시 상태 → 일반/emergency 모두 거부', async () => {
+    const { deps, state, closePosition, runEmergencyClose } = makeDeps();
     state.set('manualCanaryDaily', JSON.stringify({
       dayKey: DAY, opens: 1, openIntentId: 'intent:open:manual-canary:' + DAY,
       closeIntentId: null, emergencyCloseUsed: false, openedAt: NOW.toISOString(),
@@ -523,5 +647,74 @@ describe('durable/CAS fail-closed 보강 (리뷰 후속)', () => {
     expect(r.phase).toBe('REJECTED');
     expect(r.reason).toContain('결속');
     expect(closePosition).not.toHaveBeenCalled();
+    const emergency = await executeManualCanaryClose(
+      deps,
+      { confirm: CANARY_CONFIRM_CLOSE, mode: 'emergency' },
+    );
+    expect(emergency.phase).toBe('REJECTED');
+    expect(runEmergencyClose).not.toHaveBeenCalled();
+  });
+
+  it('close: 손상된 OPEN 결속은 SHORT로 해석하지 않고 일반/emergency 모두 제출 전 차단', async () => {
+    for (const open of [
+      { symbol: 'BTC', direction: 'BROKEN', collateralUsd: 10, leverage: 2, requestedSizeUsd: 20 },
+      { symbol: 'BTC', direction: 'LONG', collateralUsd: 10, leverage: 2, requestedSizeUsd: Number.NaN },
+      { symbol: 'BTC', direction: 'LONG', collateralUsd: 10, leverage: 2, requestedSizeUsd: 19 },
+    ]) {
+      const intentStatus = vi.fn<ManualCanaryDeps['intentStatus']>(async () => ({
+        status: 'CONFIRMED', orderKey: '0xkey', txHash: '0xabc',
+      }));
+      const openPositions = vi.fn<ManualCanaryDeps['openPositions']>(async () => []);
+      const { deps, state, closePosition, runEmergencyClose } = makeDeps({ intentStatus, openPositions });
+      state.set('manualCanaryDaily', JSON.stringify({
+        dayKey: DAY, opens: 1, openIntentId: 'intent:open:manual-canary:' + DAY,
+        closeIntentId: null, emergencyCloseUsed: false, openedAt: NOW.toISOString(), open,
+      }));
+
+      const normal = await executeManualCanaryClose(deps, { confirm: CANARY_CONFIRM_CLOSE });
+      const emergency = await executeManualCanaryClose(
+        deps,
+        { confirm: CANARY_CONFIRM_CLOSE, mode: 'emergency' },
+      );
+
+      expect(normal.phase).toBe('REJECTED');
+      expect(emergency.phase).toBe('REJECTED');
+      expect(normal.reason).toContain('결속 기록 손상');
+      expect(intentStatus).not.toHaveBeenCalled();
+      expect(openPositions).not.toHaveBeenCalled();
+      expect(closePosition).not.toHaveBeenCalled();
+      expect(runEmergencyClose).not.toHaveBeenCalled();
+    }
+  });
+
+  it('emergency close: 결속 포지션이 복수·불일치면 제출과 durable 사용 표시를 모두 차단', async () => {
+    const position = {
+      positionKey: '0xposkey1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab',
+      accountAddress: '0x46c27887c5ec5e36b2a21e1ec1bc69e7a593950e',
+      marketAddress: '0x47c031236e19d024b42f8ae6780e44a573170703',
+      collateralToken: '0xaf88d065e77c8cc2239327c5edb3a432268e5831',
+      isLong: true,
+      sizeUsd: 18.4,
+      sizeUsd30: '18400000000000000000000000000000',
+    };
+    const { deps, state, runEmergencyClose } = makeDeps({
+      initialStopStatus: async () => ({ status: 'SUBMITTED', orderKey: null }),
+      openPositions: async () => [position, { ...position, positionKey: '0xother' }],
+    });
+    state.set('manualCanaryDaily', JSON.stringify({
+      dayKey: DAY, opens: 1, openIntentId: 'intent:open:manual-canary:' + DAY,
+      closeIntentId: null, emergencyCloseUsed: false, openedAt: NOW.toISOString(),
+      open: { symbol: 'BTC', direction: 'LONG', collateralUsd: 10, leverage: 2, requestedSizeUsd: 20 },
+    }));
+
+    const r = await executeManualCanaryClose(
+      deps,
+      { confirm: CANARY_CONFIRM_CLOSE, mode: 'emergency' },
+    );
+
+    expect(r.phase).toBe('REJECTED');
+    expect(r.reason).toContain('유일하게');
+    expect(runEmergencyClose).not.toHaveBeenCalled();
+    expect(JSON.parse(state.get('manualCanaryDaily')!).emergencyCloseUsed).toBe(false);
   });
 });

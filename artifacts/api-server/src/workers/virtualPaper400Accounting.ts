@@ -1,5 +1,5 @@
 import { validatePaperContributions, type PaperContribution } from './virtualPaperContribution';
-import { evaluateDailyPaperRisk } from './virtualPaperDailyPolicy';
+import { evaluateDailyPaperRisk, dailyPaperBudget } from './virtualPaperDailyPolicy';
 import type { DbTrade } from '@workspace/db';
 import { accrueHoldingCostsFromEntryRates } from '../lib/holdingCosts';
 import { initialRiskEngineState, rollRiskPeriods, type PersistedRiskEngineState } from '../lib/riskEngineState';
@@ -160,7 +160,7 @@ export function evaluateVirtualPaper400Account(args: {
     weeklyRealizedNetPnlUsd: weeklyNet,
     dailyEntryCount: opens.filter(row => new Date(row.timestamp).getTime() >= dayStart).length,
     consecutiveLossCount: losses, lastUpdatedAt: now.toISOString() };
-  const evaluation: RiskEvaluationResult = args.aggressiveDaily ? evaluateDailyPaperRisk({equity,dayOpening:risk.startOfDayEquityUsd,
+  const evaluation: RiskEvaluationResult = args.aggressiveDaily ? evaluateDailyPaperRisk({equity,referenceCapital:ledger.fundedCapitalUsd,
     dailyLossAware:risk.dailyLossAwareNetPnlUsd,dailyRealized:dailyNet,entries:risk.dailyEntryCount,held:held.length,fresh:quotesFresh,locks:risk.locks}) : evaluateRiskState({
     dailyRiskCapitalUsd: Math.min(ledger.fundedCapitalUsd, risk.startOfDayEquityUsd),
     weeklyRiskCapitalUsd: Math.min(ledger.fundedCapitalUsd, risk.startOfWeekEquityUsd),
@@ -177,6 +177,6 @@ export function evaluateVirtualPaper400Account(args: {
     ledgerRowCount: rows.length, settlementCount: closes.length,
     settlementSha256: fixedBetaLedgerBinding(closes).sha256,
     risk: { ...risk, riskOperatingState: evaluation.state, locks: evaluation.locks } };
-  return { ledger, equityUsd: equity, unrealizedNetPnlUsd: quotesFresh ? unrealizedNet : null,
+  return { ledger, dailyBudget: args.aggressiveDaily ? dailyPaperBudget(ledger.fundedCapitalUsd, dailyNet, risk.dailyLossAwareNetPnlUsd) : null, equityUsd: equity, unrealizedNetPnlUsd: quotesFresh ? unrealizedNet : null,
     held, evaluation, next, lastOpenAtMs: opens.length ? Math.max(...opens.map(row => new Date(row.timestamp).getTime())) : null };
 }

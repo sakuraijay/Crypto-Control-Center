@@ -1,7 +1,32 @@
-import { evaluateActionBudget } from './actionBudget';
+import { evaluateActionBudget, parseCanonicalUint256Decimal } from './actionBudget';
 import { evaluateCanonicalAuthorizationFreshness } from './canonicalAuthorizationFreshness';
 import type { CanonicalSnapshot } from './relayActivationStatus';
 import type { CheckOutcome } from './manualCanary';
+import type { StopCapabilityEvidenceBinding } from './stopExecutionCapabilityState';
+
+/**
+ * Stop capability와 최종 OPEN gate가 동일 canonical/action-budget 증거를
+ * 사용했는지 대조하기 위한 값 객체. 하나라도 비정규면 결속을 만들지 않는다.
+ */
+export function buildCanonicalActionBudgetEvidenceBinding(
+  snapshot: CanonicalSnapshot | null,
+  inFlightReservedActions: number | null,
+): StopCapabilityEvidenceBinding | null {
+  if (!snapshot || !Number.isSafeInteger(snapshot.atMs) || snapshot.atMs <= 0) return null;
+  if (parseCanonicalUint256Decimal(snapshot.approvalNonce) === null
+      || parseCanonicalUint256Decimal(snapshot.expiresAt) === null
+      || parseCanonicalUint256Decimal(snapshot.remaining) === null) return null;
+  if (typeof inFlightReservedActions !== 'number'
+      || !Number.isSafeInteger(inFlightReservedActions)
+      || inFlightReservedActions < 0) return null;
+  return {
+    canonicalAtMs: snapshot.atMs,
+    approvalNonce: snapshot.approvalNonce!,
+    expiresAt: snapshot.expiresAt!,
+    remaining: snapshot.remaining!,
+    inFlightReservedActions,
+  };
+}
 
 /**
  * Manual Canary OPEN 전용 canonical delegated-authorization 판정.
@@ -33,11 +58,8 @@ export function evaluateManualCanaryCanonicalAuthorization(
   if (snapshot.featureDisabled !== false || snapshot.integrationDisabled !== false) {
     return { ok: false, detail: 'canonical API v2 delegated authorization feature/integration 상태 미확인·비활성 (fail-closed)' };
   }
-  if (
-    snapshot.expiresAt === null
-    || !/^\d+$/.test(snapshot.expiresAt)
-    || BigInt(snapshot.expiresAt) * 1000n <= BigInt(nowMs)
-  ) {
+  const expiresAt = parseCanonicalUint256Decimal(snapshot.expiresAt);
+  if (expiresAt === null || expiresAt * 1000n <= BigInt(nowMs)) {
     return { ok: false, detail: 'canonical API v2 delegated authorization 만료/만료시각 불명 — OPEN 차단 (fail-closed)' };
   }
 

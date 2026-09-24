@@ -21,12 +21,12 @@ export function evaluateCanonicalAuthorizationFreshness(
   if (!snapshot) {
     return { ok: false, detail: 'canonical API v2 readback 없음 — freshness 검증 불가 (fail-closed)' };
   }
-  if (!Number.isFinite(nowMs) || nowMs <= 0) {
+  if (!Number.isSafeInteger(nowMs) || nowMs <= 0) {
     return { ok: false, detail: '현재 시각 비정상 — canonical freshness 검증 불가 (fail-closed)' };
   }
 
   const atMs = snapshot.atMs;
-  if (!Number.isFinite(atMs) || !Number.isInteger(atMs) || atMs <= 0) {
+  if (!Number.isSafeInteger(atMs) || atMs <= 0) {
     return { ok: false, detail: 'canonical readback 시각 누락/비정상 — OPEN 차단 (fail-closed)' };
   }
   if (atMs > nowMs) {

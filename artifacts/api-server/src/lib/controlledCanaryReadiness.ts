@@ -1,6 +1,13 @@
 import { MANUAL_CANARY_CAPS } from './manualCanaryCaps';
+import {
+  isFreshStopExecutionCapability,
+  sameStopCapabilityEvidenceBinding,
+  STOP_EXECUTION_CAPABILITY_MAX_AGE_MS,
+  type StopCapabilityEvidenceBinding,
+} from './stopExecutionCapabilityState';
 
-export const CONTROLLED_CANARY_STOP_CAPABILITY_MAX_AGE_MS = 30_000;
+export const CONTROLLED_CANARY_STOP_CAPABILITY_MAX_AGE_MS =
+  STOP_EXECUTION_CAPABILITY_MAX_AGE_MS;
 
 export interface ControlledCanaryReadinessInput {
   readonlyEnabled: boolean;
@@ -26,7 +33,9 @@ export interface ControlledCanaryReadinessInput {
   stopCapability: {
     available: boolean;
     evaluatedAt: string | null;
+    evidenceBinding: StopCapabilityEvidenceBinding | null;
   };
+  canonicalActionBudgetEvidence: StopCapabilityEvidenceBinding | null;
   nowMs: number;
   uncoveredStopCount: number | null;
   settlementComplete: boolean;
@@ -46,12 +55,7 @@ export function isFreshControlledCanaryStopCapability(
   capability: ControlledCanaryReadinessInput['stopCapability'],
   nowMs: number,
 ): boolean {
-  if (!capability.available || !Number.isFinite(nowMs) || nowMs <= 0) return false;
-  if (typeof capability.evaluatedAt !== 'string') return false;
-  const evaluatedAtMs = Date.parse(capability.evaluatedAt);
-  return Number.isFinite(evaluatedAtMs)
-    && evaluatedAtMs <= nowMs
-    && nowMs - evaluatedAtMs <= CONTROLLED_CANARY_STOP_CAPABILITY_MAX_AGE_MS;
+  return isFreshStopExecutionCapability(capability, nowMs);
 }
 
 /**
@@ -70,6 +74,10 @@ export function deriveControlledCanaryReadiness(
     && cost.effectiveRoundTripCostUsd <= MANUAL_CANARY_CAPS.maxRoundTripCostUsd;
   const freshStopCapability =
     isFreshControlledCanaryStopCapability(input.stopCapability, input.nowMs);
+  const sameStopEvidence = sameStopCapabilityEvidenceBinding(
+    input.stopCapability.evidenceBinding,
+    input.canonicalActionBudgetEvidence,
+  );
 
   return input.readonlyEnabled
     && input.submissionEnabled
@@ -89,6 +97,7 @@ export function deriveControlledCanaryReadiness(
     && immutableCostCapSatisfied
     && input.decimalsReady
     && freshStopCapability
+    && sameStopEvidence
     && input.uncoveredStopCount === 0
     && input.settlementComplete
     && input.legacyZeroFeeCount === 0

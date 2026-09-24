@@ -36,6 +36,8 @@ describe('Manual Canary canonical authorization preflight', () => {
     const invalidTimestamps = [
       NOW_MS - CANONICAL_AUTHORIZATION_FRESHNESS_MS - 1,
       NOW_MS + 1,
+      NOW_MS - 0.5,
+      Number.MAX_SAFE_INTEGER + 1,
       Number.NaN,
       0,
     ];
@@ -46,6 +48,21 @@ describe('Manual Canary canonical authorization preflight', () => {
         0,
       );
       expect(result.ok).toBe(false);
+    }
+  });
+
+  it('fails closed without throwing for fractional or unsafe local clocks', () => {
+    for (const nowMs of [NOW_MS + 0.5, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => evaluateManualCanaryCanonicalAuthorization(
+        snapshot(),
+        nowMs,
+        0,
+      )).not.toThrow();
+      expect(evaluateManualCanaryCanonicalAuthorization(
+        snapshot(),
+        nowMs,
+        0,
+      )).toMatchObject({ ok: false });
     }
   });
 
@@ -84,7 +101,12 @@ describe('Manual Canary canonical authorization preflight', () => {
   });
 
   it('fails closed when authorization is expired or expiry is unknown', () => {
-    for (const expiresAt of [String(Math.floor(NOW_MS / 1000)), null, 'invalid']) {
+    for (const expiresAt of [
+      String(Math.floor(NOW_MS / 1000)),
+      null,
+      'invalid',
+      (1n << 256n).toString(),
+    ]) {
       const result = evaluateManualCanaryCanonicalAuthorization(
         snapshot({ expiresAt }),
         NOW_MS,

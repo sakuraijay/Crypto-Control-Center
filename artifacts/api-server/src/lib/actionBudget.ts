@@ -136,6 +136,21 @@ export interface ActionBudgetResult {
   reasons: string[];
 }
 
+const UINT256_MAX = (1n << 256n) - 1n;
+
+/** Canonical on-chain uint256 decimal: no signs/prefixes/whitespace/leading zeroes. */
+export function parseCanonicalUint256Decimal(value: string | null): bigint | null {
+  // A uint256 has at most 78 decimal digits. Check length before BigInt so a
+  // damaged or hostile readback cannot force an unbounded decimal parse.
+  if (value === null || value.length > 78 || !/^(?:0|[1-9]\d*)$/.test(value)) return null;
+  try {
+    const parsed = BigInt(value);
+    return parsed <= UINT256_MAX ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 export function budgetBasisLines(): string[] {
   return [
     ...CANARY_ACTION_PATHS.map(p => `${p.path}: ${p.steps.map(s => s.step).join(' + ')} = ${p.total}`),
@@ -149,8 +164,11 @@ export function evaluateActionBudget(input: ActionBudgetInput): ActionBudgetResu
   const required = requiredActionsBeforeOpen();
   let remaining: number | null = null;
   try {
-    if (input.remaining === null) throw new Error('none');
-    const v = BigInt(input.remaining);
+    // Canonical readback is an unsigned base-10 integer string. BigInt itself
+    // also accepts whitespace, signs, and hexadecimal prefixes, which would
+    // let a damaged/non-canonical snapshot pass this safety boundary.
+    const v = parseCanonicalUint256Decimal(input.remaining);
+    if (v === null) throw new Error('none');
     remaining = v > BigInt(Number.MAX_SAFE_INTEGER) ? Number.MAX_SAFE_INTEGER : Number(v);
     if (remaining < 0) throw new Error('neg');
   } catch {
@@ -158,14 +176,19 @@ export function evaluateActionBudget(input: ActionBudgetInput): ActionBudgetResu
     reasons.push('remaining actions 조회 불가 — OPEN 차단 (fail-closed)');
   }
   try {
-    if (input.expiresAt === null) throw new Error('none');
-    if (Number(input.expiresAt) * 1000 <= input.nowMs) reasons.push('approval 만료 — OPEN 차단');
+    // Number("1e999") is Infinity, so Number coercion would treat malformed
+    // expiration evidence as indefinitely valid. Compare strict decimal
+    // integer seconds as bigint and reject an invalid local clock as well.
+    const expiresAt = parseCanonicalUint256Decimal(input.expiresAt);
+    if (expiresAt === null) throw new Error('none');
+    if (!Number.isSafeInteger(input.nowMs) || input.nowMs <= 0) throw new Error('clock');
+    if (expiresAt * 1000n <= BigInt(input.nowMs)) reasons.push('approval 만료 — OPEN 차단');
   } catch {
     reasons.push('approval 만료시각 불명 — OPEN 차단 (fail-closed)');
   }
   let inFlight: number | null;
   if (input.inFlightReservedActions === undefined || input.inFlightReservedActions === null
-      || !Number.isFinite(input.inFlightReservedActions) || input.inFlightReservedActions < 0) {
+      || !Number.isSafeInteger(input.inFlightReservedActions) || input.inFlightReservedActions < 0) {
     inFlight = null;
     reasons.push('진행 중 예약분 조회 불가 — OPEN 차단 (fail-closed)');
   } else {

@@ -1,6 +1,6 @@
 import {describe,it,expect,vi} from 'vitest';
 import {dailyPaperCandidate} from '../workers/virtualPaperDailyCandidate';
-import {dailyPaperProfile,isDailyPaperProfile,evaluateDailyPaperRisk,DAILY_PAPER_POLICY} from '../workers/virtualPaperDailyPolicy';
+import {dailyPaperProfile,isDailyPaperProfile,evaluateDailyPaperRisk,DAILY_PAPER_POLICY,dailyPaperBudget} from '../workers/virtualPaperDailyPolicy';
 import {buildDailyTradePlan,parseVirtualTradePlan,LEGACY_DAILY_PLAN_VERSION} from '../workers/virtualPaperTradingMode';
 import {EMPTY_LOCKS} from '../lib/riskStateMachine';
 import {isAppliedRiskProfileSnapshot} from '../lib/riskProfiles';
@@ -11,8 +11,26 @@ import {MARKET_BY_SYMBOL_SERVER} from '../lib/gmxMarkets';
 import {virtualReplayCost} from './helpers/virtualPaper400Replay';
 const now=Date.parse('2026-09-22T03:00:10Z'),step=900000;
 const raw=()=>({source:'gmx-official-api',prices:Array.from({length:16},(_,i)=>[(Math.floor(now/step)-16+i)*step/1000,50000+i,50100+i,49900+i,50010+i])});
-const riskInput=()=>({equity:380,dayOpening:400,dailyLossAware:-20,dailyRealized:-20,entries:10,held:0,fresh:true,locks:{...EMPTY_LOCKS}});
+const riskInput=()=>({equity:380,referenceCapital:400,dailyLossAware:-20,dailyRealized:-20,entries:10,held:0,fresh:true,locks:{...EMPTY_LOCKS}});
 describe('explicit aggressive PAPER experiment',()=>{
+ it.each([500,1000,2000])('scales daily goals and loss budget with funded principal %s, retaining accrued loss',capital=>{
+  const budget=dailyPaperBudget(capital,-30,-40);
+  expect(budget.profitTargetMinUsd).toBe(capital*.05);
+  expect(budget.profitCapUsd).toBe(capital*.20);
+  expect(budget.lossLimitUsd).toBe(capital*.10);
+  expect(budget.remainingLossBudgetUsd).toBe(capital*.10-40);
+  const input={...riskInput(),referenceCapital:capital,equity:capital-40};
+  expect(evaluateDailyPaperRisk({...input,dailyLossAware:-capital*.10}).state).toBe('DAILY_LOSS_LOCKED');
+  expect(evaluateDailyPaperRisk({...input,dailyRealized:capital*.05}).entryAllowed).toBe(true);
+  expect(evaluateDailyPaperRisk({...input,dailyRealized:capital*.20}).state).toBe('PROFIT_CAP_LOCKED');
+  expect(evaluateDailyPaperRisk({...input,locks:{...EMPTY_LOCKS,dailyLockState:'DAILY_LOSS_LOCKED'}}).entryAllowed).toBe(false);
+ });
+ it('fails closed for invalid principal and budgets',()=>{
+  for(const capital of [0,-1,NaN,Infinity]) {
+   expect(()=>dailyPaperBudget(capital,0,0)).toThrow();
+   expect(evaluateDailyPaperRisk({...riskInput(),referenceCapital:capital}).entryAllowed).toBe(false);
+  }
+ });
  it('uses completed real-source OHLC and excludes unfinished/future or stale candles',()=>{
   expect(dailyPaperCandidate('BTC',raw(),now)).toMatchObject({side:'LONG',purpose:'AGGRESSIVE_PAPER_EXPERIMENT'});
   expect(dailyPaperCandidate('BTC',{...raw(),source:'synthetic'},now)).toBeNull();

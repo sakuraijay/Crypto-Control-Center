@@ -82,7 +82,9 @@ import {
   getCanonicalSnapshot,
   getDeploymentVerificationState,
   getFeeEstimateState,
+  type CanonicalSnapshot,
 } from '../lib/relayActivationStatus';
+import { evaluateCanonicalAuthorizationFreshness } from '../lib/canonicalAuthorizationFreshness';
 import { getActiveRevokeSession } from '../lib/revokeSession';
 import { getGmxPrepareStartupState } from '../lib/gmxApiPrepareStartup';
 import { countBlockingIntentsOrNull } from '../lib/executionIntents';
@@ -95,13 +97,18 @@ import {
   getStopExecutionCapability,
   isStopExecutionAvailable,
   setStopExecutionCapability,
+  type StopCapabilityEvidenceBinding,
 } from '../lib/stopExecutionCapabilityState';
 export {
   __setStopExecutionAvailabilityForTests,
   getStopExecutionCapability,
   isStopExecutionAvailable,
 } from '../lib/stopExecutionCapabilityState';
-import { evaluateActionBudget } from '../lib/actionBudget';
+import { evaluateActionBudget, parseCanonicalUint256Decimal } from '../lib/actionBudget';
+import {
+  buildCanonicalActionBudgetEvidenceBinding,
+  evaluateManualCanaryCanonicalAuthorization,
+} from '../lib/manualCanaryCanonicalAuthorization';
 import {
   listBlockingProtections, listActiveProtections, recordProtectionEvidenceFields,
   getProtectionLineageForPosition,
@@ -565,7 +572,7 @@ async function verifyStopSchemaAgainstSdk(): Promise<boolean> {
  */
 async function collectStopExecutionCapability(
   freshFeeQuote: boolean,
-): Promise<StopCapabilityResult> {
+): Promise<StopCapabilityResult & { evidenceBinding: StopCapabilityEvidenceBinding | null }> {
   // durable 저장소 + 차단 보호 주문
   let blockingProtectionCount: number | null = null;
   let durableStoreOk = false;
@@ -579,13 +586,21 @@ async function collectStopExecutionCapability(
     const cov = await loadStopCoverage();
     if (cov.ok) uncoveredCount = listUncovered(cov.map).length;
   } catch { /* fail-closed */ }
-  // action 예산 — canonical snapshot remaining (§7)
+  // canonical delegated authorization + action 예산 (§7). 숫자 remaining만으로는
+  // stale/future/비활성 readback을 실행 능력 증거로 승격할 수 없다.
   const snap = getCanonicalSnapshot();
+  const nowMs = Date.now();
+  const inFlightReservedActions = await countInFlightReservedActions();
+  const canonicalAuthorization = evaluateManualCanaryCanonicalAuthorization(
+    snap,
+    nowMs,
+    inFlightReservedActions,
+  );
   const budget = evaluateActionBudget({
     remaining: snap?.remaining ?? null,
     expiresAt: snap?.expiresAt ?? null,
-    nowMs: Date.now(),
-    inFlightReservedActions: await countInFlightReservedActions(),
+    nowMs,
+    inFlightReservedActions,
   });
   const manualCanary = isManualCanarySignerRestoreAllowed(process.env).allowed;
   let noBlockingIntents = false;
@@ -605,6 +620,7 @@ async function collectStopExecutionCapability(
     signerReady: isDelegatedSignerEnabled() && isSignerInitialized(),
     durableStoreOk,
     reconciliationOk: _reconciled && noBlockingIntents,
+    canonicalAuthorizationReady: canonicalAuthorization.ok,
     actionBudgetSufficient: budget.sufficient,
     actionBudgetRemaining: budget.remainingActions,
     freshFeeQuote,
@@ -623,7 +639,13 @@ async function collectStopExecutionCapability(
       _protectionRecon.lastPositionsFetchOkAtMs !== null &&
       Date.now() - _protectionRecon.lastPositionsFetchOkAtMs < 10 * 60_000,
   });
-  return derived;
+  return {
+    ...derived,
+    evidenceBinding: buildCanonicalActionBudgetEvidenceBinding(
+      snap,
+      inFlightReservedActions,
+    ),
+  };
 }
 
 /**
@@ -638,8 +660,14 @@ export async function evaluateManualCanaryStopCapability(
 }
 
 export async function refreshStopExecutionCapability(): Promise<StopCapabilityResult> {
-  let result: StopCapabilityResult | null = null;
+  let result: (StopCapabilityResult & {
+    evidenceBinding?: StopCapabilityEvidenceBinding | null;
+  }) | null = null;
   const refresh = async (): Promise<void> => {
+    // Bind cache freshness to when this evaluation actually started. A slow
+    // collector must not renew an already-aged result for another full TTL at
+    // completion.
+    const evaluatedAtMs = Date.now();
     try {
       const testOverride = getStopExecutionAvailabilityTestOverride();
       result = testOverride === null
@@ -656,7 +684,11 @@ export async function refreshStopExecutionCapability(): Promise<StopCapabilityRe
         reasons: [`stop 실행 능력 재평가 실패: ${(e as Error).message}`],
       };
     }
-    setStopExecutionCapability(result);
+    setStopExecutionCapability(
+      result,
+      new Date(evaluatedAtMs).toISOString(),
+      result.evidenceBinding ?? null,
+    );
   };
 
   const queued = _stopCapabilityRefreshChain.then(refresh, refresh);
@@ -693,14 +725,9 @@ async function buildExecutorActivationInput(args: {
   selfIntentId?: string | null;
 }): Promise<ActivationGateInput> {
   const snap = getCanonicalSnapshot();
-  const canonicalAuthorized = !!snap && snap.confirmed && snap.isSubaccountListed === true;
-  let approvalRemainingOk = false;
-  if (snap?.remaining && snap?.expiresAt) {
-    try {
-      approvalRemainingOk =
-        BigInt(snap.remaining) > 0n && Number(snap.expiresAt) * 1000 > Date.now();
-    } catch { approvalRemainingOk = false; }
-  }
+  const nowMs = Date.now();
+  const { canonicalAuthorized, approvalRemainingOk } =
+    evaluateExecutorCanonicalAuthorization(snap, nowMs);
   let blockingIntentCount: number | null = null;
   try { blockingIntentCount = await countBlockingIntentsOrNull(args.selfIntentId ?? null); } catch { blockingIntentCount = null; }
   let revoke = true; // 조회 실패 = revoke 진행 중으로 간주 (차단)
@@ -731,6 +758,39 @@ async function buildExecutorActivationInput(args: {
     rpcOk: args.rpcOk,
     kind: args.kind,
   });
+}
+
+/**
+ * 모든 prepare/sign/submit 경로의 공통 canonical 권한 판정.
+ * 저장 readback이 최신이고 authorization 의미가 완전하며, 남은 action과
+ * 만료 시각이 canonical decimal integer일 때만 실행 후보가 된다.
+ */
+export function evaluateExecutorCanonicalAuthorization(
+  snapshot: CanonicalSnapshot | null,
+  nowMs: number,
+): { canonicalAuthorized: boolean; approvalRemainingOk: boolean } {
+  const fresh = evaluateCanonicalAuthorizationFreshness(snapshot, nowMs).ok;
+  const canonicalAuthorized = fresh
+    && snapshot !== null
+    && snapshot.confirmed
+    && snapshot.isSubaccountListed === true
+    && snapshot.featureDisabled === false
+    && snapshot.integrationDisabled === false;
+  if (!canonicalAuthorized || !snapshot) {
+    return { canonicalAuthorized: false, approvalRemainingOk: false };
+  }
+  try {
+    const remaining = parseCanonicalUint256Decimal(snapshot.remaining);
+    const expiresAt = parseCanonicalUint256Decimal(snapshot.expiresAt);
+    if (remaining === null || expiresAt === null) {
+      return { canonicalAuthorized: true, approvalRemainingOk: false };
+    }
+    const approvalRemainingOk = remaining > 0n
+      && expiresAt * 1000n > BigInt(nowMs);
+    return { canonicalAuthorized: true, approvalRemainingOk };
+  } catch {
+    return { canonicalAuthorized: true, approvalRemainingOk: false };
+  }
 }
 
 /**
@@ -780,8 +840,7 @@ async function runGmxApiOrderPath(args: {
   });
   const canonicalNonce = (() => {
     const snap = getCanonicalSnapshot();
-    if (!snap?.approvalNonce) return null;
-    try { return BigInt(snap.approvalNonce); } catch { return null; }
+    return parseCanonicalUint256Decimal(snap?.approvalNonce ?? null);
   })();
 
   const res = await executeViaGmxApi({
@@ -951,30 +1010,13 @@ export async function runConfirmedOpenInitialStopHandoff(
     },
     decimalsReady: async (marketAddress) =>
       (await resolveIndexTokenDecimalsEvidence(marketAddress)) !== null,
-    executionCostReady: (marketAddress, isLong, nowMs) => {
-      const cost = getExecutionEligibleCostEvidence(nowMs);
-      return cost.fresh && cost.evidence !== null
-        && cost.evidence.market.toLowerCase() === marketAddress.toLowerCase()
-        && cost.evidence.isLong === isLong;
-    },
-    actionBudgetReady: async (nowMs) => {
-      const canonical = getCanonicalSnapshot();
-      if (!canonical?.confirmed || canonical.isSubaccountListed !== true) return false;
-      const budget = evaluateActionBudget({
-        remaining: canonical.remaining,
-        expiresAt: canonical.expiresAt,
-        nowMs,
-        inFlightReservedActions: await countInFlightReservedActions(),
-      });
-      return budget.sufficient;
-    },
+    executionCostReady: isConfirmedOpenHandoffCostEvidenceReady,
+    actionBudgetReady: isConfirmedOpenHandoffCanonicalAuthorizationReady,
     signerBindingReady: async () => {
       const canonical = getCanonicalSnapshot();
       const owner = getConfiguredMainAccount();
       const signer = getSignerAddress();
-      let nonce: bigint | null = null;
-      try { nonce = canonical?.approvalNonce == null ? null : BigInt(canonical.approvalNonce); }
-      catch { nonce = null; }
+      const nonce = parseCanonicalUint256Decimal(canonical?.approvalNonce ?? null);
       if (!owner || !signer || !isSignerInitialized() || nonce === null) return false;
       const relay = resolveGmxLiveRelayConfig();
       if (!relay.ok) return false;
@@ -1006,6 +1048,43 @@ export async function runConfirmedOpenInitialStopHandoff(
       now,
     }),
   });
+}
+
+/**
+ * INITIAL_STOP 제출도 OPEN과 동일한 최신 canonical authorization/action-budget
+ * 증거를 요구한다. 만료 전 remaining 값만 남은 오래된 readback이나 비활성화된
+ * feature/integration 상태로 보호 주문을 제출하지 않는다.
+ */
+export async function isConfirmedOpenHandoffCanonicalAuthorizationReady(
+  nowMs: number,
+): Promise<boolean> {
+  return evaluateManualCanaryCanonicalAuthorization(
+    getCanonicalSnapshot(),
+    nowMs,
+    await countInFlightReservedActions(),
+  ).ok;
+}
+
+/**
+ * Confirmed OPEN may only hand off to INITIAL_STOP with fresh cost evidence
+ * bound to the durable OPEN intent, not merely another quote for the same
+ * market/direction. The numeric DB column is persisted at four decimals.
+ */
+export function isConfirmedOpenHandoffCostEvidenceReady(input: {
+  parentOpenIntentId: string;
+  marketAddress: string;
+  isLong: boolean;
+  orderType: 'MarketIncrease';
+  notionalUsd: number;
+  nowMs: number;
+}): boolean {
+  const cost = getExecutionEligibleCostEvidence(input.nowMs);
+  return cost.fresh && cost.evidence !== null
+    && cost.evidence.executionScopeId === input.parentOpenIntentId
+    && cost.evidence.market.toLowerCase() === input.marketAddress.toLowerCase()
+    && cost.evidence.isLong === input.isLong
+    && cost.evidence.orderType === input.orderType
+    && Math.abs(cost.evidence.notionalUsd - input.notionalUsd) <= 0.0001;
 }
 
 /**
@@ -1110,8 +1189,7 @@ export function wireProtectionExecution(): void {
       openPosition: pos,
       canonicalNonce: (() => {
         const snap = getCanonicalSnapshot();
-        if (!snap?.approvalNonce) return null;
-        try { return BigInt(snap.approvalNonce); } catch { return null; }
+        return parseCanonicalUint256Decimal(snap?.approvalNonce ?? null);
       })(),
       allowedBlockingSourceOpen: req.sourceOpenTaskId
         ? { taskId: req.sourceOpenTaskId, intentId: req.parentOpenIntentId }

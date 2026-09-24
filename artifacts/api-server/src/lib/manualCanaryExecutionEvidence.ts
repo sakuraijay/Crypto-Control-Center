@@ -17,7 +17,7 @@ export interface ManualCanaryExecutionEvidenceGate {
  */
 export async function activateManualCanaryExecutionEvidence(
   snapshot: CostSnapshot,
-  expected: CostSnapshotExpectation,
+  expected: CostSnapshotExpectation & { executionScopeId: string },
   nowMs: number,
   gate: ManualCanaryExecutionEvidenceGate,
 ): Promise<boolean> {
@@ -33,7 +33,8 @@ export async function activateManualCanaryExecutionEvidence(
     && readback.evidence.isLong === activatedEvidence.isLong
     && readback.evidence.orderType === activatedEvidence.orderType
     && readback.evidence.notionalUsd === activatedEvidence.notionalUsd
-    && readback.evidence.observedAtMs === activatedEvidence.observedAtMs;
+    && readback.evidence.observedAtMs === activatedEvidence.observedAtMs
+    && readback.evidence.executionScopeId === activatedEvidence.executionScopeId;
 
   return refreshed.available
     && gate.isStopCapabilityAvailable()

@@ -212,6 +212,7 @@ describe('#142 Manual Canary execution evidence integration', () => {
       isLong: true,
       orderType: 'MarketIncrease' as const,
       notionalUsd: 20,
+      executionScopeId: 'intent:open:manual-canary:2026-08-19',
     };
     const snapshot = executionSnapshot(nowMs, { market });
     const {
@@ -248,6 +249,7 @@ describe('#142 Manual Canary execution evidence integration', () => {
         orderType: 'MarketIncrease',
         notionalUsd: 20,
         observedAtMs: nowMs,
+        executionScopeId: 'intent:open:manual-canary:2026-08-19',
       },
     });
   });
@@ -260,6 +262,7 @@ describe('#142 Manual Canary execution evidence integration', () => {
       isLong: true,
       orderType: 'MarketIncrease' as const,
       notionalUsd: 20,
+      executionScopeId: 'intent:open:manual-canary:2026-08-19',
     };
     const snapshot = executionSnapshot(nowMs, { market });
     const {
@@ -301,6 +304,7 @@ describe('#142 Manual Canary execution evidence integration', () => {
       isLong: true,
       orderType: 'MarketIncrease' as const,
       notionalUsd: 20,
+      executionScopeId: 'intent:open:manual-canary:2026-08-19',
     };
     const snapshot = executionSnapshot(nowMs, { market });
     const {
@@ -325,6 +329,7 @@ describe('#142 Manual Canary execution evidence integration', () => {
               isLong: true,
               orderType: replacement.orderType,
               notionalUsd: replacement.notionalUsd,
+              executionScopeId: expected.executionScopeId,
             },
             nowMs,
           )).toBe(true);
@@ -335,6 +340,157 @@ describe('#142 Manual Canary execution evidence integration', () => {
     );
 
     expect(activated).toBe(false);
+  });
+
+  it.each([
+    ['exact binding', 'MarketIncrease' as const, 20, 'intent:open:manual-canary:2026-08-19', true],
+    ['different order type', 'MarketDecrease' as const, 20, 'intent:open:manual-canary:2026-08-19', false],
+    ['different notional', 'MarketIncrease' as const, 10, 'intent:open:manual-canary:2026-08-19', false],
+    ['different OPEN intent', 'MarketIncrease' as const, 20, 'intent:open:manual-canary:other', false],
+  ])('confirmed OPEN handoff cost gate: %s', async (
+    _name,
+    recordedOrderType,
+    recordedNotionalUsd,
+    recordedScopeId,
+    expectedReady,
+  ) => {
+    const nowMs = Date.now();
+    const market = '0x' + 'b'.repeat(40);
+    const snapshot = executionSnapshot(nowMs, {
+      market,
+      orderType: recordedOrderType,
+      notionalUsd: recordedNotionalUsd,
+    });
+    const {
+      __resetExecutionEligibleCostEvidenceForTests,
+      recordExecutionEligibleCostEvidence,
+    } = await import('../lib/costSnapshot');
+    const { isConfirmedOpenHandoffCostEvidenceReady } =
+      await import('../workers/liveTestExecutor');
+
+    __resetExecutionEligibleCostEvidenceForTests();
+    expect(recordExecutionEligibleCostEvidence(snapshot, {
+      market,
+      isLong: true,
+      orderType: recordedOrderType,
+      notionalUsd: recordedNotionalUsd,
+      executionScopeId: recordedScopeId,
+    }, nowMs)).toBe(true);
+
+    expect(isConfirmedOpenHandoffCostEvidenceReady({
+      parentOpenIntentId: 'intent:open:manual-canary:2026-08-19',
+      marketAddress: market,
+      isLong: true,
+      orderType: 'MarketIncrease',
+      notionalUsd: 20,
+      nowMs,
+    })).toBe(expectedReady);
+  });
+
+  it.each([
+    ['fresh authorization', 0, false, false, true],
+    ['stale readback', 60_001, false, false, false],
+    ['future readback', -60_001, false, false, false],
+    ['feature disabled', 0, true, false, false],
+    ['integration disabled', 0, false, true, false],
+  ])('confirmed OPEN initial-stop canonical gate: %s', async (
+    _name,
+    ageMs,
+    featureDisabled,
+    integrationDisabled,
+    expectedReady,
+  ) => {
+    const nowMs = Date.now();
+    const { recordCanonicalSnapshot } = await import('../lib/relayActivationStatus');
+    recordCanonicalSnapshot({
+      atMs: nowMs - ageMs,
+      confirmed: true,
+      reason: null,
+      approvalNonce: '1',
+      isSubaccountListed: true,
+      featureDisabled,
+      integrationDisabled,
+      expiresAt: String(Math.floor(nowMs / 1000) + 3600),
+      remaining: '8',
+    });
+    const { isConfirmedOpenHandoffCanonicalAuthorizationReady } =
+      await import('../workers/liveTestExecutor');
+
+    await expect(
+      isConfirmedOpenHandoffCanonicalAuthorizationReady(nowMs),
+    ).resolves.toBe(expectedReady);
+  });
+
+  it.each([
+    ['fresh canonical evidence', 0, false, false, '8', true, true],
+    ['stale readback', 60_001, false, false, '8', false, false],
+    ['future readback', -60_001, false, false, '8', false, false],
+    ['feature disabled', 0, true, false, '8', false, false],
+    ['integration disabled', 0, false, true, '8', false, false],
+    ['non-canonical remaining', 0, false, false, '1e3', true, false],
+    ['uint256 초과 remaining', 0, false, false, (1n << 256n).toString(), true, false],
+    ['zero remaining', 0, false, false, '0', true, false],
+  ])('executor common canonical gate: %s', async (
+    _name,
+    ageMs,
+    featureDisabled,
+    integrationDisabled,
+    remaining,
+    expectedAuthorized,
+    expectedRemaining,
+  ) => {
+    const nowMs = Date.now();
+    const { evaluateExecutorCanonicalAuthorization } =
+      await import('../workers/liveTestExecutor');
+    const result = evaluateExecutorCanonicalAuthorization({
+      atMs: nowMs - ageMs,
+      confirmed: true,
+      reason: null,
+      approvalNonce: '1',
+      isSubaccountListed: true,
+      featureDisabled,
+      integrationDisabled,
+      expiresAt: String(Math.floor(nowMs / 1000) + 3600),
+      remaining,
+    }, nowMs);
+
+    expect(result).toEqual({
+      canonicalAuthorized: expectedAuthorized,
+      approvalRemainingOk: expectedRemaining,
+    });
+  });
+
+  it.each([
+    ['stale readback', 60_001, false, false],
+    ['future readback', -60_001, false, false],
+    ['feature disabled', 0, true, false],
+    ['integration disabled', 0, false, true],
+  ])('Stop capability collector rejects %s canonical authorization', async (
+    _name,
+    ageMs,
+    featureDisabled,
+    integrationDisabled,
+  ) => {
+    const nowMs = Date.now();
+    const { recordCanonicalSnapshot } = await import('../lib/relayActivationStatus');
+    recordCanonicalSnapshot({
+      atMs: nowMs - ageMs,
+      confirmed: true,
+      reason: null,
+      approvalNonce: '1',
+      isSubaccountListed: true,
+      featureDisabled,
+      integrationDisabled,
+      expiresAt: String(Math.floor(nowMs / 1000) + 3600),
+      remaining: '8',
+    });
+    const { evaluateManualCanaryStopCapability } =
+      await import('../workers/liveTestExecutor');
+
+    const result = await evaluateManualCanaryStopCapability(true);
+
+    expect(result.available).toBe(false);
+    expect(result.reasons).toContain('canonical delegated authorization 미확인/미신선');
   });
 });
 
@@ -378,7 +534,8 @@ beforeEach(async () => {
   const { recordCanonicalSnapshot } = await import('../lib/relayActivationStatus');
   recordCanonicalSnapshot({
     atMs: Date.now(), confirmed: true, reason: null, approvalNonce: '1',
-    isSubaccountListed: true, expiresAt: String(Math.floor(Date.now() / 1000) + 3600), remaining: '8',
+    isSubaccountListed: true, featureDisabled: false, integrationDisabled: false,
+    expiresAt: String(Math.floor(Date.now() / 1000) + 3600), remaining: '8',
   });
 });
 afterEach(async () => {
@@ -944,6 +1101,38 @@ describe('주기 Stop capability sequencing — actual executor function', () =>
     await Promise.all([first, second]);
 
     expect(getStopExecutionCapability()).toMatchObject({ available: true, reasons: [] });
+  });
+
+  it('느린 collector 완료 시각으로 capability TTL을 갱신하지 않는다', async () => {
+    const {
+      __setStopCapabilityCollectorForTests,
+      __setStopExecutionAvailabilityForTests,
+      getStopExecutionCapability,
+      isStopExecutionAvailable,
+      refreshStopExecutionCapability,
+    } = await import('../workers/liveTestExecutor');
+    const { STOP_EXECUTION_CAPABILITY_MAX_AGE_MS } =
+      await import('../lib/stopExecutionCapabilityState');
+    __setStopExecutionAvailabilityForTests(null);
+
+    let nowMs = 1_777_000_000_000;
+    const startedAtMs = nowMs;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => nowMs);
+    try {
+      __setStopCapabilityCollectorForTests(async () => {
+        nowMs += STOP_EXECUTION_CAPABILITY_MAX_AGE_MS + 1;
+        return { available: true, reasons: [] };
+      });
+
+      await expect(refreshStopExecutionCapability()).resolves.toMatchObject({ available: true });
+      expect(getStopExecutionCapability()).toMatchObject({
+        available: true,
+        evaluatedAt: new Date(startedAtMs).toISOString(),
+      });
+      expect(isStopExecutionAvailable()).toBe(false);
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 
   it('collector 예외를 fail-closed로 기록하고 다음 refresh에서 복구한다', async () => {

@@ -47,14 +47,14 @@ import {
   isEmergencyStopActive, isReconciled, isStopExecutionAvailable, getStopExecutionCapability,
   refreshStopExecutionCapability,
   STOP_EXECUTION_UNAVAILABLE, getProtectionReconState, countInFlightReservedActions,
-  verifyPriceConversionGolden,
+  verifyPriceConversionGolden, evaluateExecutorCanonicalAuthorization,
 } from '../workers/liveTestExecutor';
 import { getDecimalsCacheSnapshot } from '../lib/indexTokenDecimals';
 import { resolveGmxEventEmitterAddress } from '../lib/gmxOrderEvents';
 import { listActiveProtections, PROTECTION_BLOCKING_SET } from '../lib/protectionOrders';
 import {
   evaluateActionBudget, ACTION_BUDGET_VERSION, AUTO_CANCEL_BUDGET_POLICY,
-  worstCasePathName, RECOMMENDED_OWNER_APPROVAL_COUNT,
+  worstCasePathName, RECOMMENDED_OWNER_APPROVAL_COUNT, parseCanonicalUint256Decimal,
 } from '../lib/actionBudget';
 import { EXECUTION_ELIGIBLE_MAX_AGE_MS, getExecutionEligibleCostEvidence } from '../lib/costSnapshot';
 import { listUncovered } from '../lib/stopLossPlan';
@@ -75,7 +75,10 @@ import { buildPaperRelayEvidence } from '../lib/paperRelayEvidence';
 import {
   deriveControlledCanaryReadiness,
 } from '../lib/controlledCanaryReadiness';
-import { evaluateManualCanaryCanonicalAuthorization } from '../lib/manualCanaryCanonicalAuthorization';
+import {
+  buildCanonicalActionBudgetEvidenceBinding,
+  evaluateManualCanaryCanonicalAuthorization,
+} from '../lib/manualCanaryCanonicalAuthorization';
 import { EXPECTED_CANARY_SIGNER } from '../lib/canaryAllowanceInfo';
 import { deriveOperationalDiagnostics } from '../lib/operationalDiagnostics';
 import { getReleaseIdentity } from '../lib/releaseIdentity';
@@ -118,13 +121,8 @@ export async function buildGmxApiStatusSnapshot() {
   const workerStatus = getWorkerStatus();
   const serverPaperStatus = getServerPaperStatus();
   const snap = paperMode ? null : getCanonicalSnapshot();
-  const canonicalAuthorized = !!snap && snap.confirmed && snap.isSubaccountListed === true;
-  let approvalRemainingOk = false;
-  if (snap?.remaining && snap?.expiresAt) {
-    try {
-      approvalRemainingOk = BigInt(snap.remaining) > 0n && Number(snap.expiresAt) * 1000 > Date.now();
-    } catch { approvalRemainingOk = false; }
-  }
+  const { canonicalAuthorized, approvalRemainingOk } =
+    evaluateExecutorCanonicalAuthorization(snap, nowMs);
 
   const [blockingIntents, openRelayTasks] = await Promise.all([
     countBlockingIntentsOrNull(),
@@ -141,9 +139,7 @@ export async function buildGmxApiStatusSnapshot() {
     try {
       const mainAccount = env.GMX_WALLET_ADDRESS?.trim() || null;
       const storedSigner = await getStoredPublicSignerAddress(EXPECTED_CANARY_SIGNER);
-      const canonicalNonce = snap?.approvalNonce && /^\d+$/.test(snap.approvalNonce)
-        ? BigInt(snap.approvalNonce)
-        : null;
+      const canonicalNonce = parseCanonicalUint256Decimal(snap?.approvalNonce ?? null);
       if (!mainAccount || !storedSigner.ok || canonicalNonce === null) {
         approvalSessionReady = false;
       } else {
@@ -255,7 +251,16 @@ export async function buildGmxApiStatusSnapshot() {
 
   // ── 6H-2A §10 — Canary 적격 조건 확장 (전부 fail-closed) ────────────────────
   // stop 실행 능력 (§7) — 경로 구현 여부가 아니라 현재 capability/evidence로 판정
+  const stopCapability = getStopExecutionCapability();
   const stopExecutionAvailable = isStopExecutionAvailable();
+  const stopCapabilityDiagnosticReasons = stopExecutionAvailable
+    ? stopCapability.reasons
+    : stopCapability.available
+      ? Array.from(new Set([
+        ...stopCapability.reasons,
+        'STOP_EXECUTION_CAPABILITY_EVIDENCE_NOT_FRESH',
+      ]))
+      : stopCapability.reasons;
   if (!stopExecutionAvailable) {
     blockedReasons.push(`${STOP_EXECUTION_UNAVAILABLE} — Stop-Loss 경로 구현됨, 현재 capability/evidence 미충족`);
   }
@@ -291,7 +296,6 @@ export async function buildGmxApiStatusSnapshot() {
   if (!readonlyEnabled) blockedReasons.push('COST_DATA_UNAVAILABLE — readonly 비용 조회 경로 비활성');
 
   // ── 6H-2B §12 — 보호 주문(durable protection) 관측값 (조회 전용) ────────────
-  const stopCapability = getStopExecutionCapability();
   const paperStopReadinessEvidence = getPaperStopReadinessEvidence(Date.now(), env);
   let protectionCounts: Record<string, number> | null = null;
   let blockingProtectionCount: number | null = null;
@@ -394,7 +398,12 @@ export async function buildGmxApiStatusSnapshot() {
     stopCapability: {
       available: stopExecutionAvailable,
       evaluatedAt: stopCapability.evaluatedAt,
+      evidenceBinding: stopCapability.evidenceBinding,
     },
+    canonicalActionBudgetEvidence: buildCanonicalActionBudgetEvidenceBinding(
+      snap,
+      inFlightReservedActions,
+    ),
     nowMs,
     uncoveredStopCount,
     settlementComplete,
@@ -591,8 +600,10 @@ export async function buildGmxApiStatusSnapshot() {
     stopExecutionAvailable,
     // ── 6H-2B §12 — stop capability·보호 주문·action 예산 관측값 ─────────────
     stopCapability: {
-      available: stopCapability.available,
-      reasons: stopCapability.reasons,
+      // Expose the same freshness-aware result used by the execution gate.
+      // The cached raw value may remain true after its 30s evidence window.
+      available: stopExecutionAvailable,
+      reasons: stopCapabilityDiagnosticReasons,
       evaluatedAt: stopCapability.evaluatedAt,
       scope: 'LIVE_STOP_EXECUTION',
       boundary: 'READ_ONLY_STATUS_NOT_EXECUTION_AUTHORIZATION',

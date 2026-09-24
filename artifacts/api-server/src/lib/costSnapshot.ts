@@ -50,6 +50,8 @@ export interface CostSnapshotExpectation {
   isLong: boolean;
   orderType: 'MarketIncrease' | 'MarketDecrease';
   notionalUsd: number;
+  /** 실행 전용 증거를 특정 durable intent에 결속. 일반 read-only 검증은 생략 가능. */
+  executionScopeId?: string;
 }
 
 export type CostValidation =
@@ -201,6 +203,7 @@ export interface ExecutionEligibleCostEvidence {
   readonly notionalUsd: number;
   readonly observedAtMs: number;
   readonly effectiveRoundTripCostUsd: number;
+  readonly executionScopeId?: string;
 }
 
 let executionEligibleEvidence: ExecutionEligibleCostEvidence | null = null;
@@ -212,6 +215,10 @@ export function recordExecutionEligibleCostEvidence(
 ): boolean {
   const valid = validateExecutionEligibleSnapshot(snap, expected, nowMs);
   if (!valid.ok) return false;
+  if (expected.executionScopeId !== undefined
+      && (expected.executionScopeId.length === 0 || expected.executionScopeId.trim() !== expected.executionScopeId)) {
+    return false;
+  }
   executionEligibleEvidence = Object.freeze({
     market: snap.market,
     isLong: snap.isLong,
@@ -219,6 +226,7 @@ export function recordExecutionEligibleCostEvidence(
     notionalUsd: snap.notionalUsd,
     observedAtMs: Date.parse(snap.apiTimestamp as string),
     effectiveRoundTripCostUsd: valid.effectiveRoundTripCostUsd,
+    ...(expected.executionScopeId === undefined ? {} : { executionScopeId: expected.executionScopeId }),
   });
   return true;
 }

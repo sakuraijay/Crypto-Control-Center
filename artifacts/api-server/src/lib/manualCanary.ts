@@ -298,7 +298,13 @@ export interface ManualCanaryDeps extends ManualCanaryPreflightDeps {
     /** 0030: exact 포지션 결속 — manualCanary 경로는 반드시 제공해야 한다 */
     exactPosition?: ClosePositionBinding | null;
   }): Promise<LiveOrderResult>;
-  runEmergencyClose(openIntentId: string): Promise<CheckOutcome>;
+  runEmergencyClose(input: {
+    openIntentId: string;
+    symbol: string;
+    marketAddress: string;
+    isLong: boolean;
+    exactPosition: ClosePositionBinding;
+  }): Promise<CheckOutcome>;
   /**
    * #142: 실행 직전 전용 비용 증거 기록 + stop capability 원자적 재평가.
    * 실행 증거/stop gate 갱신 불가 시 fail-closed (제출 0회).
@@ -306,6 +312,7 @@ export interface ManualCanaryDeps extends ManualCanaryPreflightDeps {
    */
   recordCostEvidenceForExecution(snapshot: CostSnapshot, args: {
     market: string; isLong: boolean; orderType: 'MarketIncrease' | 'MarketDecrease'; notionalUsd: number;
+    executionScopeId: string;
   }, nowMs: number): Promise<boolean>; // execution-only — structurally unavailable in preflight/status
 }
 
@@ -346,6 +353,61 @@ export function validateCanaryRequest(symbol: unknown, direction: unknown):
     return { ok: false, reason: '방향은 LONG/SHORT만 가능' };
   }
   return { ok: true, symbol, direction };
+}
+
+function validateStoredOpenBinding(value: unknown):
+  { ok: true; binding: NonNullable<DailyCanaryState['open']> } | { ok: false; reason: string } {
+  if (typeof value !== 'object' || value === null) {
+    return { ok: false, reason: 'OPEN 결속 기록 없음/손상' };
+  }
+  const candidate = value as Partial<NonNullable<DailyCanaryState['open']>>;
+  const request = validateCanaryRequest(candidate.symbol, candidate.direction);
+  if (!request.ok) return { ok: false, reason: `OPEN 결속 기록 손상 — ${request.reason}` };
+
+  const collateralUsd = candidate.collateralUsd;
+  const leverage = candidate.leverage;
+  const requestedSizeUsd = candidate.requestedSizeUsd;
+  if (typeof collateralUsd !== 'number'
+      || !Number.isFinite(collateralUsd)
+      || collateralUsd <= 0
+      || collateralUsd > MANUAL_CANARY_CAPS.maxCollateralUsd) {
+    return { ok: false, reason: 'OPEN 결속 기록 손상 — 담보 범위 불일치' };
+  }
+  if (typeof leverage !== 'number'
+      || !Number.isFinite(leverage)
+      || leverage < 1
+      || leverage > MANUAL_CANARY_CAPS.maxLeverage) {
+    return { ok: false, reason: 'OPEN 결속 기록 손상 — 레버리지 범위 불일치' };
+  }
+  const expectedSizeUsd = Math.min(collateralUsd * leverage, MANUAL_CANARY_CAPS.maxNotionalUsd);
+  if (typeof requestedSizeUsd !== 'number'
+      || !Number.isFinite(requestedSizeUsd)
+      || requestedSizeUsd <= 0
+      || requestedSizeUsd > MANUAL_CANARY_CAPS.maxNotionalUsd
+      || Math.abs(requestedSizeUsd - expectedSizeUsd) > 1e-9) {
+    return { ok: false, reason: 'OPEN 결속 기록 손상 — 명목 크기 불일치' };
+  }
+  return {
+    ok: true,
+    binding: {
+      symbol: request.symbol,
+      direction: request.direction,
+      collateralUsd,
+      leverage,
+      requestedSizeUsd,
+    },
+  };
+}
+
+function sameOpenBinding(
+  left: NonNullable<DailyCanaryState['open']>,
+  right: NonNullable<DailyCanaryState['open']>,
+): boolean {
+  return left.symbol === right.symbol
+    && left.direction === right.direction
+    && left.collateralUsd === right.collateralUsd
+    && left.leverage === right.leverage
+    && left.requestedSizeUsd === right.requestedSizeUsd;
 }
 
 /**
@@ -552,17 +614,61 @@ export async function runCanaryPreflight(
 
 // ── Daily durable claim ──────────────────────────────────────────────────────
 /** 손상(파싱 실패)은 null과 구분 — 손상 시 어떤 실행 경로도 진행 금지 (fail-closed) */
-async function loadDailyState(deps: Pick<ManualCanaryPreflightDeps, 'loadState'>): Promise<
+async function loadDailyState(deps: Pick<ManualCanaryPreflightDeps, 'loadState' | 'now'>): Promise<
   { corrupt: false; state: DailyCanaryState | null; raw: string | null } | { corrupt: true; state: null; raw: string | null }
 > {
   const raw = await deps.loadState(STATE_KEY_DAILY);
   if (!raw) return { corrupt: false, state: null, raw: null };
   try {
-    const parsed = JSON.parse(raw) as DailyCanaryState;
-    if (typeof parsed !== 'object' || parsed === null || typeof parsed.dayKey !== 'string') {
+    const parsed = JSON.parse(raw) as Partial<DailyCanaryState>;
+    const nullableString = (value: unknown): value is string | null =>
+      value === null || typeof value === 'string';
+    const validIsoTime = (value: unknown): value is string =>
+      typeof value === 'string' && Number.isFinite(Date.parse(value));
+    const validCalendarDay = (value: unknown): value is string => {
+      if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+      const parsedDay = new Date(`${value}T00:00:00.000Z`);
+      return Number.isFinite(parsedDay.getTime()) && parsedDay.toISOString().slice(0, 10) === value;
+    };
+    if (typeof parsed !== 'object'
+        || parsed === null
+        || !validCalendarDay(parsed.dayKey)
+        // A future PHT day can never be a legitimate persisted predecessor.
+        // Treating it as merely "not today" would reset used opens to zero.
+        || parsed.dayKey > manilaDayKey(deps.now())
+        || !Number.isSafeInteger(parsed.opens)
+        || (parsed.opens as number) < 0
+        || (parsed.opens as number) > MANUAL_CANARY_CAPS.maxOrdersPerDay
+        || !nullableString(parsed.openIntentId)
+        || !nullableString(parsed.closeIntentId)
+        || typeof parsed.emergencyCloseUsed !== 'boolean'
+        || !(parsed.openedAt === null || validIsoTime(parsed.openedAt))) {
       return { corrupt: true, state: null, raw };
     }
-    return { corrupt: false, state: parsed, raw };
+
+    // `open` was absent in legacy records. Preserve read compatibility so a
+    // previous-day legacy record can roll over. CLOSE validates this binding
+    // separately and returns its more specific fail-closed diagnostic.
+    const open = parsed.open === undefined ? null : parsed.open;
+
+    const launchReservation = parsed.launchReservation ?? null;
+    if (launchReservation !== null) {
+      if (typeof launchReservation !== 'object'
+          || typeof launchReservation.id !== 'string'
+          || launchReservation.id.length === 0
+          || typeof launchReservation.openIntentId !== 'string'
+          || launchReservation.openIntentId.length === 0
+          || !validIsoTime(launchReservation.reservedAt)
+          || !validateStoredOpenBinding(launchReservation.open).ok) {
+        return { corrupt: true, state: null, raw };
+      }
+    }
+
+    return {
+      corrupt: false,
+      state: { ...parsed, open, launchReservation } as DailyCanaryState,
+      raw,
+    };
   } catch { return { corrupt: true, state: null, raw }; }
 }
 
@@ -622,6 +728,8 @@ async function reserveDailyLaunch(
 async function commitDailyLaunch(
   deps: ManualCanaryDeps,
   reservationId: string,
+  expectedOpenIntentId: string,
+  expectedOpenBinding: NonNullable<DailyCanaryState['open']>,
 ): Promise<DailyClaimResult> {
   const dayKey = manilaDayKey(deps.now());
   const loaded = await loadDailyState(deps);
@@ -632,6 +740,13 @@ async function commitDailyLaunch(
   const reservation = current.launchReservation;
   if (!reservation || reservation.id !== reservationId) {
     return { ok: false, reason: 'Canary 실행 예약 소유권 불일치 — 제출 0회 (fail-closed)' };
+  }
+  // Reservation ID만으로 소유권을 인정하면 reserve와 commit 사이에 같은 ID를
+  // 유지한 채 intent/주문 결속을 바꾼 영속 상태가 최종 OPEN으로 승격될 수 있다.
+  // 호출자가 reserve한 원본 계약 전체를 다시 결속해 TOCTOU 변경을 차단한다.
+  if (reservation.openIntentId !== expectedOpenIntentId
+      || !sameOpenBinding(reservation.open, expectedOpenBinding)) {
+    return { ok: false, reason: 'Canary 실행 예약 intent/주문 결속 변경 — 제출 0회 (fail-closed)' };
   }
   if (current.opens >= MANUAL_CANARY_CAPS.maxOrdersPerDay) {
     return { ok: false, reason: `일일 ${MANUAL_CANARY_CAPS.maxOrdersPerDay}회 소진 (${dayKey})` };
@@ -654,11 +769,19 @@ async function commitDailyLaunch(
 async function releaseDailyLaunch(
   deps: ManualCanaryDeps,
   reservationId: string,
+  expectedOpenIntentId: string,
+  expectedOpenBinding: NonNullable<DailyCanaryState['open']>,
 ): Promise<boolean> {
   const loaded = await loadDailyState(deps);
   if (loaded.corrupt || !loaded.state) return false;
   const current = loaded.state;
-  if (!current.launchReservation || current.launchReservation.id !== reservationId) return false;
+  const reservation = current.launchReservation;
+  if (!reservation || reservation.id !== reservationId) return false;
+  // 실패한 요청이 reservation ID만 알고 있다는 이유로, reserve 이후 같은 ID에
+  // 다른 intent/주문 결속이 기록된 예약까지 해제하면 새 소유자의 claim을 지울 수
+  // 있다. Commit과 동일하게 원본 계약 전체를 확인한 owner만 release할 수 있다.
+  if (reservation.openIntentId !== expectedOpenIntentId
+      || !sameOpenBinding(reservation.open, expectedOpenBinding)) return false;
   const next: DailyCanaryState = {
     ...current,
     launchReservation: null,
@@ -684,9 +807,9 @@ export async function claimDailyBudget(
   const reservationId = `claim:${deps.randomId()}`;
   const reserved = await reserveDailyLaunch(deps, reservationId, openIntentId, binding);
   if (!reserved.ok) return reserved;
-  const committed = await commitDailyLaunch(deps, reservationId);
+  const committed = await commitDailyLaunch(deps, reservationId, openIntentId, binding);
   if (!committed.ok) {
-    await releaseDailyLaunch(deps, reservationId).catch(() => false);
+    await releaseDailyLaunch(deps, reservationId, openIntentId, binding).catch(() => false);
   }
   return committed;
 }
@@ -729,9 +852,28 @@ export async function executeManualCanaryOpen(deps: ManualCanaryDeps, body: {
   let stored: StoredPreflight | null = null;
   try { stored = JSON.parse(storedRaw) as StoredPreflight; } catch { stored = null; }
   const nowMs = deps.now().getTime();
-  if (!stored || stored.id !== body.preflightId || !stored.ok) return reject('preflightId 불일치/무효 — 재수행 필요');
+  if (!Number.isSafeInteger(nowMs) || nowMs < 0) {
+    return reject('서버 시각 불명 — preflight 재수행 필요 (fail-closed)');
+  }
+  if (!stored
+      || typeof stored.id !== 'string'
+      || stored.id.length === 0
+      || stored.id !== body.preflightId
+      || stored.ok !== true) {
+    return reject('preflightId 불일치/무효 — 재수행 필요');
+  }
+  // JSON parse 성공만으로 durable token을 신뢰하지 않는다. 미래·문자형 시각은
+  // TTL 비교를 NaN/음수로 만들어 만료 검사를 우회할 수 있으므로 명시 차단한다.
+  if (!Number.isSafeInteger(stored.atMs) || stored.atMs < 0 || stored.atMs > nowMs) {
+    return reject('preflight 시각 손상/미래값 — 재수행 필요 (fail-closed)');
+  }
   if (nowMs - stored.atMs > MANUAL_CANARY_CAPS.preflightTtlMs) return reject('preflight 만료(120초) — 재수행 필요');
   if (stored.symbol !== req.symbol || stored.direction !== req.direction) return reject('preflight와 시장/방향 불일치 — 재수행 필요');
+  if (typeof stored.priceUsd !== 'number'
+      || !Number.isFinite(stored.priceUsd)
+      || stored.priceUsd <= 0) {
+    return reject('preflight 가격 손상 — 재수행 필요 (fail-closed)');
+  }
 
   // 실행 직전 전 조건 서버 재평가 (fail-closed)
   const re = await evaluateAllChecks(deps, req.symbol, req.direction);
@@ -739,7 +881,7 @@ export async function executeManualCanaryOpen(deps: ManualCanaryDeps, body: {
   if (failures.length > 0) return reject('실행 직전 재평가 실패 — 제출 0회', failures);
 
   // 시장가 추격 방지: preflight 대비 가격 드리프트 상한
-  if (stored.priceUsd === null || re.priceUsd === null) return reject('가격 확인 불가 — 제출 0회');
+  if (re.priceUsd === null) return reject('가격 확인 불가 — 제출 0회');
   const drift = Math.abs(re.priceUsd - stored.priceUsd) / stored.priceUsd;
   if (drift > MANUAL_CANARY_CAPS.maxPriceDriftFraction) {
     return reject(`가격 드리프트 ${(drift * 100).toFixed(2)}% > ${(MANUAL_CANARY_CAPS.maxPriceDriftFraction * 100).toFixed(1)}% — 추격 금지, preflight 재수행`);
@@ -789,21 +931,27 @@ export async function executeManualCanaryOpen(deps: ManualCanaryDeps, body: {
   try {
     evidenceRecorded = await deps.recordCostEvidenceForExecution(
       cost.snapshot,
-      { market: marketAddress, isLong, orderType: 'MarketIncrease', notionalUsd: sizeUsd },
+      {
+        market: marketAddress,
+        isLong,
+        orderType: 'MarketIncrease',
+        notionalUsd: sizeUsd,
+        executionScopeId: intentId,
+      },
       deps.now().getTime(),
     );
   } catch {
     evidenceRecorded = false;
   }
   if (!evidenceRecorded) {
-    await releaseDailyLaunch(deps, reservationId).catch(() => false);
+    await releaseDailyLaunch(deps, reservationId, intentId, openBinding).catch(() => false);
     return reject('실행 직전 비용 증거/stop capability 갱신 실패 — 제출 0회 (fail-closed)');
   }
 
   // Evidence가 준비된 동일 reservation owner만 일일 1회 claim을 확정한다.
-  const committed = await commitDailyLaunch(deps, reservationId);
+  const committed = await commitDailyLaunch(deps, reservationId, intentId, openBinding);
   if (!committed.ok) {
-    await releaseDailyLaunch(deps, reservationId).catch(() => false);
+    await releaseDailyLaunch(deps, reservationId, intentId, openBinding).catch(() => false);
     return reject(committed.reason);
   }
 
@@ -851,6 +999,11 @@ export async function executeManualCanaryClose(deps: ManualCanaryDeps, body: {
   const daily = loaded.state;
   if (!daily?.openIntentId) return reject('오늘 실행된 canary OPEN 없음');
 
+  // 영속 상태는 런타임 타입을 신뢰하지 않는다. 특히 손상된 direction을
+  // `LONG`이 아니므로 SHORT로 간주하면 다른 포지션을 선택할 수 있다.
+  const storedOpen = validateStoredOpenBinding(daily.open);
+  if (!storedOpen.ok) return reject(`${storedOpen.reason} — close 진행 금지 (fail-closed)`);
+
   const open = await deps.intentStatus(daily.openIntentId);
   if (!open) return reject('OPEN intent 조회 실패 (fail-closed)');
   if (open.status !== 'CONFIRMED') return reject(`OPEN 미확정 (${open.status}) — 온체인 CONFIRMED 후에만 close 가능`);
@@ -859,16 +1012,52 @@ export async function executeManualCanaryClose(deps: ManualCanaryDeps, body: {
   const stopActive = stop.status === 'ACTIVE' && !!stop.orderKey;
   const emergency = body.mode === 'emergency';
 
+  // CLOSE와 emergency close 모두 durable OPEN binding 없이는 어느 포지션도
+  // 선택하지 않는다. 단순히 authoritative 배열의 첫 항목을 사용하는 경로 금지.
+  const sym = storedOpen.binding.symbol;
+  const isLong = storedOpen.binding.direction === 'LONG';
+  const marketAddress = deps.marketAddress(sym);
+  if (!marketAddress) return reject('OPEN 결속 시장 주소 미확인 — 제출 0회');
+
   if (!stopActive && !emergency) {
     return reject('Stop-Loss ACTIVE 미확인 — 일반 close 금지, emergency close 경로만 허용');
   }
   if (emergency) {
     if (daily.emergencyCloseUsed) return reject('emergency close 이미 1회 사용 — 재제출 금지');
+
+    const positions = await deps.openPositions();
+    if (positions === null) return reject('온체인 포지션 조회 실패 — emergency close 제출 0회 (fail-closed)');
+    const account = deps.mainAddress().toLowerCase();
+    const matched = positions.filter(p =>
+      p.marketAddress.toLowerCase() === marketAddress.toLowerCase()
+      && p.isLong === isLong
+      && p.accountAddress.toLowerCase() === account
+    );
+    const pos = matched.length === 1 ? matched[0] : null;
+    if (!pos || !(pos.sizeUsd > 0)) {
+      return reject('결속된 canary 포지션을 온체인에서 유일하게 확인 불가 — emergency close 제출 0회');
+    }
+    const exactPosition: ClosePositionBinding = {
+      account,
+      marketAddress: pos.marketAddress.toLowerCase(),
+      collateralToken: pos.collateralToken.toLowerCase(),
+      positionKey: pos.positionKey,
+      preSizeUsd: pos.sizeUsd,
+      preSizeUsd30: pos.sizeUsd30,
+      requestedReductionUsd: pos.sizeUsd,
+      requestedReductionUsd30: pos.sizeUsd30,
+    };
     const prevRaw = loaded.raw;
     const next = { ...daily, emergencyCloseUsed: true };
     const cas = await deps.casState(STATE_KEY_DAILY, prevRaw, JSON.stringify(next));
     if (!cas) return reject('durable 상태 갱신 실패 — 제출 0회 (fail-closed)');
-    const r = await deps.runEmergencyClose(daily.openIntentId);
+    const r = await deps.runEmergencyClose({
+      openIntentId: daily.openIntentId,
+      symbol: sym,
+      marketAddress,
+      isLong,
+      exactPosition,
+    });
     return r.ok
       ? { ok: true, phase: 'SUBMITTED', reason: `emergency close: ${r.detail}`, intentId: daily.openIntentId, failures: [] }
       : { ok: false, phase: 'ERROR', reason: r.detail, intentId: daily.openIntentId, failures: [] };
@@ -878,12 +1067,8 @@ export async function executeManualCanaryClose(deps: ManualCanaryDeps, body: {
   const dayKey = manilaDayKey(deps.now());
   const decisionId = `${buildCanaryDecisionId(dayKey)}:close`;
   // 심볼/방향 = OPEN claim 시점 durable 결속 (전역 preflight 상태 사용 금지)
-  if (!daily.open) return reject('OPEN 결속 기록 없음 — emergency close 사용 (fail-closed)');
-  const sym = daily.open.symbol;
-  const isLong = daily.open.direction === 'LONG';
-  const marketAddress = deps.marketAddress(sym);
   const price = await deps.currentPriceUsd(sym);
-  if (!marketAddress || price === null) return reject('시장/가격 확인 불가 — 제출 0회');
+  if (price === null) return reject('시장/가격 확인 불가 — 제출 0회');
 
   // close 크기 및 exact 포지션 결속 = authoritative 온체인 포지션 실측 (요청/고정값 사용 금지)
   // positionKey + collateralToken을 포함한 full identity를 lower 계층에 넘겨

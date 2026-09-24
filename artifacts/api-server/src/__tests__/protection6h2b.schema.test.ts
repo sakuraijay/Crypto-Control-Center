@@ -183,6 +183,24 @@ describe('§7 action 예산', () => {
     expect(evaluateActionBudget({ remaining: '10', expiresAt: future, nowMs: now }).sufficient).toBe(false);          // 예약분 미제공
     expect(evaluateActionBudget({ remaining: '10', expiresAt: future, nowMs: now, inFlightReservedActions: null }).sufficient).toBe(false);
   });
+  it.each([
+    ['지수표기 remaining', '1e3', future, now, 0],
+    ['16진 remaining', '0x10', future, now, 0],
+    ['공백 remaining', ' 10 ', future, now, 0],
+    ['선행 0 remaining', '010', future, now, 0],
+    ['uint256 초과 remaining', (1n << 256n).toString(), future, now, 0],
+    ['지수표기 expiresAt', '10', '1e999', now, 0],
+    ['Infinity expiresAt', '10', 'Infinity', now, 0],
+    ['소수 expiresAt', '10', `${Math.floor(now / 1000) + 3600}.5`, now, 0],
+    ['uint256 초과 expiresAt', '10', (1n << 256n).toString(), now, 0],
+    ['비정상 clock', '10', future, Number.NaN, 0],
+    ['0 clock', '10', future, 0, 0],
+    ['소수 예약분', '10', future, now, 0.5],
+    ['unsafe 예약분', '10', future, now, Number.MAX_SAFE_INTEGER + 1],
+  ])('%s → action budget fail-closed', (_label, remaining, expiresAt, nowMs, inFlightReservedActions) => {
+    const result = evaluateActionBudget({ remaining, expiresAt, nowMs, inFlightReservedActions });
+    expect(result.sufficient).toBe(false);
+  });
   it('진행중 예약분 가산 — remaining=6 + 예약 2 → 부족 2', () => {
     const r = evaluateActionBudget({ remaining: '6', expiresAt: future, nowMs: now, inFlightReservedActions: 2 });
     expect(r.sufficient).toBe(false);
@@ -240,6 +258,7 @@ describe('§11 stop 실행 능력 파생', () => {
     initialStopHandoffReady: true,
     schemaVerified: true, transportConfigured: true, signerReady: true,
     durableStoreOk: true, reconciliationOk: true,
+    canonicalAuthorizationReady: true,
     actionBudgetSufficient: true, actionBudgetRemaining: 10,
     freshFeeQuote: true, uncoveredCount: 0, blockingProtectionCount: 0,
     executionUnlocked: true,
@@ -255,7 +274,8 @@ describe('§11 stop 실행 능력 파생', () => {
     for (const [k, v] of [
       ['schemaVerified', false], ['transportConfigured', false], ['signerReady', false],
       ['initialStopHandoffReady', false],
-      ['durableStoreOk', false], ['reconciliationOk', false], ['actionBudgetSufficient', false],
+      ['durableStoreOk', false], ['reconciliationOk', false], ['canonicalAuthorizationReady', false],
+      ['actionBudgetSufficient', false],
       ['freshFeeQuote', false], ['uncoveredCount', 1], ['uncoveredCount', null],
       ['blockingProtectionCount', 2], ['blockingProtectionCount', null], ['executionUnlocked', false],
     ] as const) {

@@ -87,7 +87,8 @@ describe('public readiness observational parity', () => {
       stop: {
         available: true,
         reasons: [],
-        evaluatedAt: '2026-08-28T10:01:30.000Z',
+        evaluatedAt: new Date(1_788_000_000_000).toISOString(),
+        evidenceBinding: null,
       },
       canaryReady: ready,
     });
@@ -137,7 +138,8 @@ describe('public readiness observational parity', () => {
         stop: {
           available: true,
           reasons: [],
-          evaluatedAt: '2026-08-28T10:01:30.000Z',
+          evaluatedAt: new Date(1_788_000_000_000).toISOString(),
+          evidenceBinding: null,
         },
         canaryReady: true,
       });
@@ -161,7 +163,8 @@ describe('public readiness observational parity', () => {
     const stop = {
       available: true,
       reasons: [],
-      evaluatedAt: '2026-08-28T10:01:30.000Z',
+      evaluatedAt: new Date(1_788_000_000_000).toISOString(),
+      evidenceBinding: null,
     };
 
     const beforeRefresh = buildPublicReadinessAttestation({
@@ -184,4 +187,24 @@ describe('public readiness observational parity', () => {
     expect(afterRefresh.canary.ready).toBe(true);
     expect(afterRefresh.canary.blockerIds).toEqual([]);
   });
+
+  it.each([
+    ['missing', null],
+    ['malformed', 'malformed'],
+    ['future', new Date(1_788_000_001_001).toISOString()],
+    ['expired', new Date(1_787_999_970_999).toISOString()],
+  ])('Stop capability evidence가 %s이면 상위 ready=true도 public readiness를 차단한다',
+    (_case, evaluatedAt) => {
+      const attestation = buildPublicReadinessAttestation({
+        nowMs: 1_788_000_001_000,
+        paper: paperSnapshot(),
+        stop: { available: true, reasons: [], evaluatedAt, evidenceBinding: null },
+        canaryReady: true,
+      });
+
+      expect(attestation.stop.ready).toBe(false);
+      expect(attestation.stop.blockerIds).toEqual(['PUBLIC_STOP_CAPABILITY_UNAVAILABLE']);
+      expect(attestation.canary.ready).toBe(false);
+      expect(attestation.canary.blockerIds).toContain('PUBLIC_STOP_CAPABILITY_UNAVAILABLE');
+    });
 });

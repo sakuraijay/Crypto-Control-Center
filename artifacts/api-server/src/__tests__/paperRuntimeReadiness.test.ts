@@ -20,6 +20,7 @@ import {
 } from '../lib/paperRuntimeReadiness';
 import {
   __resetExecutionEligibleCostEvidenceForTests,
+  EXECUTION_ELIGIBLE_MAX_AGE_MS,
   getExecutionEligibleCostEvidence,
   type CostSnapshot,
 } from '../lib/costSnapshot';
@@ -956,9 +957,19 @@ describe('PAPER runtime readiness cycle', () => {
     expect(maxActiveReads).toBe(1);
   });
 
-  it('완료 시점부터 최소 60초 뒤에만 다음 scheduled collection을 시작한다', async () => {
+  it('느린 collection도 시작 시점 기준 interval로 재예약한다', async () => {
     vi.useFakeTimers();
-    const deps = depsFrom(canaryResult({ roundTripCostUsd: 0.4 }));
+    const result = canaryResult({ roundTripCostUsd: 0.4 });
+    const deps = depsFrom(result);
+    let refreshCount = 0;
+    deps.refreshCanary = vi.fn(async () => {
+      refreshCount += 1;
+      if (refreshCount === 1) vi.setSystemTime(NOW + 15_000);
+      return {
+        decimals: result.decimals,
+        costs: result.costs,
+      };
+    });
     deps.nowMs = () => Date.now();
     vi.setSystemTime(NOW);
     try {
@@ -968,14 +979,21 @@ describe('PAPER runtime readiness cycle', () => {
         getPaperRuntimeReadinessSnapshot(NOW, ENV).scheduler.inFlight,
       ).toBe(false));
 
-      expect(PAPER_READINESS_REFRESH_INTERVAL_MS).toBe(60_000);
+      expect(PAPER_READINESS_REFRESH_INTERVAL_MS).toBe(20_000);
+      expect(PAPER_READINESS_REFRESH_INTERVAL_MS).toBeLessThan(
+        EXECUTION_ELIGIBLE_MAX_AGE_MS,
+      );
       const completed = getPaperRuntimeReadinessSnapshot(
         Date.now(),
         ENV,
       ).scheduler;
-      expect(completed.nextRefreshAtMs! - completed.lastCompletedAtMs!).toBe(
+      expect(completed.nextRefreshAtMs! - completed.lastAttemptAtMs!).toBe(
         PAPER_READINESS_REFRESH_INTERVAL_MS,
       );
+      const completionDelayMs =
+        completed.nextRefreshAtMs! - completed.lastCompletedAtMs!;
+      expect(completionDelayMs).toBeGreaterThan(0);
+      expect(completionDelayMs).toBeLessThanOrEqual(5_000);
       const remainingMs = completed.nextRefreshAtMs! - Date.now();
       expect(remainingMs).toBeGreaterThan(0);
       await vi.advanceTimersByTimeAsync(remainingMs - 1);

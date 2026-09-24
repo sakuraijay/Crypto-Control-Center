@@ -4,6 +4,7 @@ import { EXPECTED_CANARY_SIGNER } from './canaryAllowanceInfo';
 import { evaluateCanonicalAuthorizationFreshness } from './canonicalAuthorizationFreshness';
 import type { CanonicalSnapshot } from './relayActivationStatus';
 import { GMX_DEPLOYMENT_MANIFEST } from './gmxDeploymentManifest';
+import { parseCanonicalUint256Decimal } from './actionBudget';
 
 type StoredSignerResult =
   | { ok: true; address: string }
@@ -65,10 +66,10 @@ export async function checkManualCanaryOwnerApproval(
       return outcome(false, 'canonical readback 미확인 — Owner Approval 재사용 금지');
     }
     const nonceText = canonicalSnapshot.approvalNonce;
-    if (typeof nonceText !== 'string' || !/^(0|[1-9]\d*)$/.test(nonceText)) {
+    const canonicalNonce = parseCanonicalUint256Decimal(nonceText);
+    if (canonicalNonce === null) {
       return outcome(false, 'canonical approval nonce 누락/비정상 — Owner Approval 재사용 금지');
     }
-    const canonicalNonce = BigInt(nonceText);
 
     // Keep DB-backed signer/session modules out of import-only and injected-deps
     // paths so isolated CI tests do not require DATABASE_URL.

@@ -319,6 +319,48 @@ describe('#142 Canary Launch Contract — Success path', () => {
     expect(daily.launchReservation).toBeNull();
   });
 
+  it('failed reservation owner cannot release a same-id reservation whose intent binding changed', async () => {
+    let durableState!: Map<string, string>;
+    const recordEvidence = vi.fn(async () => {
+      const raw = durableState.get('manualCanaryDaily');
+      expect(raw).toBeDefined();
+      const daily = JSON.parse(raw!);
+      expect(daily.launchReservation).not.toBeNull();
+      // Simulate durable-state corruption/race after reserve but before the failed
+      // owner's cleanup. The reservation ID is deliberately retained.
+      daily.launchReservation.openIntentId = 'intent:open:foreign-owner';
+      durableState.set('manualCanaryDaily', JSON.stringify(daily));
+      return false;
+    });
+    const executeOrder = vi.fn(async () => ({
+      ok: true, txHash: '0xabc', orderKey: '0xkey', simulated: false, executedAt: NOW.toISOString(),
+    }));
+    const built = makeContractDeps({
+      executeOrder: executeOrder as ManualCanaryDeps['executeOrder'],
+      recordCostEvidenceForExecution: recordEvidence as ManualCanaryDeps['recordCostEvidenceForExecution'],
+    });
+    durableState = built.state;
+
+    const pf = await runCanaryPreflight(built.deps, 'BTC', 'LONG');
+    expect(pf.ok).toBe(true);
+    const result = await executeManualCanaryOpen(built.deps, {
+      preflightId: pf.preflightId,
+      confirm: CANARY_CONFIRM_OPEN,
+      symbol: 'BTC',
+      direction: 'LONG',
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.phase).toBe('REJECTED');
+    expect(executeOrder).toHaveBeenCalledTimes(0);
+    const daily = JSON.parse(durableState.get('manualCanaryDaily')!);
+    expect(daily.opens).toBe(0);
+    expect(daily.launchReservation).toMatchObject({
+      openIntentId: 'intent:open:foreign-owner',
+      open: { symbol: 'BTC', direction: 'LONG' },
+    });
+  });
+
   it('execute: recordCostEvidenceForExecution throws → fail-closed without daily budget consumption', async () => {
     const recordEvidence = vi.fn(async () => {
       throw new Error('raw recorder failure must not escape');

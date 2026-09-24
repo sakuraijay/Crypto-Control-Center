@@ -13,8 +13,8 @@ export async function runVirtualPaperDailyCycle(d:DailyCycleDeps){
   const diagnostics:{symbol:string;reason:string;details?:string[]}[]=[];const entryStages:{symbol:string;stage:string}[]=[];
   const mode=d.tradingMode??'INTRADAY';
   const outcome=(status:string,reason:string|null=null)=>({status,reason,diagnostics,entryStages,
-    policy:{...policy,...(d.policyVersion==='virtual400-daily/v3'?{version:'virtual400-daily/v3',cooldownMinutes:60,maxDailyEntries:24}:{}),...(d.policyVersion==='virtual400-daily/v4'?{version:'virtual400-daily/v4'}:{}),symbols:[...(d.markets?.keys()??[])],appliedAt:d.policyAppliedAt},
-    tradingMode:{mode,...DAILY_ENTRY_OPTIONS[mode],...(d.policyVersion!==policy.version&&mode==='INTRADAY'?{maxHoldHours:.5}:{})},at:d.now.toISOString(),mode:'VIRTUAL_PAPER_400' as const,
+    policy:{...policy,...(d.policyVersion==='virtual400-daily/v3'?{version:'virtual400-daily/v3',cooldownMinutes:60,maxDailyEntries:24}:{}),...(['virtual400-daily/v4','virtual400-daily/v5'].includes(d.policyVersion??'')?{version:d.policyVersion}:{}),symbols:[...(d.markets?.keys()??[])],appliedAt:d.policyAppliedAt},
+    tradingMode:{mode,...DAILY_ENTRY_OPTIONS[mode],...(['virtual400-daily/v3','virtual400-daily/v4'].includes(d.policyVersion??'')&&mode==='INTRADAY'?{maxHoldHours:.5}:{})},at:d.now.toISOString(),mode:'VIRTUAL_PAPER_400' as const,
     realFundsUsed:false,costBasis:'SIMULATED / ESTIMATED' as const,
     account:{...account,held:account.held.map(r=>({id:r.id,symbol:r.symbol,side:r.side,sizeUsd:r.sizeInUsd,entryPrice:r.price,stopPrice:r.stopPriceUsd,takeProfitPrice:r.takeProfitPriceUsd}))}});
   if(d.engineMode!=='PAPER'||!d.shouldContinue())return outcome('BLOCKED','PAPER_MODE_REQUIRED');
@@ -29,7 +29,7 @@ export async function runVirtualPaperDailyCycle(d:DailyCycleDeps){
   if(!account.evaluation.entryAllowed)return outcome(account.held.length?'NO_TRADE':'BLOCKED',account.evaluation.blockReasons.join('; '));
   if(account.lastOpenAtMs!==null&&d.now.getTime()-account.lastOpenAtMs<policy.cooldownMinutes*60_000)return outcome('NO_TRADE','PAPER_ENTRY_COOLDOWN');
   const profile=dailyPaperProfile(account.equityUsd??0,d.policyAppliedAt!);
-  const remainingDailyLoss=Math.max(0,account.next.risk.startOfDayEquityUsd*.1+account.next.risk.dailyLossAwareNetPnlUsd);
+  const remainingDailyLoss=account.dailyBudget!.remainingLossBudgetUsd;
   const budget=Math.min(profile.derivedLimits.maxRiskPerTradeUsd,remainingDailyLoss);
   const candidates=(await d.readDailyCandidates()).sort((a,b)=>Math.abs(b.momentum)-Math.abs(a.momentum));
   for(const candidate of candidates){

@@ -4,7 +4,10 @@ import { validateEnvAgainstManifest } from '../lib/gmxDeploymentManifest';
 import { getActiveRevokeSession } from '../lib/revokeSession';
 import { getReleaseIdentity } from '../lib/releaseIdentity';
 import { readRuntimeDbSafetyEvidence } from '../lib/runtimeSafetyEvidence';
-import { getStopExecutionCapability } from '../lib/stopExecutionCapabilityState';
+import {
+  getStopExecutionCapability,
+  isFreshStopExecutionCapability,
+} from '../lib/stopExecutionCapabilityState';
 import { getExecutorStatus } from '../workers/internalExecutor';
 import { deriveOperationalDiagnostics } from '../lib/operationalDiagnostics';
 import { buildGmxApiStatusSnapshot } from './gmxapi';
@@ -44,6 +47,10 @@ router.get('/release/safety', async (_req, res) => {
     relayFlags,
   }, identity);
   const stopCapability = getStopExecutionCapability();
+  const stopExecutionAvailable = isFreshStopExecutionCapability(
+    stopCapability,
+    Date.now(),
+  );
   const publicReadiness = (await buildGmxApiStatusSnapshot()).publicReadiness;
   return res.json({
     ok: true,
@@ -85,7 +92,7 @@ router.get('/release/safety', async (_req, res) => {
       activeRevoke,
       relayFlags,
       stopExecution: {
-        available: stopCapability.available,
+        available: stopExecutionAvailable,
         evaluatedAt: stopCapability.evaluatedAt,
       },
     },
