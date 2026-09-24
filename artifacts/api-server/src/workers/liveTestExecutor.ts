@@ -820,8 +820,7 @@ async function runGmxApiOrderPath(args: {
   });
   const canonicalNonce = (() => {
     const snap = getCanonicalSnapshot();
-    if (!snap?.approvalNonce) return null;
-    try { return BigInt(snap.approvalNonce); } catch { return null; }
+    return parseCanonicalUint256Decimal(snap?.approvalNonce ?? null);
   })();
 
   const res = await executeViaGmxApi({
@@ -997,9 +996,7 @@ export async function runConfirmedOpenInitialStopHandoff(
       const canonical = getCanonicalSnapshot();
       const owner = getConfiguredMainAccount();
       const signer = getSignerAddress();
-      let nonce: bigint | null = null;
-      try { nonce = canonical?.approvalNonce == null ? null : BigInt(canonical.approvalNonce); }
-      catch { nonce = null; }
+      const nonce = parseCanonicalUint256Decimal(canonical?.approvalNonce ?? null);
       if (!owner || !signer || !isSignerInitialized() || nonce === null) return false;
       const relay = resolveGmxLiveRelayConfig();
       if (!relay.ok) return false;
@@ -1172,8 +1169,7 @@ export function wireProtectionExecution(): void {
       openPosition: pos,
       canonicalNonce: (() => {
         const snap = getCanonicalSnapshot();
-        if (!snap?.approvalNonce) return null;
-        try { return BigInt(snap.approvalNonce); } catch { return null; }
+        return parseCanonicalUint256Decimal(snap?.approvalNonce ?? null);
       })(),
       allowedBlockingSourceOpen: req.sourceOpenTaskId
         ? { taskId: req.sourceOpenTaskId, intentId: req.parentOpenIntentId }

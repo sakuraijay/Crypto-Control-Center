@@ -54,7 +54,7 @@ import { resolveGmxEventEmitterAddress } from '../lib/gmxOrderEvents';
 import { listActiveProtections, PROTECTION_BLOCKING_SET } from '../lib/protectionOrders';
 import {
   evaluateActionBudget, ACTION_BUDGET_VERSION, AUTO_CANCEL_BUDGET_POLICY,
-  worstCasePathName, RECOMMENDED_OWNER_APPROVAL_COUNT,
+  worstCasePathName, RECOMMENDED_OWNER_APPROVAL_COUNT, parseCanonicalUint256Decimal,
 } from '../lib/actionBudget';
 import { EXECUTION_ELIGIBLE_MAX_AGE_MS, getExecutionEligibleCostEvidence } from '../lib/costSnapshot';
 import { listUncovered } from '../lib/stopLossPlan';
@@ -136,9 +136,7 @@ export async function buildGmxApiStatusSnapshot() {
     try {
       const mainAccount = env.GMX_WALLET_ADDRESS?.trim() || null;
       const storedSigner = await getStoredPublicSignerAddress(EXPECTED_CANARY_SIGNER);
-      const canonicalNonce = snap?.approvalNonce && /^\d+$/.test(snap.approvalNonce)
-        ? BigInt(snap.approvalNonce)
-        : null;
+      const canonicalNonce = parseCanonicalUint256Decimal(snap?.approvalNonce ?? null);
       if (!mainAccount || !storedSigner.ok || canonicalNonce === null) {
         approvalSessionReady = false;
       } else {

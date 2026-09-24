@@ -57,6 +57,7 @@ import { isLiveTestExecutionLocked } from '../lib/liveTestGate';
 import { readSubaccountAuthorization, type DataStoreClient } from '../lib/gmxDataStore';
 import { sanitizeRpcError } from '../lib/rpcErrorSanitize';
 import { keccak256, toHex } from 'viem';
+import { parseCanonicalUint256Decimal } from '../lib/actionBudget';
 
 const router = Router();
 
@@ -674,7 +675,7 @@ router.get('/executor/relay/activation', requireOperatorAuth, async (_req, res) 
     const canonical: CanonicalCheck = snap
       ? {
           confirmed: snap.confirmed, reason: snap.reason,
-          approvalNonce: snap.approvalNonce !== null ? BigInt(snap.approvalNonce) : null,
+          approvalNonce: parseCanonicalUint256Decimal(snap.approvalNonce),
           isSubaccountListed: snap.isSubaccountListed,
           expiresAt: snap.expiresAt, remaining: snap.remaining,
         }
