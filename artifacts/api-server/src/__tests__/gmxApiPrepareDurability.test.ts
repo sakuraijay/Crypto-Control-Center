@@ -627,6 +627,36 @@ describe('6G-3 §6 — 중앙 게이트 blocking task', () => {
     });
   });
 
+  it('SUBMITTING 영속 전환 중 다른 blocking task 등장 → 최종 재조회가 외부 submit 0회로 차단', async () => {
+    const { transport, calls } = mockTransport();
+    const reevaluateActivation = vi.fn()
+      .mockResolvedValueOnce(fullActivation())
+      .mockImplementationOnce(async () => {
+        // 첫 pre-submit blocking 조회 이후, SUBMITTING 전환 중 경쟁 task가 생긴 상황.
+        store.tasks.push({
+          id: 'late-intruder', idempotencyKey: 'k-late-intruder', kind: 'OPEN',
+          status: RELAY_TASK_STATUS.UNRESOLVED, transportGen: GMX_API_TRANSPORT_GEN,
+          createdAt: new Date(), updatedAt: new Date(),
+        });
+        return fullActivation();
+      });
+
+    const r = await runGmxApiSubmitFlow(flowInput(transport, { reevaluateActivation }));
+
+    expect(reevaluateActivation).toHaveBeenCalledTimes(2);
+    expect(r.prepareCalls).toBe(1);
+    expect(r.signCalls).toBe(1);
+    expect(r.submitCalls).toBe(0);
+    expect(calls.submit).toBe(0);
+    expect(r.submitted).toBe(false);
+    expect(r.finalStatus).toBe(RELAY_TASK_STATUS.FAILED_PRE_BROADCAST);
+    expect(r.blockReasons.join(' ')).toContain('SUBMITTING 후 다른 미종결 relay task 1건');
+    expect(store.tasks[0]).toMatchObject({
+      status: RELAY_TASK_STATUS.FAILED_PRE_BROADCAST,
+      errorClass: 'FINAL_PRE_BROADCAST_GATE',
+    });
+  });
+
   it('PAPER → durable 기록·prepare 0회', async () => {
     const { transport, calls } = mockTransport();
     const prepareSpy = vi.fn();

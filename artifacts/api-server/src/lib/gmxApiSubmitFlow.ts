@@ -15,6 +15,7 @@
  *  4. requestId 등 증거 저장 실패 = UNRESOLVED — 서명·제출 0회, 신규 실행 차단 유지.
  *  5. 서명 직전 typed data 재계산·결속 검증 실패 = 서명 0회.
  *  6. submit 직전 게이트 재평가 + 다른 blocking relay task 재확인(자기 task 1건만 제외).
+ *     SUBMITTING 영속 전환 뒤에도 둘 다 최종 재검증해 전이 중 TOCTOU를 차단한다.
  *  7. submit은 정확히 1회 — ambiguous는 UNRESOLVED, 4xx는 FAILED_PRE_BROADCAST,
  *     429는 차단(rate_limited·재시도 금지).
  *  8. 자동 재제출·자동 peer 재시도 금지 (transport가 구조적으로 차단).
@@ -412,6 +413,17 @@ export async function runGmxApiSubmitFlow(input: GmxSubmitFlowInput): Promise<Gm
   if (!finalGate.networkEligible) {
     blockReasons.push(...finalGate.missing);
     await failFinalPreBroadcastGate('SUBMITTING 후 최종 게이트 미충족 — 제출 0회');
+    return result;
+  }
+  const finalBlockingAtSubmit = await countBlockingRelayTasksOrNull({
+    transportGen: GMX_API_TRANSPORT_GEN,
+    excludeTaskIds: [result.taskRowId!],
+    excludeSourceOpen: sourceOpen,
+  });
+  if (finalBlockingAtSubmit === null || finalBlockingAtSubmit > 0) {
+    await failFinalPreBroadcastGate(finalBlockingAtSubmit === null
+      ? 'SUBMITTING 후 blocking relay task 최종 재조회 실패 — 제출 0회 (fail-closed)'
+      : `SUBMITTING 후 다른 미종결 relay task ${finalBlockingAtSubmit}건 — 제출 0회`);
     return result;
   }
 
