@@ -261,44 +261,20 @@ async function collectManualCanaryReadonlyEvidence(
     injectedReadonlyReaders?.fetchCost ?? fetchManualCanaryReadonlyCost;
   for (const symbol of MANUAL_CANARY_READONLY_SYMBOLS) {
     decimals[symbol] = await decimalsReader(symbol);
-    const cost = await costReader({
-      symbol,
-      isLong: true,
-      notionalUsd: MANUAL_CANARY_CAPS.maxNotionalUsd,
-    });
-    costs[symbol] = cost.ok
-      ? {
-        ok: true,
-        reason: null,
-        snapshot: cost.snapshot,
-        roundTripCostUsd: cost.roundTripCostUsd,
-        diagnostics: cost.diagnostics,
-      }
-      : {
-        ok: false,
-        reason: cost.reason,
-        snapshot: null,
-        roundTripCostUsd: null,
-        diagnostics: cost.diagnostics,
-      };
     const market = MARKET_BY_SYMBOL_SERVER.get(symbol);
-    const seedQuotes = new Map<number, import('./boundedCanaryEconomics').BoundedCanaryQuoteResult>();
-    if (cost.ok) seedQuotes.set(MANUAL_CANARY_CAPS.maxNotionalUsd, {
-      ok: true,
-      snapshot: cost.snapshot,
-      diagnostics: cost.diagnostics,
-    });
-    else seedQuotes.set(MANUAL_CANARY_CAPS.maxNotionalUsd, {
-      ok: false,
-      reason: cost.reason,
-      diagnostics: cost.diagnostics,
-    });
+    let capCost: ManualCanaryReadonlyCostResult | null = null;
     boundedEconomics[symbol] = market
       ? await exploreBoundedCanaryEconomics({
         symbol,
         market: market.marketToken,
         fetchQuote: async (input) => {
           const quote = await costReader(input);
+          // The bounded grid is ascending and the immutable $20 quote is last.
+          // Reuse that freshest quote for readiness instead of collecting $20
+          // before up to nine slower diagnostic reads and publishing it stale.
+          if (input.notionalUsd === MANUAL_CANARY_CAPS.maxNotionalUsd) {
+            capCost = quote;
+          }
           return quote.ok
             ? {
               ok: true,
@@ -312,7 +288,6 @@ async function collectManualCanaryReadonlyEvidence(
             };
         },
         nowMs: () => Date.now(),
-        seedQuotes,
       })
       : {
         status: 'UNAVAILABLE',
@@ -342,6 +317,58 @@ async function collectManualCanaryReadonlyEvidence(
         detail: '공식 market registry 없음',
         failedNotionalUsd: null,
         componentDiagnostics: [],
+      };
+
+    // An early bounded-grid failure may occur before its final $20 point. Keep
+    // the canonical readiness quote available with one explicit fail-closed
+    // fallback; successful grids reuse their already-collected cap quote.
+    const cost = capCost ?? await costReader({
+      symbol,
+      isLong: true,
+      notionalUsd: MANUAL_CANARY_CAPS.maxNotionalUsd,
+    });
+    costs[symbol] = cost.ok
+      ? {
+        ok: true,
+        reason: null,
+        snapshot: cost.snapshot,
+        roundTripCostUsd: cost.roundTripCostUsd,
+        diagnostics: cost.diagnostics,
+      }
+      : {
+        ok: false,
+        reason: cost.reason,
+        snapshot: null,
+        roundTripCostUsd: null,
+        diagnostics: cost.diagnostics,
+      };
+  }
+
+  // BTC is collected before ETH to preserve deterministic single-read
+  // concurrency. If its bounded grid succeeded, one final exact-$20 refresh
+  // prevents the later ETH diagnostic grid from aging BTC past the 30s OPEN
+  // eligibility window. ETH already owns the final grid quote. Failed BTC
+  // evidence remains fail-closed and is not retried here.
+  if (costs.BTC?.ok) {
+    const refreshedBtc = await costReader({
+      symbol: 'BTC',
+      isLong: true,
+      notionalUsd: MANUAL_CANARY_CAPS.maxNotionalUsd,
+    });
+    costs.BTC = refreshedBtc.ok
+      ? {
+        ok: true,
+        reason: null,
+        snapshot: refreshedBtc.snapshot,
+        roundTripCostUsd: refreshedBtc.roundTripCostUsd,
+        diagnostics: refreshedBtc.diagnostics,
+      }
+      : {
+        ok: false,
+        reason: refreshedBtc.reason,
+        snapshot: null,
+        roundTripCostUsd: null,
+        diagnostics: refreshedBtc.diagnostics,
       };
   }
   return { decimals, costs, boundedEconomics };
