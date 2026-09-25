@@ -306,6 +306,43 @@ describe('intentReconciler — 온체인 판정 (fail-closed)', () => {
     expect(r.resolutions[0]).toMatchObject({ intentId: 'intent:close:d1', status: 'CONFIRMED' });
   });
 
+  it('production 보호-handoff 모드: executed OPEN은 증거만 저장하고 blocking 유지', async () => {
+    state.blockingRows = [intent({ id: 'intent:open:protected', orderType: 'open' })];
+    const client = mockClient({
+      getTransactionReceipt: async () => successReceipt([createdLog()]),
+      getOrderResolutionLogs: async () => [resolutionLog('OrderExecuted')],
+    });
+    const r = await reconcileBlockingIntentsOnchain(
+      () => client,
+      { deferExecutedOpenToProtectionHandoff: true },
+    );
+    expect(r.resolutions).toEqual([]);
+    expect(r.stillBlocking).toBe(1);
+    expect(state.resolveCalls).toEqual([]);
+    expect(state.evidenceCalls.at(-1)?.evidence).toMatchObject({
+      orderKey: KEY,
+      resolutionTxHash: '0xResTx',
+      resolutionBlock: '456',
+    });
+    expect(String(state.evidenceCalls.at(-1)?.evidence.resolutionReason))
+      .toContain('INITIAL_STOP handoff 완료 전');
+  });
+
+  it('production 보호-handoff 모드: executed CLOSE는 기존대로 CONFIRMED', async () => {
+    state.blockingRows = [intent({ id: 'intent:close:protected', orderType: 'close' })];
+    const client = mockClient({
+      getTransactionReceipt: async () => successReceipt([createdLog()]),
+      getOrderResolutionLogs: async () => [resolutionLog('OrderExecuted')],
+    });
+    const r = await reconcileBlockingIntentsOnchain(
+      () => client,
+      { deferExecutedOpenToProtectionHandoff: true },
+    );
+    expect(r.resolutions).toEqual([
+      expect.objectContaining({ intentId: 'intent:close:protected', status: 'CONFIRMED' }),
+    ]);
+  });
+
   it('기존 orderKey 보유 intent → receipt 로그 재파싱 없이 이벤트 조회로 직행', async () => {
     state.blockingRows = [intent({ orderKey: KEY, orderCreatedBlock: '90' })];
     const client = mockClient({

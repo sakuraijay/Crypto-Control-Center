@@ -443,7 +443,10 @@ export async function reconcileOnRestart(): Promise<boolean> {
 
     // 차단 intent가 있으면 온체인 증거로 판정 시도 (RPC 오류 → 차단 유지, throw 안 함)
     if (intentResult.ok && intentResult.blockingCount > 0) {
-      const summary = await reconcileBlockingIntentsOnchain();
+      const summary = await reconcileBlockingIntentsOnchain(
+        undefined,
+        { deferExecutedOpenToProtectionHandoff: true },
+      );
       await applyIntentResolutionsToAuditLog(summary.resolutions);
     }
     // 판정 후 잔여 차단 intent 재조회 (조회 실패 → true, fail-closed)
@@ -1434,7 +1437,10 @@ export async function runPeriodicIntentReconciliation(): Promise<void> {
   try { await runProtectionPass(); } catch { /* runProtectionPass도 내부 fail-closed */ }
   try {
     if (await hasBlockingIntents()) {
-      const summary = await reconcileBlockingIntentsOnchain();
+      const summary = await reconcileBlockingIntentsOnchain(
+        undefined,
+        { deferExecutedOpenToProtectionHandoff: true },
+      );
       await applyIntentResolutionsToAuditLog(summary.resolutions);
       console.info(`[LiveTestExecutor] 주기 reconciliation: ${summary.resolutions.length}건 판정`);
     }
