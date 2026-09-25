@@ -259,7 +259,7 @@ async function collectManualCanaryReadonlyEvidence(
     injectedReadonlyReaders?.resolveDecimals ?? resolveCanarySymbolDecimals;
   const costReader =
     injectedReadonlyReaders?.fetchCost ?? fetchManualCanaryReadonlyCost;
-  await Promise.all(MANUAL_CANARY_READONLY_SYMBOLS.map(async (symbol) => {
+  for (const symbol of MANUAL_CANARY_READONLY_SYMBOLS) {
     decimals[symbol] = await decimalsReader(symbol);
     const market = MARKET_BY_SYMBOL_SERVER.get(symbol);
     let capCost: ManualCanaryReadonlyCostResult | null = null;
@@ -321,7 +321,7 @@ async function collectManualCanaryReadonlyEvidence(
 
     // An early bounded-grid failure may occur before its final $20 point. Keep
     // the canonical readiness quote available with one explicit fail-closed
-    // fallback. Successful grids add no external reads compared with before.
+    // fallback; successful grids reuse their already-collected cap quote.
     const cost = capCost ?? await costReader({
       symbol,
       isLong: true,
@@ -342,7 +342,35 @@ async function collectManualCanaryReadonlyEvidence(
         roundTripCostUsd: null,
         diagnostics: cost.diagnostics,
       };
-  }));
+  }
+
+  // BTC is collected before ETH to preserve deterministic single-read
+  // concurrency. If its bounded grid succeeded, one final exact-$20 refresh
+  // prevents the later ETH diagnostic grid from aging BTC past the 30s OPEN
+  // eligibility window. ETH already owns the final grid quote. Failed BTC
+  // evidence remains fail-closed and is not retried here.
+  if (costs.BTC?.ok) {
+    const refreshedBtc = await costReader({
+      symbol: 'BTC',
+      isLong: true,
+      notionalUsd: MANUAL_CANARY_CAPS.maxNotionalUsd,
+    });
+    costs.BTC = refreshedBtc.ok
+      ? {
+        ok: true,
+        reason: null,
+        snapshot: refreshedBtc.snapshot,
+        roundTripCostUsd: refreshedBtc.roundTripCostUsd,
+        diagnostics: refreshedBtc.diagnostics,
+      }
+      : {
+        ok: false,
+        reason: refreshedBtc.reason,
+        snapshot: null,
+        roundTripCostUsd: null,
+        diagnostics: refreshedBtc.diagnostics,
+      };
+  }
   return { decimals, costs, boundedEconomics };
 }
 

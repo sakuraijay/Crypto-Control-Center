@@ -105,7 +105,7 @@ describe('manualCanaryReadonlyEvidence import isolation', () => {
 
     for (const symbol of ['BTC', 'ETH'] as const) {
       const symbolCalls = calls.filter((call) => call.symbol === symbol);
-      expect(symbolCalls).toHaveLength(10);
+      expect(symbolCalls).toHaveLength(symbol === 'BTC' ? 11 : 10);
       expect(symbolCalls.at(-1)?.notionalUsd).toBe(20);
       expect(result.costs[symbol]).toMatchObject({
         ok: true,
