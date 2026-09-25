@@ -463,6 +463,16 @@ describe('relay_reverted / cancelled', () => {
     expect(s.transitioned).toBe(1);
     expect(transitionSpy.mock.calls[0][0]).toMatchObject({ to: 'FAILED' });
     expect(resolveIntentSpy).toHaveBeenCalledWith('intent:open:d1', 'FAILED', expect.anything());
+    expect(resolveIntentSpy.mock.invocationCallOrder[0]).toBeLessThan(transitionSpy.mock.invocationCallOrder[0]);
+  });
+
+  it('relay_reverted intent FAILED 저장 실패 → relay task를 blocking으로 유지', async () => {
+    dbState.rows = [row()];
+    resolveIntentSpy.mockResolvedValue(false);
+    const t = makeTransport(() => ({ status: 'relay_reverted', requestId: 'req-1', executionTxHash: TX }));
+    const s = await reconcileGmxApiTasks(deps(t, makeOnchain(receiptReverted)));
+    expect(s).toMatchObject({ transitioned: 0, errors: 1 });
+    expect(transitionSpy).not.toHaveBeenCalled();
   });
 
   it('relay_reverted 보고 + receipt success 모순 → UNRESOLVED', async () => {
@@ -484,6 +494,42 @@ describe('relay_reverted / cancelled', () => {
     expect(s.transitioned).toBe(1);
     expect(transitionSpy.mock.calls[0][0]).toMatchObject({ to: 'CANCELLED' });
     expect(resolveIntentSpy).toHaveBeenCalledWith('intent:open:d1', 'CANCELLED', expect.anything());
+    expect(resolveIntentSpy.mock.invocationCallOrder[0]).toBeLessThan(transitionSpy.mock.invocationCallOrder[0]);
+  });
+
+  it('cancelled intent 저장 실패 → relay task를 blocking으로 유지', async () => {
+    dbState.rows = [row()];
+    eventsState.classify = {
+      kind: 'cancelled', txHash: TX, blockNumber: '100',
+      emitterAddress: '0x' + 'e'.repeat(40),
+    };
+    resolveIntentSpy.mockResolvedValue(false);
+    const t = makeTransport(() => ({ status: 'cancelled', requestId: 'req-1', executionTxHash: TX, orderKeys: [ORDER_KEY] }));
+    const s = await reconcileGmxApiTasks(deps(t, makeOnchain(receiptSuccess)));
+    expect(s).toMatchObject({ transitioned: 0, errors: 1 });
+    expect(transitionSpy).not.toHaveBeenCalled();
+  });
+
+  it('cancelled intent 선행 terminal 뒤 재시작 → 동일 증거를 확인해 task까지 수렴', async () => {
+    dbState.rows = [row()];
+    eventsState.classify = {
+      kind: 'cancelled', txHash: TX, blockNumber: '100',
+      emitterAddress: '0x' + 'e'.repeat(40),
+    };
+    resolveIntentSpy.mockResolvedValue(false);
+    terminalIntentState.current = {
+      status: 'CANCELLED',
+      resolutionTxHash: TX,
+      orderKey: ORDER_KEY,
+      receiptStatus: 'success',
+      resolutionBlock: '100',
+      orderEmitterAddress: '0x' + 'e'.repeat(40),
+      resolutionReason: '온체인 OrderCancelled',
+    };
+    const t = makeTransport(() => ({ status: 'cancelled', requestId: 'req-1', executionTxHash: TX, orderKeys: [ORDER_KEY] }));
+    const s = await reconcileGmxApiTasks(deps(t, makeOnchain(receiptSuccess)));
+    expect(s).toMatchObject({ transitioned: 1, errors: 0 });
+    expect(transitionSpy).toHaveBeenCalledWith(expect.objectContaining({ to: 'CANCELLED' }));
   });
 
   it('cancelled 보고 + 온체인 OrderCancelled 부재 → UNRESOLVED', async () => {

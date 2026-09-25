@@ -287,16 +287,22 @@ async function reconcileOneTask(row: RelayTaskRow, deps: GmxReconcileDeps, summa
   if (verdict.action === 'fail_pending_receipt') {
     // relay_reverted: 온체인 receipt reverted일 때만 FAILED
     if (receipt.status === 'reverted') {
+      // task를 먼저 terminal로 만들면 intent 저장 실패 뒤 재스캔 대상이 사라진다.
+      // intent를 먼저 저장하고, 이미 동일 증거로 terminal인 경우도 확인해 재시작 수렴한다.
+      const intentResolved = await resolveLinkedIntent(row, 'FAILED', {
+        txHash, orderKey: null, basis: '온체인 receipt revert',
+        receiptStatus: 'reverted', resolutionBlock: receipt.blockNumber == null ? null : String(receipt.blockNumber),
+      });
+      if (!intentResolved) {
+        summary.errors += 1;
+        return;
+      }
       const t = await transitionRelayTask({
         taskId: row.id, from: row.status as RelayTaskStatus, to: RELAY_TASK_STATUS.FAILED,
         patch: { txHash, resolutionBasis: `GMX relay_reverted + 온체인 receipt revert 확인 (tx=${txHash})` },
       });
       if (t.ok) {
         summary.transitioned += 1;
-        await resolveLinkedIntent(row, 'FAILED', {
-          txHash, orderKey: null, basis: '온체인 receipt revert',
-          receiptStatus: 'reverted', resolutionBlock: receipt.blockNumber == null ? null : String(receipt.blockNumber),
-        });
       } else summary.errors += 1;
     } else {
       // 보고와 온체인 모순 — 조사 필요
@@ -443,20 +449,24 @@ async function reconcileOneTask(row: RelayTaskRow, deps: GmxReconcileDeps, summa
   // cancelled — 온체인 OrderCancelled 근거 확인 후에만 CANCELLED
   if (verdict.action === 'cancelled') {
     if (resolution?.kind === 'cancelled') {
+      const intentResolved = await resolveLinkedIntent(row, 'CANCELLED', {
+        txHash,
+        orderKey,
+        basis: '온체인 OrderCancelled',
+        receiptStatus: 'success',
+        resolutionBlock: resolution.blockNumber,
+        emitterAddress: resolution.emitterAddress,
+      });
+      if (!intentResolved) {
+        summary.errors += 1;
+        return;
+      }
       const t = await transitionRelayTask({
         taskId: row.id, from: row.status as RelayTaskStatus, to: RELAY_TASK_STATUS.CANCELLED,
         patch: { txHash, orderKey, resolutionBasis: `GMX cancelled + 온체인 OrderCancelled (tx=${txHash})` },
       });
       if (t.ok) {
         summary.transitioned += 1;
-        await resolveLinkedIntent(row, 'CANCELLED', {
-          txHash,
-          orderKey,
-          basis: '온체인 OrderCancelled',
-          receiptStatus: 'success',
-          resolutionBlock: resolution.blockNumber,
-          emitterAddress: resolution.emitterAddress,
-        });
       } else summary.errors += 1;
     } else {
       const t = await transitionRelayTask({
