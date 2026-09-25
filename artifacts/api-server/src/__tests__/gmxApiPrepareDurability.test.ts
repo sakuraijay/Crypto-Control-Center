@@ -605,6 +605,28 @@ describe('6G-3 §6 — 중앙 게이트 blocking task', () => {
     expect(r.finalStatus).toBe(RELAY_TASK_STATUS.CANCELLED);
   });
 
+  it('SUBMITTING 영속 전환 중 canonical/action-budget 권한 변경 → 최종 게이트가 외부 submit 0회로 차단', async () => {
+    const { transport, calls } = mockTransport();
+    const reevaluateActivation = vi.fn()
+      .mockResolvedValueOnce(fullActivation())
+      .mockResolvedValueOnce(fullActivation({ canonicalAuthorized: false }));
+
+    const r = await runGmxApiSubmitFlow(flowInput(transport, { reevaluateActivation }));
+
+    expect(reevaluateActivation).toHaveBeenCalledTimes(2);
+    expect(r.prepareCalls).toBe(1);
+    expect(r.signCalls).toBe(1);
+    expect(r.submitCalls).toBe(0);
+    expect(calls.submit).toBe(0);
+    expect(r.submitted).toBe(false);
+    expect(r.finalStatus).toBe(RELAY_TASK_STATUS.FAILED_PRE_BROADCAST);
+    expect(r.blockReasons.join(' ')).toContain('SUBMITTING 후 최종 게이트 미충족');
+    expect(store.tasks[0]).toMatchObject({
+      status: RELAY_TASK_STATUS.FAILED_PRE_BROADCAST,
+      errorClass: 'FINAL_PRE_BROADCAST_GATE',
+    });
+  });
+
   it('PAPER → durable 기록·prepare 0회', async () => {
     const { transport, calls } = mockTransport();
     const prepareSpy = vi.fn();
