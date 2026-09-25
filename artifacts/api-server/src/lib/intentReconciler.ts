@@ -134,12 +134,23 @@ export interface OnchainReconcileSummary {
   stillBlocking: number;
 }
 
+export interface OnchainReconcileOptions {
+  /**
+   * GMX API v2 OPEN은 relay task reconciler가 finalized OrderExecuted와
+   * durable INITIAL_STOP handoff를 함께 완료한 뒤에만 CONFIRMED로 만든다.
+   * generic intent reconciler가 먼저 terminal 전환하지 않도록 production
+   * wiring에서 활성화한다. CANCELLED와 CLOSE 판정은 기존대로 처리한다.
+   */
+  deferExecutedOpenToProtectionHandoff?: boolean;
+}
+
 /**
  * 차단 intent들을 온체인 증거로 판정. RPC/조회 오류는 개별 intent 차단 유지로
  * 흡수되며 절대 throw하지 않는다 (Worker 중단 방지).
  */
 export async function reconcileBlockingIntentsOnchain(
   clientFactory: () => OnchainClient = createViemOnchainClient,
+  options: OnchainReconcileOptions = {},
 ): Promise<OnchainReconcileSummary> {
   const blocking = await listBlockingIntents();
   if (blocking === null) return { ok: false, checked: 0, resolutions: [], stillBlocking: -1 };
@@ -179,7 +190,7 @@ export async function reconcileBlockingIntentsOnchain(
 
   for (const intent of blocking) {
     try {
-      const resolved = await reconcileSingleIntent(client, intent, configuredEmitter);
+      const resolved = await reconcileSingleIntent(client, intent, configuredEmitter, options);
       if (resolved) resolutions.push(resolved);
       else stillBlocking++;
     } catch (e) {
@@ -202,6 +213,7 @@ async function reconcileSingleIntent(
   client: OnchainClient,
   intent: IntentRow,
   configuredEmitter: string,
+  options: OnchainReconcileOptions,
 ): Promise<IntentResolution | null> {
   // 허용 emitter 집합: 현재 설정값 ∪ 이 intent에 영속된 과거 매칭 주소.
   // GMX upgrade로 주소가 교체돼도 기존 intent는 저장된 주소로 계속 판정 가능하다.
@@ -286,6 +298,23 @@ async function reconcileSingleIntent(
   const resolutionBlock = BigInt(resolution.blockNumber);
   if (latest < resolutionBlock
       || latest - resolutionBlock < BigInt(EVIDENCE_CONFIRMATION_DEPTH)) {
+    return null;
+  }
+
+  if (resolution.kind === 'executed'
+      && intent.orderType === 'open'
+      && options.deferExecutedOpenToProtectionHandoff === true) {
+    // OPEN terminal 전환은 gmxApiStatusReconciler의 confirmed-OPEN handoff가
+    // INITIAL_STOP durable 상태와 함께 수렴시킨다. 여기서는 최종 온체인
+    // 증거만 보존하고 intent를 blocking으로 유지한다.
+    await updateIntentEvidence(intent.id, {
+      receiptStatus: 'success',
+      orderKey,
+      orderCreatedBlock: createdBlock ?? undefined,
+      resolutionTxHash: resolution.txHash,
+      resolutionBlock: resolution.blockNumber,
+      resolutionReason: 'OrderExecuted 확인 — durable INITIAL_STOP handoff 완료 전 OPEN terminal 전환 보류',
+    });
     return null;
   }
 
