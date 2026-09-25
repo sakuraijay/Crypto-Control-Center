@@ -42,14 +42,10 @@ describe('manualCanaryReadonlyEvidence import isolation', () => {
 
     const result = await adapter.refreshManualCanaryReadonlyEvidence();
 
-    expect(calls).toEqual([
-      'decimals:BTC',
-      'cost:BTC',
-      'cost:BTC',
-      'decimals:ETH',
-      'cost:ETH',
-      'cost:ETH',
-    ]);
+    expect(calls.filter((call) => call === 'decimals:BTC')).toHaveLength(1);
+    expect(calls.filter((call) => call === 'decimals:ETH')).toHaveLength(1);
+    expect(calls.filter((call) => call === 'cost:BTC')).toHaveLength(2);
+    expect(calls.filter((call) => call === 'cost:ETH')).toHaveLength(2);
     expect(result.decimals.BTC.ok).toBe(true);
     expect(result.costs.BTC).toMatchObject({
       ok: false,
@@ -64,6 +60,62 @@ describe('manualCanaryReadonlyEvidence import isolation', () => {
         complete: false,
       },
     });
+    expect(forbiddenLoads).toEqual([]);
+  });
+
+  it('publishes each symbol from the final $20 grid quote without an extra successful read', async () => {
+    const adapter = await import('../lib/manualCanaryReadonlyEvidence');
+    const calls: Array<{ symbol: string; notionalUsd: number }> = [];
+    adapter.__setManualCanaryReadonlyReadersForTests({
+      resolveDecimals: async (symbol) => ({ ok: true, detail: `${symbol} verified` }),
+      fetchCost: async ({ symbol, notionalUsd }) => {
+        calls.push({ symbol, notionalUsd });
+        const observedAt = Date.now();
+        return {
+          ok: true as const,
+          roundTripCostUsd: 0.2,
+          snapshot: {
+            market: symbol === 'BTC'
+              ? '0x7C11F78Ce78768518D743E81Fdfa2F860C6b9A77'
+              : '0x70d95587d40A2caf56bd97485aB3Eec10Bee6336',
+            isLong: true,
+            orderType: 'MarketIncrease' as const,
+            notionalUsd,
+            positionFeeUsd: 0.2,
+            executionFeeUsd: 0,
+            estimatedPriceImpactUsd: 0,
+            fundingFeeUsd: 0,
+            borrowingFeeUsd: 0,
+            estimatedExitFeeUsd: 0,
+            estimatedExitPriceImpactUsd: 0,
+            fundingRatePerHourFraction: 0,
+            borrowingRatePerHourFraction: 0,
+            totalEstimatedRoundTripCostUsd: 0.2,
+            source: 'GMX_API' as const,
+            blockNumber: null,
+            apiTimestamp: new Date(observedAt).toISOString(),
+            fetchedAt: new Date(observedAt).toISOString(),
+            expiresAt: new Date(observedAt + 60_000).toISOString(),
+          },
+        };
+      },
+    });
+
+    const result = await adapter.refreshManualCanaryReadonlyEvidence();
+
+    for (const symbol of ['BTC', 'ETH'] as const) {
+      const symbolCalls = calls.filter((call) => call.symbol === symbol);
+      expect(symbolCalls).toHaveLength(10);
+      expect(symbolCalls.at(-1)?.notionalUsd).toBe(20);
+      expect(result.costs[symbol]).toMatchObject({
+        ok: true,
+        roundTripCostUsd: 0.2,
+        snapshot: { notionalUsd: 20 },
+      });
+      expect(result.boundedEconomics?.[symbol]).toMatchObject({
+        search: { fetchedQuoteCount: 10, complete: true },
+      });
+    }
     expect(forbiddenLoads).toEqual([]);
   });
 });
