@@ -798,7 +798,9 @@ describe('finalized OPEN → real initial-stop protection composition', () => {
     const first = await reconcile();
     expect(first.summary.transitioned).toBe(0);
     expect(state.relayTasks.get(TASK_ID)?.status).toBe('TASK_ACCEPTED');
-    expect(state.resolvedIntents.has(INTENT_ID)).toBe(false);
+    // handoff가 durable해진 뒤 intent를 먼저 terminal로 저장한다. relay task CAS가
+    // 실패해도 task는 차단 상태라 신규 OPEN을 막고, 다음 pass에서 수렴한다.
+    expect(state.resolvedIntents.get(INTENT_ID)).toBe('CONFIRMED');
     expect(submit).toHaveBeenCalledTimes(2);
     expect(submit.mock.calls.map(([request]) => request.purpose)).toEqual([
       'INITIAL_STOP', 'EMERGENCY_CLOSE',

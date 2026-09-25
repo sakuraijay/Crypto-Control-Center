@@ -31,7 +31,7 @@ import {
   type RawLog,
 } from './gmxOrderEvents';
 import { createViemOnchainClient, type OnchainClient } from './intentReconciler';
-import { resolveIntentTerminal } from './executionIntents';
+import { getExecutionIntent, resolveIntentTerminal } from './executionIntents';
 import { EVIDENCE_CONFIRMATION_DEPTH } from './protectionEvidence';
 
 const OPEN_GMX_STATUSES: RelayTaskStatus[] = [
@@ -158,18 +158,33 @@ async function resolveLinkedIntent(
     resolutionBlock?: string | null;
     emitterAddress?: string;
   },
-): Promise<void> {
-  if (!row.intentId) return;
+): Promise<boolean> {
+  if (!row.intentId) return true;
+  const intentEvidence = {
+    resolutionTxHash: evidence.txHash,
+    orderKey: evidence.orderKey ?? undefined,
+    receiptStatus: evidence.receiptStatus,
+    resolutionBlock: evidence.resolutionBlock,
+    orderEmitterAddress: evidence.emitterAddress,
+    resolutionReason: evidence.basis,
+  };
   try {
-    await resolveIntentTerminal(row.intentId, status, {
-      resolutionTxHash: evidence.txHash,
-      orderKey: evidence.orderKey ?? undefined,
-      receiptStatus: evidence.receiptStatus,
-      resolutionBlock: evidence.resolutionBlock,
-      orderEmitterAddress: evidence.emitterAddress,
-      resolutionReason: evidence.basis,
-    });
-  } catch { /* intent 해소 실패 → blocking 유지 (fail-closed) */ }
+    if (await resolveIntentTerminal(row.intentId, status, intentEvidence)) return true;
+  } catch { /* 아래 권위 행 확인으로 수렴 여부를 판정한다. */ }
+
+  // intent가 먼저 terminal로 저장된 직후 task 전환 전에 프로세스가 중단될 수 있다.
+  // 다음 pass에서 같은 온체인 증거와 정확히 일치하는 terminal intent만 성공으로
+  // 인정해 task 전환을 재시도한다. 조회 실패/불일치는 계속 차단한다.
+  const current = await getExecutionIntent(row.intentId);
+  if (!current || current.status !== status) return false;
+  const sameHex = (left: string | null | undefined, right: string | null | undefined) =>
+    (left ?? '').toLowerCase() === (right ?? '').toLowerCase();
+  return sameHex(current.resolutionTxHash, intentEvidence.resolutionTxHash)
+    && sameHex(current.orderKey, intentEvidence.orderKey)
+    && current.receiptStatus === (intentEvidence.receiptStatus ?? null)
+    && current.resolutionBlock === (intentEvidence.resolutionBlock ?? null)
+    && sameHex(current.orderEmitterAddress, intentEvidence.orderEmitterAddress)
+    && current.resolutionReason === intentEvidence.resolutionReason;
 }
 
 /** 단일 task 판정 — 순수 로직 분리를 위해 receipt 증거 수집 포함 */
@@ -363,13 +378,10 @@ async function reconcileOneTask(row: RelayTaskRow, deps: GmxReconcileDeps, summa
           return;
         }
         if (!handoff.handled) return;
-      }
-      const t = await transitionRelayTask({
-        taskId: row.id, from: row.status as RelayTaskStatus, to: RELAY_TASK_STATUS.CONFIRMED,
-        patch: { txHash, orderKey, resolutionBasis: `GMX executed + 온체인 OrderExecuted (tx=${txHash} orderKey=${orderKey})` },
-      });
-      if (t.ok) {
-        summary.transitioned += 1;
+
+        // Stop handoff 뒤 task를 먼저 terminal로 만들면 intent 저장 1회 실패 시
+        // 재스캔 대상이 사라진다. 증거와 intent를 먼저 영속화하고, 둘 다 확인된
+        // 경우에만 task를 terminal로 전환한다. 중간 재시작은 위 exact-match 확인으로 수렴한다.
         const terminalEvidenceStored = await patchTask(row.id, {
           gmxExecutionTxHash: txHash,
           gmxOrderKeys: JSON.stringify([orderKey]),
@@ -378,7 +390,7 @@ async function reconcileOneTask(row: RelayTaskRow, deps: GmxReconcileDeps, summa
           summary.errors += 1;
           return;
         }
-        await resolveLinkedIntent(row, 'CONFIRMED', {
+        const intentResolved = await resolveLinkedIntent(row, 'CONFIRMED', {
           txHash,
           orderKey,
           basis: '온체인 OrderExecuted',
@@ -386,6 +398,35 @@ async function reconcileOneTask(row: RelayTaskRow, deps: GmxReconcileDeps, summa
           resolutionBlock: resolution.blockNumber,
           emitterAddress: resolution.emitterAddress,
         });
+        if (!intentResolved) {
+          summary.errors += 1;
+          return;
+        }
+      }
+      const t = await transitionRelayTask({
+        taskId: row.id, from: row.status as RelayTaskStatus, to: RELAY_TASK_STATUS.CONFIRMED,
+        patch: { txHash, orderKey, resolutionBasis: `GMX executed + 온체인 OrderExecuted (tx=${txHash} orderKey=${orderKey})` },
+      });
+      if (t.ok) {
+        summary.transitioned += 1;
+        if (row.kind !== 'OPEN') {
+          const terminalEvidenceStored = await patchTask(row.id, {
+            gmxExecutionTxHash: txHash,
+            gmxOrderKeys: JSON.stringify([orderKey]),
+          });
+          if (!terminalEvidenceStored) {
+            summary.errors += 1;
+            return;
+          }
+          await resolveLinkedIntent(row, 'CONFIRMED', {
+            txHash,
+            orderKey,
+            basis: '온체인 OrderExecuted',
+            receiptStatus: 'success',
+            resolutionBlock: resolution.blockNumber,
+            emitterAddress: resolution.emitterAddress,
+          });
+        }
       } else summary.errors += 1;
     } else {
       // executed 보고인데 온체인 OrderExecuted 이벤트 없음 — 보고만으로 CONFIRMED 금지

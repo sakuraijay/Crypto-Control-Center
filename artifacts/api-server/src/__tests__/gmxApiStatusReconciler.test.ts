@@ -60,9 +60,14 @@ vi.mock('../lib/relayLifecycle', async (importOriginal) => {
   return { ...actual, transitionRelayTask: transitionSpy };
 });
 const resolveIntentSpy = vi.hoisted(() => vi.fn(async () => true));
+const terminalIntentState = vi.hoisted(() => ({ current: null as Record<string, unknown> | null }));
 vi.mock('../lib/executionIntents', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../lib/executionIntents')>();
-  return { ...actual, resolveIntentTerminal: resolveIntentSpy };
+  return {
+    ...actual,
+    resolveIntentTerminal: resolveIntentSpy,
+    getExecutionIntent: vi.fn(async () => terminalIntentState.current),
+  };
 });
 const eventsState = vi.hoisted(() => ({
   classify: null as null | {
@@ -141,6 +146,8 @@ beforeEach(() => {
   transitionSpy.mockClear();
   transitionSpy.mockResolvedValue({ ok: true } as never);
   resolveIntentSpy.mockClear();
+  resolveIntentSpy.mockResolvedValue(true);
+  terminalIntentState.current = null;
   eventsState.classify = null;
   eventsState.extract = { ok: true, orderKey: ORDER_KEY, emitterAddress: '0xE' };
   setConfirmedOpenHandoff(async () => ({ handled: true, basis: 'test durable handoff' }));
@@ -274,6 +281,46 @@ describe('executed — 온체인 교차검증 후에만 CONFIRMED', () => {
     expect(s.transitioned).toBe(1);
     expect(transitionSpy.mock.calls[0][0]).toMatchObject({ to: 'CONFIRMED', patch: { txHash: TX, orderKey: ORDER_KEY } });
     expect(resolveIntentSpy).toHaveBeenCalledWith('intent:open:d1', 'CONFIRMED', expect.objectContaining({ resolutionTxHash: TX, orderKey: ORDER_KEY }));
+    expect(resolveIntentSpy.mock.invocationCallOrder[0]).toBeLessThan(transitionSpy.mock.invocationCallOrder[0]);
+  });
+
+  it('OPEN intent terminal 저장 실패 → relay task를 terminal로 만들지 않고 재시도 가능하게 유지', async () => {
+    dbState.rows = [row()];
+    eventsState.classify = {
+      kind: 'executed', txHash: TX, blockNumber: '100',
+      emitterAddress: '0x' + 'e'.repeat(40),
+    };
+    resolveIntentSpy.mockResolvedValue(false);
+    const t = makeTransport(() => ({
+      status: 'executed', requestId: 'req-1', executionTxHash: TX, orderKeys: [ORDER_KEY],
+    }));
+    const s = await reconcileGmxApiTasks(deps(t, makeOnchain(receiptSuccess)));
+    expect(s).toMatchObject({ transitioned: 0, errors: 1 });
+    expect(transitionSpy).not.toHaveBeenCalled();
+  });
+
+  it('intent 선행 terminal 뒤 재시작 → 동일 증거를 확인하고 relay task까지 수렴', async () => {
+    dbState.rows = [row()];
+    eventsState.classify = {
+      kind: 'executed', txHash: TX, blockNumber: '100',
+      emitterAddress: '0x' + 'e'.repeat(40),
+    };
+    resolveIntentSpy.mockResolvedValue(false);
+    terminalIntentState.current = {
+      status: 'CONFIRMED',
+      resolutionTxHash: TX,
+      orderKey: ORDER_KEY,
+      receiptStatus: 'success',
+      resolutionBlock: '100',
+      orderEmitterAddress: '0x' + 'e'.repeat(40),
+      resolutionReason: '온체인 OrderExecuted',
+    };
+    const t = makeTransport(() => ({
+      status: 'executed', requestId: 'req-1', executionTxHash: TX, orderKeys: [ORDER_KEY],
+    }));
+    const s = await reconcileGmxApiTasks(deps(t, makeOnchain(receiptSuccess)));
+    expect(s).toMatchObject({ transitioned: 1, errors: 0 });
+    expect(transitionSpy).toHaveBeenCalledWith(expect.objectContaining({ to: 'CONFIRMED' }));
   });
 
   it('OrderExecuted finality depth 미충족 → handoff/CONFIRMED 모두 보류', async () => {
