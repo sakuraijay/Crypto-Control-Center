@@ -103,6 +103,8 @@ function emergencyConvergenceResult(
   successBasis: string,
   failureReason: string,
 ): ConfirmedOpenHandoffResult {
+  // Durable id alone is not completion evidence: a lost status transition can
+  // leave the only claimant in-flight, so the OPEN relay must remain retryable.
   if (emergency.currentStatus === 'PLANNED'
       || emergency.currentStatus === 'PREPARED'
       || emergency.currentStatus === 'SUBMITTING') {
