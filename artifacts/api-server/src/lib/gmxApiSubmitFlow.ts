@@ -384,14 +384,18 @@ export async function runGmxApiSubmitFlow(input: GmxSubmitFlowInput): Promise<Gm
   // action-budget 예약이 바뀔 수 있다. 위 gate2 결과를 그대로 전송 권한으로
   // 재사용하지 않고 외부 submit 호출 직전에 한 번 더 실제 파생값을 읽는다.
   // 이 시점은 아직 broadcast 전이므로 실패를 확정 FAILED_PRE_BROADCAST로 남긴다.
-  const failFinalPreBroadcastGate = async (reason: string) => {
+  const failFinalPreBroadcast = async (
+    reason: string,
+    errorClass = 'FINAL_PRE_BROADCAST_GATE',
+    resolutionBasis = 'SUBMITTING 영속 전환 후 최종 게이트 미충족 — 외부 submit 호출 0회',
+  ) => {
     blockReasons.push(reason);
     const transitioned = await transitionRelayTask({
       taskId: result.taskRowId!, from: RELAY_TASK_STATUS.SUBMITTING,
       to: RELAY_TASK_STATUS.FAILED_PRE_BROADCAST,
       patch: {
-        errorClass: 'FINAL_PRE_BROADCAST_GATE',
-        resolutionBasis: 'SUBMITTING 영속 전환 후 최종 게이트 미충족 — 외부 submit 호출 0회',
+        errorClass,
+        resolutionBasis,
       },
     });
     if (transitioned.ok) result.finalStatus = RELAY_TASK_STATUS.FAILED_PRE_BROADCAST;
@@ -400,11 +404,11 @@ export async function runGmxApiSubmitFlow(input: GmxSubmitFlowInput): Promise<Gm
   let finalActivation: ActivationGateInput;
   try { finalActivation = await input.reevaluateActivation(); }
   catch {
-    await failFinalPreBroadcastGate('SUBMITTING 후 최종 게이트 재평가 실패 — 제출 0회 (fail-closed)');
+    await failFinalPreBroadcast('SUBMITTING 후 최종 게이트 재평가 실패 — 제출 0회 (fail-closed)');
     return result;
   }
   if (finalActivation.kind !== input.kind) {
-    await failFinalPreBroadcastGate(
+    await failFinalPreBroadcast(
       `SUBMITTING 후 activation kind ${finalActivation.kind} ≠ flow kind ${input.kind} — 제출 0회 (fail-closed)`,
     );
     return result;
@@ -412,7 +416,7 @@ export async function runGmxApiSubmitFlow(input: GmxSubmitFlowInput): Promise<Gm
   const finalGate = evaluateActivationGate(finalActivation);
   if (!finalGate.networkEligible) {
     blockReasons.push(...finalGate.missing);
-    await failFinalPreBroadcastGate('SUBMITTING 후 최종 게이트 미충족 — 제출 0회');
+    await failFinalPreBroadcast('SUBMITTING 후 최종 게이트 미충족 — 제출 0회');
     return result;
   }
   const finalBlockingAtSubmit = await countBlockingRelayTasksOrNull({
@@ -421,16 +425,26 @@ export async function runGmxApiSubmitFlow(input: GmxSubmitFlowInput): Promise<Gm
     excludeSourceOpen: sourceOpen,
   });
   if (finalBlockingAtSubmit === null || finalBlockingAtSubmit > 0) {
-    await failFinalPreBroadcastGate(finalBlockingAtSubmit === null
+    await failFinalPreBroadcast(finalBlockingAtSubmit === null
       ? 'SUBMITTING 후 blocking relay task 최종 재조회 실패 — 제출 0회 (fail-closed)'
       : `SUBMITTING 후 다른 미종결 relay task ${finalBlockingAtSubmit}건 — 제출 0회`);
     return result;
   }
 
   // 10. submit — 정확히 1회, transport가 단일 peer·무재시도 보장
+  let submitBody: unknown;
+  try { submitBody = input.buildSubmitBody(prepared, signature); }
+  catch {
+    await failFinalPreBroadcast(
+      'submit 본문 생성 실패 — 외부 submit 호출 0회 (fail-closed)',
+      'SUBMIT_BODY_BUILD_FAILED',
+      'submit 본문 생성 예외 — 외부 submit 미호출, broadcast 없음',
+    );
+    return result;
+  }
   result.submitCalls = 1;
   const submit = await input.transport.postJson<Record<string, unknown>>(
-    '/orders/txns/submit', input.buildSubmitBody(prepared, signature), 'submit',
+    '/orders/txns/submit', submitBody, 'submit',
   );
 
   if (submit.ok) {

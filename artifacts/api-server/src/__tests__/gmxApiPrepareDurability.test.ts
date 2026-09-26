@@ -657,6 +657,27 @@ describe('6G-3 §6 — 중앙 게이트 blocking task', () => {
     });
   });
 
+  it('submit 본문 생성 예외 → FAILED_PRE_BROADCAST·외부 submit 0회', async () => {
+    const { transport, calls } = mockTransport();
+    const buildSubmitBody = vi.fn(() => { throw new Error('malformed submit body'); });
+
+    const r = await runGmxApiSubmitFlow(flowInput(transport, { buildSubmitBody }));
+
+    expect(buildSubmitBody).toHaveBeenCalledTimes(1);
+    expect(r.prepareCalls).toBe(1);
+    expect(r.signCalls).toBe(1);
+    expect(r.submitCalls).toBe(0);
+    expect(calls.submit).toBe(0);
+    expect(r.submitted).toBe(false);
+    expect(r.finalStatus).toBe(RELAY_TASK_STATUS.FAILED_PRE_BROADCAST);
+    expect(r.blockReasons.join(' ')).toContain('submit 본문 생성 실패');
+    expect(store.tasks[0]).toMatchObject({
+      status: RELAY_TASK_STATUS.FAILED_PRE_BROADCAST,
+      errorClass: 'SUBMIT_BODY_BUILD_FAILED',
+      resolutionBasis: 'submit 본문 생성 예외 — 외부 submit 미호출, broadcast 없음',
+    });
+  });
+
   it('PAPER → durable 기록·prepare 0회', async () => {
     const { transport, calls } = mockTransport();
     const prepareSpy = vi.fn();
