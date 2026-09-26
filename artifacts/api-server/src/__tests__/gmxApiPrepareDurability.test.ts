@@ -397,8 +397,10 @@ describe('6G-3 §3.4 — prepare 실패 분류 (자동 재시도 0회)', () => {
       toView: () => ({ ok: true, view }),
     }));
     expect(r.signCalls).toBe(0); expect(calls.submit).toBe(0);
-    // 전이 자체도 실패할 수 있으므로 결과 상태는 UNRESOLVED 의도이며 durable 전환 재시도는 없다
-    expect(r.finalStatus).toBe(RELAY_TASK_STATUS.UNRESOLVED);
+    // 전이 자체도 실패했으므로 반환 상태가 의도한 terminal을 과장하면 안 된다.
+    expect(r.finalStatus).toBe(RELAY_TASK_STATUS.PREPARE_REQUESTED);
+    expect(store.tasks[0]?.status).toBe(RELAY_TASK_STATUS.PREPARE_REQUESTED);
+    expect(r.blockReasons.join(' ')).toContain('prepare 실패 상태 저장 실패');
     expect(r.blockReasons.join(' ')).toContain('증거 저장 실패');
   });
 });
@@ -721,6 +723,40 @@ describe('6G-3 §6 — 중앙 게이트 blocking task', () => {
     expect(r.finalStatus).toBe(RELAY_TASK_STATUS.SUBMITTING);
     expect(r.blockReasons.join(' ')).toContain('UNRESOLVED 저장 실패');
     expect(store.tasks[0]?.status).toBe(RELAY_TASK_STATUS.SUBMITTING);
+  });
+
+  it('typed data 결속 실패 뒤 terminal 저장 실패 → 반환·durable 모두 API_PREPARED 유지', async () => {
+    const { transport, calls } = mockTransport();
+    const r = await runGmxApiSubmitFlow(flowInput(transport, {
+      verifyTypedDataBinding: async () => {
+        store.failUpdate = true;
+        return { ok: false, reason: 'binding mismatch' };
+      },
+    }));
+
+    expect(r.signCalls).toBe(0);
+    expect(r.submitCalls).toBe(0);
+    expect(calls.submit).toBe(0);
+    expect(r.finalStatus).toBe(RELAY_TASK_STATUS.API_PREPARED);
+    expect(r.blockReasons.join(' ')).toContain('typed data 결속 실패 상태 저장 실패');
+    expect(store.tasks[0]?.status).toBe(RELAY_TASK_STATUS.API_PREPARED);
+  });
+
+  it('제출 전 게이트 취소 저장 실패 → 반환·durable 모두 API_PREPARED 유지', async () => {
+    const { transport, calls } = mockTransport();
+    const r = await runGmxApiSubmitFlow(flowInput(transport, {
+      reevaluateActivation: async () => {
+        store.failUpdate = true;
+        return fullActivation({ rpcOk: false });
+      },
+    }));
+
+    expect(r.signCalls).toBe(1);
+    expect(r.submitCalls).toBe(0);
+    expect(calls.submit).toBe(0);
+    expect(r.finalStatus).toBe(RELAY_TASK_STATUS.API_PREPARED);
+    expect(r.blockReasons.join(' ')).toContain('제출 전 취소 상태 저장 실패');
+    expect(store.tasks[0]?.status).toBe(RELAY_TASK_STATUS.API_PREPARED);
   });
 
   it('PAPER → durable 기록·prepare 0회', async () => {
