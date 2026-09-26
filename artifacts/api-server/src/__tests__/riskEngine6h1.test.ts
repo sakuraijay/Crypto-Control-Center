@@ -5,8 +5,9 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
-  RISK_POLICY, CANARY_POLICY, deriveDailyTargets, deriveWeeklyMaxLossUsd,
-  deriveTradeRiskUsd, evaluateCanaryGate, isAutoPromotionAllowed,
+  RISK_POLICY, CANARY_POLICY, CAPITAL_PLAN, CAPITAL_TIER_LADDER,
+  deriveDailyTargets, deriveWeeklyMaxLossUsd, deriveTradeRiskUsd,
+  evaluateCanaryGate, evaluateCapitalPromotion, isAutoPromotionAllowed,
 } from '../lib/riskPolicy';
 import { dailyRiskCapital, weeklyRiskCapital, positionSizingCapital } from '../lib/riskCapital';
 import { realizedNetPnl, estimatedExitNetPnl, lossAwareNetPnl } from '../lib/riskPnl';
@@ -51,26 +52,26 @@ function baseInput(overrides: Partial<RiskEvaluationInput> = {}): RiskEvaluation
 
 // ── 파생값 (§16 #1-3) ──────────────────────────────────────────────────────────
 describe('policy derivations', () => {
-  it('equity $1,000 → 목표 50/100/30/보호 35, 주간 80, 위험 7.50/10', () => {
+  it('Active $1,000 → 과열 50/100, 일손실 10, 보호 35, 주간 80, 위험 2.50/5', () => {
     const t = deriveDailyTargets(1000);
     expect(t.primaryProfitTargetUsd).toBe(50);
     expect(t.absoluteProfitCapUsd).toBe(100);
-    expect(t.dailyMaxLossUsd).toBe(30);
+    expect(t.dailyMaxLossUsd).toBe(10);
     expect(t.protectedProfitFloorUsd).toBe(35);
-    expect(t.defensiveModeLossUsd).toBe(20);
+    expect(t.defensiveModeLossUsd).toBe(5);
     expect(deriveWeeklyMaxLossUsd(1000)).toBe(80);
     const r = deriveTradeRiskUsd(1000);
-    expect(r.baseRiskUsd).toBe(7.5);
-    expect(r.absoluteMaxRiskUsd).toBe(10);
+    expect(r.baseRiskUsd).toBe(2.5);
+    expect(r.absoluteMaxRiskUsd).toBe(5);
   });
 
-  it('equity $900 → 45/90/27 (기준 자본 축소)', () => {
+  it('equity $900 → 45/90/9 (기준 자본 축소)', () => {
     const cap = dailyRiskCapital(obs(900), NOW, MAX_AGE);
     expect(cap.ok && cap.capitalUsd).toBe(900);
     const t = deriveDailyTargets(900);
     expect(t.primaryProfitTargetUsd).toBe(45);
     expect(t.absoluteProfitCapUsd).toBe(90);
-    expect(t.dailyMaxLossUsd).toBe(27);
+    expect(t.dailyMaxLossUsd).toBe(9);
   });
 
   it('equity $1,200 → 자본은 $1,000으로 캡 (복리 금지 — 50/100/30 유지)', () => {
@@ -192,8 +193,8 @@ describe('risk state machine', () => {
     expect(r3.state).toBe('PROFIT_CAP_LOCKED');
   });
 
-  it('-2% → DEFENSIVE: size 50%·2x·잔여 1회', () => {
-    const r = evaluateRiskState(baseInput({ dailyLossAwareNetPnlUsd: -20 }));
+  it('-0.5% → DEFENSIVE: size 50%·2x·잔여 1회', () => {
+    const r = evaluateRiskState(baseInput({ dailyLossAwareNetPnlUsd: -5 }));
     expect(r.state).toBe('DEFENSIVE');
     expect(r.entryAllowed).toBe(true);
     expect(r.sizeFactor).toBe(0.5);
@@ -277,11 +278,11 @@ describe('risk-based sizing', () => {
     const r = computePositionSize(base);
     expect(r.ok).toBe(true);
     if (r.ok) {
-      expect(r.baseRiskUsd).toBe(7.5);
-      expect(r.absoluteMaxRiskUsd).toBe(10);
+      expect(r.baseRiskUsd).toBe(2.5);
+      expect(r.absoluteMaxRiskUsd).toBe(5);
       expect(r.effectiveStopLossFraction).toBeCloseTo(0.012);
-      expect(r.maxNotionalByRisk).toBeCloseTo(625);
-      expect(r.finalNotionalUsd).toBeCloseTo(625); // < 1000×3
+      expect(r.maxNotionalByRisk).toBeCloseTo(208.333333);
+      expect(r.finalNotionalUsd).toBeCloseTo(208.333333); // < 1000×3
       expect(r.allowedLeverage).toBe(3);
     }
   });
@@ -306,7 +307,7 @@ describe('risk-based sizing', () => {
   it('물타기/revenge 사이징 금지 — 손실 후에도 위험 산정은 capital 기준 고정', () => {
     // 남은 일일 목표나 직전 손실이 입력에 존재하지 않음 → 구조적으로 불가능.
     const after = computePositionSize({ ...base, useAbsoluteMaxRisk: false });
-    expect(after.ok && after.allowedRiskUsd).toBe(7.5);
+    expect(after.ok && after.allowedRiskUsd).toBe(2.5);
   });
 });
 
@@ -415,7 +416,10 @@ describe('policy constants regression', () => {
   it('정책 값 고정 — 임의 변경 감지', () => {
     expect(RISK_POLICY.initialCapitalUsd).toBe(1000);
     expect(RISK_POLICY.maxRiskCapitalUsd).toBe(1000);
-    expect(RISK_POLICY.hardStopEquityUsd).toBe(850);
+    expect(RISK_POLICY.hardStopEquityUsd).toBe(920);
+    expect(RISK_POLICY.baseRiskPerTradePercent).toBe(0.25);
+    expect(RISK_POLICY.maxRiskPerTradePercent).toBe(0.5);
+    expect(RISK_POLICY.dailyMaxLossPercent).toBe(1);
     expect(RISK_POLICY.baseMaxLeverage).toBe(3);
     expect(RISK_POLICY.conditional5xEnabled).toBe(false);
     expect(RISK_POLICY.maxConcurrentPositions).toBe(1);
@@ -425,5 +429,36 @@ describe('policy constants regression', () => {
     expect(RISK_POLICY.averagingDownEnabled).toBe(false);
     expect(RISK_POLICY.autoCompoundingEnabled).toBe(false);
     expect(RISK_POLICY.tradingTimezone).toBe('Asia/Manila');
+  });
+
+  it('Planned Seed는 Active/Reserve와 분리되고 증액 권한이 아니다', () => {
+    expect(CAPITAL_PLAN.plannedSeedCapitalUsd).toBe(10_000);
+    expect(CAPITAL_PLAN.activeTradingCapitalUsd).toBe(1_000);
+    expect(CAPITAL_PLAN.reserveCapitalUsd).toBe(200);
+    expect(CAPITAL_PLAN.deployableActiveCapitalUsd).toBe(800);
+    expect(CAPITAL_PLAN.plannedSeedAuthorizesFunding).toBe(false);
+    expect(CAPITAL_PLAN.plannedSeedAuthorizesPromotion).toBe(false);
+    expect(CAPITAL_TIER_LADDER.map(t => t.capitalUsd)).toEqual([15, 1_000, 2_500, 5_000, 10_000]);
+  });
+
+  it('Active Capital 승격은 순차 단계와 모든 증거 및 사용자 승인을 요구한다', () => {
+    const complete = {
+      fromCapitalUsd: 1_000 as const,
+      toCapitalUsd: 2_500 as const,
+      positiveNetExpectancyAfterCosts: true,
+      gmxOrderExecutionSettlementMatched: true,
+      stopLossExecutable: true,
+      emergencyCloseExecutable: true,
+      unresolvedCount: 0,
+      drawdownWithinLimit: true,
+      dailyLossWithinLimit: true,
+      stageCanaryVerified: true,
+      userReportReviewed: true,
+      userExplicitlyApproved: true,
+    };
+    expect(evaluateCapitalPromotion(complete)).toEqual({ allowed: true });
+    expect(evaluateCapitalPromotion({ ...complete, userExplicitlyApproved: false }).allowed).toBe(false);
+    expect(evaluateCapitalPromotion({ ...complete, unresolvedCount: null }).allowed).toBe(false);
+    expect(evaluateCapitalPromotion({ ...complete, toCapitalUsd: 5_000 }).allowed).toBe(false);
   });
 });

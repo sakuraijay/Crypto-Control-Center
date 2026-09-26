@@ -103,6 +103,7 @@ import {
 import { GMX_API_TRANSPORT_GEN, type PreparedOrderView } from '../lib/gmxApiOrders';
 import type { GmxApiTransport } from '../lib/gmxApiTransport';
 import type { ActivationGateInput } from '../lib/relayActivationGate';
+import { __resetReadinessRefreshForTests, recordCanonicalSnapshot } from '../lib/relayActivationStatus';
 
 const MAIN = '0x1111111111111111111111111111111111111111';
 const SUB = '0x2222222222222222222222222222222222222222';
@@ -185,11 +186,98 @@ function flowInput(transport: GmxApiTransport, overrides?: Partial<GmxSubmitFlow
 beforeEach(() => {
   store.tasks = []; store.failInsert = false; store.failUpdate = false; store.failSelect = false;
   __resetGmxPrepareStartupStateForTests();
+  __resetReadinessRefreshForTests();
 });
 afterEach(() => { vi.restoreAllMocks(); });
 
 // ════════════ A) 영속화 우선 순서 ════════════
 describe('6G-3 §3 — 외부 prepare 호출 전 영속화', () => {
+  it('canonical delegation=false면 signer가 초기화되어도 prepare·서명·제출 0회', async () => {
+    const { transport, calls } = mockTransport();
+    const prepareSpy = vi.fn(async () => ({ ok: true, data: {}, peerHost: 'x' } as never));
+    const signSpy = vi.fn(async () => ({ ok: true as const, signature: '0xsig-secret' }));
+    const r = await runGmxApiSubmitFlow(flowInput(transport, {
+      activation: fullActivation({ canonicalAuthorized: false }),
+      prepareOrder: prepareSpy,
+      signTypedData: signSpy,
+    }));
+    expect(prepareSpy).not.toHaveBeenCalled();
+    expect(signSpy).not.toHaveBeenCalled();
+    expect(r.prepareCalls).toBe(0);
+    expect(r.signCalls).toBe(0);
+    expect(r.submitCalls).toBe(0);
+    expect(calls.submit).toBe(0);
+  });
+
+  it('caller boolean이 true여도 fresh canonical evidence가 무효면 prepare·서명·submit·transport 0회', async () => {
+    const nowMs = Date.parse('2026-08-30T07:00:00.000Z');
+    recordCanonicalSnapshot({
+      atMs: nowMs,
+      confirmed: true,
+      reason: null,
+      approvalNonce: '7',
+      isSubaccountListed: false,
+      featureDisabled: false,
+      integrationDisabled: false,
+      expiresAt: String(Math.floor(nowMs / 1000) + 3600),
+      remaining: '8',
+    });
+    const { transport, calls } = mockTransport();
+    const prepareSpy = vi.fn(async () => ({ ok: true, data: {}, peerHost: 'x' } as never));
+    const signSpy = vi.fn(async () => ({ ok: true as const, signature: '0xsig-secret' }));
+    const paperEnv = {
+      WORKER_ENGINE_MODE: 'PAPER',
+      AUTO_WORKER_LIVE_ENABLED: 'false',
+      LIVE_TEST_EXECUTION_LOCKED: 'false',
+      DELEGATED_SIGNER_ENABLED: 'true',
+      GMX_API_READONLY_ENABLED: 'true',
+      GMX_API_ORDER_SUBMISSION_ENABLED: 'true',
+    } as NodeJS.ProcessEnv;
+
+    const r = await runGmxApiSubmitFlow(flowInput(transport, {
+      activation: fullActivation({
+        env: paperEnv,
+        manualCanary: true,
+        canonicalAuthorized: true,
+        canonicalInFlightReservedActions: 0,
+        nowMs,
+      }),
+      prepareOrder: prepareSpy,
+      signTypedData: signSpy,
+    }));
+
+    expect(r.blockReasons.some((x) => x.includes('delegated authorization 비활성'))).toBe(true);
+    expect(prepareSpy).not.toHaveBeenCalled();
+    expect(signSpy).not.toHaveBeenCalled();
+    expect(r.prepareCalls).toBe(0);
+    expect(r.signCalls).toBe(0);
+    expect(r.submitCalls).toBe(0);
+    expect(calls.submit).toBe(0);
+    expect(store.tasks).toHaveLength(0);
+  });
+
+  it('실제 OPEN flow를 activation CLOSE로 위장해도 prepare·서명·submit·transport 0회', async () => {
+    const { transport, calls } = mockTransport();
+    const prepareSpy = vi.fn(async () => ({ ok: true, data: {}, peerHost: 'x' } as never));
+    const signSpy = vi.fn(async () => ({ ok: true as const, signature: '0xsig-secret' }));
+
+    const r = await runGmxApiSubmitFlow(flowInput(transport, {
+      kind: 'OPEN',
+      activation: fullActivation({ kind: 'CLOSE' }),
+      prepareOrder: prepareSpy,
+      signTypedData: signSpy,
+    }));
+
+    expect(r.blockReasons.some((x) => x.includes('activation kind CLOSE ≠ flow kind OPEN'))).toBe(true);
+    expect(prepareSpy).not.toHaveBeenCalled();
+    expect(signSpy).not.toHaveBeenCalled();
+    expect(r.prepareCalls).toBe(0);
+    expect(r.signCalls).toBe(0);
+    expect(r.submitCalls).toBe(0);
+    expect(calls.submit).toBe(0);
+    expect(store.tasks).toHaveLength(0);
+  });
+
   it('task insert 실패 → prepare·서명·제출 0회', async () => {
     store.failInsert = true;
     const { transport, calls } = mockTransport();
@@ -309,8 +397,10 @@ describe('6G-3 §3.4 — prepare 실패 분류 (자동 재시도 0회)', () => {
       toView: () => ({ ok: true, view }),
     }));
     expect(r.signCalls).toBe(0); expect(calls.submit).toBe(0);
-    // 전이 자체도 실패할 수 있으므로 결과 상태는 UNRESOLVED 의도이며 durable 전환 재시도는 없다
-    expect(r.finalStatus).toBe(RELAY_TASK_STATUS.UNRESOLVED);
+    // 전이 자체도 실패했으므로 반환 상태가 의도한 terminal을 과장하면 안 된다.
+    expect(r.finalStatus).toBe(RELAY_TASK_STATUS.PREPARE_REQUESTED);
+    expect(store.tasks[0]?.status).toBe(RELAY_TASK_STATUS.PREPARE_REQUESTED);
+    expect(r.blockReasons.join(' ')).toContain('prepare 실패 상태 저장 실패');
     expect(r.blockReasons.join(' ')).toContain('증거 저장 실패');
   });
 });
@@ -435,6 +525,70 @@ describe('6G-3 §6 — 중앙 게이트 blocking task', () => {
     expect(await countBlockingRelayTasksOrNull({ transportGen: GMX_API_TRANSPORT_GEN })).toBe(3);
   });
 
+  it('confirmed OPEN source 결속만 제외해 보호 flow 1회를 허용한다', async () => {
+    const sourceIntentId = 'intent:open:general-sol';
+    store.tasks.push({
+      id: 'source-open',
+      idempotencyKey: 'source-key',
+      kind: 'OPEN',
+      status: RELAY_TASK_STATUS.TASK_ACCEPTED,
+      transportGen: GMX_API_TRANSPORT_GEN,
+      intentId: sourceIntentId,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const { transport, calls } = mockTransport();
+    const r = await runGmxApiSubmitFlow(flowInput(transport, {
+      allowedBlockingSourceOpen: { taskId: 'source-open', intentId: sourceIntentId },
+      kind: 'CLOSE',
+      activation: fullActivation({ kind: 'CLOSE' }),
+      reevaluateActivation: async () => fullActivation({ kind: 'CLOSE' }),
+    }));
+    expect(r.submitted).toBe(true);
+    expect(r.prepareCalls).toBe(1);
+    expect(r.signCalls).toBe(1);
+    expect(r.submitCalls).toBe(1);
+    expect(calls.submit).toBe(1);
+  });
+
+  it('source task ID의 intent 결속이 다르거나 unrelated blocker가 있으면 보호 flow를 차단한다', async () => {
+    store.tasks.push(
+      {
+        id: 'source-open',
+        idempotencyKey: 'source-key',
+        kind: 'OPEN',
+        status: RELAY_TASK_STATUS.TASK_ACCEPTED,
+        transportGen: GMX_API_TRANSPORT_GEN,
+        intentId: 'intent:open:actual',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+      {
+        id: 'unrelated',
+        idempotencyKey: 'unrelated-key',
+        kind: 'CLOSE',
+        status: RELAY_TASK_STATUS.UNRESOLVED,
+        transportGen: GMX_API_TRANSPORT_GEN,
+        intentId: 'intent:close:other',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+    );
+    const { transport, calls } = mockTransport();
+    const prepareSpy = vi.fn();
+    const r = await runGmxApiSubmitFlow(flowInput(transport, {
+      allowedBlockingSourceOpen: {
+        taskId: 'source-open',
+        intentId: 'intent:open:spoofed',
+      },
+      prepareOrder: prepareSpy,
+    }));
+    expect(r.submitted).toBe(false);
+    expect(prepareSpy).not.toHaveBeenCalled();
+    expect(calls.submit).toBe(0);
+    expect(r.blockReasons.join(' ')).toContain('미종결 relay task 2건');
+  });
+
   it('제출 직전 다른 blocking task 등장 → CANCELLED·제출 0회', async () => {
     const { transport, calls } = mockTransport();
     const r = await runGmxApiSubmitFlow(flowInput(transport, {
@@ -451,6 +605,158 @@ describe('6G-3 §6 — 중앙 게이트 blocking task', () => {
     expect(calls.submit).toBe(0);
     expect(r.submitted).toBe(false);
     expect(r.finalStatus).toBe(RELAY_TASK_STATUS.CANCELLED);
+  });
+
+  it('SUBMITTING 영속 전환 중 canonical/action-budget 권한 변경 → 최종 게이트가 외부 submit 0회로 차단', async () => {
+    const { transport, calls } = mockTransport();
+    const reevaluateActivation = vi.fn()
+      .mockResolvedValueOnce(fullActivation())
+      .mockResolvedValueOnce(fullActivation({ canonicalAuthorized: false }));
+
+    const r = await runGmxApiSubmitFlow(flowInput(transport, { reevaluateActivation }));
+
+    expect(reevaluateActivation).toHaveBeenCalledTimes(2);
+    expect(r.prepareCalls).toBe(1);
+    expect(r.signCalls).toBe(1);
+    expect(r.submitCalls).toBe(0);
+    expect(calls.submit).toBe(0);
+    expect(r.submitted).toBe(false);
+    expect(r.finalStatus).toBe(RELAY_TASK_STATUS.FAILED_PRE_BROADCAST);
+    expect(r.blockReasons.join(' ')).toContain('SUBMITTING 후 최종 게이트 미충족');
+    expect(store.tasks[0]).toMatchObject({
+      status: RELAY_TASK_STATUS.FAILED_PRE_BROADCAST,
+      errorClass: 'FINAL_PRE_BROADCAST_GATE',
+    });
+  });
+
+  it('SUBMITTING 영속 전환 중 다른 blocking task 등장 → 최종 재조회가 외부 submit 0회로 차단', async () => {
+    const { transport, calls } = mockTransport();
+    const reevaluateActivation = vi.fn()
+      .mockResolvedValueOnce(fullActivation())
+      .mockImplementationOnce(async () => {
+        // 첫 pre-submit blocking 조회 이후, SUBMITTING 전환 중 경쟁 task가 생긴 상황.
+        store.tasks.push({
+          id: 'late-intruder', idempotencyKey: 'k-late-intruder', kind: 'OPEN',
+          status: RELAY_TASK_STATUS.UNRESOLVED, transportGen: GMX_API_TRANSPORT_GEN,
+          createdAt: new Date(), updatedAt: new Date(),
+        });
+        return fullActivation();
+      });
+
+    const r = await runGmxApiSubmitFlow(flowInput(transport, { reevaluateActivation }));
+
+    expect(reevaluateActivation).toHaveBeenCalledTimes(2);
+    expect(r.prepareCalls).toBe(1);
+    expect(r.signCalls).toBe(1);
+    expect(r.submitCalls).toBe(0);
+    expect(calls.submit).toBe(0);
+    expect(r.submitted).toBe(false);
+    expect(r.finalStatus).toBe(RELAY_TASK_STATUS.FAILED_PRE_BROADCAST);
+    expect(r.blockReasons.join(' ')).toContain('SUBMITTING 후 다른 미종결 relay task 1건');
+    expect(store.tasks[0]).toMatchObject({
+      status: RELAY_TASK_STATUS.FAILED_PRE_BROADCAST,
+      errorClass: 'FINAL_PRE_BROADCAST_GATE',
+    });
+  });
+
+  it('submit 본문 생성 예외 → FAILED_PRE_BROADCAST·외부 submit 0회', async () => {
+    const { transport, calls } = mockTransport();
+    const buildSubmitBody = vi.fn(() => { throw new Error('malformed submit body'); });
+
+    const r = await runGmxApiSubmitFlow(flowInput(transport, { buildSubmitBody }));
+
+    expect(buildSubmitBody).toHaveBeenCalledTimes(1);
+    expect(r.prepareCalls).toBe(1);
+    expect(r.signCalls).toBe(1);
+    expect(r.submitCalls).toBe(0);
+    expect(calls.submit).toBe(0);
+    expect(r.submitted).toBe(false);
+    expect(r.finalStatus).toBe(RELAY_TASK_STATUS.FAILED_PRE_BROADCAST);
+    expect(r.blockReasons.join(' ')).toContain('submit 본문 생성 실패');
+    expect(store.tasks[0]).toMatchObject({
+      status: RELAY_TASK_STATUS.FAILED_PRE_BROADCAST,
+      errorClass: 'SUBMIT_BODY_BUILD_FAILED',
+      resolutionBasis: 'submit 본문 생성 예외 — 외부 submit 미호출, broadcast 없음',
+    });
+  });
+
+  it('submit 불명 결과 뒤 상태 저장 실패 → 반환·durable 모두 SUBMITTING 유지', async () => {
+    const { transport, calls } = mockTransport();
+    transport.postJson = async (_path, _body, intent) => {
+      if (intent === 'submit') {
+        calls.submit++;
+        store.failUpdate = true;
+        return {
+          ok: false, kind: 'network', httpStatus: null, ambiguous: true,
+          message: 'connection reset', peerHost: 'arbitrum.gmxapi.io',
+        } as never;
+      }
+      return { ok: true, data: {}, peerHost: 'arbitrum.gmxapi.io' } as never;
+    };
+
+    const r = await runGmxApiSubmitFlow(flowInput(transport));
+
+    expect(r.submitCalls).toBe(1);
+    expect(calls.submit).toBe(1);
+    expect(r.submitted).toBe(false);
+    expect(r.finalStatus).toBe(RELAY_TASK_STATUS.SUBMITTING);
+    expect(r.blockReasons.join(' ')).toContain('submit 실패 상태 저장 실패');
+    expect(store.tasks[0]?.status).toBe(RELAY_TASK_STATUS.SUBMITTING);
+  });
+
+  it('submit 수락 뒤 TASK_ACCEPTED·UNRESOLVED 저장 모두 실패 → 반환·durable 모두 SUBMITTING 유지', async () => {
+    const { transport, calls } = mockTransport();
+    transport.postJson = async (_path, _body, intent) => {
+      if (intent === 'submit') {
+        calls.submit++;
+        store.failUpdate = true;
+        return { ok: true, data: { status: 'relay_accepted' }, peerHost: 'arbitrum.gmxapi.io' } as never;
+      }
+      return { ok: true, data: {}, peerHost: 'arbitrum.gmxapi.io' } as never;
+    };
+
+    const r = await runGmxApiSubmitFlow(flowInput(transport));
+
+    expect(r.submitCalls).toBe(1);
+    expect(calls.submit).toBe(1);
+    expect(r.submitted).toBe(false);
+    expect(r.finalStatus).toBe(RELAY_TASK_STATUS.SUBMITTING);
+    expect(r.blockReasons.join(' ')).toContain('UNRESOLVED 저장 실패');
+    expect(store.tasks[0]?.status).toBe(RELAY_TASK_STATUS.SUBMITTING);
+  });
+
+  it('typed data 결속 실패 뒤 terminal 저장 실패 → 반환·durable 모두 API_PREPARED 유지', async () => {
+    const { transport, calls } = mockTransport();
+    const r = await runGmxApiSubmitFlow(flowInput(transport, {
+      verifyTypedDataBinding: async () => {
+        store.failUpdate = true;
+        return { ok: false, reason: 'binding mismatch' };
+      },
+    }));
+
+    expect(r.signCalls).toBe(0);
+    expect(r.submitCalls).toBe(0);
+    expect(calls.submit).toBe(0);
+    expect(r.finalStatus).toBe(RELAY_TASK_STATUS.API_PREPARED);
+    expect(r.blockReasons.join(' ')).toContain('typed data 결속 실패 상태 저장 실패');
+    expect(store.tasks[0]?.status).toBe(RELAY_TASK_STATUS.API_PREPARED);
+  });
+
+  it('제출 전 게이트 취소 저장 실패 → 반환·durable 모두 API_PREPARED 유지', async () => {
+    const { transport, calls } = mockTransport();
+    const r = await runGmxApiSubmitFlow(flowInput(transport, {
+      reevaluateActivation: async () => {
+        store.failUpdate = true;
+        return fullActivation({ rpcOk: false });
+      },
+    }));
+
+    expect(r.signCalls).toBe(1);
+    expect(r.submitCalls).toBe(0);
+    expect(calls.submit).toBe(0);
+    expect(r.finalStatus).toBe(RELAY_TASK_STATUS.API_PREPARED);
+    expect(r.blockReasons.join(' ')).toContain('제출 전 취소 상태 저장 실패');
+    expect(store.tasks[0]?.status).toBe(RELAY_TASK_STATUS.API_PREPARED);
   });
 
   it('PAPER → durable 기록·prepare 0회', async () => {

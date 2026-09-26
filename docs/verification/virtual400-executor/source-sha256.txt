@@ -1,0 +1,4 @@
+ca9c273a0d0672094ac00c798ea77480c041f70e45798090be49a2446e4977b6  artifacts/api-server/src/workers/serverPaperExecutor.ts
+ce93a7f42cbff1bb941d65dd40356178c65c2955e46039dc2835a245eb9d14c5  artifacts/api-server/src/workers/aiWorker.ts
+e3e89df5c2d59207fcd47c0cfa0a19e05bdfffcafc6807ab1e98658bb05238a6  artifacts/api-server/src/__tests__/serverPaperExecutor.test.ts
+f12e3e7a424525259837f9abe350d307a52f6497e7ecea5aa922f072e26908ef  artifacts/api-server/src/__tests__/aiWorker.test.ts

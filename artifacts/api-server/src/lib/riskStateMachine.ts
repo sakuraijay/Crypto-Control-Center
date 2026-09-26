@@ -57,6 +57,22 @@ export interface RiskEvaluationInput {
   dailyRiskCapitalUsd: number | null;
   weeklyRiskCapitalUsd: number | null;
   currentEquityUsd: number | null;
+  /**
+   * 승인된 Active Trading Capital과 runtime capital 의미가 일치할 때만 true.
+   * false면 기존 HARD_STOP은 보존하되 새로운 threshold-triggered HARD_STOP은 만들지 않는다.
+   * undefined는 기존 호출자 호환을 위해 legacy 동작(현재 threshold 평가)을 유지한다.
+   */
+  newHardStopEvaluationAllowed?: boolean;
+  /** false gate의 운영 진단 사유. 영속 lock으로 승격하지 않고 비고정 fail-closed 차단에만 사용. */
+  activeCapitalConfigurationDriftReason?: string | null;
+  /**
+   * 선택된 Active Capital context가 명시적으로 결속한 HARD_STOP equity/reference pair.
+   * 둘 다 생략하면 legacy standard policy($920/$1,000)를 사용한다.
+   * 둘 중 하나만 있거나 값이 유효하지 않으면 sticky lock을 만들지 않고 fail-closed한다.
+   * 명시 pair를 사용할 때는 newHardStopEvaluationAllowed=true가 반드시 함께 와야 한다.
+   */
+  hardStopPolicyEquityUsd?: number;
+  hardStopPolicyReferenceCapitalUsd?: number;
   /** authoritative 실현 순수익 (오늘, Manila) — null = 산출 불가 */
   dailyRealizedNetPnlUsd: number | null;
   /** 보수적 손실 게이트 PnL (오늘) — null = 산출 불가 */
@@ -67,6 +83,8 @@ export interface RiskEvaluationInput {
   dailyEntryCount: number;
   consecutiveLossCount: number;
   openPositionCount: number;
+  /** 적용 프로필 상한. 절대 프로필 상한(2)을 넘길 수 없다. */
+  maxConcurrentPositions?: number;
   /** DB 영속화 정상 여부 — false면 무조건 진입 차단 */
   dbOk: boolean;
   /** 수수료/시장 데이터 사용 가능 여부 — false면 진입 차단 */
@@ -112,6 +130,15 @@ export function resetWeeklyLocks(locks: PersistedLocks): PersistedLocks {
 
 export function evaluateRiskState(input: RiskEvaluationInput): RiskEvaluationResult {
   const p = RISK_POLICY;
+  const maxConcurrentPositions = Math.max(
+    1,
+    Math.min(
+      Number.isFinite(input.maxConcurrentPositions)
+        ? Math.floor(input.maxConcurrentPositions as number)
+        : p.maxConcurrentPositions,
+      p.maxProfileConcurrentPositions,
+    ),
+  );
   const locks: PersistedLocks = { ...input.locks };
   const blockReasons: string[] = [];
   const actions: RiskAction[] = [];
@@ -131,14 +158,60 @@ export function evaluateRiskState(input: RiskEvaluationInput): RiskEvaluationRes
     return blocked('UNRESOLVED');
   }
 
-  // ── 1. HARD STOP — equity ≤ $850, 자동 해제 절대 금지 ───────────────────────
+  // ── 1. HARD STOP — 기존 sticky lock 우선, fresh threshold는 Active Capital 정합성 필요 ─
   if (locks.hardStopReason) {
     blockReasons.push(`HARD_STOPPED: ${locks.hardStopReason} — 운영자 명시적 검토 전 영구 차단`);
     return blocked('HARD_STOPPED');
   }
-  if (input.currentEquityUsd !== null && input.currentEquityUsd <= p.hardStopEquityUsd) {
+  if (input.newHardStopEvaluationAllowed === false) {
+    const driftReason = input.activeCapitalConfigurationDriftReason?.trim()
+      || 'ACTIVE_CAPITAL_CONFIGURATION_DRIFT';
+    blockReasons.push(
+      `ACTIVE_CAPITAL_CONFIGURATION_DRIFT: ${driftReason} — ` +
+      '승인 Active Capital 정합성 확인 전 신규 HARD_STOP 평가 및 신규 진입 차단',
+    );
+    // 구성 drift는 자동으로 sticky HARD_STOP/UNRESOLVED lock을 만들지 않는다.
+    // 운영 설정이 올바르게 복구되면 다음 평가에서 해소 가능하지만 entry는 현재 fail-closed다.
+    return blocked('NORMAL');
+  }
+
+  const explicitHardStopBinding =
+    input.hardStopPolicyEquityUsd !== undefined
+    || input.hardStopPolicyReferenceCapitalUsd !== undefined;
+  if (explicitHardStopBinding && input.newHardStopEvaluationAllowed !== true) {
+    blockReasons.push(
+      'HARD_STOP_POLICY_BINDING_REQUIRES_EXPLICIT_GATE — 명시 threshold는 Active Capital 정합성 gate=true일 때만 평가 가능',
+    );
+    return blocked('NORMAL');
+  }
+
+  const hardStopEquityUsd = explicitHardStopBinding
+    ? input.hardStopPolicyEquityUsd
+    : p.hardStopEquityUsd;
+  const hardStopReferenceCapitalUsd = explicitHardStopBinding
+    ? input.hardStopPolicyReferenceCapitalUsd
+    : p.initialCapitalUsd;
+  if (
+    typeof hardStopEquityUsd !== 'number'
+    || !Number.isFinite(hardStopEquityUsd)
+    || hardStopEquityUsd <= 0
+    || typeof hardStopReferenceCapitalUsd !== 'number'
+    || !Number.isFinite(hardStopReferenceCapitalUsd)
+    || hardStopReferenceCapitalUsd <= 0
+    || hardStopEquityUsd >= hardStopReferenceCapitalUsd
+  ) {
+    blockReasons.push(
+      'HARD_STOP_POLICY_BINDING_INVALID — threshold/reference pair 불완전·비정상, 신규 HARD_STOP 평가 및 신규 진입 차단',
+    );
+    return blocked('NORMAL');
+  }
+
+  if (input.currentEquityUsd !== null && input.currentEquityUsd <= hardStopEquityUsd) {
+    const hardStopDrawdownPercent =
+      (hardStopReferenceCapitalUsd - hardStopEquityUsd) / hardStopReferenceCapitalUsd * 100;
     locks.hardStopReason =
-      `equity $${input.currentEquityUsd.toFixed(2)} ≤ hard stop $${p.hardStopEquityUsd} (최초 $${p.initialCapitalUsd} 대비 -15%)`;
+      `equity $${input.currentEquityUsd.toFixed(2)} ≤ hard stop $${hardStopEquityUsd} ` +
+      `(현재 Active $${hardStopReferenceCapitalUsd} 대비 -${hardStopDrawdownPercent.toFixed(2)}%)`;
     actions.push('CLOSE_ALL_POSITIONS', 'CANCEL_ALL_ORDERS');
     blockReasons.push(locks.hardStopReason);
     return blocked('HARD_STOPPED');
@@ -220,7 +293,7 @@ export function evaluateRiskState(input: RiskEvaluationInput): RiskEvaluationRes
   }
 
   // ── 8. +5% Profit Protection ────────────────────────────────────────────────
-  // A. 실현 순수익 +5% — 신규 진입 금지, 부분청산 후 5% 미만이어도 재진입 금지
+  // A. 실현 순수익 +5% — 신규 진입 금지, 부분청산 후 5% 미만 되어도 재진입 금지
   if (realized >= targets.primaryProfitTargetUsd || locks.dailyLockState === 'PROFIT_TARGET_LOCKED') {
     if (locks.dailyLockState !== 'PROFIT_TARGET_LOCKED') {
       locks.dailyLockState = 'PROFIT_TARGET_LOCKED';
@@ -273,8 +346,8 @@ export function evaluateRiskState(input: RiskEvaluationInput): RiskEvaluationRes
       blockReasons.push(`일일 신규 진입 한도 (${input.dailyEntryCount}/${p.maxDailyEntries})`);
       return blocked('DEFENSIVE', 0.5);
     }
-    if (input.openPositionCount >= p.maxConcurrentPositions) {
-      blockReasons.push(`동시 포지션 한도 (${input.openPositionCount}/${p.maxConcurrentPositions})`);
+    if (input.openPositionCount >= maxConcurrentPositions) {
+      blockReasons.push(`동시 포지션 한도 (${input.openPositionCount}/${maxConcurrentPositions})`);
       return blocked('DEFENSIVE', 0.5);
     }
     return {
@@ -288,8 +361,8 @@ export function evaluateRiskState(input: RiskEvaluationInput): RiskEvaluationRes
     blockReasons.push(`일일 신규 진입 한도 도달 (${input.dailyEntryCount}/${p.maxDailyEntries})`);
     return blocked('NORMAL', 1);
   }
-  if (input.openPositionCount >= p.maxConcurrentPositions) {
-    blockReasons.push(`동시 포지션 한도 (${input.openPositionCount}/${p.maxConcurrentPositions})`);
+  if (input.openPositionCount >= maxConcurrentPositions) {
+    blockReasons.push(`동시 포지션 한도 (${input.openPositionCount}/${maxConcurrentPositions})`);
     return blocked('NORMAL', 1);
   }
 

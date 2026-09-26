@@ -78,7 +78,11 @@ export interface ProfitProtectRecord {
   idempotencyKey: string;
   positionKey: string;
   dayKey: string;
+  /** PAPER durable recovery plan. Optional only for records written before the
+   * atomic REDUCE70 reservation format was introduced. */
+  originalSizeUsd?: number;
   reduceSizeUsd: number;
+  remainingSizeUsd?: number;
   fullClose: boolean;
   status: ProfitProtectStatus;
   orderKey: string | null;

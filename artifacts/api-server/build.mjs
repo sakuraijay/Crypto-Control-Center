@@ -4,15 +4,220 @@ import { fileURLToPath } from "node:url";
 import { build as esbuild } from "esbuild";
 import esbuildPluginPino from "esbuild-plugin-pino";
 import { rm } from "node:fs/promises";
+import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 
 // Plugins (e.g. 'esbuild-plugin-pino') may use `require` to resolve dependencies
 globalThis.require = createRequire(import.meta.url);
 
 const artifactDir = path.dirname(fileURLToPath(import.meta.url));
+const repoDir = path.resolve(artifactDir, "../..");
+
+const RELEASE_SHA_PATTERN = /^[0-9a-f]{40}$/;
+const SAFETY_CONTRACT_VERSION = "post-publish-safety/v1";
+const HANDOFF_CONTRACT_VERSION = "confirmed-open-initial-stop/v1";
+const HANDOFF_CONTRACT_FILES = [
+  "artifacts/api-server/src/lib/confirmedOpenStopHandoff.ts",
+  "artifacts/api-server/src/lib/gmxApiSubmitFlow.ts",
+  "artifacts/api-server/src/lib/protectionOrders.ts",
+  "artifacts/api-server/src/lib/relayLifecycle.ts",
+  "artifacts/api-server/src/workers/liveTestExecutor.ts",
+  "artifacts/api-server/src/workers/protectionExecutor.ts",
+  "artifacts/api-server/src/__tests__/confirmedOpenStopHandoff.test.ts",
+  "artifacts/api-server/src/__tests__/gmxApiPrepareDurability.test.ts",
+  "artifacts/api-server/src/__tests__/gmxApiStatusReconciler.test.ts",
+  "artifacts/api-server/src/__tests__/protection6h2b.lifecycle.test.ts",
+];
+const CRITICAL_RELEASE_PATHS = [
+  ".github/workflows/ci.yml",
+  ".replit",
+  "pnpm-lock.yaml",
+  "package.json",
+  "artifacts/api-server/build.mjs",
+  "artifacts/api-server/package.json",
+  "artifacts/api-server/src/lib",
+  "artifacts/api-server/src/routes/canary.ts",
+  "artifacts/api-server/src/routes/gmxapi.ts",
+  "artifacts/api-server/src/routes/livetest.ts",
+  "artifacts/api-server/src/workers/liveTestExecutor.ts",
+  "artifacts/api-server/src/workers/protectionExecutor.ts",
+  "lib/db",
+];
+const PRODUCT_RELEASE_PATHS = [
+  ".github",
+  ".replit",
+  "package.json",
+  "pnpm-lock.yaml",
+  "scripts",
+  "lib",
+  "artifacts/api-server",
+  "artifacts/futures-web",
+];
+
+function git(args) {
+  return execFileSync("git", args, { cwd: repoDir, encoding: "utf8" }).trim();
+}
+
+function githubEventHeadSha() {
+  const eventPath = process.env.GITHUB_EVENT_PATH;
+  if (!eventPath) return null;
+  try {
+    const event = JSON.parse(readFileSync(eventPath, "utf8"));
+    const sha = event?.pull_request?.head?.sha;
+    return typeof sha === "string" ? sha.toLowerCase() : null;
+  } catch {
+    return null;
+  }
+}
+
+function handoverRefShas() {
+  try {
+    const refs = git([
+      "for-each-ref",
+      "--format=%(objectname)",
+      "refs/remotes/*/codex/handover-20260820",
+    ]);
+    return refs ? refs.split(/\r?\n/).map((sha) => sha.toLowerCase()) : [];
+  } catch {
+    return [];
+  }
+}
+
+function headParentShas() {
+  try {
+    const fields = git(["rev-list", "--parents", "-n", "1", "HEAD"])
+      .toLowerCase()
+      .split(/\s+/);
+    return fields.slice(1);
+  } catch {
+    return [];
+  }
+}
+
+function resolveReleaseSha() {
+  const candidates = [
+    githubEventHeadSha(),
+    ...handoverRefShas(),
+    ...headParentShas(),
+    (() => { try { return git(["rev-parse", "HEAD"]).toLowerCase(); } catch { return null; } })(),
+  ];
+  for (const sha of [...new Set(candidates)]) {
+    if (typeof sha !== "string" || !RELEASE_SHA_PATTERN.test(sha)) continue;
+    try {
+      execFileSync("git", ["merge-base", "--is-ancestor", sha, "HEAD"], { cwd: repoDir, stdio: "ignore" });
+      execFileSync("git", ["diff", "--quiet", sha, "--", ...CRITICAL_RELEASE_PATHS], {
+        cwd: repoDir,
+        stdio: "ignore",
+      });
+      execFileSync("git", ["diff", "--quiet", sha, "--", ...PRODUCT_RELEASE_PATHS], {
+        cwd: repoDir,
+        stdio: "ignore",
+      });
+      const untracked = git(["ls-files", "--others", "--exclude-standard", "--", ...PRODUCT_RELEASE_PATHS]);
+      if (untracked) continue;
+      return sha;
+    } catch {
+      // A stale tracking ref or PR merge parent may legitimately differ. Try the
+      // next locally available candidate, but never accept one with a critical diff.
+    }
+  }
+  throw new Error("Canary release SHA could not be bound to the local security-critical source");
+}
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function configuredSafetyFlags(env) {
+  const relayMode = env.GMX_RELAY_MODE === "LIVE" || env.GMX_RELAY_MODE === "DRY_RUN"
+    ? env.GMX_RELAY_MODE : "DISABLED";
+  return {
+    engineMode: env.WORKER_ENGINE_MODE === "LIVE" ? "LIVE" : "PAPER",
+    autoWorkerLiveEnabled: env.AUTO_WORKER_LIVE_ENABLED === "true",
+    liveTestExecutionLocked: env.LIVE_TEST_EXECUTION_LOCKED !== "false",
+    delegatedSignerEnabled: env.DELEGATED_SIGNER_ENABLED === "true",
+    gmxOrderSubmissionEnabled: env.GMX_API_ORDER_SUBMISSION_ENABLED === "true",
+    relaySubmissionEnabled: env.GMX_RELAY_SUBMISSION_ENABLED === "true",
+    relaySubmitNetworkEnabled: env.GMX_RELAY_NETWORK_ENABLED === "true",
+    relayMode,
+  };
+}
+
+function buildHandoffContract(releaseSha) {
+  const parts = HANDOFF_CONTRACT_FILES.map((relativePath) => {
+    const source = git(["show", `${releaseSha}:${relativePath}`]);
+    return `${relativePath}\0${source}`;
+  });
+  const joined = parts.join("\0");
+  if (!joined.includes("sourceOpenTaskId")
+      || !joined.includes("allowedBlockingSourceOpen")
+      || !joined.includes("GENERAL_INTENT_ID")
+      || !joined.includes("EMERGENCY_CLOSE")) {
+    throw new Error("Task #140 confirmed OPEN handoff safety contract is incomplete");
+  }
+  return {
+    version: HANDOFF_CONTRACT_VERSION,
+    sha256: sha256(joined),
+    files: [...HANDOFF_CONTRACT_FILES],
+  };
+}
+
+function readWebAssets() {
+  const indexPath = path.resolve(repoDir, "artifacts/futures-web/dist/public/index.html");
+  const html = readFileSync(indexPath, "utf8");
+  const paths = [...html.matchAll(/(?:src|href)="(\/assets\/[^"]+\.(?:js|css))"/g)]
+    .map((match) => match[1]);
+  if (paths.length < 2) throw new Error("Production Web asset manifest is incomplete");
+  return [...new Set(paths)].sort().map((publicPath) => ({
+    path: publicPath,
+    sha256: sha256(readFileSync(path.resolve(repoDir, `artifacts/futures-web/dist/public${publicPath}`))),
+  }));
+}
+
+function buildReleaseIdentity(releaseSha) {
+  const productTree = git(["rev-parse", `${releaseSha}^{tree}`]).toLowerCase();
+  const workspaceHeadSha = git(["rev-parse", "HEAD"]).toLowerCase();
+  const workspaceProductTree = git(["rev-parse", "HEAD^{tree}"]).toLowerCase();
+  const buildConfiguredSafetyFlags = configuredSafetyFlags(process.env);
+  if (!RELEASE_SHA_PATTERN.test(productTree)) {
+    throw new Error("Product tree could not be bound to the release commit");
+  }
+  const builtAt = new Date().toISOString();
+  const handoff = buildHandoffContract(releaseSha);
+  const webAssets = readWebAssets();
+  const identityBasis = JSON.stringify({
+    releaseSha,
+    productTree,
+    workspaceSource: { headSha: workspaceHeadSha, productTree: workspaceProductTree },
+    configuredSafetyFlags: buildConfiguredSafetyFlags,
+    safetyContractVersion: SAFETY_CONTRACT_VERSION,
+    handoff,
+    webAssets,
+    topology: { processCount: 1, port: 8080, owner: "api-server" },
+  });
+  return {
+    schemaVersion: 1,
+    releaseSha,
+    productTree,
+    buildId: sha256(`${identityBasis}\0${builtAt}`),
+    builtAt,
+    workspaceSource: { headSha: workspaceHeadSha, productTree: workspaceProductTree },
+    configuredSafetyFlags: buildConfiguredSafetyFlags,
+    safetyContract: {
+      version: SAFETY_CONTRACT_VERSION,
+      confirmedOpenInitialStop: handoff,
+    },
+    topology: { processCount: 1, port: 8080, owner: "api-server" },
+    webAssets,
+  };
+}
 
 async function buildAll() {
   const distDir = path.resolve(artifactDir, "dist");
   await rm(distDir, { recursive: true, force: true });
+  const canaryReleaseSha = resolveReleaseSha();
+  const releaseIdentity = buildReleaseIdentity(canaryReleaseSha);
 
   await esbuild({
     entryPoints: [path.resolve(artifactDir, "src/index.ts")],
@@ -22,6 +227,10 @@ async function buildAll() {
     outdir: distDir,
     outExtension: { ".js": ".mjs" },
     logLevel: "info",
+    define: {
+      __CANARY_RELEASE_SHA__: JSON.stringify(canaryReleaseSha),
+      __RELEASE_IDENTITY__: JSON.stringify(releaseIdentity),
+    },
     // Some packages may not be bundleable, so we externalize them, we can add more here as needed.
     // Some of the packages below may not be imported or installed, but we're adding them in case they are in the future.
     // Examples of unbundleable packages:

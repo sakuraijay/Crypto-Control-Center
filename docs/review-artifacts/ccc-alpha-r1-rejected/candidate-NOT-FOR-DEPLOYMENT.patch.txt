@@ -1,0 +1,817 @@
+diff --git a/artifacts/api-server/src/__tests__/aiWorker.test.ts b/artifacts/api-server/src/__tests__/aiWorker.test.ts
+index 46c3d7b1999f277e17d4b4155a8394261a336a4e..a619a1c0953cd0d91ea69c2bf1b9009df5d2ad56 100644
+--- a/artifacts/api-server/src/__tests__/aiWorker.test.ts
++++ b/artifacts/api-server/src/__tests__/aiWorker.test.ts
+@@ -95,6 +95,18 @@ vi.mock('../lib/tradeSettlement', () => ({
+ }));
+ 
+ vi.mock('../lib/riskProfiles', () => ({
++  deriveRiskProfileLimits: (_name: string, base: Record<string, unknown>) => ({
++    immediateEntryThreshold: 80,
++    maxRiskPerTradePct: 0.75,
++    reserveCashPct: Number(base.reserveCashPct ?? 20),
++    maxMarginPerTradeUsd: Number(base.maxMarginPerTrade ?? 334),
++    maxConcurrentPositions: 1,
++    cooldownMinutes: Number(base.cooldownMinutes ?? 30),
++    maxLeverage: Math.min(Number(base.maxLeverage ?? 3), 3),
++    maxTotalExposureUsd: Number(base.maxTotalExposureUSDT ?? 3_000),
++    allocatedTradingCapitalUsd: Number(base.tradingCapital ?? 1_000),
++    maxRiskPerTradeUsd: Number(base.tradingCapital ?? 1_000) * 0.0075,
++  }),
+   applyRiskProfileToLimits: (base: Record<string, unknown>) => base,
+   promoteRiskProfileAtSafeBoundary: async (base: Record<string, unknown>) => ({
+     desired: {
+@@ -268,6 +280,9 @@ import type { StrategyShadowRecord } from '../intel/strategyShadowAdapterV2';
+ import { buildCandleStrategyShadowEvidence } from '../intel/candleStrategyShadowEvidenceV2';
+ import { buildTestNetEdgeResearch } from './helpers/strategyNetEdgeResearchFixture';
+ import type { CandleSignalToRisk } from '../intel/candleSignalContract';
++import { FIXED_BETA_REFERENCE_CONTEXT } from '../workers/fixedBetaReferenceContract';
++import { createFixedBetaReferenceSnapshotV1 } from '../workers/fixedBetaReferenceState';
++import { prepareFixedBetaReferenceWorkerStateRowV1 } from '../workers/fixedBetaReferenceWorkerState';
+ import {
+   runIntelServiceCycle,
+   runStrategyShadowWorkerReadOnly,
+@@ -283,6 +298,7 @@ import {
+   reduceServerPaper70,
+   requestServerPaperCloseAll,
+   manageServerPaperTick,
++  loadServerOpenRows,
+ } from '../workers/serverPaperExecutor';
+ 
+ // ── 최소 유효 AI 결정 (CASH — 가장 안전한 기본값) ──────────────────────────────
+@@ -333,6 +349,21 @@ function resetWorker() {
+   wm.strategyLifecycleRestoreBlocked = true;
+   wm.activePaperEpochStartMs = null;
+   wm.paperEpochStateOk = true;
++  wm.riskState = null;
++  wm.riskDbOk = false;
++  wm.lastRiskEvaluation = null;
++  wm.serverPaperTickInFlight = false;
++  wm.dailyBaseline = null;
++  wm.weeklyBaseline = null;
++  wm.lastDailyPnlUsd = null;
++  wm.lastWeeklyPnlUsd = null;
++  wm.lastDailyRealizedUsd = null;
++  wm.lastWeeklyRealizedUsd = null;
++  wm.lastCurrentEquityUsd = null;
++  wm.periodPnlUpdatedAt = null;
++  wm.lastPaperSizing = null;
++  wm.lastCloseAllSummary = null;
++  wm.lastSettlementReconcile = null;
+   (wm.priceAtBySymbol as Map<string, number>).clear();
+   (wm.lastTickUpdatedAtBySymbol as Map<string, number>).clear();
+ 
+@@ -466,6 +497,29 @@ describe('AI Worker Active Capital Risk binding', () => {
+     expect(result.locks.hardStopReason).toContain('hard stop $920');
+   });
+ 
++  it('explicit Fixed Beta binds the worker RiskStateMachine to 400/368', () => {
++    const result = evaluateWorkerRiskState(
++      riskInput({
++        dailyRiskCapitalUsd: 400,
++        weeklyRiskCapitalUsd: 400,
++        currentEquityUsd: 367.99,
++      }),
++      400,
++      {
++        policyContext: 'FIXED_BETA_400',
++        hardStopThresholdBindingCapability: 'RISK_STATE_MACHINE_EXPLICIT_PAIR_V1',
++      },
++    );
++
++    expect(result.state).toBe('HARD_STOPPED');
++    expect(result.entryAllowed).toBe(false);
++    expect(result.actions).toEqual(expect.arrayContaining([
++      'CLOSE_ALL_POSITIONS',
++      'CANCEL_ALL_ORDERS',
++    ]));
++    expect(result.locks.hardStopReason).toContain('hard stop $368');
++  });
++
+   it('preserves an existing historical HARD_STOP across runtime capital drift', () => {
+     const historical = 'historical HARD_STOP — operator review required';
+     const result = evaluateWorkerRiskState(
+@@ -567,6 +621,56 @@ function setupDbSequence(opts: {
+   _dbUpdateImpl = () => 0;
+ }
+ 
++function fixedBetaReferenceRow() {
++  const periodKey = new Date(Date.now() - 1_000).toISOString();
++  const created = createFixedBetaReferenceSnapshotV1({
++    rawReferenceContext: FIXED_BETA_REFERENCE_CONTEXT,
++    rawPolicyContext: 'FIXED_BETA_400',
++    configuredTradingCapitalUsd: 1_000,
++    currentRiskEquityUsd: 400,
++    dailyPeriodKey: periodKey,
++    weeklyPeriodKey: periodKey,
++    historicalHardStopPresent: false,
++  });
++  if (!created.ok) throw new Error(created.reason);
++  const prepared = prepareFixedBetaReferenceWorkerStateRowV1(created.snapshot, false);
++  if (!prepared.ok) throw new Error(prepared.reason);
++  return prepared.row;
++}
++
++/**
++ * Worker cycle query order with explicit Fixed Beta:
++ * start() selects 1..6 as in setupDbSequence(), then runCycle selects
++ * pending approvals (7), strategy config (8), protected beta reference (9),
++ * and trades (10).
++ */
++function setupFixedBetaCycleDb(reference: unknown | null) {
++  let selectCallN = 0;
++  _dbSelectImpl = () => {
++    selectCallN++;
++    if (selectCallN === 1) return [];
++    if (selectCallN === 2) return [];
++    if (selectCallN === 3) return [];
++    if (selectCallN === 4) return [];
++    if (selectCallN === 5) return [];
++    if (selectCallN === 6) return [];
++    if (selectCallN === 7) return [];
++    if (selectCallN === 8) {
++      return [{
++        limits: JSON.stringify({
++          tradingCapital: 1_000,
++          policyContext: 'FIXED_BETA_400',
++        }),
++      }];
++    }
++    if (selectCallN === 9) return reference ? [reference] : [];
++    if (selectCallN === 10) return [];
++    return [];
++  };
++  _dbInsertImpl = () => [{ id: 'fixed-beta-decision' }];
++  _dbUpdateImpl = () => 0;
++}
++
+ // ────────────────────────────────────────────────────────────────────────────
+ 
+ describe('PAPER epoch accounting boundary', () => {
+@@ -707,6 +811,76 @@ describe('Worker 초기 상태', () => {
+   });
+ });
+ 
++describe('Worker Fixed Beta capital integration', () => {
++  beforeEach(() => {
++    resetWorker();
++    vi.mocked(runAiEngine).mockReset();
++  });
++  afterEach(() => {
++    workerManager.stop();
++    vi.useRealTimers();
++  });
++
++  it('uses the protected 400-USDC context for actual AI account and profile inputs', async () => {
++    vi.useFakeTimers({ now: 1_800_000_000_000 });
++    setupFixedBetaCycleDb(fixedBetaReferenceRow());
++    vi.mocked(runAiEngine).mockReturnValue(
++      CASH_DECISION as unknown as ReturnType<typeof runAiEngine>,
++    );
++
++    await workerManager.start();
++    const wm = workerManager as unknown as { runCycle(): Promise<void> };
++    await wm.runCycle();
++
++    const aiInput = vi.mocked(runAiEngine).mock.calls.at(-1)?.[0] as {
++      account?: { balance?: number; availableBalance?: number };
++      tradingCapital?: number;
++    };
++    expect(aiInput.account).toMatchObject({ balance: 400, availableBalance: 400 });
++    expect(aiInput.tradingCapital).toBe(400);
++    expect(workerManager.getStatus()).toMatchObject({
++      lastLimitsUsed: { tradingCapital: 400 },
++      currentEquityUsd: 400,
++      dailyPnlUsd: 0,
++      weeklyPnlUsd: 0,
++    });
++  });
++
++  it('blocks only new Fixed Beta entries when the protected row is unavailable', async () => {
++    vi.useFakeTimers({ now: 1_800_000_000_000 });
++    setupFixedBetaCycleDb(null);
++    vi.mocked(runAiEngine).mockReturnValue({
++      ...CASH_DECISION,
++      operatingState: 'LONG',
++      executionType: 'perp_long_open',
++      primarySymbol: 'BTC',
++      confidence: 95,
++      sizeUsd: 100,
++      leverage: 1,
++    } as unknown as ReturnType<typeof runAiEngine>);
++    vi.mocked(loadServerOpenRows).mockResolvedValue([{
++      id: 'paper-open-1',
++      symbol: 'BTC',
++      side: 'LONG',
++      status: 'OPEN',
++      sizeUsd: '100',
++      entryPrice: '60000',
++      leverage: 1,
++    }] as never);
++    const closeAll = vi.mocked(requestServerPaperCloseAll).mockResolvedValue({ persisted: true });
++
++    await workerManager.start();
++    const wm = workerManager as unknown as { runCycle(): Promise<void> };
++    await wm.runCycle();
++
++    expect(closeAll).toHaveBeenCalled();
++    const aiDecisionInsert = _dbValuesInputs
++      .map(input => input as Record<string, unknown>)
++      .find(input => input.direction === 'NO_TRADE');
++    expect(aiDecisionInsert?.riskResult).toBe('VETOED');
++  });
++});
++
+ describe('worker lifecycle generation safety', () => {
+   beforeEach(() => { resetWorker(); });
+   afterEach(() => { workerManager.stop(); vi.useRealTimers(); vi.restoreAllMocks(); });
+diff --git a/artifacts/api-server/src/lib/riskEngineState.ts b/artifacts/api-server/src/lib/riskEngineState.ts
+index 2d725d6454e667f35adf4fb411b1589ec03048a8..90c0a20193cda2a25aeb54df41ac1e4d655075d3 100644
+--- a/artifacts/api-server/src/lib/riskEngineState.ts
++++ b/artifacts/api-server/src/lib/riskEngineState.ts
+@@ -19,6 +19,7 @@ import {
+   EMPTY_LOCKS, resetDailyLocks, resetWeeklyLocks,
+   type PersistedLocks, type RiskOperatingState,
+ } from './riskStateMachine';
++import type { ActiveCapitalPolicyContext } from './activeCapitalSemantics';
+ 
+ export const RISK_ENGINE_STATE_KEY = 'riskEngineStateV1';
+ 
+@@ -37,6 +38,8 @@ export interface PersistedRiskEngineState {
+   riskOperatingState: RiskOperatingState;
+   locks: PersistedLocks;
+   lastUpdatedAt: string;
++  /** Optional scope marker; omitted legacy rows are Standard Active. */
++  capitalPolicyContext?: ActiveCapitalPolicyContext;
+ }
+ 
+ export function initialRiskEngineState(now: Date, equityUsd: number): PersistedRiskEngineState {
+@@ -83,6 +86,9 @@ export function parseRiskEngineState(raw: string | null | undefined): PersistedR
+       riskOperatingState: v.riskOperatingState as RiskOperatingState,
+       locks,
+       lastUpdatedAt: typeof v.lastUpdatedAt === 'string' ? v.lastUpdatedAt : v.dayPeriodStart,
++      capitalPolicyContext: v.capitalPolicyContext === 'FIXED_BETA_400'
++        ? 'FIXED_BETA_400'
++        : undefined,
+     };
+   } catch {
+     return null;
+diff --git a/artifacts/api-server/src/workers/aiWorker.ts b/artifacts/api-server/src/workers/aiWorker.ts
+index a450678d1d5d7878015cf71b90792fb782fcb39d..89fc3f99b89afa0af7e88c1c3fb4712ccdd02ff9 100644
+--- a/artifacts/api-server/src/workers/aiWorker.ts
++++ b/artifacts/api-server/src/workers/aiWorker.ts
+@@ -74,9 +74,19 @@ import {
+   type ServerPaperExecStatus, type PriceQuote,
+ } from "./serverPaperExecutor";
+ import {
++  deriveRiskProfileLimits,
+   applyRiskProfileToLimits,
+   promoteRiskProfileAtSafeBoundary,
+ } from "../lib/riskProfiles";
++import {
++  resolveFixedBetaWorkerCycleCapitalContextV1,
++  type FixedBetaWorkerCycleCapitalContextV1,
++} from './fixedBetaWorkerCycleCapitalContext';
++import { readFixedBetaReferenceWorkerStateFromDbV1 } from './fixedBetaReferenceDbReadAdapter';
++import type {
++  ActiveCapitalPolicyContext,
++  HardStopThresholdBindingCapability,
++} from '../lib/activeCapitalSemantics';
+ import { isPaperEpochActivationHeld } from '../lib/paperEpochActivationLock';
+ import {
+   PAPER_EPOCH_ACTIVE_KEY,
+@@ -101,12 +111,18 @@ type DecisionClaimResult =
+ export function evaluateWorkerRiskState(
+   input: RiskEvaluationInput,
+   runtimeConfiguredCapitalUsd: number | null | undefined,
++  capitalContext?: {
++    policyContext?: ActiveCapitalPolicyContext;
++    hardStopThresholdBindingCapability?: HardStopThresholdBindingCapability;
++  },
+ ): RiskEvaluationResult {
+   const binding = buildActiveCapitalWorkerBinding({
+     runtimeConfiguredCapitalUsd,
+     observedWalletBalanceUsd: null,
+     currentRiskEquityUsd: input.currentEquityUsd,
+     historicalHardStopTriggerReason: input.locks.hardStopReason,
++    policyContext: capitalContext?.policyContext,
++    hardStopThresholdBindingCapability: capitalContext?.hardStopThresholdBindingCapability,
+   });
+ 
+   return evaluateRiskState({
+@@ -162,6 +178,9 @@ const CYCLE_INTERVAL_MS = 60_000;
+ /** 초기 사이클 지연 — 가격 히스토리 축적 대기 */
+ const INITIAL_DELAY_MS = 30_000;
+ 
++/** Risk-period observations older than eight days are not usable for entry sizing. */
++const WORKER_RISK_OBSERVATION_MAX_AGE_MS = 8 * 24 * 60 * 60 * 1000;
++
+ /**
+  * 기본 리스크 한도 — RISK_POLICY($1,000 최종 정책, 6H-1)에서 파생.
+  * DB에 전략 설정이 없을 때 사용하는 보수적 기본값.
+@@ -587,6 +606,7 @@ class WorkerManager {
+     riskEval: RiskEvaluationResult | null,
+     cycleNum: number,
+     generation: number,
++    entryExecutionAuthorized = true,
+   ): Promise<void> {
+     if (!this.isCurrentGeneration(generation)) return;
+     const serverOpenRows = await loadServerOpenRows();
+@@ -635,6 +655,8 @@ class WorkerManager {
+       return; // 청산 사이클에는 신규 진입 없음
+     }
+ 
++    if (!entryExecutionAuthorized) return;
++
+     // 3) 신규 진입 — 즉시 진입 유형만 (scale_in/scale_out/hedge 등 물타기·복합 거부)
+     const isEntry =
+       (decision.operatingState === 'LONG' || decision.operatingState === 'SHORT') &&
+@@ -1134,6 +1156,30 @@ class WorkerManager {
+   }
+ 
+   // ── Strategy limits from DB ─────────────────────────────────────────────
++  /**
++   * Resolve the explicit capital meaning for one cycle.
++   *
++   * Standard Active deliberately does not read the Fixed Beta row. Fixed Beta
++   * is a read-only protected-reference check: failure is surfaced to the cycle
++   * as an entry block, while the caller continues to run close/protection and
++   * reconciliation paths.
++   */
++  private async resolveCycleCapitalContext(
++    limits: RiskLimits,
++  ): Promise<FixedBetaWorkerCycleCapitalContextV1> {
++    const historicalHardStopPresent = this.riskDbOk
++      ? Boolean(this.riskState?.locks.hardStopReason)
++      : undefined;
++    return resolveFixedBetaWorkerCycleCapitalContextV1({
++      rawPolicyContext: limits.policyContext,
++      configuredTradingCapitalUsd: limits.tradingCapital,
++      authoritativeHistoricalHardStopPresent: historicalHardStopPresent,
++      readWorkerStateRow: limits.policyContext === 'FIXED_BETA_400'
++        ? readFixedBetaReferenceWorkerStateFromDbV1
++        : null,
++    });
++  }
++
+   /**
+    * DB에서 사용자 Strategy 설정을 읽어 RiskLimits 반환.
+    * 설정이 없거나 실패하면 보수적인 DEFAULT_LIMITS 반환.
+@@ -1431,15 +1477,38 @@ class WorkerManager {
+ 
+       // 프로필 변경은 사이클 시작의 안전 경계에서만 승격한다. API는 desired만 기록하며
+       // Worker 외 다른 경로는 applied를 변경할 수 없다.
+-      const [baseLimits, paperState] = await Promise.all([
+-        this.loadStrategyLimits(),
+-        this.loadPaperState(),
+-      ]);
++      const baseLimits = await this.loadStrategyLimits();
++      const capitalContext = await this.resolveCycleCapitalContext(baseLimits);
++      if (!capitalContext.ok) {
++        console.warn(
++          `[AIWorker] capital context unavailable — 신규 진입만 차단: ${capitalContext.reason}`,
++        );
++      }
++      if (!this.isCurrentGeneration(capturedGeneration)) return;
++
++      // Rebind the profile's capital-sensitive derived limits to the same
++      // selected 400-USDC domain. The configured Active Capital remains
++      // untouched; this is only the cycle calculation view.
++      const profileBaseLimits = capitalContext.ok && capitalContext.betaRequested
++        ? { ...baseLimits, tradingCapital: capitalContext.effectiveTradingCapitalUsd }
++        : baseLimits;
++      const paperState = await this.loadPaperState();
+       if (!this.isCurrentGeneration(capturedGeneration)) return;
++      // Profile promotion remains on the configured Standard limits so this
++      // read-only Beta path cannot rewrite the persisted applied-profile row.
++      // Only the in-memory derived snapshot is rebound to the selected domain.
+       const riskProfileStatus = await promoteRiskProfileAtSafeBoundary(baseLimits);
+       if (!this.isCurrentGeneration(capturedGeneration)) return;
+-      const riskProfile = riskProfileStatus.applied;
+-      const limits = applyRiskProfileToLimits(baseLimits, riskProfile);
++      const riskProfile = capitalContext.ok && capitalContext.betaRequested
++        ? {
++            ...riskProfileStatus.applied,
++            derivedLimits: deriveRiskProfileLimits(
++              riskProfileStatus.applied.name,
++              profileBaseLimits,
++            ),
++          }
++        : riskProfileStatus.applied;
++      const limits = applyRiskProfileToLimits(profileBaseLimits, riskProfile);
+       this.lastLimitsUsed = limits;
+ 
+       const analyses = this.buildAnalyses();
+@@ -1467,14 +1536,36 @@ class WorkerManager {
+       // ⚠️ 반드시 cooldown/거래한도 게이트보다 먼저 수행 — 게이트 조기 반환 시에도
+       //    PnL이 매 사이클 갱신되어 stale 값이 노출되지 않는다.
+       // paperState가 DB 실패로 synthetic zeros면 가짜 PnL을 만들지 않도록 스킵(fail-closed).
+-      if (paperState.liveTestDbOk) {
+-        const equityNow =
+-          limits.tradingCapital
++      const fixedBetaCycle = capitalContext.ok && capitalContext.betaRequested
++        ? capitalContext.fixedBetaReference
++        : null;
++      const betaSelectionRequested = baseLimits.policyContext === 'FIXED_BETA_400';
++      const betaReferenceUnavailable = betaSelectionRequested && fixedBetaCycle === null;
++      const cycleEquity = fixedBetaCycle
++        ? fixedBetaCycle.snapshot.currentRiskEquityUsd
++        : limits.tradingCapital
+           + paperState.totalRealizedPnlAllTime
+           + paperState.totalUnrealizedPnl;
+-        await this.updatePeriodPnl(equityNow, paperState.realizedPnLToday, paperState.realizedPnLWeekly);
+-        if (!this.isCurrentGeneration(capturedGeneration)) return;
+-      } else {
++      if (paperState.liveTestDbOk && !betaReferenceUnavailable) {
++        if (fixedBetaCycle) {
++          // Fixed Beta's protected snapshot is authoritative for its own
++          // equity/baselines. Never roll or write the legacy Standard
++          // baseline keys from this path.
++          this.lastCurrentEquityUsd = cycleEquity;
++          this.lastDailyPnlUsd = fixedBetaCycle.metrics.dailyPnlUsd;
++          this.lastWeeklyPnlUsd = fixedBetaCycle.metrics.weeklyPnlUsd;
++          this.lastDailyRealizedUsd = fixedBetaCycle.metrics.dailyPnlUsd;
++          this.lastWeeklyRealizedUsd = fixedBetaCycle.metrics.weeklyPnlUsd;
++          this.periodPnlUpdatedAt = new Date().toISOString();
++        } else {
++          await this.updatePeriodPnl(
++            cycleEquity,
++            paperState.realizedPnLToday,
++            paperState.realizedPnLWeekly,
++          );
++          if (!this.isCurrentGeneration(capturedGeneration)) return;
++        }
++      } else if (!paperState.liveTestDbOk) {
+         this.clearPeriodPnl();
+       }
+ 
+@@ -1512,19 +1603,26 @@ class WorkerManager {
+       }
+ 
+       // ── Equity HWM 및 계좌 드로다운 계산 ───────────────────────────────
+-      // currentEquity = 초기 자본 + 전체 누적 실현 PnL + mark-to-market 미실현 PnL
+-      // totalRealizedPnlAllTime을 사용해 오늘만이 아닌 전체 계좌 가치를 반영합니다.
+-      const currentEquity =
+-        limits.tradingCapital
+-        + paperState.totalRealizedPnlAllTime  // 전체 기간 누적 실현 PnL
+-        + paperState.totalUnrealizedPnl;      // mark-to-market 미실현 PnL
++      // Standard uses the complete PAPER equity. Fixed Beta uses only the
++      // protected reference domain, never legacy all-time PnL/HWM.
++      const currentEquity = cycleEquity;
++      const scopedUnrealizedPnl = fixedBetaCycle ? 0 : paperState.totalUnrealizedPnl;
+ 
+       // HWM 갱신: 첫 사이클은 현재 equity로 초기화.
+       // DB에 저장해 서버 재시작 후에도 maxDrawdown 강제가 연속성을 갖도록 함.
+-      if (this.equityHighWaterMark === null || currentEquity > this.equityHighWaterMark) {
++      // Fixed Beta must never reuse or overwrite the legacy Standard HWM. Its
++      // protected reference is the only HWM source available to this path.
++      if (fixedBetaCycle) {
++        this.equityHighWaterMark = Math.max(
++          fixedBetaCycle.snapshot.referenceHwmUsd,
++          currentEquity,
++        );
++      } else if (this.equityHighWaterMark === null || currentEquity > this.equityHighWaterMark) {
+         this.equityHighWaterMark = currentEquity;
+-        await this.saveHwmToDb(currentEquity);
+-        if (!this.isCurrentGeneration(capturedGeneration)) return;
++        if (!betaReferenceUnavailable) {
++          await this.saveHwmToDb(currentEquity);
++          if (!this.isCurrentGeneration(capturedGeneration)) return;
++        }
+       }
+ 
+       // HWM 대비 드로다운 % (HWM > 0이고 현재 equity < HWM일 때만 의미 있음)
+@@ -1541,6 +1639,29 @@ class WorkerManager {
+       if (this.riskState === null && this.riskDbOk) {
+         this.riskState = initialRiskEngineState(nowRisk, currentEquity);
+       }
++      // A persisted RiskEngine row is scoped to the capital meaning that
++      // produced it. On an explicit Standard/Beta switch, keep sticky safety
++      // locks but do not carry period losses/counts across domains. A failed
++      // Beta reference intentionally leaves an existing Beta scope intact so
++      // management can continue without rewriting it as Standard.
++      const betaScopeActive = fixedBetaCycle !== null;
++      if (
++        this.riskState
++        && (betaScopeActive || !betaSelectionRequested)
++        && (betaScopeActive
++          ? this.riskState.capitalPolicyContext !== 'FIXED_BETA_400'
++          : this.riskState.capitalPolicyContext === 'FIXED_BETA_400')
++      ) {
++        const retainedLocks = this.riskState.locks;
++        this.riskState = {
++          ...initialRiskEngineState(nowRisk, currentEquity),
++          locks: retainedLocks,
++          ...(betaScopeActive ? { capitalPolicyContext: 'FIXED_BETA_400' as const } : {}),
++        };
++      }
++      const scopedConsecutiveLosses = fixedBetaCycle
++        ? (this.riskState?.consecutiveLossCount ?? 0)
++        : paperState.consecutiveLosses;
+       let riskEval: RiskEvaluationResult | null = null;
+       if (this.riskState) {
+         // Manila 기간 롤오버 (daily reset은 weekly/hard 잠금을 해제하지 않음)
+@@ -1548,27 +1669,56 @@ class WorkerManager {
+         this.riskState = rolled.state;
+ 
+         // 기준점 관측 시각 = 기간 시작. maxAge = 8일 (주간 기준점도 유효해야 함)
+-        const RISK_OBS_MAX_AGE_MS = 8 * 24 * 60 * 60 * 1000;
+         const dCap = dailyRiskCapital(
+-          { equityUsd: this.riskState.startOfDayEquityUsd, recordedAt: this.riskState.dayPeriodStart },
+-          nowRisk, RISK_OBS_MAX_AGE_MS,
++          fixedBetaCycle
++            ? {
++                equityUsd: fixedBetaCycle.snapshot.dailyStartEquityUsd,
++                recordedAt: fixedBetaCycle.snapshot.dailyPeriodKey,
++              }
++            : {
++                equityUsd: this.riskState.startOfDayEquityUsd,
++                recordedAt: this.riskState.dayPeriodStart,
++              },
++          nowRisk, WORKER_RISK_OBSERVATION_MAX_AGE_MS,
++          capitalContext.ok && capitalContext.betaRequested
++            ? capitalContext.riskCapitalScope
++            : null,
+         );
+         const wCap = weeklyRiskCapital(
+-          { equityUsd: this.riskState.startOfWeekEquityUsd, recordedAt: this.riskState.weekPeriodStart },
+-          nowRisk, RISK_OBS_MAX_AGE_MS,
++          fixedBetaCycle
++            ? {
++                equityUsd: fixedBetaCycle.snapshot.weeklyStartEquityUsd,
++                recordedAt: fixedBetaCycle.snapshot.weeklyPeriodKey,
++              }
++            : {
++                equityUsd: this.riskState.startOfWeekEquityUsd,
++                recordedAt: this.riskState.weekPeriodStart,
++              },
++          nowRisk, WORKER_RISK_OBSERVATION_MAX_AGE_MS,
++          capitalContext.ok && capitalContext.betaRequested
++            ? capitalContext.riskCapitalScope
++            : null,
+         );
+ 
+         // PAPER 모드: 시뮬레이션 체결에 수수료 0으로 정의 → 실현 PnL = 순 PnL.
+         // LIVE 모드에서는 fee breakdown 필수 — 결측 시 feeDataOk=false로 fail-closed.
+-        const dailyRealizedNet = paperState.liveTestDbOk ? paperState.realizedPnLManilaDay : null;
+-        const weeklyRealizedNet = paperState.liveTestDbOk ? paperState.realizedPnLManilaWeek : null;
++        const dailyRealizedNet = paperState.liveTestDbOk
++          ? (fixedBetaCycle?.metrics.dailyPnlUsd ?? paperState.realizedPnLManilaDay)
++          : null;
++        const weeklyRealizedNet = paperState.liveTestDbOk
++          ? (fixedBetaCycle?.metrics.weeklyPnlUsd ?? paperState.realizedPnLManilaWeek)
++          : null;
+         const hasOpenPositions = paperState.positions.length > 0;
+         const estimatedExit = dailyRealizedNet !== null && hasOpenPositions
+-          ? dailyRealizedNet + paperState.totalUnrealizedPnl
++          ? dailyRealizedNet + scopedUnrealizedPnl
+           : (dailyRealizedNet !== null ? null : null);
+         const lossAware = dailyRealizedNet !== null
+-          ? (hasOpenPositions ? Math.min(dailyRealizedNet, dailyRealizedNet + paperState.totalUnrealizedPnl) : dailyRealizedNet)
++          ? (hasOpenPositions ? Math.min(dailyRealizedNet, dailyRealizedNet + scopedUnrealizedPnl) : dailyRealizedNet)
+           : null;
++        const scopedDailyEntryCount = fixedBetaCycle
++          ? this.riskState.dailyEntryCount
++          : paperState.entriesManilaDay;
++        const scopedConsecutiveLossCount = scopedConsecutiveLosses;
+ 
+         riskEval = evaluateWorkerRiskState({
+           dailyRiskCapitalUsd:  dCap.ok ? dCap.capitalUsd : null,
+@@ -1578,15 +1728,35 @@ class WorkerManager {
+           dailyLossAwareNetPnlUsd: lossAware,
+           estimatedExitNetPnlUsd:  estimatedExit,
+           weeklyRealizedNetPnlUsd: weeklyRealizedNet,
+-          dailyEntryCount:      paperState.entriesManilaDay,
+-          consecutiveLossCount: paperState.consecutiveLosses,
++          dailyEntryCount:      scopedDailyEntryCount,
++          consecutiveLossCount: scopedConsecutiveLossCount,
+           openPositionCount:    paperState.positions.length,
+           maxConcurrentPositions: riskProfile.derivedLimits.maxConcurrentPositions,
+           dbOk:                 this.riskDbOk && paperState.liveTestDbOk,
+           feeDataOk:            true,  // PAPER: 수수료 0 정의. LIVE 실행 경로는 별도 fee 게이트.
+           marketDataFresh:      dataFreshMs < 120_000,
+           locks: this.riskState.locks,
+-        }, limits.tradingCapital);
++        }, limits.tradingCapital, capitalContext.ok && capitalContext.betaRequested
++          ? {
++              policyContext: capitalContext.policyContext,
++              hardStopThresholdBindingCapability:
++                capitalContext.hardStopThresholdBindingCapability,
++            }
++          : undefined);
++
++        // A missing/invalid protected reference is not permission to discard
++        // existing protection actions. Keep the evaluated actions/locks and
++        // add only an entry gate for the failed Fixed Beta context.
++        if (!capitalContext.ok) {
++          riskEval = {
++            ...riskEval,
++            entryAllowed: false,
++            blockReasons: [
++              ...riskEval.blockReasons,
++              `FIXED_BETA_REFERENCE_UNAVAILABLE: ${capitalContext.reason}`,
++            ],
++          };
++        }
+ 
+         // 평가 결과 영속화 — 저장 실패 시 다음 사이클 fail-closed
+         this.riskState = {
+@@ -1594,11 +1764,12 @@ class WorkerManager {
+           dailyRealizedNetPnlUsd:  dailyRealizedNet ?? this.riskState.dailyRealizedNetPnlUsd,
+           dailyLossAwareNetPnlUsd: lossAware ?? this.riskState.dailyLossAwareNetPnlUsd,
+           weeklyRealizedNetPnlUsd: weeklyRealizedNet ?? this.riskState.weeklyRealizedNetPnlUsd,
+-          dailyEntryCount:      paperState.entriesManilaDay,
+-          consecutiveLossCount: paperState.consecutiveLosses,
++          dailyEntryCount:      scopedDailyEntryCount,
++          consecutiveLossCount: scopedConsecutiveLossCount,
+           riskOperatingState:   riskEval.state,
+           locks:                riskEval.locks,
+           lastUpdatedAt:        nowRisk.toISOString(),
++          ...(fixedBetaCycle ? { capitalPolicyContext: 'FIXED_BETA_400' as const } : {}),
+         };
+         const saved = await saveRiskEngineState(this.riskState);
+         if (!this.isCurrentGeneration(capturedGeneration)) return;
+@@ -1633,23 +1804,26 @@ class WorkerManager {
+           // reserveCash 차감은 stateEngine 내부에서 한 번만 수행됩니다.
+           // 여기서 미리 차감하면 stateEngine이 다시 차감해 이중 공제가 됩니다.
+           availableBalance: limits.tradingCapital,
+-          unrealizedPnl:    paperState.totalUnrealizedPnl,
++          unrealizedPnl:    scopedUnrealizedPnl,
+           // §5 (6H-2): UNSETTLED 이익은 엔진 손익 입력에서 제외 — 미정산 이익이
+           // 손실을 상쇄해 일일 손실 한도 발동을 지연시키는 것을 방지 (보수적).
+-          realizedPnlToday: paperState.realizedPnLTodayGated,
++          realizedPnlToday: fixedBetaCycle?.metrics.dailyPnlUsd
++            ?? paperState.realizedPnLTodayGated,
+         },
+         limits,
+         engineState:              "RUNNING",
+-        consecutiveLosses:        paperState.consecutiveLosses,
++        consecutiveLosses:        scopedConsecutiveLosses,
+         dataFreshMs,
+-        dailyRealizedPnlUsd:      paperState.realizedPnLTodayGated,
+-        weeklyRealizedPnlUsd:     paperState.realizedPnLWeeklyGated,
+-        rolling24hRealizedPnlUsd: paperState.realizedPnLRolling24h,
++        dailyRealizedPnlUsd:      fixedBetaCycle?.metrics.dailyPnlUsd
++          ?? paperState.realizedPnLTodayGated,
++        weeklyRealizedPnlUsd:     fixedBetaCycle?.metrics.weeklyPnlUsd
++          ?? paperState.realizedPnLWeeklyGated,
++        rolling24hRealizedPnlUsd: fixedBetaCycle ? 0 : paperState.realizedPnLRolling24h,
+         tradingCapital:           limits.tradingCapital,
+         accountDrawdownPct,
+         // ── LIVE TEST MODE ────────────────────────────────────────────────
+         isLiveMode,
+-        liveTestAccumLossUsd: paperState.liveTestAccumLossUsd,  // DB 기반, 재시작 후 자동 복원
++        liveTestAccumLossUsd: fixedBetaCycle ? 0 : paperState.liveTestAccumLossUsd,
+         liveTestDbOk:         paperState.liveTestDbOk,           // false → stateEngine fail-closed
+         walletSubgraphOk,  // false when stale, disconnected, or wrong-network
+         // Server-authoritative on-chain position count (RPC → 999 fail-closed).
+@@ -1723,7 +1897,20 @@ class WorkerManager {
+           if (typeof engineResult.sizeUsd === 'number' && engineResult.sizeUsd > 0 && paperMkt) {
+             const nowSizing = new Date();
+             const lev = typeof engineResult.leverage === 'number' ? Math.max(1, engineResult.leverage) : 1;
+-            const sizingCap = Math.min(limits.tradingCapital, RISK_POLICY.maxRiskCapitalUsd);
++            const sizingCap = capitalContext.ok && capitalContext.betaRequested
++              ? (() => {
++                  const scoped = positionSizingCapital(
++                    {
++                      equityUsd: currentEquity,
++                      recordedAt: nowSizing.toISOString(),
++                    },
++                    nowSizing,
++                    WORKER_RISK_OBSERVATION_MAX_AGE_MS,
++                    capitalContext.riskCapitalScope,
++                  );
++                  return scoped.ok ? scoped.capitalUsd : 0;
++                })()
++              : Math.min(limits.tradingCapital, RISK_POLICY.maxRiskCapitalUsd);
+             const tierCap = sizingCap * riskEval.maxLeverage;
+ 
+             // ── 6H-2A §3 — PAPER 비용은 공식 GMX read-only 추정(PAPER_GMX_ESTIMATE)만.
+@@ -1813,6 +2000,18 @@ class WorkerManager {
+         }
+       }
+ 
++      // The Fixed Beta context is a read-only calculation domain. It never
++      // authorizes PAPER/LIVE entry, approval submission, signing, or orders.
++      // Preserve a CASH decision so existing close/protection paths still run.
++      if (fixedBetaCycle
++        && (engineResult.operatingState === 'LONG' || engineResult.operatingState === 'SHORT')) {
++        engineResult.operatingState = 'CASH';
++        engineResult.riskApproved = false;
++        engineResult.riskVetoReason = '[FIXED_BETA_400] entry execution unauthorized';
++        engineResult.sizeUsd = undefined;
++        engineResult.leverage = undefined;
++      }
++
+       // ── 6H-2A §5 — LIVE 정산 reconciliation (비치명 — 실패해도 Worker 생존) ──
+       // UNSETTLED LIVE 거래가 있고 전부 SETTLED 전환하지 못하면 incomplete=true →
+       // 아래 tryLiveTestExecution 호출부에서 신규 LIVE 진입이 차단된다.
+@@ -1834,7 +2033,7 @@ class WorkerManager {
+       // LIVE TEST MODE: 상태 업데이트 + 누적 손실 캐시 갱신
+       const testModeActive = Boolean(limits.liveTestMode && isLiveMode);
+       this.lastLiveTestMode     = testModeActive;
+-      this.liveTestAccumLossUsd = paperState.liveTestAccumLossUsd;
++      this.liveTestAccumLossUsd = fixedBetaCycle ? 0 : paperState.liveTestAccumLossUsd;
+       this.lastLiveTestDbOk     = paperState.liveTestDbOk;
+       if (testModeActive) {
+         const vetoPrefix = '[LIVE TEST]';
+@@ -2008,7 +2207,14 @@ class WorkerManager {
+       // ── Task #111 — 서버 권위 PAPER 실행 (PAPER 모드 전용, LIVE/승인 경로와 분리) ──
+       if (!isLiveMode && !testModeActive) {
+         try {
+-          await this.runServerPaperExecution(decision, paperState, riskEval, cycleNum, capturedGeneration);
++          await this.runServerPaperExecution(
++            decision,
++            paperState,
++            riskEval,
++            cycleNum,
++            capturedGeneration,
++            !fixedBetaCycle,
++          );
+           if (!this.isCurrentGeneration(capturedGeneration)) return;
+           // 실행 결과(paperExecuted/paperOrderId)를 durable 기록에 반영
+           if (decision.paperExecuted) {
+@@ -2029,12 +2235,20 @@ class WorkerManager {
+       // LIVE TEST 자율 실행 (운영자 반복 승인 없음 — 별도 실행 경로)
+       if (testModeActive && isLiveMode) {
+         void this.tryLiveTestExecution(
+-          decision, analyses, liveTestData, paperState, limits, cycleNum,
++          decision,
++          analyses,
++          liveTestData,
++          fixedBetaCycle
++            ? { ...paperState, liveTestAccumLossUsd: 0 }
++            : paperState,
++          limits,
++          cycleNum,
+           {
+             closeAllRequested: riskEval?.actions.includes('CLOSE_ALL_POSITIONS') === true,
+             reduce70Requested: riskEval?.actions.includes('REDUCE_POSITION_70PCT') === true,
+           },
+           capturedGeneration,
++          !fixedBetaCycle,
+         );
+       }
+ 
+@@ -2119,6 +2333,7 @@ class WorkerManager {
+     riskActions: { closeAllRequested: boolean; reduce70Requested: boolean } =
+       { closeAllRequested: false, reduce70Requested: false },
+     generation?: number,
++    entryExecutionAuthorized = true,
+   ): Promise<void> {
+     try {
+       if (generation !== undefined && !this.isCurrentGeneration(generation)) return;
+@@ -2153,6 +2368,8 @@ class WorkerManager {
+         return;
+       }
+ 
++      if (!entryExecutionAuthorized) return;
++
+       if (!primarySymbol) return;
+ 
+       const market = MARKET_BY_SYMBOL_SERVER.get(primarySymbol);
+diff --git a/artifacts/api-server/src/workers/serverTypes.ts b/artifacts/api-server/src/workers/serverTypes.ts
+index deec97bf1b9f5c0455d511f7f6f3b750e5e5a1e7..8ae0e8954e4d98a6f910de53af5e98be4495bc72 100644
+--- a/artifacts/api-server/src/workers/serverTypes.ts
++++ b/artifacts/api-server/src/workers/serverTypes.ts
+@@ -3,6 +3,8 @@
+  * Mirrors the frontend AI types without React/browser dependencies.
+  */
+ 
++import type { ActiveCapitalPolicyContext } from '../lib/activeCapitalSemantics';
++
+ export type AiOperatingState = 'SPOT' | 'LONG' | 'SHORT' | 'HEDGE' | 'CASH';
+ 
+ export type MarketCondition =
+@@ -118,6 +120,12 @@ export interface RiskLimits {
+   testMaxLeverage?: number;
+   /** Max simultaneous positions in LIVE TEST mode. Always 1 — not configurable. */
+   readonly testMaxPositions?: 1;
++  /**
++   * Explicit worker capital meaning. Omitted preserves the historical Standard
++   * Active path; this is never inferred from dates, wallet balance, or a numeric
++   * tradingCapital value.
++   */
++  policyContext?: ActiveCapitalPolicyContext;
+ }
+ 
+ export interface AppliedRiskProfileSnapshot {
+diff --git a/docs/CCC_CANONICAL_OPERATING_POLICY_2026-09-07.md b/docs/CCC_CANONICAL_OPERATING_POLICY_2026-09-07.md
+index 1287fc5751f1463fd833d7335e83023bd2b97b77..6e695be36249247b47d0c7dae7cdcf6aee10d0de 100644
+--- a/docs/CCC_CANONICAL_OPERATING_POLICY_2026-09-07.md
++++ b/docs/CCC_CANONICAL_OPERATING_POLICY_2026-09-07.md
+@@ -315,3 +315,14 @@ When future canonical runs read this file, retain this item as deferred roadmap
+ - Keep the existing personal, desktop-first GMX scope and cost controls unless the owner separately changes them. Beta is not automatic approval for SaaS, additional exchanges, unlimited authority or continuous real-money execution beyond an approved session.
+ - Retain separate dashboard/ease-of-use, autonomous-execution, operational-reliability and economics results. Address each unknown or failed gate with evidence; do not equate CI green, stage naming or a profitable small sample with final-release readiness.
+ - Final public/V1.0 launch date remains unspecified. This schedule correction changes engineering milestone labels and priorities, not legal contract terms or runtime financial permissions.
++
++## 15. B50-01/R1 finite source exception
++
++For the single B50-01/R1 repair, the existing explicit `FIXED_BETA_400` worker
++capital context may be wired into the actual AI Worker risk/equity/sizing path and
++covered by isolated mocked regressions. This is a source-level integration
++exception only: Standard Active remains the default, protected-reference failure
++blocks new entries while preserving close/protection/reconciliation, and it does
++not authorize Production DB/bootstrap/HWM or capital mutation, signing, orders,
++fund movement, deployment, merge, or publish. The existing `$0.40` cost cap and
++all authorization/submission flags remain unchanged.

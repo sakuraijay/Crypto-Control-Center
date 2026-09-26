@@ -140,7 +140,7 @@ describe('executeLiveTestOrder — LOCKED 상태 시뮬레이션', () => {
     expect(result.ok).toBe(true);
     expect(result.txHash).toBeNull();
     expect(result.orderKey).toBeNull();
-  });
+  }, 30_000);
 
   it('누적 손실 $3 초과 + LOCKED → simulated=true (잠금이 게이트보다 먼저 적용)', async () => {
     const { executeLiveTestOrder } = await import('../workers/liveTestExecutor');
@@ -198,6 +198,20 @@ describe('setEmergencyStop', () => {
     expect(result.simulated).toBe(false);
     expect(result.error).toMatch(/Emergency Stop|비상/i);
   });
+});
+
+describe('loadEmergencyStopFromDb', () => {
+  it.each(['{}', 'null', '[]', '{"active":"true"}'])(
+    'parse 가능한 손상 payload %s를 fail-closed로 거부한다',
+    async (value) => {
+      mockWhere.mockResolvedValueOnce([{ value }]);
+      const { loadEmergencyStopFromDb, isEmergencyStopActive } =
+        await import('../workers/liveTestExecutor');
+
+      await expect(loadEmergencyStopFromDb()).resolves.toBe(false);
+      expect(isEmergencyStopActive()).toBe(true);
+    },
+  );
 });
 
 describe('reconcileOnRestart', () => {

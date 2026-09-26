@@ -10,7 +10,7 @@
  *  §3 CASH 전환: requestServerPaperCloseAll → pendingClose 최우선 전량 청산 → 키 해제
  *  §4 RISK_CLOSE_ALL 사유 결속
  *  §5 재시작 복구: 상태 리셋 후 loadPendingCloseFromDb + DB open 행만으로 틱이 청산 완수
- *  §6 중복 진입 차단: 동일 decisionId·동시 포지션 게이트 (OPEN 1건 초과 0건)
+ *  §6 프로필별 진입 차단: 보수적 1개, aggressive는 서로 다른 심볼 슬롯 2개
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -20,6 +20,7 @@ interface Store {
   workerState: Map<string, string>;
 }
 const store: Store = { trades: [], workerState: new Map() };
+let forceOpenUpdateZero = false;
 
 /** where 인자(드리즐 SQL 객체)를 순환 안전하게 평탄화해 포함된 문자열 수집 */
 function flatStrings(x: unknown, out: string[] = [], seen = new Set<unknown>()): string[] {
@@ -48,7 +49,7 @@ vi.mock('@workspace/db', () => {
   function chain(exec: (op: { where?: unknown; values?: unknown; set?: unknown }) => unknown) {
     const op: { where?: unknown; values?: unknown; set?: unknown } = {};
     const c: Record<string, unknown> = {};
-    for (const m of ['from', 'limit', 'offset', 'orderBy', 'onConflictDoNothing', 'onConflictDoUpdate', 'returning']) c[m] = () => c;
+    for (const m of ['from', 'limit', 'offset', 'orderBy', 'onConflictDoNothing', 'onConflictDoUpdate', 'returning', 'for']) c[m] = () => c;
     c['where'] = (arg: unknown) => { op.where = arg; return c; };
     c['values'] = (arg: unknown) => { op.values = arg; return c; };
     c['set'] = (arg: unknown) => { op.set = arg; return c; };
@@ -56,17 +57,31 @@ vi.mock('@workspace/db', () => {
       (resolve, reject) => Promise.resolve().then(() => exec(op)).then(resolve, reject);
     return c;
   }
-  return { db: {
+  const database: Record<string, unknown> = {
     select: vi.fn(() => chain((op) => globalThis.__e2eExec('select', op))),
     insert: vi.fn(() => chain((op) => globalThis.__e2eExec('insert', op))),
     update: vi.fn(() => chain((op) => globalThis.__e2eExec('update', op))),
     delete: vi.fn(() => chain((op) => globalThis.__e2eExec('delete', op))),
-  }, tradesTable, workerStateTable };
+  };
+  database['transaction'] = vi.fn(async (fn: (tx: unknown) => unknown) => {
+    const snapshot = globalThis.__e2eSnapshot();
+    try {
+      return await fn(database);
+    } catch (err) {
+      globalThis.__e2eRestore(snapshot);
+      throw err;
+    }
+  });
+  return { db: database, tradesTable, workerStateTable };
 });
 
 declare global {
   // eslint-disable-next-line no-var
   var __e2eExec: (kind: string, op: { where?: unknown; values?: unknown; set?: unknown }) => unknown;
+  // eslint-disable-next-line no-var
+  var __e2eSnapshot: () => unknown;
+  // eslint-disable-next-line no-var
+  var __e2eRestore: (snapshot: unknown) => void;
 }
 
 const WS_KEYS = ['serverPaperPendingClose', 'pendingClose'];
@@ -78,7 +93,7 @@ globalThis.__e2eExec = (kind, op) => {
     strs.some((s) => WS_KEYS.some((k) => s.includes(k)) || s.startsWith('profitProtect'));
 
   if (isWorkerState) {
-    const key = strs.find((s) => WS_KEYS.some((k) => s.includes(k)) || s.startsWith('profitProtect'))
+    const key = strs.find((s) => WS_KEYS.some((k) => s.includes(k)) || s.startsWith('profitProtect') || s.startsWith('vp400m1:'))
       ?? (op.values as Record<string, string> | undefined)?.['key'];
     if (kind === 'select') return key && store.workerState.has(key) ? [{ key, value: store.workerState.get(key) }] : [];
     if (kind === 'insert') { const v = op.values as Record<string, string>; store.workerState.set(v['key']!, v['value']!); return [{}]; }
@@ -90,12 +105,16 @@ globalThis.__e2eExec = (kind, op) => {
   // trades
   if (kind === 'insert') {
     const v = op.values as Record<string, unknown>;
-    // unique 강제: openDecisionId(OPEN)·closesTradeId(FULL CLOSE)·SERVER 단일 미청산
+    // unique 강제: openDecisionId(OPEN)·closesTradeId(FULL CLOSE)·SERVER slot/symbol
     if (v['action'] === 'OPEN') {
       if (store.trades.some((r) => r['action'] === 'OPEN' && r['openDecisionId'] === v['openDecisionId']))
         throw new Error('duplicate key value violates unique constraint "trades_open_decision_uq"');
-      if (store.trades.some((r) => r['action'] === 'OPEN' && r['managedBy'] === 'SERVER' && r['closeTime'] === 0))
-        throw new Error('duplicate key value violates unique constraint "trades_server_single_open_uq"');
+      if (store.trades.some((r) => r['action'] === 'OPEN' && r['managedBy'] === 'SERVER'
+        && r['closeTime'] === 0 && r['paperPositionSlot'] === v['paperPositionSlot']))
+        throw new Error('duplicate key value violates unique constraint "trades_server_open_slot_uq"');
+      if (store.trades.some((r) => r['action'] === 'OPEN' && r['managedBy'] === 'SERVER'
+        && r['closeTime'] === 0 && String(r['symbol']).toUpperCase() === String(v['symbol']).toUpperCase()))
+        throw new Error('duplicate key value violates unique constraint "trades_server_open_symbol_uq"');
     }
     if (v['action'] === 'CLOSE' && v['closeKind'] === 'FULL') {
       if (store.trades.some((r) => r['action'] === 'CLOSE' && r['closeKind'] === 'FULL' && r['closesTradeId'] === v['closesTradeId']))
@@ -116,6 +135,10 @@ globalThis.__e2eExec = (kind, op) => {
   if (kind === 'update') {
     const target = store.trades.find((r) => strs.includes(r['id'] as string));
     if (target) {
+      if (forceOpenUpdateZero && target['action'] === 'OPEN'
+        && Object.hasOwn(op.set as object, 'closeTime')) {
+        return [];
+      }
       // 조건부 UPDATE: closeTime=0 조건 존중 (이미 닫힌 행 재청산 금지)
       if (strs.includes('closeTime') && target['closeTime'] !== 0) return [];
       Object.assign(target, op.set as Record<string, unknown>);
@@ -125,9 +148,26 @@ globalThis.__e2eExec = (kind, op) => {
   return [];
 };
 
+globalThis.__e2eSnapshot = () => ({
+  trades: structuredClone(store.trades),
+  workerState: new Map(store.workerState),
+});
+
+globalThis.__e2eRestore = (snapshot) => {
+  const saved = snapshot as Store;
+  store.trades = saved.trades;
+  store.workerState = saved.workerState;
+};
+
 vi.mock('../lib/paperCostCache', () => ({ getPaperCostBinding: vi.fn(() => null) }));
 
 import { getPaperCostBinding } from '../lib/paperCostCache';
+import { runVirtualPaper400Cycle } from '../workers/virtualPaper400Cycle';
+import { buildActiveVirtualPaper400SessionState } from '../workers/virtualPaper400SessionState';
+import { initialVirtualPaper400RiskState, evaluateVirtualPaper400Account } from '../workers/virtualPaper400Accounting';
+import { virtualReplaySignal, virtualReplayCost } from './helpers/virtualPaper400Replay';
+import { rawCandleVirtualReplaySignal } from './helpers/virtualPaper400RawCandleReplay';
+import type { DbTrade } from '@workspace/db';
 import {
   openServerPaperPosition, requestServerPaperCloseAll, loadPendingCloseFromDb,
   manageServerPaperTick, loadServerOpenRows, getServerPaperStatus,
@@ -143,12 +183,24 @@ const BINDING = {
 
 const T0 = Date.now();
 const H = 3_600_000;
+const CONSERVATIVE_PROFILE = {
+  name: 'conservative' as const,
+  version: 'risk-profile/v1' as const,
+  appliedAt: '2026-08-21T00:00:00.000Z',
+  derivedLimits: {
+    immediateEntryThreshold: 80, maxRiskPerTradePct: 0.25, reserveCashPct: 20,
+    maxMarginPerTradeUsd: 334, maxConcurrentPositions: 1, cooldownMinutes: 30,
+    maxLeverage: 3, maxTotalExposureUsd: 3_000,
+    allocatedTradingCapitalUsd: 1_000, maxRiskPerTradeUsd: 2.5,
+  },
+};
 
 async function openBtcLong(nowMs = T0, decisionId = 'dec-e2e-1') {
   return openServerPaperPosition({
     decisionId, symbol: 'BTC', side: 'LONG', sizeUsd: 300, leverage: 3,
     quote: { priceUsd: 50_000, ageMs: 5_000 }, tpPriceUsd: 52_000,
-    openPositionCount: 0, entriesManilaDay: 0, nowMs,
+    openPositionCount: 0, entriesManilaDay: 0,
+    riskProfileSnapshot: CONSERVATIVE_PROFILE, nowMs,
   });
 }
 
@@ -163,7 +215,177 @@ beforeEach(() => {
   __resetServerPaperStateForTests();
   store.trades = [];
   store.workerState.clear();
+  forceOpenUpdateZero = false;
   vi.mocked(getPaperCostBinding).mockReturnValue(BINDING as ReturnType<typeof getPaperCostBinding>);
+});
+
+describe('VIRTUAL 400 deterministic REPLAY through the real PAPER executor', () => {
+  // Fixed Manila daytime: OPEN and its 1h settlement belong to the same risk day.
+  const REPLAY_NOW = Date.parse('2026-09-20T04:00:10.000Z');
+  it.each([
+    ['INTRADAY','profit'],['INTRADAY','deadline'],['INTRADAY','gap'],
+    ['SWING','profit'],['SWING','deadline'],['SWING','gap'],['SWING','corrupt'],
+    ['INTRADAY','invalid_entry_plan'],['SWING','changed_cost'],['INTRADAY','xrp_profit'],
+    ['INTRADAY','structural_profit'],['INTRADAY','structural_gap'],['SWING','structural_deadline'],['INTRADAY','structural_changed_cost'],
+  ] as const)('runs %s mode through actual executor, restart, %s exit and exact net settlement',async(mode,testScenario)=>{
+    const structural = testScenario.startsWith('structural_');
+    const scenario = structural ? testScenario.slice('structural_'.length) : testScenario === 'xrp_profit' ? 'profit' : testScenario;
+    const symbol = testScenario === 'xrp_profit' ? 'XRP' : 'BTC';
+    const { VIRTUAL_GMX_MARKETS } = await import('../lib/virtualGmxUniverse');
+    const market = VIRTUAL_GMX_MARKETS.find(m=>m.name === `${symbol}/USD`)!;
+    const now=new Date(REPLAY_NOW);
+    const session=buildActiveVirtualPaper400SessionState('mode-e2e',new Date(REPLAY_NOW-1000));
+    let saved=initialVirtualPaper400RiskState(session.session);
+    vi.mocked(getPaperCostBinding).mockReturnValue({...BINDING,estEntryCostUsd:.015,estExitCostUsd:.015,
+      fundingRatePerHourFraction:.00001,borrowingRatePerHourFraction:.00001});
+    const result=await runVirtualPaper400Cycle({now,engineMode:'PAPER',policyAppliedAt:now.toISOString(),tradingMode:mode, structuralTargets:structural, markets: new Map([[symbol, market]]),
+      sessionRaw:JSON.stringify(session),previous:saved,rows:[],quote:quoteFn(50_000),shouldContinue:()=>true,
+      persistRisk:async state=>{saved=structuredClone(state);},
+      readSignals:async()=>[{...virtualReplaySignal(REPLAY_NOW, symbol),structuralStop:structural?49_600:49_900,strategyTargetPrice:mode==='SWING'?51_000:50_800,expectedNetEdgeBps:300}],
+      readCost:async(_s,_l,n)=>({...virtualReplayCost(REPLAY_NOW,n),market:market.marketToken}),
+      claim:async(id,audit)=>{const recorded=structuredClone(audit) as {tradePlan:{targetRoePct:number}};
+        if(scenario==='invalid_entry_plan')recorded.tradePlan.targetRoePct=100;
+        store.workerState.set(id,JSON.stringify(recorded));return true;},
+      open:args=>{if(scenario==='changed_cost')vi.mocked(getPaperCostBinding).mockReturnValue({...BINDING,
+        estEntryCostUsd:.015,estExitCostUsd:.015,fundingRatePerHourFraction:.001});
+        return openServerPaperPosition(args);},close:async()=>false,reduce:async()=>false});
+    if(scenario==='invalid_entry_plan'||scenario==='changed_cost'){
+      expect(result.status).toBe('BLOCKED');expect(result.reason).toBe(structural?'VIRTUAL_STRATEGY_TARGET_OR_COST_MISMATCH':'VIRTUAL_MODE_PLAN_OR_HORIZON_COST_INVALID');
+      expect(store.trades).toHaveLength(0);return;
+    }
+    expect(result.status).toBe('OPENED');
+    const open=store.trades[0];const originalClaim=store.workerState.get(String(open.openDecisionId));
+    expect(originalClaim).toBeTruthy();
+    // Simulate both browser/selector change and process restart; entry plan remains immutable.
+    store.workerState.set('virtual_trading_mode_v1:mode-e2e',JSON.stringify({mode:mode==='INTRADAY'?'SWING':'INTRADAY'}));
+    __resetServerPaperStateForTests();
+    if(scenario==='corrupt')store.workerState.set(String(open.openDecisionId),'{}');
+    const hours=scenario==='deadline'?(mode==='INTRADAY'?12:72):1;
+    const price=scenario==='profit'?51_000:scenario==='gap'?47_500:50_000;
+    await manageServerPaperTick(quoteFn(price),REPLAY_NOW+hours*H);
+    await manageServerPaperTick(quoteFn(price),REPLAY_NOW+hours*H+1000);
+    expect(closeRows()).toHaveLength(1);
+    const close=closeRows()[0];
+    expect(close.closeReason).toBe(scenario==='profit'?(structural?'TAKE_PROFIT':'MODE_NET_TAKE_PROFIT'):scenario==='deadline'?'MODE_TIME_EXIT':scenario==='gap'?'STOP_LOSS':'MODE_PLAN_UNAVAILABLE');
+    expect(Number(close.netPnlEstimatedUsd)).toBeCloseTo(Number(close.pnl)-Number(close.estEntryCostUsd)-Number(close.estExitCostUsd)-Number(close.estHoldingCostUsd));
+    if(scenario==='gap')expect(Number(close.netPnlEstimatedUsd)/Number(open.collateralUsd)*100).toBeLessThan(-10);
+    if(scenario!=='corrupt')expect(store.workerState.get(String(open.openDecisionId))).toBe(originalClaim);
+  });
+  it.each([false, true])('runs Signal/Risk/sizing → OPEN → restart → structural SL → cost settlement (active=%s)', async active => {
+    const now = new Date(REPLAY_NOW);
+    const session = buildActiveVirtualPaper400SessionState('full-replay', new Date(REPLAY_NOW - 1_000));
+    let saved = initialVirtualPaper400RiskState(session.session);
+    store.workerState.set('riskEngineStateV1', 'STANDARD_SENTINEL');
+    vi.mocked(getPaperCostBinding).mockReturnValue({ ...BINDING, estEntryCostUsd: 0.015, estExitCostUsd: 0.015 });
+    const result = await runVirtualPaper400Cycle({
+      now, engineMode: 'PAPER', policyAppliedAt: active ? now.toISOString() : undefined, sessionRaw: JSON.stringify(session), previous: saved,
+      rows: [], quote: quoteFn(50_000), shouldContinue: () => true,
+      persistRisk: async state => { saved = JSON.parse(JSON.stringify(state)); },
+      readSignals: async () => [virtualReplaySignal(REPLAY_NOW)],
+      readCost: async (_symbol, _long, size) => virtualReplayCost(REPLAY_NOW, size),
+      claim: async (id, audit) => { if (store.workerState.has(id)) return false;
+        store.workerState.set(id, JSON.stringify(audit)); return true; },
+      open: args => openServerPaperPosition(args),
+      close: async () => { throw new Error('unexpected signal close-all'); },
+      reduce: async () => { throw new Error('unexpected reduction'); },
+    });
+    expect(result.status).toBe('OPENED');
+    expect(store.trades[0]).toMatchObject({ strategy: session.session.strategyTag, stopPriceUsd: '49000' });
+    expect(Number(store.trades[0].sizeInUsd)).toBeLessThanOrEqual(active ? 80 : 50);
+    expect(Number(store.trades[0].leverage)).toBe(active ? 10 : 1);
+    expect(Number(store.trades[0].collateralUsd)).toBe(Number(store.trades[0].sizeInUsd) / (active ? 10 : 1));
+    // Simulated process restart: no cached worker state is needed to protect the OPEN.
+    __resetServerPaperStateForTests();
+    await manageServerPaperTick(quoteFn(48_950), REPLAY_NOW + H);
+    await manageServerPaperTick(quoteFn(48_950), REPLAY_NOW + H + 1_000);
+    expect(closeRows()).toHaveLength(1);
+    expect(closeRows()[0]).toMatchObject({ strategy: session.session.strategyTag,
+      closeReason: 'STOP_LOSS', settlementStatus: 'PAPER_ESTIMATED' });
+    const restored = evaluateVirtualPaper400Account({ session: session.session, previous: saved,
+      rows: store.trades as unknown as DbTrade[], now: new Date(REPLAY_NOW + H + 1_000), quote: quoteFn(48_950) });
+    expect(restored.ledger.realizedEquityUsd).toBeLessThan(400);
+    expect(restored.ledger.modeledTradingCostUsd).toBeGreaterThan(0);
+    expect(restored.ledger.settlementCount).toBe(1);
+    expect(restored.next.risk.dailyEntryCount).toBe(1);
+    expect(restored.next.risk.consecutiveLossCount).toBe(1);
+    expect(store.workerState.get('riskEngineStateV1')).toBe('STANDARD_SENTINEL');
+  });
+});
+
+describe('VIRTUAL 400 raw-candle REPLAY through Strategy/Risk/PAPER settlement', () => {
+  const REPLAY_NOW = Date.parse('2026-09-20T04:00:10.000Z');
+
+  it('runs closed 4h/1h/15m candles → strategy arbiter → Risk/sizing → OPEN → protection → settlement', async () => {
+    const now = new Date(REPLAY_NOW);
+    const session = buildActiveVirtualPaper400SessionState('raw-candle-replay', new Date(REPLAY_NOW - 1_000));
+    const signal = rawCandleVirtualReplaySignal(REPLAY_NOW);
+    const entryPrice = signal.entryPrice!;
+    const stopPrice = signal.structuralStop!;
+    let saved = initialVirtualPaper400RiskState(session.session);
+    store.workerState.set('riskEngineStateV1', 'STANDARD_SENTINEL');
+    vi.mocked(getPaperCostBinding).mockReturnValue({ ...BINDING, estEntryCostUsd: 0.015, estExitCostUsd: 0.015 });
+
+    const result = await runVirtualPaper400Cycle({
+      now,
+      engineMode: 'PAPER',
+      policyAppliedAt: now.toISOString(),
+      sessionRaw: JSON.stringify(session),
+      previous: saved,
+      rows: [],
+      quote: quoteFn(entryPrice),
+      shouldContinue: () => true,
+      persistRisk: async state => { saved = JSON.parse(JSON.stringify(state)); },
+      readSignals: async () => [signal],
+      readCost: async (_symbol, _long, size) => virtualReplayCost(REPLAY_NOW, size),
+      claim: async (id, audit) => {
+        if (store.workerState.has(id)) return false;
+        store.workerState.set(id, JSON.stringify(audit));
+        return true;
+      },
+      open: args => openServerPaperPosition(args),
+      close: async () => { throw new Error('unexpected signal close-all'); },
+      reduce: async () => { throw new Error('unexpected reduction'); },
+    });
+
+    expect(signal).toMatchObject({
+      action: 'LONG',
+      strategyId: 'TREND_PULLBACK',
+      lifecycleEligible: true,
+    });
+    expect(signal.confidence).toBeGreaterThanOrEqual(80);
+    expect(signal.candleSignalEvidence).toMatchObject({
+      disposition: 'AGREED',
+      authority: 'EVIDENCE_ONLY',
+      executionAuthorized: false,
+      paperPositionMutationAllowed: false,
+    });
+    expect(result.status).toBe('OPENED');
+    expect(store.trades[0]).toMatchObject({
+      strategy: session.session.strategyTag,
+      stopPriceUsd: String(stopPrice),
+    });
+
+    __resetServerPaperStateForTests();
+    await manageServerPaperTick(quoteFn(stopPrice - 0.01), REPLAY_NOW + H);
+    await manageServerPaperTick(quoteFn(stopPrice - 0.01), REPLAY_NOW + H + 1_000);
+    expect(closeRows()).toHaveLength(1);
+    expect(closeRows()[0]).toMatchObject({
+      strategy: session.session.strategyTag,
+      closeReason: 'STOP_LOSS',
+      settlementStatus: 'PAPER_ESTIMATED',
+    });
+    const restored = evaluateVirtualPaper400Account({
+      session: session.session,
+      previous: saved,
+      rows: store.trades as unknown as DbTrade[],
+      now: new Date(REPLAY_NOW + H + 1_000),
+      quote: quoteFn(stopPrice - 0.01),
+    });
+    expect(restored.ledger.realizedEquityUsd).toBeLessThan(400);
+    expect(restored.ledger.modeledTradingCostUsd).toBeGreaterThan(0);
+    expect(restored.ledger.settlementCount).toBe(1);
+    expect(store.workerState.get('riskEngineStateV1')).toBe('STANDARD_SENTINEL');
+  });
 });
 
 describe('E2E §1 — OPEN → SL 터치 → net settlement → 중복 0건', () => {
@@ -195,6 +417,18 @@ describe('E2E §1 — OPEN → SL 터치 → net settlement → 중복 0건', ()
     await manageServerPaperTick(quoteFn(49_400), T0 + H + 10_000);
     await manageServerPaperTick(quoteFn(49_400), T0 + H + 20_000);
     expect(closeRows()).toHaveLength(1);
+  });
+
+  it('CLOSE insert 후 OPEN 조건부 갱신 실패는 transaction 전체를 rollback한다', async () => {
+    await openBtcLong();
+    const open = store.trades[0]!;
+    forceOpenUpdateZero = true;
+
+    await manageServerPaperTick(quoteFn(49_400), T0 + H);
+
+    expect(closeRows()).toHaveLength(0);
+    expect(open['closeTime']).toBe(0);
+    expect(getServerPaperStatus().unresolved).toContain('조건부 갱신 0건');
   });
 });
 
@@ -273,10 +507,96 @@ describe('E2E §6 — 중복 진입 차단', () => {
     expect(store.trades.filter((r) => r['action'] === 'OPEN')).toHaveLength(1);
   });
 
-  it('SERVER 미청산 존재 중 다른 결정의 OPEN도 단일 미청산 unique로 차단', async () => {
+  it('보수적 기본은 SERVER 미청산 1개에서 다른 결정도 차단', async () => {
     await openBtcLong(T0, 'dec-a');
     const r2 = await openBtcLong(T0 + 1_000, 'dec-b');
     expect(r2.ok).toBe(false);
     expect(store.trades.filter((r) => r['action'] === 'OPEN')).toHaveLength(1);
   });
+
+  it('aggressive 이름을 선택해도 동시 포지션 1개 한도는 완화되지 않는다', async () => {
+    const profile = {
+      name: 'aggressive' as const,
+      version: 'risk-profile/v1' as const,
+      appliedAt: new Date(T0).toISOString(),
+      derivedLimits: {
+        immediateEntryThreshold: 80, maxRiskPerTradePct: 0.5, reserveCashPct: 20,
+        maxMarginPerTradeUsd: 334, maxConcurrentPositions: 1, cooldownMinutes: 30,
+        maxLeverage: 3, maxTotalExposureUsd: 3_000,
+        allocatedTradingCapitalUsd: 1_000, maxRiskPerTradeUsd: 5,
+      },
+    };
+    const first = await openServerPaperPosition({
+      decisionId: 'dec-slot-1', symbol: 'BTC', side: 'LONG', sizeUsd: 300, leverage: 3,
+      quote: { priceUsd: 50_000, ageMs: 5_000 }, tpPriceUsd: null,
+      openPositionCount: 0, maxConcurrentPositions: 1, entriesManilaDay: 0,
+      riskProfileSnapshot: profile, nowMs: T0,
+    });
+    const second = await openServerPaperPosition({
+      decisionId: 'dec-slot-2', symbol: 'ETH', side: 'SHORT', sizeUsd: 300, leverage: 3,
+      quote: { priceUsd: 3_000, ageMs: 5_000 }, tpPriceUsd: null,
+      openPositionCount: 1, maxConcurrentPositions: 1, entriesManilaDay: 1,
+      riskProfileSnapshot: profile, nowMs: T0 + 1,
+    });
+    const third = await openServerPaperPosition({
+      decisionId: 'dec-slot-3', symbol: 'SOL', side: 'LONG', sizeUsd: 300, leverage: 3,
+      quote: { priceUsd: 150, ageMs: 5_000 }, tpPriceUsd: null,
+      openPositionCount: 2, maxConcurrentPositions: 1, entriesManilaDay: 2,
+      riskProfileSnapshot: profile, nowMs: T0 + 2,
+    });
+    const duplicate = await openServerPaperPosition({
+      decisionId: 'dec-slot-4', symbol: 'BTC', side: 'LONG', sizeUsd: 300, leverage: 3,
+      quote: { priceUsd: 50_000, ageMs: 5_000 }, tpPriceUsd: null,
+      openPositionCount: 1, maxConcurrentPositions: 1, entriesManilaDay: 2,
+      riskProfileSnapshot: profile, nowMs: T0 + 3,
+    });
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(false);
+    expect(third.ok).toBe(false);
+    expect(duplicate.ok).toBe(false);
+    const opens = store.trades.filter((r) => r['action'] === 'OPEN');
+    expect(opens.map(row => row['paperPositionSlot'])).toEqual([1]);
+    expect(opens.every(row => row['riskProfileSnapshot'] === profile)).toBe(true);
+  });
+});
+
+describe('daily PAPER experiment through actual executor',()=>{
+ it.each(['profit','loss','expiry','cost_changed','live'] as const)('persists and settles %s',async scenario=>{
+  const {runVirtualPaperDailyCycle}=await import('../workers/virtualPaperDailyCycle');
+  const {DAILY_PAPER_POLICY}=await import('../workers/virtualPaperDailyPolicy');
+  const {MARKET_BY_SYMBOL_SERVER}=await import('../lib/gmxMarkets');
+  const now=Date.parse('2026-09-22T03:00:10Z');
+  const session=buildActiveVirtualPaper400SessionState('daily-e2e',new Date(now-1000));
+  process.env.WORKER_ENGINE_MODE=scenario==='live'?'LIVE':'PAPER';
+  let saved=initialVirtualPaper400RiskState(session.session);
+  vi.mocked(getPaperCostBinding).mockReturnValue({...BINDING,estEntryCostUsd:.02,estExitCostUsd:.01,
+    fundingRatePerHourFraction:.00001,borrowingRatePerHourFraction:.00001});
+  try {
+  const result=await runVirtualPaperDailyCycle({sessionRaw:JSON.stringify(session),policyAppliedAt:new Date(now).toISOString(),
+    policyVersion:DAILY_PAPER_POLICY.version,tradingMode:'INTRADAY',engineMode:'PAPER',previous:saved,rows:[],now:new Date(now),
+    markets:MARKET_BY_SYMBOL_SERVER,quote:quoteFn(50000),shouldContinue:()=>true,persistRisk:async s=>{saved=s;},readSignals:async()=>[],
+    readDailyCandidates:async()=>[{symbol:'BTC',source:'gmx-official-api',closedAt:now-10000,evaluatedAt:now,side:'LONG',referencePrice:50000,stopFraction:.006,momentum:.001,purpose:'AGGRESSIVE_PAPER_EXPERIMENT'}],
+    readCost:async(_s,_l,n)=>virtualReplayCost(now,n),claim:async(id,audit)=>{if(store.workerState.has(id))return false;store.workerState.set(id,JSON.stringify(audit));return true;},
+    open:async args=>{if(scenario==='cost_changed')vi.mocked(getPaperCostBinding).mockReturnValue({...BINDING,estEntryCostUsd:1});return openServerPaperPosition(args);},
+    close:async()=>false,reduce:async()=>false});
+  if(scenario==='cost_changed'||scenario==='live'){expect(result.status).toBe('BLOCKED');expect(store.trades).toHaveLength(0);return;}
+  expect(result.status).toBe('OPENED');expect(store.trades).toHaveLength(1);
+  const open=store.trades[0];expect(Number(open.sizeInUsd)).toBeCloseTo(1000);
+  expect(store.workerState.get(String(open.openDecisionId))).toContain('PAPER_DAILY_MOMENTUM_EXPERIMENT');
+  __resetServerPaperStateForTests();
+  const price=scenario==='profit'?50700:scenario==='loss'?49500:50001;
+  if(scenario==='expiry'){
+    await manageServerPaperTick(quoteFn(price),now+31*60000);
+    expect(closeRows()).toHaveLength(0);
+    __resetServerPaperStateForTests();
+  }
+  const at=now+(scenario==='expiry'?61:5)*60000;
+  await manageServerPaperTick(quoteFn(price),at);await manageServerPaperTick(quoteFn(price),at+1000);
+  expect(closeRows()).toHaveLength(1);
+  const close=closeRows()[0];expect(close.closeReason).toBe(scenario==='profit'?'TAKE_PROFIT':scenario==='loss'?'STOP_LOSS':'MODE_TIME_EXIT');
+  expect(Number(close.netPnlEstimatedUsd)).toBeCloseTo(Number(close.pnl)-Number(close.estEntryCostUsd)-Number(close.estExitCostUsd)-Number(close.estHoldingCostUsd));
+  const restored=evaluateVirtualPaper400Account({session:session.session,previous:saved,rows:store.trades as unknown as DbTrade[],now:new Date(at+1000),quote:quoteFn(price),aggressiveDaily:true});
+  expect(restored.ledger.settlementCount).toBe(1);if(scenario==='loss')expect(restored.ledger.realizedEquityUsd).toBeLessThan(390);
+  } finally {process.env.WORKER_ENGINE_MODE='PAPER';}
+ });
 });

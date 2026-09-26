@@ -15,6 +15,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v3
@@ -29,6 +31,12 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Install PostgreSQL test binaries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql
+          echo "$(pg_config --bindir)" >> "$GITHUB_PATH"
 
       # ── Step 1: TypeScript ─────────────────────────────────────────────────
       # calendar.tsx / spinner.tsx 에 기존 pre-existing React 19 ref 오류가 있음.
@@ -62,6 +70,19 @@ jobs:
         env:
           # 테스트 환경에서는 VAPID 키 없음 → fail-closed 경로 검증
           NODE_ENV: test
+          # Unit imports need a syntactically valid URL; integration tests start
+          # and use their own isolated temporary PostgreSQL cluster.
+          DATABASE_URL: postgresql://postgres@127.0.0.1:1/postgres
+
+      # ── Step 4b: Pin #140/#141 settlement/handoff regression tests ──────────
+      # confirmedOpenStopHandoff (#140) and closeSettlementEvidence (#141) are
+      # pinned in a dedicated step so regressions are immediately visible.
+      # WORKER_ENGINE_MODE remains PAPER; no real network/signing/order/fund actions.
+      - name: Tests — #140 confirmedOpenStopHandoff + #141 closeSettlementEvidence (pinned)
+        id: tests-settlement-handoff
+        run: pnpm --filter @workspace/api-server run test:settlement-handoff
+        env:
+          NODE_ENV: test
 
       # ── Step 5: Regression tests (futures-web) ─────────────────────────────
       - name: Tests — futures-web
@@ -77,10 +98,12 @@ jobs:
           echo "=============================="
           echo "CI Quality Gate Summary"
           echo "=============================="
-          echo "- TypeScript (all):      ${{ steps.typecheck.outcome || 'skipped' }}"
-          echo "- Build futures-web:     ${{ steps.build-web.outcome || 'skipped' }}"
-          echo "- Build deploy bundle:   ${{ steps.build-deploy.outcome || 'skipped' }}"
-          echo "- Tests api-server:      ${{ steps.tests-api.outcome || 'skipped' }}"
-          echo "- Tests web:             ${{ steps.tests-web.outcome || 'skipped' }}"
+          echo "- TypeScript (all):              ${{ steps.typecheck.outcome || 'skipped' }}"
+          echo "- Build futures-web:             ${{ steps.build-web.outcome || 'skipped' }}"
+          echo "- Build deploy bundle:           ${{ steps.build-deploy.outcome || 'skipped' }}"
+          echo "- Tests api-server:              ${{ steps.tests-api.outcome || 'skipped' }}"
+          echo "- Tests #140/#141 pinned:        ${{ steps.tests-settlement-handoff.outcome || 'skipped' }}"
+          echo "- Tests web:                     ${{ steps.tests-web.outcome || 'skipped' }}"
           echo ""
           echo "LIVE_EXECUTION_LOCKED=true 는 절대 변경하지 마세요."
+          echo "WORKER_ENGINE_MODE=PAPER 는 절대 변경하지 마세요 (AUTO LIVE 비활성 유지)."

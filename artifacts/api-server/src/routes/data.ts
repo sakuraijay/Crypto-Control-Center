@@ -9,11 +9,29 @@
  */
 
 import { Router } from "express";
+import { VIRTUAL_PAPER_400_STRATEGY_PREFIX } from '../workers/virtualPaper400Ledger';
 import { db, tradesTable, strategyConfigTable, workerStateTable } from "@workspace/db";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, or } from "drizzle-orm";
 import { getPaperCostBinding } from "../lib/paperCostCache";
-import { clampDailyTargetUSDT } from "../lib/riskPolicy";
+import { RISK_POLICY, clampDailyTargetUSDT } from "../lib/riskPolicy";
 import { accrueHoldingCostsFromEntryRates, computePaperNetPnl } from "../lib/holdingCosts";
+import { requireOperatorAuth } from "../lib/operatorAuthGuard";
+import {
+  getRiskProfileStatus,
+  parseRiskProfileName,
+  profileBaseLimits,
+  requestRiskProfile,
+} from "../lib/riskProfiles";
+import {
+  WORKER_POLICY_CONTEXT_KEY,
+  WORKER_POLICY_CONTEXT_SCHEMA_VERSION,
+  containsReservedAccountingFields,
+} from '../workers/workerPolicyContext';
+import {
+  WORKER_FIXED_BETA_CONTEXT,
+  WORKER_STANDARD_ACTIVE_CONTEXT,
+} from '../workers/workerCapitalPolicy';
+import { FIXED_BETA_TRADE_STRATEGY } from '../workers/fixedBetaAccountingState';
 
 const router = Router();
 
@@ -26,7 +44,9 @@ router.get("/data/trades", async (_req, res) => {
       .select()
       .from(tradesTable)
       .orderBy(tradesTable.timestamp);
-    res.json(trades);
+    // The legacy Dashboard/TradingContext is Standard-only. Virtual accounting
+    // is exposed by its session endpoint and must never inflate Standard PnL.
+    res.json(trades.filter(row => !row.strategy?.startsWith(VIRTUAL_PAPER_400_STRATEGY_PREFIX)));
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch trades" });
   }
@@ -55,13 +75,16 @@ router.post("/data/trades/batch", async (req, res) => {
       timestamp: string; closeTime?: number;
     }>;
     if (!Array.isArray(rows) || rows.length === 0) return res.json({ count: 0 });
+    if (rows.some(row => row.strategy === FIXED_BETA_TRADE_STRATEGY || row.strategy?.startsWith(VIRTUAL_PAPER_400_STRATEGY_PREFIX))) {
+      return res.status(403).json({ ok: false, code: 'RESERVED_ACCOUNTING_SCOPE', error: 'reserved alpha accounting strategy is server-only' });
+    }
 
     // ── Task #111 — 서버 권위 격리 (batch도 단건 POST와 동일한 fail-closed 가드) ──
     try {
       for (const r of rows) {
         const existing = await db.select().from(tradesTable)
           .where(eq(tradesTable.id, String(r.id ?? ""))).limit(1);
-        if (existing[0]?.managedBy === "SERVER") {
+        if (existing[0]?.managedBy === "SERVER" || existing[0]?.strategy === FIXED_BETA_TRADE_STRATEGY) {
           return res.status(409).json({
             ok: false, code: "SERVER_MANAGED_ROW",
             error: "서버 Worker가 관리하는 거래 행 포함 — batch 저장 거부",
@@ -133,13 +156,16 @@ router.post("/data/trades/batch", async (req, res) => {
 router.post("/data/trades", async (req, res) => {
   try {
     const r = req.body;
+    if (r?.strategy === FIXED_BETA_TRADE_STRATEGY || (typeof r?.strategy === 'string' && r.strategy.startsWith(VIRTUAL_PAPER_400_STRATEGY_PREFIX))) {
+      return res.status(403).json({ ok: false, code: 'RESERVED_ACCOUNTING_SCOPE', error: 'reserved alpha accounting strategy is server-only' });
+    }
 
     // ── Task #111 — 서버 권위 격리: 클라이언트 POST가 서버 관리 상태를 덮어쓸 수 없다 ──
     // 1) 동일 id의 서버 관리 행 upsert 거부
     try {
       const existing = await db.select().from(tradesTable)
         .where(eq(tradesTable.id, String(r.id ?? ""))).limit(1);
-      if (existing[0]?.managedBy === "SERVER") {
+      if (existing[0]?.managedBy === "SERVER" || existing[0]?.strategy === FIXED_BETA_TRADE_STRATEGY) {
         return res.status(409).json({
           ok: false, code: "SERVER_MANAGED_ROW",
           error: "서버 Worker가 관리하는 거래 행 — 클라이언트 수정 불가",
@@ -310,7 +336,7 @@ router.delete("/data/trades", async (_req, res) => {
     // 판정 실패도 fail-closed.
     try {
       const serverRows = await db.select().from(tradesTable)
-        .where(eq(tradesTable.managedBy, "SERVER")).limit(1);
+        .where(or(eq(tradesTable.managedBy, "SERVER"), eq(tradesTable.strategy, FIXED_BETA_TRADE_STRATEGY))).limit(1);
       if (serverRows.length > 0) {
         return res.status(409).json({
           ok: false, code: "SERVER_MANAGED_ROW",
@@ -355,6 +381,10 @@ router.get("/data/strategy", async (_req, res) => {
 /** PUT /api/data/strategy — save (upsert) strategy config */
 router.put("/data/strategy", async (req, res) => {
   try {
+    if (containsReservedAccountingFields(req.body)) {
+      res.status(403).json({ ok: false, code: 'RESERVED_ACCOUNTING_SCOPE', error: 'Accounting policy and capability fields require the dedicated operator boundary' });
+      return;
+    }
     const { indicators } = req.body;
     // Clamp risk limits (maxDrawdownPercent, dailyLossLimitUSDT, weeklyLossLimitUSDT)
     // then LIVE TEST MODE hardcaps. Both are authoritative server-side.
@@ -375,6 +405,61 @@ router.put("/data/strategy", async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: "Failed to save strategy config" });
+  }
+});
+
+/**
+ * Explicit worker accounting-domain selector.  It intentionally does not infer a
+ * domain from capital, mode, wallet, or dates.  The alpha state itself is never
+ * initialized here; an absent alpha ledger remains fail-closed in the worker.
+ */
+router.put("/data/worker-policy-context", requireOperatorAuth, async (req, res) => {
+  const policyContext = req.body?.policyContext;
+  if (policyContext !== WORKER_STANDARD_ACTIVE_CONTEXT && policyContext !== WORKER_FIXED_BETA_CONTEXT) {
+    return res.status(400).json({ ok: false, error: 'policyContext must be STANDARD_ACTIVE or FIXED_BETA_400' });
+  }
+  const value = JSON.stringify({
+    schemaVersion: WORKER_POLICY_CONTEXT_SCHEMA_VERSION,
+    policyContext,
+    approvedBy: 'OPERATOR_AUTH_V1',
+    approvedAt: new Date().toISOString(),
+  });
+  try {
+    await db.insert(workerStateTable).values({ key: WORKER_POLICY_CONTEXT_KEY, value, updatedAt: new Date() })
+      .onConflictDoUpdate({ target: workerStateTable.key, set: { value, updatedAt: new Date() } });
+    return res.json({ ok: true, policyContext });
+  } catch {
+    return res.status(503).json({ ok: false, error: 'worker policy context could not be persisted' });
+  }
+});
+
+/** GET /api/data/risk-profile — 권위 프로필의 desired/applied/pending 상태 */
+router.get("/data/risk-profile", async (_req, res) => {
+  try {
+    const rows = await db.select({ limits: strategyConfigTable.limits })
+      .from(strategyConfigTable).limit(1);
+    res.json(await getRiskProfileStatus(profileBaseLimits(rows[0]?.limits)));
+  } catch {
+    res.status(503).json({ error: "Risk profile status unavailable (fail-closed)" });
+  }
+});
+
+/**
+ * PUT /api/data/risk-profile — 프로필 변경 요청만 기록한다.
+ * 실제 적용은 Worker가 열린 포지션/승인/intent/close가 없는 안전 사이클 경계에서 수행한다.
+ */
+router.put("/data/risk-profile", requireOperatorAuth, async (req, res) => {
+  const name = parseRiskProfileName(req.body?.profile);
+  if (!name) {
+    return res.status(400).json({ error: "profile must be conservative or aggressive" });
+  }
+  try {
+    await requestRiskProfile(name);
+    const rows = await db.select({ limits: strategyConfigTable.limits })
+      .from(strategyConfigTable).limit(1);
+    return res.json(await getRiskProfileStatus(profileBaseLimits(rows[0]?.limits)));
+  } catch {
+    return res.status(503).json({ error: "Risk profile request could not be persisted" });
   }
 });
 
@@ -400,19 +485,19 @@ function clampRiskLimits(limits: unknown): unknown {
   const lim     = limits as Record<string, unknown>;
   const clamped: Record<string, unknown> = { ...lim };
 
-  // maxDrawdownPercent: 1% ≤ x ≤ 50% — above 50% is unsafe, below 1% blocks all trades
+  // maxDrawdownPercent: 기존 값이 더 엄격하면 보존, 완화는 8%에서 차단
   if ('maxDrawdownPercent' in clamped) {
     const v = safeNum(clamped.maxDrawdownPercent);
-    clamped.maxDrawdownPercent = v !== undefined ? Math.min(50, Math.max(1, v)) : undefined;
+    clamped.maxDrawdownPercent = v !== undefined ? Math.min(8, Math.max(1, v)) : undefined;
   }
 
   // ── 6H-1 $1,000 최종 정책 하드캡 ────────────────────────────────────────
   // UI에서 어떤 값을 보내도 서버가 정책 상한으로 강제 클램프한다.
 
-  // dailyLossLimitUSDT: $10 ≤ x ≤ $30 (risk capital $1,000 × 3%)
+  // dailyLossLimitUSDT: 최대 $10 (현재 Active $1,000 × 1%)
   if ('dailyLossLimitUSDT' in clamped) {
     const v = safeNum(clamped.dailyLossLimitUSDT);
-    clamped.dailyLossLimitUSDT = v !== undefined ? Math.min(30, Math.max(10, v)) : undefined;
+    clamped.dailyLossLimitUSDT = v !== undefined ? Math.min(10, Math.max(0, v)) : undefined;
   }
 
   // weeklyLossLimitUSDT: $10 ≤ x ≤ $80 (risk capital $1,000 × 8%)
@@ -425,6 +510,14 @@ function clampRiskLimits(limits: unknown): unknown {
   if ('maxLeverage' in clamped) {
     const v = safeNum(clamped.maxLeverage);
     clamped.maxLeverage = v !== undefined ? Math.min(3, Math.max(1, v)) : undefined;
+  }
+
+  // maxMarginPerTrade: 현재 Active 단계의 보수적 절대 상한 $334
+  if ('maxMarginPerTrade' in clamped) {
+    const v = safeNum(clamped.maxMarginPerTrade);
+    clamped.maxMarginPerTrade = v !== undefined
+      ? Math.min(RISK_POLICY.maxMarginPerTradeUsd, Math.max(0, v))
+      : undefined;
   }
 
   // tradingCapital: $10 ≤ x ≤ $1,000 — 초과 자본은 위험 산정에서 제외 (복리 금지)

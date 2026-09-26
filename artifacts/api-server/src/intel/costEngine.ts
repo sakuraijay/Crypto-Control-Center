@@ -42,6 +42,8 @@ export const INTEL_COST_POLICY = Object.freeze({
   /** 실행 실패(재시도 gas·기회손실) 예비비 — 명목 대비 2bp */
   failureRiskReserveFraction: 0.0002,
 });
+/** Canonical identifier for a complete production candidate cost breakdown. */
+export const INTEL_MEASURED_COST_SOURCE = 'GMX_MEASURED_READONLY' as const;
 
 const fin = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
 
@@ -292,7 +294,7 @@ export function buildCandidateCostBreakdown(input: CandidateCostInput): CostBrea
     costBasis: missing.length > 0
       ? `UNAVAILABLE 성분: ${missing.join(',')} — 0 대체 금지; ${basisParts.join('; ')}`
       : basisParts.join('; '),
-    costSource: 'GMX_MEASURED_READONLY',
+    costSource: INTEL_MEASURED_COST_SOURCE,
     costSnapshotFetchedAtMs: fetchedAtMs,
     // 6I-4 — 출처 pin + 성분별 관측 시각 (API/UI 노출: stale·출처 감사 가능)
     sourcePin: rates !== null ? rates.sourcePin : null,

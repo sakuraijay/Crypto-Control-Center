@@ -7,7 +7,12 @@ import NotFound from '@/pages/not-found';
 import { GlobalProviders, useAppContext } from '@/lib/context';
 import { Shell } from '@/components/shell';
 import { AuthOverlay } from '@/components/auth/AuthOverlay';
+import { OnboardingOverlay } from '@/components/onboarding/OnboardingOverlay';
 import { RiskAlertMonitor } from '@/components/trading/RiskAlertMonitor';
+import StandardWorkspace from '@/pages/standard';
+import SystemPage from '@/pages/system';
+import ActivityPage from '@/pages/activity';
+import CalendarPage from '@/pages/calendar';
 
 import Dashboard from '@/pages/dashboard';
 import Positions from '@/pages/positions';
@@ -18,6 +23,8 @@ import Settings from '@/pages/settings';
 import Backtest from '@/pages/backtest';
 import AiLog from '@/pages/ai-log';
 import { AlertCircle } from 'lucide-react';
+
+export const APP_ROUTER_BASE = '/futures-web';
 
 function EmergencyBanner() {
   const { engineState, resetFromEmergency } = useAppContext();
@@ -41,12 +48,24 @@ function EmergencyBanner() {
   );
 }
 
-function Router() {
+function OverviewPage() {
+  return (
+    <div className="flex flex-col gap-5">
+      <Dashboard />
+    </div>
+  );
+}
+
+export function AppRouter() {
   return (
     <RoutedErrorBoundary>
       <Shell>
         <Switch>
-          <Route path="/" component={Dashboard} />
+          <Route path="/" component={OverviewPage} />
+          <Route path="/standard" component={StandardWorkspace} />
+          <Route path="/system" component={SystemPage} />
+          <Route path="/activity" component={ActivityPage} />
+          <Route path="/calendar" component={CalendarPage} />
           <Route path="/positions" component={Positions} />
           <Route path="/watchlist" component={Watchlist} />
           <Route path="/strategy" component={Strategy} />
@@ -54,7 +73,7 @@ function Router() {
           <Route path="/settings" component={Settings} />
           <Route path="/backtest" component={Backtest} />
           <Route path="/ai-log" component={AiLog} />
-          <Route component={NotFound} />
+          <Route path="*" component={NotFound} />
         </Switch>
       </Shell>
     </RoutedErrorBoundary>
@@ -66,13 +85,14 @@ function RoutedErrorBoundary({ children }: { children: ReactNode }) {
   return <ErrorBoundary resetKey={location}>{children}</ErrorBoundary>;
 }
 
-function AppContent() {
+export function AppContent() {
   return (
     <>
       <AuthOverlay />
+      <OnboardingOverlay />
       <EmergencyBanner />
       <RiskAlertMonitor />
-      <Router />
+      <AppRouter />
     </>
   );
 }
@@ -81,7 +101,7 @@ function App() {
   return (
     <GlobalProviders>
       <TooltipProvider>
-        <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, '')}>
+        <WouterRouter base={APP_ROUTER_BASE}>
           <AppContent />
         </WouterRouter>
         <Toaster />

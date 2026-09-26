@@ -1,86 +1,26 @@
-/**
- * AiEngineContext — 5-State AI Trading Engine
- *
- * Runs a decision cycle every CYCLE_MS milliseconds:
- *   1. Build SymbolAnalysis from live price buffer + 24h change data
- *   2. Call runAiEngine() — pure state-selection logic
- *   3. Risk gate check
- *   4. Paper mode + autoExecute → placeOrder() locally (simulated)
- *   5. LIVE_TRADING mode → queue as PendingLiveApproval (operator must APPROVE)
- *   6. Persist decision to API server
- *
- * Operator role:
- *   • Paper mode: monitoring + optional auto-execute toggle
- *   • Live mode:  APPROVE / REJECT each proposed order before real money moves
- *   • Always:     Emergency Stop, pause/resume
- */
+/** Server decision history, approval review and notification UI. No browser trading engine. */
 
 import {
   createContext, useCallback, useContext, useEffect, useRef, useState, ReactNode,
 } from 'react';
-import { v4 as uuid } from 'uuid';
 import { useToast } from '@/hooks/use-toast';
 import type {
-  AiEngineDecision, AiEngineStats, AiOperatingState, MarketRanking,
-  PriceBuffer, SymbolAnalysis, PendingLiveApproval, ApprovalStatus,
+  AiEngineDecision, AiOperatingState,
+  PendingLiveApproval, ApprovalStatus,
 } from '../ai/types';
-import { APPROVAL_TIMEOUT_MS } from '../ai/types';
-import { computeIndicators, computeScores } from '../ai/indicators';
-import { runAiEngine } from '../ai/stateEngine';
-import { displaySymbol as gmxDisplaySymbol } from '../gmx/markets';
 import { useTradingContext } from './TradingContext';
-import { useAppContext } from './AppContext';
 import { useStrategyContext } from './StrategyContext';
-import { useWatchlistContext } from './WatchlistContext';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const CYCLE_MS = 60_000;
-const MAX_BUFFER = 200;
-const CORE_SYMBOLS = ['BTC', 'ETH', 'SOL', 'ARB', 'LINK'];
 /** Prune expired approvals older than this (keep for audit) */
 const APPROVAL_HISTORY_KEEP_MS = 24 * 60 * 60 * 1000;
-
-// ── Operating mode ────────────────────────────────────────────────────────────
-
-export type OperatingMode = 'AUTONOMOUS_AI' | 'MANUAL_OVERRIDE' | 'RISK_LOCKED';
-
-function deriveOperatingMode(engineState: string, autoExecute: boolean): OperatingMode {
-  if (engineState === 'RISK_LOCKED' || engineState === 'EMERGENCY_STOP') return 'RISK_LOCKED';
-  if (engineState === 'LIVE_TRADING') return 'AUTONOMOUS_AI';
-  if (engineState === 'PAPER_TRADING' && autoExecute) return 'AUTONOMOUS_AI';
-  return 'MANUAL_OVERRIDE';
-}
 
 // ── Context type ──────────────────────────────────────────────────────────────
 
 interface AiEngineContextType {
-  currentDecision: AiEngineDecision | null;
   decisionHistory: AiEngineDecision[];
-  stats: AiEngineStats;
-  running: boolean;
-  autoExecute: boolean;
-  setAutoExecute: (v: boolean) => void;
-  triggerCycle: () => void;
   clearHistory: () => void;
-  nextCycleMs: number;
-
-  /** Derived operating mode for sidebar / status displays */
-  operatingMode: OperatingMode;
-
-  // ── Market rankings ──────────────────────────────────────────────────────
-  /** Ranked list of all analysed GMX markets from the latest cycle */
-  marketRankings: MarketRanking[];
-
-  // ── System health / pause ────────────────────────────────────────────────
-  /** True when the engine is paused */
-  systemPaused: boolean;
-  pauseReason: string | null;
-
-  // ── Daily benchmark ──────────────────────────────────────────────────────
-  benchmarkAccountSize: number;
-  benchmarkDailyMin: number;
-  benchmarkDailyMax: number;
 
   // ── Live approval gate ───────────────────────────────────────────────────
   /** All approvals (pending + historical) */
@@ -117,25 +57,6 @@ interface AiEngineContextType {
    */
   sendTestNotification: () => Promise<'sent' | 'denied' | 'unsupported'>;
 
-  /**
-   * Current profit-lock stage (0 = off, 1–3 = increasingly tight).
-   * Derived from the latest cycle's `profitLockStage` field.
-   * Lv.1 activates when daily realized PnL ≥ tradingCapital × profitLockThresholdPct.
-   */
-  profitLockStage: 0 | 1 | 2 | 3;
-
-  // ── Risk guard meters ────────────────────────────────────────────────────
-  /**
-   * Unix-ms timestamp when the post-RISK_LOCKED cooldown period ends.
-   * 0 when not in cooldown. Updated when the engine is cleared from RISK_LOCKED.
-   */
-  cooldownEndsAt: number;
-  /** Number of trades (paper + live-queued) in the current 1-hour sliding window. */
-  tradesThisHour: number;
-  /**
-   * Realized PnL since Monday 00:00 local time (negative = net weekly loss).
-   * Used for display and weeklyLossLimitUSDT enforcement.
-   */
   weeklyRealizedPnl: number;
   /**
    * True when LIVE TEST MODE is active (from strategy limits).
@@ -149,80 +70,14 @@ const AiEngineContext = createContext<AiEngineContextType | undefined>(undefined
 // ── Provider ──────────────────────────────────────────────────────────────────
 
 export function AiEngineProvider({ children }: { children: ReactNode }) {
-  const { account, positions, closedTrades, placeOrder, clearAllPositions, updatePositionRisk, consecutiveLosses, todayStats } = useTradingContext();
-  const { engineState, setEngineState } = useAppContext();
+  const { closedTrades } = useTradingContext();
   const { limits } = useStrategyContext();
-  const { watchlist } = useWatchlistContext();
   const { toast } = useToast();
 
-  const [currentDecision, setCurrentDecision] = useState<AiEngineDecision | null>(null);
   const [decisionHistory, setDecisionHistory] = useState<AiEngineDecision[]>([]);
-  const [stats, setStats] = useState<AiEngineStats>({
-    totalCycles: 0,
-    stateDistribution: { SPOT: 0, LONG: 0, SHORT: 0, HEDGE: 0, CASH: 0 },
-    currentStreak: { state: 'CASH', cycles: 0 },
-    avgConfidence: 0,
-    lastCycleAt: null,
-  });
-  const [autoExecute, setAutoExecute] = useState(false);
-  const [running, setRunning] = useState(false);
-  const [nextCycleMs, setNextCycleMs] = useState(CYCLE_MS);
   const [pendingApprovals, setPendingApprovals] = useState<PendingLiveApproval[]>([]);
-  const [marketRankings, setMarketRankings] = useState<MarketRanking[]>([]);
-  const [systemPaused] = useState(false);
-  const [pauseReason] = useState<string | null>(null);
-  const [cooldownEndsAt, setCooldownEndsAt] = useState<number>(0);
-  const [tradesThisHour, setTradesThisHour] = useState<number>(0);
-
-  // ── Benchmark constants (display-only, not enforced by engine) ─────────────
-  const BENCHMARK_ACCOUNT = 10_000;
-  const BENCHMARK_DAILY_MIN = 500;
-  const BENCHMARK_DAILY_MAX = 1_000;
-
-  const priceBuffer = useRef<PriceBuffer>(new Map());
-  const lastPriceUpdate = useRef<number>(Date.now());
-  const cycleNumber = useRef(0);
-  const prevState = useRef<AiOperatingState>('CASH');
-  const cycleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const countdownTimer = useRef<ReturnType<typeof setInterval> | null>(null);
-  const nextCycleAt = useRef<number>(Date.now() + CYCLE_MS);
   const seenApprovalIds = useRef<Set<string>>(new Set());
   const dbPage = useRef(1); // page 0 loaded on mount
-  /** Track last-known profit-lock stage so we can detect upward transitions. */
-  const prevProfitLockStageRef = useRef<0 | 1 | 2 | 3>(0);
-  /** Peak realized PnL today — monotonically increases so stage can only rise within a day. */
-  const maxDailyPnlRef = useRef(0);
-  /** Calendar-day key used to reset monotonic PnL and stage at midnight. */
-  const cycleResetDayRef = useRef('');
-  /** Timestamp (ms) when the post-RISK_LOCKED cooldown period ends (0 = not in cooldown). */
-  const cooldownEndRef = useRef<number>(0);
-  /** Previous engineState — detects RISK_LOCKED → active transitions for cooldown start. */
-  const prevEngineStateRef = useRef<string>('');
-  /**
-   * Always-current refs to closedTrades and pendingApprovals.
-   * runCycle reads these (not the state values) to avoid stale-closure issues
-   * while also surviving browser reloads — count is derived from persisted data.
-   */
-  const closedTradesRef = useRef(closedTrades);
-  const pendingApprovalsRef = useRef(pendingApprovals);
-
-  // ── Feed price buffer from watchlist ───────────────────────────────────────
-  useEffect(() => {
-    const symbols = [...CORE_SYMBOLS, ...watchlist.map(w => w.symbol)];
-    for (const sym of symbols) {
-      const entry = watchlist.find(w => w.symbol === sym);
-      if (!entry?.price || entry.price <= 0) continue;
-      if (!priceBuffer.current.has(sym)) priceBuffer.current.set(sym, []);
-      const buf = priceBuffer.current.get(sym)!;
-      const last = buf[buf.length - 1];
-      if (last !== entry.price) {
-        buf.push(entry.price);
-        if (buf.length > MAX_BUFFER) buf.splice(0, buf.length - MAX_BUFFER);
-        lastPriceUpdate.current = Date.now();
-      }
-    }
-  }, [watchlist]);
-
   // ── Seed history from persisted DB records on mount ───────────────────────
   useEffect(() => {
     (async () => {
@@ -478,66 +333,6 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
     }
   }, [pendingApprovals, toast]);
 
-  // ── Daily / weekly loss limit → RISK_LOCKED ───────────────────────────────
-  useEffect(() => {
-    if (engineState === 'EMERGENCY_STOP' || engineState === 'RISK_LOCKED') return;
-
-    const dailyLoss = account.realizedPnlToday;
-    const dailyLimit = limits.dailyLossLimitUSDT;
-    const weeklyLimit = limits.weeklyLossLimitUSDT ?? 0;
-    const consecLimit = limits.consecutiveLossLimit ?? 3;
-
-    // Weekly loss: sum realized PnL of all trades since Monday 00:00 local time.
-    // This is authoritative — daily PnL alone cannot detect multi-day drawdowns.
-    const monday = new Date();
-    monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7)); // ISO Mon=0
-    monday.setHours(0, 0, 0, 0);
-    const weeklyRealized = closedTrades
-      .filter(t => new Date(t.timestamp) >= monday)
-      .reduce((s, t) => s + (t.pnl ?? 0), 0);
-    const weeklyLossUsd = weeklyRealized < 0 ? Math.abs(weeklyRealized) : 0;
-
-    const hitDaily  = dailyLimit  > 0 && dailyLoss  < 0 && Math.abs(dailyLoss) >= dailyLimit;
-    const hitWeekly = weeklyLimit > 0 && weeklyLossUsd >= weeklyLimit;
-    const hitConsec = consecLimit > 0 && consecutiveLosses >= consecLimit;
-
-    if (hitDaily || hitWeekly || hitConsec) {
-      const reason = hitDaily
-        ? `Daily loss limit hit ($${Math.abs(dailyLoss).toFixed(0)} / $${dailyLimit})`
-        : hitWeekly
-          ? `Weekly loss limit hit ($${weeklyLossUsd.toFixed(0)} / $${weeklyLimit})`
-          : `${consecutiveLosses} consecutive losses (limit ${consecLimit})`;
-      console.warn(`[AiEngine] RISK_LOCKED — ${reason}`);
-      setEngineState('RISK_LOCKED');
-    }
-  }, [account.realizedPnlToday, closedTrades, consecutiveLosses, limits, engineState, setEngineState]);
-
-  // ── Cooldown: block new entries after RISK_LOCKED is cleared ─────────────
-  // When the operator manually resets the engine from RISK_LOCKED, new entries
-  // are blocked for cooldownMinutes to prevent immediately hitting another limit.
-  useEffect(() => {
-    const prev = prevEngineStateRef.current;
-    prevEngineStateRef.current = String(engineState);
-
-    // Only start cooldown on a genuine RISK_LOCKED → active transition
-    if (
-      prev === 'RISK_LOCKED' &&
-      engineState !== 'RISK_LOCKED' &&
-      engineState !== 'EMERGENCY_STOP'
-    ) {
-      const cooldownMs = (limits.cooldownMinutes ?? 30) * 60_000;
-      const endTime = Date.now() + cooldownMs;
-      cooldownEndRef.current = endTime;
-      setCooldownEndsAt(endTime);
-      console.info(`[AiEngine] Cooldown started — ${limits.cooldownMinutes ?? 30} min until new entries`);
-    }
-    // Clear cooldown when engine is force-stopped
-    if (engineState === 'EMERGENCY_STOP') {
-      cooldownEndRef.current = 0;
-      setCooldownEndsAt(0);
-    }
-  }, [engineState, limits.cooldownMinutes]);
-
   // ── Auto-expire pending approvals ─────────────────────────────────────────
   useEffect(() => {
     const t = setInterval(() => {
@@ -565,75 +360,6 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
       }
     }, 15_000);
     return () => clearInterval(t);
-  }, []);
-
-  // ── Build SymbolAnalysis ───────────────────────────────────────────────────
-  const buildAnalyses = useCallback((): SymbolAnalysis[] => {
-    const analyses: SymbolAnalysis[] = [];
-    const allSymbols = [...new Set([...CORE_SYMBOLS, ...watchlist.map(w => w.symbol)])];
-
-    for (const sym of allSymbols) {
-      const wlEntry = watchlist.find(w => w.symbol === sym);
-      const buf = priceBuffer.current.get(sym);
-      const price = wlEntry?.price ?? buf?.[buf.length - 1] ?? 0;
-      if (price <= 0 || !buf || buf.length < 5) continue;
-
-      const displaySym = gmxDisplaySymbol(sym);
-      const priceChange24h = wlEntry?.change24h ?? 0;
-      const indicators = computeIndicators(buf, priceChange24h);
-      const { bullishScore, bearishScore, directionalBias, opportunityScore } = computeScores(indicators);
-
-      analyses.push({
-        symbol: sym, displaySymbol: displaySym, price, indicators,
-        bullishScore, bearishScore, directionalBias, opportunityScore,
-      });
-    }
-    return analyses.sort((a, b) => b.opportunityScore - a.opportunityScore);
-  }, [watchlist]);
-
-  // ── Persist decision to API ─────────────────────────────────────────────────
-  const persistDecision = useCallback(async (decision: AiEngineDecision) => {
-    try {
-      await fetch('/api/ai/decisions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ts: decision.createdAt,
-          symbol: decision.primarySymbol ?? 'MULTI',
-          direction: decision.operatingState === 'LONG' ? 'LONG'
-            : decision.operatingState === 'SHORT' ? 'SHORT'
-            : 'NO_TRADE',
-          confidence: decision.confidence / 100,
-          rationale: decision.stateRationale,
-          strategy: `AI_5STATE_${decision.operatingState}`,
-          riskResult: decision.riskApproved ? 'APPROVED' : 'VETOED',
-          riskNote: decision.riskVetoReason ?? null,
-          executionOutcome: decision.paperExecuted ? 'SIMULATED' : 'PENDING',
-          operatingState: decision.operatingState,
-          cycleNumber: decision.cycleNumber,
-          fullJson: JSON.stringify(decision),
-        }),
-      });
-    } catch { /* non-fatal */ }
-  }, []);
-
-  // ── Update stats ────────────────────────────────────────────────────────────
-  const updateStats = useCallback((decision: AiEngineDecision) => {
-    setStats(prev => {
-      const dist = { ...prev.stateDistribution };
-      dist[decision.operatingState] = (dist[decision.operatingState] ?? 0) + 1;
-      const streak = prev.currentStreak.state === decision.operatingState
-        ? { state: decision.operatingState, cycles: prev.currentStreak.cycles + 1 }
-        : { state: decision.operatingState, cycles: 1 };
-      const total = prev.totalCycles + 1;
-      return {
-        totalCycles: total,
-        stateDistribution: dist,
-        currentStreak: streak,
-        avgConfidence: (prev.avgConfidence * prev.totalCycles + decision.confidence) / total,
-        lastCycleAt: decision.createdAt,
-      };
-    });
   }, []);
 
   // ── Approve a live order (paper dry-run validation) ─────────────────────────
@@ -796,271 +522,6 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
     }).catch(() => { /* non-fatal */ });
   }, []);
 
-  // ── Run one engine cycle ────────────────────────────────────────────────────
-  const runCycle = useCallback(async () => {
-    if (running) return;
-    setRunning(true);
-
-    try {
-      const analyses = buildAnalyses();
-      const dataFreshMs = Date.now() - lastPriceUpdate.current;
-      cycleNumber.current += 1;
-
-      // ── Rate-limit gates ─────────────────────────────────────────────────
-      const now = Date.now();
-
-      // Cooldown gate: after RISK_LOCKED reset, block new entries for cooldownMinutes.
-      const inCooldown = now < cooldownEndRef.current;
-
-      // Trades-per-hour gate: derived from persisted durable sources so it
-      // survives browser reloads and provider remounts.
-      // Counts: paper/spot trades closed this hour + live approvals queued this hour.
-      const oneHourAgo = now - 3_600_000;
-      const closedThisHour = closedTradesRef.current.filter(
-        t => new Date(t.timestamp).getTime() > oneHourAgo,
-      ).length;
-      const approvedThisHour = pendingApprovalsRef.current.filter(
-        a => new Date(a.createdAt).getTime() > oneHourAgo,
-      ).length;
-      const currentTradesThisHour = closedThisHour + approvedThisHour;
-      setTradesThisHour(currentTradesThisHour);
-      const tradeLimitHit =
-        (limits.maxTradesPerHour ?? 0) > 0 &&
-        currentTradesThisHour >= (limits.maxTradesPerHour ?? 0);
-
-      const rawDecision = runAiEngine({
-        cycleNumber: cycleNumber.current,
-        prevState: prevState.current,
-        analyses,
-        positions,
-        account: {
-          balance: account.balance,
-          availableBalance: account.availableBalance,
-          unrealizedPnl: account.unrealizedPnl,
-          realizedPnlToday: account.realizedPnlToday,
-        },
-        limits,
-        engineState: String(engineState),
-        consecutiveLosses: consecutiveLosses,
-        dataFreshMs,
-        // Profit-lock inputs.
-        // Use the PEAK realized PnL seen today (monotonically increasing within a day)
-        // so that profitLockStage can only rise, never fall, even if an unrealised
-        // gain is later taken away by a pullback that doesn't yet close the trade.
-        // todayStats.realized is the authoritative source (all close paths feed it).
-        // ── Daily rollover: reset peak when calendar day changes ──
-        dailyRealizedPnlUsd: (() => {
-          const todayKey = new Date().toDateString();
-          if (todayKey !== cycleResetDayRef.current) {
-            maxDailyPnlRef.current = 0;
-            prevProfitLockStageRef.current = 0;
-            cycleResetDayRef.current = todayKey;
-          }
-          maxDailyPnlRef.current = Math.max(maxDailyPnlRef.current, todayStats.realized);
-          return maxDailyPnlRef.current;
-        })(),
-        tradingCapital: limits.tradingCapital,
-      });
-
-      const isLiveTrade  = engineState === 'LIVE_TRADING';
-      const isPaperTrade = !isLiveTrade && engineState !== 'EMERGENCY_STOP' && engineState !== 'RISK_LOCKED';
-      // HEDGE bypasses cooldown and rate-limit gates — protecting at-risk
-      // positions must never be blocked by administrative time-locks.
-      const isHedgeAction = rawDecision.operatingState === 'HEDGE';
-      const isActionable =
-        rawDecision.riskApproved &&
-        rawDecision.operatingState !== 'CASH' &&
-        rawDecision.executionType !== 'hold' &&
-        !!rawDecision.sizeUsd && rawDecision.sizeUsd > 0 &&
-        !!rawDecision.primarySymbol &&
-        (isHedgeAction || !inCooldown) &&    // cooldown blocks speculative entries
-        (isHedgeAction || !tradeLimitHit);   // hourly rate limit blocks speculative entries
-
-      setMarketRankings(rawDecision.marketRankings ?? []);
-
-      // ── Profit-lock stage transition → tighten existing open-position trailing stops ─
-      // When the stage rises (better-than-threshold profit day), tighten trailing stops
-      // on ALL open LONG/SHORT positions so already-captured gains are better protected.
-      //
-      // ⛔ Ratchet invariant: we only REDUCE trailing distance; if a position's current
-      //    trailing pct is already tighter than the computed target, we leave it alone.
-      //    We never loosen a trailing stop, even when the stage drops later in the session.
-      const newStage = (rawDecision.profitLockStage ?? 0) as 0 | 1 | 2 | 3;
-      if (newStage > prevProfitLockStageRef.current) {
-        const tightenFactor =
-          newStage === 1 ? 0.80 :
-          newStage === 2 ? 0.65 : 0.50;
-        for (const pos of positions) {
-          if (
-            !pos.trailingStopPct || pos.trailingStopPct <= 0 ||
-            (pos.side !== 'LONG' && pos.side !== 'SHORT')
-          ) continue;
-
-          const newTrailing = Math.max(0.3, pos.trailingStopPct * tightenFactor);
-          if (newTrailing >= pos.trailingStopPct) continue; // already tighter or equal
-
-          // Compute immediate stop from the EXISTING high-water mark (not markPrice).
-          // This prevents the stop from moving backward after updatePositionRisk resets
-          // the ratchet base; the preserved highWater keeps the ratchet running from
-          // the correct level even through price pullbacks.
-          const existingHW = pos._trailingHighWater ?? pos.entryPrice;
-          const newSlFromHW = pos.side === 'LONG'
-            ? existingHW * (1 - newTrailing / 100)
-            : existingHW * (1 + newTrailing / 100);
-
-          // Direction-aware ratchet invariant:
-          //   LONG  → new stop must be HIGHER than current (closer to price)
-          //   SHORT → new stop must be LOWER  than current (closer to price)
-          const isTighter = pos.side === 'LONG'
-            ? newSlFromHW > (pos.slPrice ?? 0)
-            : newSlFromHW < (pos.slPrice ?? Infinity);
-
-          if (isTighter) {
-            // Pass existingHW so updatePositionRisk preserves the ratchet base
-            updatePositionRisk(pos.id, pos.tpPrice ?? null, newSlFromHW, newTrailing, existingHW);
-          }
-        }
-      }
-      // Monotonic within a session: stage only increases during a trading day.
-      // staleData / emergency exits now carry profitLockStage too, so newStage
-      // is always the authoritative computed value — safe to take Math.max.
-      prevProfitLockStageRef.current = Math.max(
-        prevProfitLockStageRef.current, newStage,
-      ) as 0 | 1 | 2 | 3;
-
-      let paperExecuted = false;
-      let paperOrderId: string | undefined;
-
-      if (isActionable) {
-        if (isLiveTrade) {
-          // ── LIVE: queue for operator approval ──────────────────────────────
-          const now = new Date().toISOString();
-          const approval: PendingLiveApproval = {
-            id: uuid(),
-            decision: { ...rawDecision, id: uuid(), createdAt: now, paperExecuted: false } as AiEngineDecision,
-            createdAt: now,
-            expiresAt: new Date(Date.now() + APPROVAL_TIMEOUT_MS).toISOString(),
-            status: 'PENDING',
-          };
-          setPendingApprovals(prev => [...prev, approval]);
-          // tradesThisHour updates next cycle from pendingApprovalsRef.
-
-          // DB에 영속 저장 (non-fatal)
-          fetch('/api/ai/approvals', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              id:           approval.id,
-              decisionJson: JSON.stringify(approval.decision),
-              expiresAt:    approval.expiresAt,
-            }),
-          }).catch(() => { /* non-fatal */ });
-
-        } else if (isPaperTrade && autoExecute) {
-          // ── PAPER: auto-execute locally ────────────────────────────────────
-          const sym = rawDecision.primarySymbol!;
-          const side = rawDecision.operatingState === 'SHORT' ? 'SHORT' : 'LONG';
-          const baseOrder = {
-            symbol: sym,
-            side: side as 'LONG' | 'SHORT',
-            orderType: 'MarketIncrease' as const,
-            sizeInUsd: rawDecision.sizeUsd!,
-            leverage: rawDecision.leverage ?? 5,
-            tpPrice: rawDecision.tpPrice,
-            slPrice: rawDecision.slPrice,
-            // Pass profit-lock-adjusted trailing stop so paper execution honours
-            // the tightened trailing distance from stateEngine.
-            trailingStopPct: rawDecision.trailingStopPct,
-          };
-
-          let result;
-          if (['perp_long_open', 'perp_short_open', 'hedge_open', 'scale_in'].includes(rawDecision.executionType)) {
-            result = placeOrder(baseOrder);
-          } else if (rawDecision.executionType === 'spot_swap') {
-            result = placeOrder({ ...baseOrder, leverage: 1 });
-          }
-          if (result?.success) {
-            paperExecuted = true;
-            paperOrderId = uuid();
-            // tradesThisHour will update naturally next cycle via closedTradesRef.
-          }
-        }
-      } else if (
-        rawDecision.operatingState === 'CASH' &&
-        isPaperTrade && autoExecute &&
-        positions.length > 0
-      ) {
-        console.info('[AiEngine] CASH state with open positions — closing all (paper)');
-        clearAllPositions();
-      }
-
-      const decision: AiEngineDecision = {
-        id: uuid(),
-        createdAt: new Date().toISOString(),
-        paperExecuted,
-        paperOrderId,
-        ...rawDecision,
-      };
-
-      prevState.current = decision.operatingState;
-      setCurrentDecision(decision);
-      setDecisionHistory(prev => [decision, ...prev].slice(0, 200));
-      updateStats(decision);
-      await persistDecision(decision);
-    } finally {
-      setRunning(false);
-    }
-  }, [
-    running, buildAnalyses, positions, account, limits, engineState,
-    autoExecute, placeOrder, clearAllPositions, updatePositionRisk,
-    updateStats, persistDecision, consecutiveLosses, todayStats,
-  ]);
-
-  // Keep closedTrades/pendingApprovals refs current so runCycle reads live data.
-  useEffect(() => { closedTradesRef.current = closedTrades; }, [closedTrades]);
-  useEffect(() => { pendingApprovalsRef.current = pendingApprovals; }, [pendingApprovals]);
-
-  // ── Always-current runCycle ref — avoids stale closure in scheduler ─────────
-  // The scheduler useEffect is intentionally mounted once with [] to avoid
-  // tearing down and restarting the timer on every strategy change. Instead we
-  // maintain a ref that always points to the *latest* runCycle so the timeout
-  // callback reads current limits/state on every invocation.
-  const runCycleRef = useRef(runCycle);
-  useEffect(() => { runCycleRef.current = runCycle; }, [runCycle]);
-
-  // ── Schedule cycles ─────────────────────────────────────────────────────────
-  useEffect(() => {
-    const schedule = () => {
-      nextCycleAt.current = Date.now() + CYCLE_MS;
-      cycleTimer.current = setTimeout(async () => {
-        await runCycleRef.current();
-        schedule();
-      }, CYCLE_MS);
-    };
-
-    const initTimer = setTimeout(() => {
-      runCycleRef.current().then(schedule);
-    }, 8_000);
-
-    countdownTimer.current = setInterval(() => {
-      setNextCycleMs(Math.max(0, nextCycleAt.current - Date.now()));
-    }, 1_000);
-
-    return () => {
-      clearTimeout(initTimer);
-      if (cycleTimer.current) clearTimeout(cycleTimer.current);
-      if (countdownTimer.current) clearInterval(countdownTimer.current);
-    };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const triggerCycle = useCallback(async () => {
-    if (cycleTimer.current) clearTimeout(cycleTimer.current);
-    await runCycle();
-    nextCycleAt.current = Date.now() + CYCLE_MS;
-    cycleTimer.current = setTimeout(triggerCycle, CYCLE_MS);
-  }, [runCycle]);
-
   // ── Load older decisions from server (paginated) ──────────────────────────
   const loadMoreHistory = useCallback(async (): Promise<boolean> => {
     try {
@@ -1101,11 +562,9 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
 
   const clearHistory = useCallback(() => {
     setDecisionHistory([]);
-    setCurrentDecision(null);
   }, []);
 
   const pendingCount = pendingApprovals.filter(a => a.status === 'PENDING').length;
-  const operatingMode = deriveOperatingMode(String(engineState), autoExecute);
 
   // ── Weekly realized PnL (since Monday 00:00 local) — derived from closedTrades ──
   const weeklyRealizedPnl = (() => {
@@ -1119,20 +578,9 @@ export function AiEngineProvider({ children }: { children: ReactNode }) {
 
   return (
     <AiEngineContext.Provider value={{
-      currentDecision, decisionHistory, stats,
-      running, autoExecute, setAutoExecute,
-      triggerCycle, clearHistory, nextCycleMs,
-      operatingMode,
-      marketRankings,
-      systemPaused, pauseReason,
-      benchmarkAccountSize: BENCHMARK_ACCOUNT,
-      benchmarkDailyMin:    BENCHMARK_DAILY_MIN,
-      benchmarkDailyMax:    BENCHMARK_DAILY_MAX,
+      decisionHistory, clearHistory,
       pendingApprovals, approveLiveOrder, rejectLiveOrder, retryLiveApproval, pendingCount, loadMoreHistory,
       notificationPermission, requestNotificationPermission, sendTestNotification,
-      profitLockStage: (currentDecision?.profitLockStage ?? 0) as 0 | 1 | 2 | 3,
-      cooldownEndsAt,
-      tradesThisHour,
       weeklyRealizedPnl,
       liveTestMode: limits.liveTestMode ?? false,
     }}>

@@ -35,6 +35,7 @@ import {
   isValidEvmAddress,
   type RawLog,
 } from './gmxOrderEvents';
+import { EVIDENCE_CONFIRMATION_DEPTH } from './protectionEvidence';
 
 // RPC 오류 로그 새니타이즈 — db-free 모듈로 분리 (기존 import 경로 호환을 위해 re-export)
 export { sanitizeRpcError } from './rpcErrorSanitize';
@@ -54,6 +55,8 @@ export interface OnchainClient {
   getTransactionReceipt(txHash: string): Promise<ReceiptResult | null>;
   /** EventEmitter(허용 주소 집합)에서 orderKey에 대한 실행/취소/동결 이벤트 로그 조회 */
   getOrderResolutionLogs(orderKey: string, fromBlock: string | null, emitters: string[]): Promise<RawLog[]>;
+  /** 최신 블록. 미구현/조회 실패는 finality 미확인으로 취급한다. */
+  getLatestBlockNumber?(): Promise<bigint | null>;
 }
 
 /** 실제 RPC 클라이언트 — GMX_RPC_URL 필수 (없으면 throw → 차단 유지) */
@@ -109,6 +112,9 @@ export function createViemOnchainClient(): OnchainClient {
         blockNumber:     l.blockNumber ? String(BigInt(l.blockNumber)) : null,
       }));
     },
+    async getLatestBlockNumber() {
+      try { return await client.getBlockNumber(); } catch { return null; }
+    },
   };
 }
 
@@ -128,12 +134,23 @@ export interface OnchainReconcileSummary {
   stillBlocking: number;
 }
 
+export interface OnchainReconcileOptions {
+  /**
+   * GMX API v2 OPEN은 relay task reconciler가 finalized OrderExecuted와
+   * durable INITIAL_STOP handoff를 함께 완료한 뒤에만 CONFIRMED로 만든다.
+   * generic intent reconciler가 먼저 terminal 전환하지 않도록 production
+   * wiring에서 활성화한다. CANCELLED와 CLOSE 판정은 기존대로 처리한다.
+   */
+  deferExecutedOpenToProtectionHandoff?: boolean;
+}
+
 /**
  * 차단 intent들을 온체인 증거로 판정. RPC/조회 오류는 개별 intent 차단 유지로
  * 흡수되며 절대 throw하지 않는다 (Worker 중단 방지).
  */
 export async function reconcileBlockingIntentsOnchain(
   clientFactory: () => OnchainClient = createViemOnchainClient,
+  options: OnchainReconcileOptions = {},
 ): Promise<OnchainReconcileSummary> {
   const blocking = await listBlockingIntents();
   if (blocking === null) return { ok: false, checked: 0, resolutions: [], stillBlocking: -1 };
@@ -173,7 +190,7 @@ export async function reconcileBlockingIntentsOnchain(
 
   for (const intent of blocking) {
     try {
-      const resolved = await reconcileSingleIntent(client, intent, configuredEmitter);
+      const resolved = await reconcileSingleIntent(client, intent, configuredEmitter, options);
       if (resolved) resolutions.push(resolved);
       else stillBlocking++;
     } catch (e) {
@@ -196,6 +213,7 @@ async function reconcileSingleIntent(
   client: OnchainClient,
   intent: IntentRow,
   configuredEmitter: string,
+  options: OnchainReconcileOptions,
 ): Promise<IntentResolution | null> {
   // 허용 emitter 집합: 현재 설정값 ∪ 이 intent에 영속된 과거 매칭 주소.
   // GMX upgrade로 주소가 교체돼도 기존 intent는 저장된 주소로 계속 판정 가능하다.
@@ -268,6 +286,34 @@ async function reconcileSingleIntent(
     // 동결 — 판정 불가. UNRESOLVED 유지, 자동 해제 금지
     await updateIntentEvidence(intent.id, {
       resolutionReason: `OrderFrozen 이벤트 확인 (tx ${resolution.txHash ?? '?'}) — 판정 불가, 차단 유지`,
+    });
+    return null;
+  }
+
+  // 실행/취소 terminal 전이는 보수적 15-block finality 이후에만 허용한다.
+  // 최신 블록 조회 실패·이벤트 block 부재·미충족은 상태를 그대로 차단 유지한다.
+  if (!resolution.blockNumber || !client.getLatestBlockNumber) return null;
+  const latest = await client.getLatestBlockNumber();
+  if (latest === null) return null;
+  const resolutionBlock = BigInt(resolution.blockNumber);
+  if (latest < resolutionBlock
+      || latest - resolutionBlock < BigInt(EVIDENCE_CONFIRMATION_DEPTH)) {
+    return null;
+  }
+
+  if (resolution.kind === 'executed'
+      && intent.orderType === 'open'
+      && options.deferExecutedOpenToProtectionHandoff === true) {
+    // OPEN terminal 전환은 gmxApiStatusReconciler의 confirmed-OPEN handoff가
+    // INITIAL_STOP durable 상태와 함께 수렴시킨다. 여기서는 최종 온체인
+    // 증거만 보존하고 intent를 blocking으로 유지한다.
+    await updateIntentEvidence(intent.id, {
+      receiptStatus: 'success',
+      orderKey,
+      orderCreatedBlock: createdBlock ?? undefined,
+      resolutionTxHash: resolution.txHash,
+      resolutionBlock: resolution.blockNumber,
+      resolutionReason: 'OrderExecuted 확인 — durable INITIAL_STOP handoff 완료 전 OPEN terminal 전환 보류',
     });
     return null;
   }

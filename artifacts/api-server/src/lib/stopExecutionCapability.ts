@@ -8,6 +8,11 @@
 import { MIN_SAFE_ACTION_BUDGET } from './actionBudget';
 
 export interface StopCapabilityInput {
+  /**
+   * Confirmed OPEN evidence를 실제 initial Stop 생성 호출로 넘기는 production
+   * handoff가 구현·검증되었는지. Transport 구성만으로 true가 될 수 없다.
+   */
+  initialStopHandoffReady: boolean;
   /** §2 — StopLossDecrease 스키마 검증 통과 (골든 테스트로 고정된 빌더 존재) */
   schemaVerified: boolean;
   /** prepare/binding/서명/제출 transport 구성 완료 (live relay config ok) */
@@ -18,6 +23,8 @@ export interface StopCapabilityInput {
   durableStoreOk: boolean;
   /** §9 — reconciliation 완료 (blocking intent 0 + startup reconcile ok) */
   reconciliationOk: boolean;
+  /** 최신 canonical delegated-authorization readback이 활성·신선한지 */
+  canonicalAuthorizationReady: boolean;
   /** §7 — action 예산 충분 (remaining ≥ MIN_SAFE_ACTION_BUDGET) */
   actionBudgetSufficient: boolean;
   actionBudgetRemaining: number | null;
@@ -49,11 +56,13 @@ export interface StopCapabilityResult {
 
 export function deriveStopExecutionCapability(input: StopCapabilityInput): StopCapabilityResult {
   const reasons: string[] = [];
+  if (!input.initialStopHandoffReady) reasons.push('confirmed OPEN → initial Stop production handoff 미구현');
   if (!input.schemaVerified) reasons.push('StopLossDecrease 스키마 미검증');
   if (!input.transportConfigured) reasons.push('GMX API transport/relay 미구성');
   if (!input.signerReady) reasons.push('delegated signer 비활성/미초기화');
   if (!input.durableStoreOk) reasons.push('durable 보호 주문 저장소 접근 불가');
   if (!input.reconciliationOk) reasons.push('reconciliation 미완료/차단 intent 존재');
+  if (!input.canonicalAuthorizationReady) reasons.push('canonical delegated authorization 미확인/미신선');
   if (!input.actionBudgetSufficient) {
     reasons.push(`action 예산 부족 (remaining=${input.actionBudgetRemaining ?? '조회불가'} < ${MIN_SAFE_ACTION_BUDGET})`);
   }

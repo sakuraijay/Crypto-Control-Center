@@ -1,0 +1,6 @@
+$ env -i PATH="$PATH" HOME="$HOME" CI=true NODE_ENV=test pnpm --filter @workspace/api-server typecheck
+
+> @workspace/api-server@0.0.0 typecheck /tmp/ccc-alpha-p0-20260918/artifacts/api-server
+> tsc -p tsconfig.json --noEmit
+
+Exit status 0

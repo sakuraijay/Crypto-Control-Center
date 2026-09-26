@@ -14,6 +14,7 @@ import { useWallet } from '@/lib/context';
 import {
   fetchSubaccountAuthDetailed, mapAuthFetchToDisplayState, postPrepareApproval, postApprovalSignature,
   mapAuthStateToView, canRequestOwnerSignature, canPrepareApproval, mapSignError, formatUnixSeconds,
+  getOwnerApprovalRecoveryNotice,
   recheckActiveWallet, clientVerifyApprovalSignature,
   APPROVAL_GRANTS, APPROVAL_DENIALS, CANARY_REQUESTED_MAX_ALLOWED_COUNT,
   type SubaccountAuthResponse, type PrepareResponse,
@@ -153,6 +154,7 @@ export function SubaccountApprovalCard() {
 
   const summary = prepared?.summary;
   const oc = auth?.onchain ?? null;
+  const recoveryNotice = getOwnerApprovalRecoveryNotice(auth?.ownerApprovalRecovery);
 
   return (
     <div className="flex flex-col gap-3 p-4 rounded-lg border border-border bg-card/30" data-testid="card-subaccount-approval">
@@ -168,6 +170,18 @@ export function SubaccountApprovalCard() {
         </button>
       </div>
       <p className="text-[11px] text-muted-foreground leading-relaxed">{view.description}</p>
+      {recoveryNotice && (
+        <div
+          className="p-2 rounded border border-amber-500/40 bg-amber-500/10 text-[10px] leading-relaxed"
+          data-testid="text-owner-approval-recovery"
+        >
+          <div className="font-semibold text-amber-400">저장된 Owner Approval을 복원하지 못했습니다</div>
+          <div className="mt-0.5 text-muted-foreground">{recoveryNotice}</div>
+          <div className="mt-1 text-muted-foreground">
+            기존 evidence는 자동 삭제하지 않았으며, READY를 합성하지 않습니다.
+          </div>
+        </div>
+      )}
 
       {/* #124-C — 두 계약 구분 명시 (혼동 방지, 자동 확대·허위 24h 표시 금지) */}
       <div className="p-2 rounded border border-border bg-secondary/40 text-[10px] leading-relaxed" data-testid="text-contract-clarity">

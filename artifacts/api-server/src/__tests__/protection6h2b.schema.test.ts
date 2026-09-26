@@ -183,6 +183,24 @@ describe('§7 action 예산', () => {
     expect(evaluateActionBudget({ remaining: '10', expiresAt: future, nowMs: now }).sufficient).toBe(false);          // 예약분 미제공
     expect(evaluateActionBudget({ remaining: '10', expiresAt: future, nowMs: now, inFlightReservedActions: null }).sufficient).toBe(false);
   });
+  it.each([
+    ['지수표기 remaining', '1e3', future, now, 0],
+    ['16진 remaining', '0x10', future, now, 0],
+    ['공백 remaining', ' 10 ', future, now, 0],
+    ['선행 0 remaining', '010', future, now, 0],
+    ['uint256 초과 remaining', (1n << 256n).toString(), future, now, 0],
+    ['지수표기 expiresAt', '10', '1e999', now, 0],
+    ['Infinity expiresAt', '10', 'Infinity', now, 0],
+    ['소수 expiresAt', '10', `${Math.floor(now / 1000) + 3600}.5`, now, 0],
+    ['uint256 초과 expiresAt', '10', (1n << 256n).toString(), now, 0],
+    ['비정상 clock', '10', future, Number.NaN, 0],
+    ['0 clock', '10', future, 0, 0],
+    ['소수 예약분', '10', future, now, 0.5],
+    ['unsafe 예약분', '10', future, now, Number.MAX_SAFE_INTEGER + 1],
+  ])('%s → action budget fail-closed', (_label, remaining, expiresAt, nowMs, inFlightReservedActions) => {
+    const result = evaluateActionBudget({ remaining, expiresAt, nowMs, inFlightReservedActions });
+    expect(result.sufficient).toBe(false);
+  });
   it('진행중 예약분 가산 — remaining=6 + 예약 2 → 부족 2', () => {
     const r = evaluateActionBudget({ remaining: '6', expiresAt: future, nowMs: now, inFlightReservedActions: 2 });
     expect(r.sufficient).toBe(false);
@@ -200,7 +218,7 @@ describe('§10 실행 적격 30초 창', () => {
     fundingFeeUsd: 0, borrowingFeeUsd: 0, estimatedExitFeeUsd: 0.1,
     fundingRatePerHourFraction: 0, borrowingRatePerHourFraction: 0,
     totalEstimatedRoundTripCostUsd: 0.25, source: 'GMX_API',
-    blockNumber: null, apiTimestamp: null,
+    blockNumber: null, apiTimestamp: new Date(nowMs - ageMs).toISOString(),
     fetchedAt: new Date(nowMs - ageMs).toISOString(),
     expiresAt: new Date(nowMs - ageMs + COST_SNAPSHOT_TTL_MS).toISOString(),
   });
@@ -225,13 +243,22 @@ describe('§10 실행 적격 30초 창', () => {
     expect(validateExecutionEligibleSnapshot(null, expected, now).ok).toBe(false);
     expect(validateExecutionEligibleSnapshot(mkSnap(1_000, now), { ...expected, isLong: false }, now).ok).toBe(false);
   });
+  it('upstream 관측 시각 부재/로컬 fetchedAt 불일치 → 부적격', () => {
+    expect(validateExecutionEligibleSnapshot({ ...mkSnap(1_000, now), apiTimestamp: null }, expected, now).ok).toBe(false);
+    expect(validateExecutionEligibleSnapshot({
+      ...mkSnap(1_000, now),
+      fetchedAt: new Date(now).toISOString(),
+    }, expected, now).ok).toBe(false);
+  });
 });
 
 // ── §11 capability 파생 ──────────────────────────────────────────────────────
 describe('§11 stop 실행 능력 파생', () => {
   const allOk = {
+    initialStopHandoffReady: true,
     schemaVerified: true, transportConfigured: true, signerReady: true,
     durableStoreOk: true, reconciliationOk: true,
+    canonicalAuthorizationReady: true,
     actionBudgetSufficient: true, actionBudgetRemaining: 10,
     freshFeeQuote: true, uncoveredCount: 0, blockingProtectionCount: 0,
     executionUnlocked: true,
@@ -246,7 +273,9 @@ describe('§11 stop 실행 능력 파생', () => {
   it('각 단일 조건 실패 → false + 사유', () => {
     for (const [k, v] of [
       ['schemaVerified', false], ['transportConfigured', false], ['signerReady', false],
-      ['durableStoreOk', false], ['reconciliationOk', false], ['actionBudgetSufficient', false],
+      ['initialStopHandoffReady', false],
+      ['durableStoreOk', false], ['reconciliationOk', false], ['canonicalAuthorizationReady', false],
+      ['actionBudgetSufficient', false],
       ['freshFeeQuote', false], ['uncoveredCount', 1], ['uncoveredCount', null],
       ['blockingProtectionCount', 2], ['blockingProtectionCount', null], ['executionUnlocked', false],
     ] as const) {

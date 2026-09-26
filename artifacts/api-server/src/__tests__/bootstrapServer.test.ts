@@ -74,7 +74,7 @@ describe('#121 부트스트랩 콜드스타트 503', () => {
     server = http.createServer(control.handler);
     const port = await listen(server);
 
-    for (const path of ['/', '/healthz', '/api/executor/status', '/futures-web/', '/futures-terminal/']) {
+    for (const path of ['/', '/healthz', '/api/executor/status', '/futures-web/', '/unknown-artifact/']) {
       const r = await get(port, path);
       expect(r.status, path).toBe(503);
       expect(r.headers['content-type']).toContain('application/json');

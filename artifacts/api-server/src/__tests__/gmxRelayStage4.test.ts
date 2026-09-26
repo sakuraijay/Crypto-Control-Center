@@ -47,7 +47,7 @@ vi.mock('@workspace/db', () => {
           return rowsFor(t);
         };
         const whereResult = (cond: unknown) => {
-          const p = Promise.resolve().then(() => filterRows(all(), cond));
+          const p = Promise.resolve(filterRows(all(), cond));
           return Object.assign(p, {
             limit: async (n: number) => filterRows(all(), cond).slice(0, n),
             orderBy: () => ({ limit: async (n: number) => filterRows(all(), cond).slice(0, n) }),
@@ -115,6 +115,8 @@ vi.mock('@workspace/db', () => {
 vi.mock('drizzle-orm', () => ({
   eq: (col: { __col?: string }, v: unknown) => ({ op: 'eq', col: col.__col, v }),
   and: (...cs: unknown[]) => ({ op: 'and', cs }),
+  or: (...cs: unknown[]) => ({ op: 'or', cs }),
+  lte: (col: { __col?: string }, v: unknown) => ({ op: 'lte', col: col.__col, v }),
   inArray: (col: { __col?: string }, vs: unknown[]) => ({ op: 'in', col: col.__col, vs }),
   desc: (col: unknown) => ({ op: 'desc', col }),
 }));
@@ -125,6 +127,8 @@ function filterRows(rows: FakeRow[], cond: unknown): FakeRow[] {
     if (cc.op === 'eq') return row[cc.col!] === cc.v;
     if (cc.op === 'in') return cc.vs!.includes(row[cc.col!]);
     if (cc.op === 'and') return cc.cs!.every((x) => test(row, x));
+    if (cc.op === 'or') return cc.cs!.some((x) => test(row, x));
+    if (cc.op === 'lte') return (row[cc.col!] as Date).getTime() <= (cc.v as Date).getTime();
     return true;
   };
   return rows.filter((r) => test(r, cond));
@@ -142,7 +146,8 @@ import { reconcileVerdict } from '../lib/relayTaskReconciler';
 import { decideRevokeCompletion } from '../lib/relayRevokeAdapter';
 import {
   RELAY_TASK_STATUS, TERMINAL_STATUSES, isTransitionAllowed, createRelayTask, safeTransition,
-  listUnresolvedTasks,
+  listUnresolvedTasks, listInvestigationTasksOrThrow, isRelayTaskInvestigationEligible,
+  RELAY_SUBMITTING_STALE_MS,
 } from '../lib/relayLifecycle';
 import { WETH_ARBITRUM, type RelayFeeQuote } from '../lib/relayFeeQuote';
 import {
@@ -588,6 +593,51 @@ describe('runSubmitFlow — 원자적 제출 흐름 (§5)', () => {
     expect(row?.status).toBe(RELAY_TASK_STATUS.SUBMITTING);
     const investigation = await listUnresolvedTasks();
     expect(investigation.some((t) => t.id === r.taskRowId)).toBe(true);
+  });
+
+  it('운영자 조사 목록은 fresh SUBMITTING을 제외하고 stale 이후에만 포함한다', async () => {
+    const now = Date.now();
+    store.tasks = [
+      {
+        id: 'unresolved', status: RELAY_TASK_STATUS.UNRESOLVED,
+        createdAt: new Date(now), updatedAt: new Date(now),
+      },
+      {
+        id: 'fresh', status: RELAY_TASK_STATUS.SUBMITTING,
+        createdAt: new Date(now), updatedAt: new Date(now - RELAY_SUBMITTING_STALE_MS + 1),
+      },
+      {
+        id: 'stale', status: RELAY_TASK_STATUS.SUBMITTING,
+        createdAt: new Date(now), updatedAt: new Date(now - RELAY_SUBMITTING_STALE_MS),
+      },
+    ];
+
+    expect(isRelayTaskInvestigationEligible(store.tasks[1] as never, now)).toBe(false);
+    expect(isRelayTaskInvestigationEligible(store.tasks[2] as never, now)).toBe(true);
+    const rows = await listInvestigationTasksOrThrow(50, now);
+    expect(rows.map((row) => row.id)).toEqual(['unresolved', 'stale']);
+  });
+
+  it('운영자 조사 목록은 DB 오류를 빈 목록으로 위장하지 않는다', async () => {
+    store.failSelect = true;
+    await expect(listInvestigationTasksOrThrow()).rejects.toThrow();
+  });
+
+  it('fresh SUBMITTING이 limit보다 많아도 오래된 blocking task를 숨기지 않는다', async () => {
+    const now = Date.now();
+    store.tasks = [
+      ...Array.from({ length: 120 }, (_, i) => ({
+        id: `fresh-${i}`, status: RELAY_TASK_STATUS.SUBMITTING,
+        createdAt: new Date(now - i), updatedAt: new Date(now),
+      })),
+      {
+        id: 'older-unresolved', status: RELAY_TASK_STATUS.UNRESOLVED,
+        createdAt: new Date(now - 10_000), updatedAt: new Date(now - 10_000),
+      },
+    ];
+    const rows = await listInvestigationTasksOrThrow(50, now);
+    expect(rows.map((row) => row.id)).toContain('older-unresolved');
+    expect(rows.some((row) => row.id.startsWith('fresh-'))).toBe(false);
   });
 
   it('submit timeout(ambiguous) → UNRESOLVED + 재시도 0회', async () => {

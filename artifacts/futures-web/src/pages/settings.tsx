@@ -64,6 +64,8 @@ interface ExecutorHealth {
   // AI Worker cycle fields
   workerRunning?: boolean;
   cycleCount?: number;
+  schedulerHeartbeatAt?: string | null;
+  lastDecisionAt?: string | null;
   lastCycleAt?: string | null;
   lastCycleResult?: WorkerCycleResult | null;
   equityHwm?: number | null;
@@ -1511,11 +1513,18 @@ export default function Settings() {
               </div>
 
               {/* 타임스탬프 */}
-              {health.lastCycleAt && (
+              {health.schedulerHeartbeatAt && (
                 <p className="text-[10px] text-muted-foreground font-mono">
-                  마지막 사이클:{' '}
-                  {format(new Date(health.lastCycleAt), 'yyyy-MM-dd HH:mm:ss')}
-                  {' '}({formatElapsed(now - new Date(health.lastCycleAt).getTime())})
+                  마지막 scheduler heartbeat:{' '}
+                  {format(new Date(health.schedulerHeartbeatAt), 'yyyy-MM-dd HH:mm:ss')}
+                  {' '}({formatElapsed(now - new Date(health.schedulerHeartbeatAt).getTime())})
+                </p>
+              )}
+              {health.lastDecisionAt && (
+                <p className="text-[10px] text-muted-foreground font-mono">
+                  마지막 새 결정:{' '}
+                  {format(new Date(health.lastDecisionAt), 'yyyy-MM-dd HH:mm:ss')}
+                  {' '}({formatElapsed(now - new Date(health.lastDecisionAt).getTime())})
                 </p>
               )}
 
@@ -2101,10 +2110,13 @@ export default function Settings() {
                     : '연결됨',
               },
               // workerRunning은 사이클 순간 lock 지표(유휴 시 false) — liveness 판정은
-              // lastCycleAt 최근성(5분) + cycleCount 기준 (active/stale/unknown)
+              // schedulerHeartbeatAt 최근성(5분) + cycleCount 기준 (active/stale/unknown)
               (() => {
                 const ws = health
-                  ? classifyWorkerCycleStatus({ lastCycleAt: health.lastCycleAt, cycleCount: health.cycleCount })
+                  ? classifyWorkerCycleStatus({
+                      schedulerHeartbeatAt: health.schedulerHeartbeatAt,
+                      cycleCount: health.cycleCount,
+                    })
                   : 'unknown';
                 return {
                   label: 'AI Worker 사이클',

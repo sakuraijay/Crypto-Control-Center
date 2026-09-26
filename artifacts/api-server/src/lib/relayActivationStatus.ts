@@ -106,6 +106,10 @@ export interface CanonicalSnapshot {
   reason: string | null;
   approvalNonce: string | null;
   isSubaccountListed: boolean | null;
+  /** canonical DataStore feature gate. 누락/null은 authorization 미확인으로 취급한다. */
+  featureDisabled?: boolean | null;
+  /** canonical integration gate. 누락/null은 authorization 미확인으로 취급한다. */
+  integrationDisabled?: boolean | null;
   expiresAt: string | null;
   remaining: string | null;
 }

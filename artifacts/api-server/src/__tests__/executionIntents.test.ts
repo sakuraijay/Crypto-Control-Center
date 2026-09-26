@@ -3,6 +3,8 @@
  *
  * 검증:
  *  - createPreparedIntent: created / duplicate(PK 충돌) / error(fail-closed)
+ *  - createPreparedIntent(CLOSE): 원자적 쌍 INSERT (intent + 정산 거래 행)
+ *  - buildCloseSettlementTradeId: 결정적 settlement trade id
  *  - markIntentSubmitted / markIntentUnresolved / markIntentFailedPreBroadcast
  *  - hasBlockingIntents: 존재/부재/조회 실패(fail-closed → true)
  *  - reconcileIntentsOnRestart: PREPARED/SUBMITTED → UNRESOLVED, 실패 시 ok=false
@@ -22,6 +24,12 @@ const dbState = vi.hoisted(() => ({
   selectRows:      [] as { id: string; status?: string }[],
   selectThrows:    false,
   lastUpdateSet:   null as Record<string, unknown> | null,
+  // transaction support
+  txInsertCalls:   0,
+  txInsertFail:    false,     // intent INSERT 0행 (duplicate)
+  txTradeInsertFail: false,   // trade INSERT 0행 (duplicate)
+  txThrows:        false,
+  txRolledBack:    false,
 }));
 
 vi.mock('@workspace/db', () => {
@@ -35,6 +43,24 @@ vi.mock('@workspace/db', () => {
     (p as { limit: (n: number) => Promise<unknown> }).limit = (_n: number) => selectResult();
     return p;
   };
+
+  // tx mock: rollback() throws so transaction() can catch and re-throw
+  const makeTxInsert = () => ({
+    values: vi.fn().mockReturnValue({
+      onConflictDoNothing: vi.fn().mockReturnValue({
+        returning: vi.fn().mockImplementation(() => {
+          dbState.txInsertCalls++;
+          if (dbState.txInsertCalls === 1) {
+            // first call = intent INSERT
+            return Promise.resolve(dbState.txInsertFail ? [] : [{ id: 'x' }]);
+          }
+          // second call = trade INSERT
+          return Promise.resolve(dbState.txTradeInsertFail ? [] : [{ id: 'trade-x' }]);
+        }),
+      }),
+    }),
+  });
+
   return {
     db: {
       insert: vi.fn().mockReturnValue({
@@ -66,8 +92,23 @@ vi.mock('@workspace/db', () => {
           orderBy: vi.fn().mockReturnValue({ limit: (_n: number) => selectResult() }),
         }),
       }),
+      // transaction: simulate a simple tx context; re-throws non-rollback errors
+      transaction: vi.fn().mockImplementation(async (fn: (tx: unknown) => Promise<void>) => {
+        if (dbState.txThrows) throw new Error('transaction failed');
+        const tx = {
+          insert: vi.fn().mockReturnValue(makeTxInsert()),
+        };
+        try {
+          await fn(tx);
+        } catch (e) {
+          // Any throw inside transaction callback propagates (sentinel or real error)
+          dbState.txRolledBack = true;
+          throw e;
+        }
+      }),
     },
     executionIntentsTable: { id: 'id', status: 'status', createdAt: 'created_at' },
+    tradesTable: { id: 'id', symbol: 'symbol', action: 'action' },
   };
 });
 
@@ -86,12 +127,34 @@ beforeEach(() => {
   dbState.selectRows      = [];
   dbState.selectThrows    = false;
   dbState.lastUpdateSet   = null;
+  dbState.txInsertCalls   = 0;
+  dbState.txInsertFail    = false;
+  dbState.txTradeInsertFail = false;
+  dbState.txThrows        = false;
+  dbState.txRolledBack    = false;
 });
 
 function newIntent() {
   return {
     id: 'intent:open:d1', decisionId: 'd1', cycleNumber: 1, symbol: 'ETH',
     orderType: 'open' as const, isLong: true, sizeUsd: 10, collateralUsd: 5,
+  };
+}
+
+function newCloseIntent() {
+  return {
+    id: 'intent:close:d1', decisionId: 'd1', cycleNumber: 1, symbol: 'ETH',
+    orderType: 'close' as const, isLong: true, sizeUsd: 10, collateralUsd: 0,
+    closeBinding: {
+      account:               '0xmainwallet',
+      marketAddress:         '0xmarket',
+      collateralToken:       '0xcollateral',
+      positionKey:           '0xposkey',
+      preSizeUsd:            10,
+      preSizeUsd30:          '10000000000000000000000000000000',
+      requestedReductionUsd: 10,
+      requestedReductionUsd30: '10000000000000000000000000000000',
+    },
   };
 }
 
@@ -104,7 +167,7 @@ describe('buildIntentId — 결정적 idempotency key', () => {
   });
 });
 
-describe('createPreparedIntent', () => {
+describe('createPreparedIntent (OPEN)', () => {
   it('INSERT 성공 → created', async () => {
     const { createPreparedIntent } = await import('../lib/executionIntents');
     expect(await createPreparedIntent(newIntent())).toBe('created');
@@ -120,6 +183,45 @@ describe('createPreparedIntent', () => {
     dbState.insertThrows = true;
     const { createPreparedIntent } = await import('../lib/executionIntents');
     expect(await createPreparedIntent(newIntent())).toBe('error');
+  });
+});
+
+describe('createPreparedIntent (CLOSE) — 0030 원자적 쌍 INSERT', () => {
+  it('intent+trade 두 INSERT 모두 성공 → created', async () => {
+    const { createPreparedIntent } = await import('../lib/executionIntents');
+    const result = await createPreparedIntent(newCloseIntent());
+    expect(result).toBe('created');
+    // transaction이 2회 INSERT를 수행했는지 확인
+    expect(dbState.txInsertCalls).toBe(2);
+  });
+
+  it('intent INSERT 0행(PK 충돌) → duplicate (롤백, trade 생성 없음)', async () => {
+    dbState.txInsertFail = true;
+    const { createPreparedIntent } = await import('../lib/executionIntents');
+    expect(await createPreparedIntent(newCloseIntent())).toBe('duplicate');
+    expect(dbState.txRolledBack).toBe(true);
+  });
+
+  it('trade INSERT 0행(이미 존재) → duplicate (롤백)', async () => {
+    dbState.txTradeInsertFail = true;
+    const { createPreparedIntent } = await import('../lib/executionIntents');
+    expect(await createPreparedIntent(newCloseIntent())).toBe('duplicate');
+    expect(dbState.txRolledBack).toBe(true);
+  });
+
+  it('transaction 예외 → error (fail-closed, 제출 금지)', async () => {
+    dbState.txThrows = true;
+    const { createPreparedIntent } = await import('../lib/executionIntents');
+    expect(await createPreparedIntent(newCloseIntent())).toBe('error');
+  });
+});
+
+describe('buildCloseSettlementTradeId — 결정적 settlement trade id', () => {
+  it('intentId로 결정적 id 생성', async () => {
+    const { buildCloseSettlementTradeId } = await import('../lib/executionIntents');
+    expect(buildCloseSettlementTradeId('intent:close:d1')).toBe('settlement:close:intent:close:d1');
+    expect(buildCloseSettlementTradeId('intent:close:d1')).toBe(buildCloseSettlementTradeId('intent:close:d1'));
+    expect(buildCloseSettlementTradeId('intent:close:d1')).not.toBe(buildCloseSettlementTradeId('intent:close:d2'));
   });
 });
 

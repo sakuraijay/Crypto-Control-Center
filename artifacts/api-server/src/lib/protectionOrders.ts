@@ -195,6 +195,34 @@ export async function getProtection(id: string): Promise<ProtectionOrderRow | nu
   } catch { return null; }
 }
 
+export type ProtectionLineageResult =
+  | { ok: true; parentOpenIntentId: string | null }
+  | { ok: false; reason: string };
+
+/**
+ * startup/periodic coverage가 handoff와 같은 EMERGENCY_CLOSE idempotency lineage를
+ * 재사용하기 위한 조회. 동일 position이 여러 OPEN lineage에 결속되면 자동 선택하지 않는다.
+ */
+export async function getProtectionLineageForPosition(
+  positionKey: string,
+): Promise<ProtectionLineageResult> {
+  try {
+    const rows = await db.select().from(protectionOrdersTable)
+      .where(eq(protectionOrdersTable.positionKey, positionKey));
+    const lineages = new Set(
+      rows
+        .map((row) => row.parentOpenIntentId)
+        .filter((id): id is string => typeof id === 'string' && id.length > 0),
+    );
+    if (lineages.size > 1) {
+      return { ok: false, reason: '동일 position에 복수 OPEN lineage — emergency close 자동 생성 금지' };
+    }
+    return { ok: true, parentOpenIntentId: [...lineages][0] ?? null };
+  } catch {
+    return { ok: false, reason: 'protection lineage 조회 실패 — emergency close 자동 생성 금지' };
+  }
+}
+
 export type ProtectionListResult = { ok: true; rows: ProtectionOrderRow[] } | { ok: false };
 
 /** 활성(non-terminal) 보호 주문 전체 — 조회 실패 = ok:false (fail-closed 판단은 호출측) */

@@ -15,7 +15,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray, lte, or } from 'drizzle-orm';
 import { db, relayTasksTable, type RelayTaskRow } from '@workspace/db';
 
 export const RELAY_TASK_STATUS = {
@@ -53,6 +53,9 @@ export const RECOVERY_STATUSES: readonly RelayTaskStatus[] = [
   RELAY_TASK_STATUS.ORDER_CREATED,
   RELAY_TASK_STATUS.UNRESOLVED,
 ];
+
+/** SUBMITTING은 전송 직후 정상 상태일 수 있으므로 이 시간이 지난 행만 운영자 조사 대상으로 노출한다. */
+export const RELAY_SUBMITTING_STALE_MS = 60_000;
 
 /** 허용 전이 테이블 — 명시되지 않은 전이는 전부 거부 */
 const ALLOWED_TRANSITIONS: Record<string, readonly RelayTaskStatus[]> = {
@@ -216,6 +219,13 @@ export async function getRelayTaskById(taskId: string): Promise<RelayTaskRow | n
   }
 }
 
+/** 조사 endpoint용 strict 조회 — DB 오류를 "task 없음"으로 위장하지 않는다. */
+export async function getRelayTaskByIdOrThrow(taskId: string): Promise<RelayTaskRow | null> {
+  const rows = await db.select().from(relayTasksTable)
+    .where(eq(relayTasksTable.id, taskId)).limit(1);
+  return rows[0] ?? null;
+}
+
 /** UNRESOLVED task 목록 (조사 UI용) */
 export async function listUnresolvedTasks(limit = 50): Promise<RelayTaskRow[]> {
   try {
@@ -226,6 +236,53 @@ export async function listUnresolvedTasks(limit = 50): Promise<RelayTaskRow[]> {
       .orderBy(desc(relayTasksTable.createdAt)).limit(limit);
   } catch {
     return [];
+  }
+}
+
+export function isRelayTaskInvestigationEligible(
+  row: Pick<RelayTaskRow, 'status' | 'updatedAt'>,
+  nowMs = Date.now(),
+): boolean {
+  if (row.status === RELAY_TASK_STATUS.UNRESOLVED) return true;
+  if (row.status !== RELAY_TASK_STATUS.SUBMITTING) return false;
+  return Math.max(0, nowMs - row.updatedAt.getTime()) >= RELAY_SUBMITTING_STALE_MS;
+}
+
+/**
+ * 운영자 조사 endpoint 전용 목록.
+ * DB 오류를 전파하고, fresh SUBMITTING은 정상 in-flight일 수 있으므로 제외한다.
+ */
+export async function listInvestigationTasksOrThrow(
+  limit = 50,
+  nowMs = Date.now(),
+): Promise<RelayTaskRow[]> {
+  const staleBefore = new Date(nowMs - RELAY_SUBMITTING_STALE_MS);
+  const rows = await db.select().from(relayTasksTable)
+    .where(or(
+      eq(relayTasksTable.status, RELAY_TASK_STATUS.UNRESOLVED),
+      and(
+        eq(relayTasksTable.status, RELAY_TASK_STATUS.SUBMITTING),
+        lte(relayTasksTable.updatedAt, staleBefore),
+      ),
+    ))
+    .orderBy(desc(relayTasksTable.createdAt)).limit(limit);
+  return rows.filter((row) => isRelayTaskInvestigationEligible(row, nowMs)).slice(0, limit);
+}
+
+/**
+ * UNRESOLVED/SUBMITTING 조사 대상 수 — 조회 실패는 null.
+ * 상태/안전 evidence에서 빈 배열 fallback을 정상 0건으로 오인하지 않도록 분리한다.
+ */
+export async function countUnresolvedTasksOrNull(): Promise<number | null> {
+  try {
+    const rows = await db.select({ id: relayTasksTable.id }).from(relayTasksTable)
+      .where(inArray(relayTasksTable.status, [
+        RELAY_TASK_STATUS.UNRESOLVED,
+        RELAY_TASK_STATUS.SUBMITTING,
+      ]));
+    return rows.length;
+  } catch {
+    return null;
   }
 }
 
@@ -247,22 +304,40 @@ export async function countOpenRelayTasksOrNull(): Promise<number | null> {
 
 /**
  * 6G-3 §6 — 특정 transportGen의 미종결(blocking) relay task 수.
- * excludeTaskId는 정확히 자기 task 1건만 제외한다 (다른 task를 숨기지 않음).
+ * excludeTaskId/excludeTaskIds는 호출자가 명시한 정확한 task만 제외한다.
  * 조회 실패 = null (fail-closed 판단용).
  */
 export async function countBlockingRelayTasksOrNull(params: {
   transportGen: string;
   excludeTaskId?: string | null;
+  excludeTaskIds?: readonly string[];
+  /** exact OPEN task+intent 결속이 모두 맞을 때만 source handoff task를 제외한다. */
+  excludeSourceOpen?: { taskId: string; intentId: string } | null;
 }): Promise<number | null> {
   const nonTerminal = (Object.values(RELAY_TASK_STATUS) as RelayTaskStatus[])
     .filter((s) => !TERMINAL_STATUSES.includes(s));
   try {
-    const rows = await db.select({ id: relayTasksTable.id }).from(relayTasksTable)
+    const rows = await db.select({
+      id: relayTasksTable.id,
+      kind: relayTasksTable.kind,
+      intentId: relayTasksTable.intentId,
+    }).from(relayTasksTable)
       .where(and(
         eq(relayTasksTable.transportGen, params.transportGen),
         inArray(relayTasksTable.status, nonTerminal),
       ));
-    return rows.filter((r) => r.id !== (params.excludeTaskId ?? null)).length;
+    const excluded = new Set([
+      ...(params.excludeTaskIds ?? []),
+      ...(params.excludeTaskId ? [params.excludeTaskId] : []),
+    ]);
+    return rows.filter((r) => {
+      if (excluded.has(r.id)) return false;
+      const source = params.excludeSourceOpen;
+      return !(source
+        && r.id === source.taskId
+        && r.kind === 'OPEN'
+        && r.intentId === source.intentId);
+    }).length;
   } catch {
     return null;
   }

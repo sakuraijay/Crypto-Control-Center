@@ -28,6 +28,120 @@ export interface GmxApiStatusView {
     expiresAt: string | number | null;
     remaining: string | null;
   };
+  paperRelayEvidence?: {
+    scope: 'PAPER_READ_ONLY_RELAY_EVIDENCE';
+    boundary: 'READ_ONLY_NOT_EXECUTION_AUTHORIZATION';
+    executionAuthorized: false;
+    evaluatedAtMs: number;
+    fresh: true;
+    safe: boolean;
+    failureIds: string[];
+    executionOnly: Array<{
+      id: string;
+      status: 'verified' | 'failed' | 'not_evaluated';
+      fresh: boolean;
+      observedAtMs: number | null;
+      ageMs: number | null;
+      failureId: string | null;
+    }>;
+    storedSafety: Array<{
+      id: string;
+      status: 'verified' | 'failed' | 'not_evaluated';
+      fresh: boolean;
+      observedAtMs: number | null;
+      ageMs: number | null;
+      failureId: string | null;
+    }>;
+  } | null;
+  paperEpochPreflight?: {
+    scope: 'PAPER_EPOCH_READINESS_PREFLIGHT';
+    boundary: 'READ_ONLY_CALCULATION_NOT_STATE_CHANGE';
+    executionAuthorized: false;
+    stateChangePerformed: false;
+    observedAtMs: number;
+    readyForPaperEpochProposal: boolean;
+    blockerIds: string[];
+    counts: {
+      openPositionCount: number | null;
+      pendingApprovalCount: number | null;
+      pendingCloseCount: number | null;
+      blockingIntentCount: number | null;
+      blockingProtectionCount: number | null;
+      paperExecutorUnresolvedCount: number | null;
+      unresolvedRelayTaskCount: number | null;
+      unsettledTradeCount: number | null;
+      openRelayTaskCount: number | null;
+    };
+    current: {
+      activeTradingCapitalUsd: number | null;
+      equityHwmUsd: number | null;
+      dailyRiskBaselineUsd: number | null;
+      weeklyRiskBaselineUsd: number | null;
+      currentEquityUsd: number | null;
+      reserveCashPct: number | null;
+      riskOperatingState: string | null;
+      riskEntryAllowed: boolean;
+    };
+    planned: {
+      seedCapitalUsd: 10_000;
+      activeCapitalStagesUsd: readonly [1_000, 2_500, 5_000, 10_000];
+      separation: 'PLANNED_SEED_IS_NOT_ACTIVE_OR_RESERVE_CAPITAL';
+    };
+    paperTestAllocationPlan: {
+      scope: 'PAPER_TEST_ALLOCATION';
+      authority: 'SERVER_CODE_USER_APPROVED_PLAN';
+      approvalStatus: 'USER_APPROVED_PLAN';
+      applicationStatus: 'PROPOSED_NOT_APPLIED';
+      totalAllocationUsd: 400;
+      reservePercent: 20;
+      reserveUsd: 80;
+      deployableUsd: 320;
+      walletEligibilityMinimumUsdc: 400;
+      futureActiveCapitalPolicyCandidate: {
+        baseRiskPerTradePercent: 0.25;
+        baseRiskPerTradeUsd: 1;
+        maxRiskPerTradePercent: 0.5;
+        maxRiskPerTradeUsd: 2;
+        hardStopDrawdownPercent: 8;
+        hardStopEquityUsd: 368;
+        maxLeverage: 3;
+        recommendedMaxMarginPerTradeUsd: 100;
+        targetRoundTripCostCapUsd: 0.4;
+      };
+      applied: false;
+      executionAuthorized: false;
+      autoActivationAllowed: false;
+      stateChangePerformed: false;
+      runtimeDbHwmUnchanged: true;
+    };
+    proposedNewEpoch: {
+      activeTradingCapitalUsd: 1_000;
+      equityHwmUsd: 1_000;
+      dailyRiskBaselineUsd: 1_000;
+      weeklyRiskBaselineUsd: 1_000;
+      applied: false;
+      persistenceId: null;
+    };
+    boundaries: {
+      engineMode: 'PAPER' | 'LIVE' | null;
+      autoWorkerLiveEnabled: boolean | null;
+      liveTestExecutionLocked: boolean | null;
+      delegatedSignerEnabled: boolean | null;
+      gmxOrderSubmissionEnabled: boolean | null;
+      relaySubmissionEnabled: boolean | null;
+      relaySubmitNetworkEnabled: boolean | null;
+      relayMode: 'DISABLED' | 'DRY_RUN' | 'LIVE' | null;
+    };
+    preservedExecutionGates: {
+      readyForControlledCanary: boolean;
+      stopExecutionAvailable: boolean;
+      hardStopReason: string | null;
+      riskOperatingState: string | null;
+      riskEntryAllowed: boolean;
+      unchanged: true;
+    };
+    notices: string[];
+  };
   approvalSessionReady: boolean | null;
   blockingIntentCount: number | null;
   openRelayTaskCount: number | null;
@@ -51,7 +165,38 @@ export interface GmxApiStatusView {
     available: boolean;
     reasons: string[];
     evaluatedAt: string | null;
+    scope: 'LIVE_STOP_EXECUTION';
+    boundary: 'READ_ONLY_STATUS_NOT_EXECUTION_AUTHORIZATION';
+    paperMode: boolean;
     schemaPin: { sdk: string; stopLossDecrease: number };
+    /**
+     * PAPER Stop readiness diagnostics. Display-only evidence; it cannot grant
+     * execution authorization.
+     */
+    readinessEvidence?: {
+      scope: 'PAPER_READ_ONLY_STOP_READINESS';
+      boundary: 'READ_ONLY_NOT_EXECUTION_AUTHORIZATION';
+      readinessComplete: boolean;
+      executionAuthorized: false;
+      generation: number | null;
+      evaluatedAtMs: number | null;
+      expiresAtMs: number | null;
+      fresh: boolean;
+      reasons: string[];
+      missingConditionIds: string[];
+      conditions: Array<{
+        id: string;
+        label: string;
+        category: 'supporting_readonly' | 'execution_required';
+        status: 'verified' | 'failed' | 'stale' | 'not_evaluated';
+        source: string | null;
+        observedAtMs: number | null;
+        ageMs: number | null;
+        fresh: boolean;
+        failureId: string | null;
+        detail: string | null;
+      }>;
+    };
   };
   protectionCounts?: Record<string, number> | null;
   blockingProtectionCount?: number | null;
@@ -92,6 +237,168 @@ export interface GmxApiStatusView {
   };
   uncoveredStopCount?: number | null;
   executionEligibleCostMaxAgeMs?: number;
+  /**
+   * PAPER background diagnostic cache. This evidence is display-only and never
+   * execution authorization; unknown/stale/failed values remain fail-closed.
+   */
+  paperRuntimeReadiness?: {
+    boundary: 'READ_ONLY_NOT_EXECUTION_AUTHORIZATION';
+    paperMode: boolean;
+    readonlyEnabled: boolean;
+    scheduler: {
+      running: boolean;
+      inFlight: boolean;
+      intervalMs: number;
+      lastAttemptAtMs: number | null;
+      lastCompletedAtMs: number | null;
+      lastSuccessAtMs: number | null;
+      nextRefreshAtMs: number | null;
+      lastFailureId: string | null;
+    };
+    decimals: Record<'BTC' | 'ETH', {
+      state: 'not_evaluated' | 'verified' | 'stale' | 'failed';
+      attemptedAtMs: number | null;
+      observedAtMs: number | null;
+      ageMs: number | null;
+      fresh: boolean;
+      failureId: string | null;
+      detail: string | null;
+      decimals: number | null;
+      source: string | null;
+      tokenAddress: string | null;
+    }>;
+    deployment: {
+      state: 'not_evaluated' | 'verified' | 'stale' | 'failed';
+      attemptedAtMs: number | null;
+      observedAtMs: number | null;
+      ageMs: number | null;
+      fresh: boolean;
+      failureId: string | null;
+      detail: string | null;
+      manifestVersion: number | null;
+    };
+    rpc: {
+      state: 'not_evaluated' | 'verified' | 'stale' | 'failed';
+      attemptedAtMs: number | null;
+      observedAtMs: number | null;
+      ageMs: number | null;
+      fresh: boolean;
+      failureId: string | null;
+      detail: string | null;
+      chainId: number | null;
+    };
+    costs: Record<'BTC' | 'ETH', {
+      evidenceRole: 'OBSERVATIONAL_READ_ONLY';
+      observationalFresh: boolean;
+      state: 'not_evaluated' | 'verified' | 'stale' | 'failed';
+      attemptedAtMs: number | null;
+      observedAtMs: number | null;
+      ageMs: number | null;
+      fresh: boolean;
+      failureId: string | null;
+      detail: string | null;
+      symbol: 'BTC' | 'ETH';
+      direction: 'LONG';
+      notionalUsd: number;
+      holdingHours: number;
+      capUsd: number | null;
+      positionFeeUsd: number | null;
+      executionFeeUsd: number | null;
+      estimatedPriceImpactUsd: number | null;
+      fundingFeeUsd: number | null;
+      borrowingFeeUsd: number | null;
+       fundingRatePerHourFraction: number | null;
+       borrowingRatePerHourFraction: number | null;
+      estimatedExitFeeUsd: number | null;
+      estimatedExitPriceImpactUsd: number | null;
+      tradingFeesUsd: number | null;
+      priceImpactTotalUsd: number | null;
+      carryCostUsd: number | null;
+      otherCostUsd: number | null;
+      effectiveRoundTripCostUsd: number | null;
+      totalCostRatePct: number | null;
+      capDeltaUsd: number | null;
+      capExcessUsd: number | null;
+      capExcessRatePct: number | null;
+      requiredCostReductionUsd: number | null;
+      requiredCostReductionPct: number | null;
+      breakEvenGrossMoveUsd: number | null;
+      breakEvenGrossMovePct: number | null;
+      withinCap: boolean | null;
+      blockReason: string | null;
+      executionSnapshot: {
+        fresh: boolean;
+        eligible: boolean;
+        authorized: false;
+        maxAgeMs: number;
+        failureId: string | null;
+        blockReason: string | null;
+      };
+      source: string | null;
+      apiTimestamp: string | null;
+      fetchedAt: string | null;
+      diagnostics?: {
+        firstFailure?: {
+          component: string;
+          sourceId: string;
+          failureClass: string;
+          httpStatus: number | null;
+          peerHost: string | null;
+          peerPath: string[];
+        } | null;
+        failures: Array<{
+          component: string;
+          sourceId: string;
+          failureClass: string;
+          httpStatus: number | null;
+          peerHost: string | null;
+          peerPath: string[];
+        }>;
+        sourceTraces?: Array<{
+          sourceId: string;
+          attempts: Array<{
+            peerHost: string;
+            failureClass: string | null;
+            httpStatus: number | null;
+          }>;
+          attemptCount: number;
+          retryCount: number;
+          failoverCount: number;
+        }>;
+        attemptCount: number;
+        retryCount?: number;
+        failoverCount: number;
+        lastAttemptAtMs: number | null;
+        lastSuccessAtMs: number | null;
+        lastFailureAtMs: number | null;
+      };
+    }>;
+    economics: Record<'BTC' | 'ETH', {
+      state: 'AVAILABLE' | 'UNAVAILABLE';
+      reason: string | null;
+      candidateNotionalUsd: number | null;
+      holdingHours: number | null;
+      expectedGrossEdgeFraction: number | null;
+      expectedGrossEdgeUsd: number | null;
+      expectedGrossEdgeSource: string | null;
+      fixedExecutionCostUsd: number | null;
+      variableCostRateFraction: number | null;
+      denominatorFraction: number | null;
+      economicMinimumNotionalUsd: number | null;
+      technicalMinimumNotionalUsd: number;
+      requiredMinimumNotionalUsd: number | null;
+      candidateSufficient: boolean | null;
+      capUsd: number | null;
+      capRelationship: 'WITHIN_CAP' | 'EXCEEDS_CAP' | 'UNAVAILABLE';
+    }>;
+    blockerIds: string[];
+    manualActionHolds: Array<{
+      id: string;
+      requestedAt: string;
+      requiredAction: string;
+      resumeCondition: string;
+    }>;
+  };
   // 6G-3 §7 — prepare 단계 관측 (조회 전용; null = 조회 실패, "미설정" 위장 금지)
   prepareStageCounts: Record<string, number> | null;
   oldestBlockingTaskAt: string | null;
@@ -101,6 +408,16 @@ export interface GmxApiStatusView {
   };
   blockedReasons: string[];
   notices: string[];
+  // ── CLOSE 정산 관측 (읽기 전용; null = Worker 미실행 또는 조회 실패) ──
+  settlementReconcile: {
+    ok: boolean;
+    unsettledCount: number;
+    settledNow: number;
+    incomplete: boolean;
+    reasons: string[];
+  } | null;
+  legacyZeroFeeCount: number | null;
+  unsettledLiveTradeCount: number | null;
 }
 
 export type GmxApiFetchFailureKind =

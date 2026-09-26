@@ -31,7 +31,8 @@ import {
   type RawLog,
 } from './gmxOrderEvents';
 import { createViemOnchainClient, type OnchainClient } from './intentReconciler';
-import { resolveIntentTerminal } from './executionIntents';
+import { getExecutionIntent, resolveIntentTerminal } from './executionIntents';
+import { EVIDENCE_CONFIRMATION_DEPTH } from './protectionEvidence';
 
 const OPEN_GMX_STATUSES: RelayTaskStatus[] = [
   RELAY_TASK_STATUS.SUBMITTING,
@@ -96,6 +97,36 @@ export interface GmxReconcileSummary {
   errors: number;
 }
 
+export interface ConfirmedOpenHandoffInput {
+  taskId: string;
+  intentId: string;
+  orderKey: string;
+  executionTxHash: string;
+  emitterAddress: string;
+  resolutionBlock: string;
+  latestBlock: string;
+  confirmations: number;
+}
+
+export type ConfirmedOpenHandoffResult =
+  | { handled: true; basis: string }
+  | { handled: false; reason: string };
+
+export type ConfirmedOpenHandoffFn = (
+  input: ConfirmedOpenHandoffInput,
+) => Promise<ConfirmedOpenHandoffResult>;
+
+let _confirmedOpenHandoff: ConfirmedOpenHandoffFn | null = null;
+
+/** liveTestExecutor가 production callback을 결선한다. null은 fail-closed 미결선. */
+export function setConfirmedOpenHandoff(fn: ConfirmedOpenHandoffFn | null): void {
+  _confirmedOpenHandoff = fn;
+}
+
+export function isConfirmedOpenHandoffWired(): boolean {
+  return _confirmedOpenHandoff !== null;
+}
+
 function allowedEmitters(): string[] {
   const r = resolveGmxEventEmitterAddress();
   return r.ok ? [r.address] : [];
@@ -104,27 +135,56 @@ function allowedEmitters(): string[] {
 async function patchTask(
   taskId: string,
   patch: Partial<{ gmxApiStatus: string; gmxExecutionTxHash: string; gmxOrderKeys: string }>,
-): Promise<void> {
+): Promise<boolean> {
   try {
-    await db.update(relayTasksTable).set({ ...patch, updatedAt: new Date() })
-      .where(eq(relayTasksTable.id, taskId));
-  } catch { /* 기록 실패 — 상태 전이는 transitionRelayTask가 별도 판단 */ }
+    const updated = await db.update(relayTasksTable).set({ ...patch, updatedAt: new Date() })
+      .where(eq(relayTasksTable.id, taskId))
+      .returning({ id: relayTasksTable.id });
+    return updated.length === 1;
+  } catch {
+    return false;
+  }
 }
 
 /** 연결된 execution intent를 relay task 종결과 함께 해소 (증거 동봉) */
 async function resolveLinkedIntent(
   row: RelayTaskRow,
   status: 'CONFIRMED' | 'FAILED' | 'CANCELLED',
-  evidence: { txHash: string | null; orderKey: string | null; basis: string },
-): Promise<void> {
-  if (!row.intentId) return;
+  evidence: {
+    txHash: string | null;
+    orderKey: string | null;
+    basis: string;
+    receiptStatus?: 'success' | 'reverted';
+    resolutionBlock?: string | null;
+    emitterAddress?: string;
+  },
+): Promise<boolean> {
+  if (!row.intentId) return true;
+  const intentEvidence = {
+    resolutionTxHash: evidence.txHash,
+    orderKey: evidence.orderKey ?? undefined,
+    receiptStatus: evidence.receiptStatus,
+    resolutionBlock: evidence.resolutionBlock,
+    orderEmitterAddress: evidence.emitterAddress,
+    resolutionReason: evidence.basis,
+  };
   try {
-    await resolveIntentTerminal(row.intentId, status, {
-      resolutionTxHash: evidence.txHash,
-      orderKey: evidence.orderKey ?? undefined,
-      resolutionReason: evidence.basis,
-    });
-  } catch { /* intent 해소 실패 → blocking 유지 (fail-closed) */ }
+    if (await resolveIntentTerminal(row.intentId, status, intentEvidence)) return true;
+  } catch { /* 아래 권위 행 확인으로 수렴 여부를 판정한다. */ }
+
+  // intent가 먼저 terminal로 저장된 직후 task 전환 전에 프로세스가 중단될 수 있다.
+  // 다음 pass에서 같은 온체인 증거와 정확히 일치하는 terminal intent만 성공으로
+  // 인정해 task 전환을 재시도한다. 조회 실패/불일치는 계속 차단한다.
+  const current = await getExecutionIntent(row.intentId);
+  if (!current || current.status !== status) return false;
+  const sameHex = (left: string | null | undefined, right: string | null | undefined) =>
+    (left ?? '').toLowerCase() === (right ?? '').toLowerCase();
+  return sameHex(current.resolutionTxHash, intentEvidence.resolutionTxHash)
+    && sameHex(current.orderKey, intentEvidence.orderKey)
+    && current.receiptStatus === (intentEvidence.receiptStatus ?? null)
+    && current.resolutionBlock === (intentEvidence.resolutionBlock ?? null)
+    && sameHex(current.orderEmitterAddress, intentEvidence.orderEmitterAddress)
+    && current.resolutionReason === intentEvidence.resolutionReason;
 }
 
 /** 단일 task 판정 — 순수 로직 분리를 위해 receipt 증거 수집 포함 */
@@ -138,6 +198,7 @@ async function reconcileOneTask(row: RelayTaskRow, deps: GmxReconcileDeps, summa
         patch: { resolutionBasis: 'GMX requestId 미확보 — 상태 조회 불가, 운영자 조사 필요' },
       });
       if (t.ok) summary.unresolvedMarked += 1;
+      else summary.errors += 1;
     }
     return;
   }
@@ -156,6 +217,7 @@ async function reconcileOneTask(row: RelayTaskRow, deps: GmxReconcileDeps, summa
         patch: { resolutionBasis: `status 조회 ${st.kind} (not-found/구조 불일치) — 자동 종결 금지, 조사 필요` },
       });
         if (t.ok) summary.unresolvedMarked += 1;
+        else summary.errors += 1;
       }
     } else {
       summary.skippedTransient += 1;
@@ -170,15 +232,20 @@ async function reconcileOneTask(row: RelayTaskRow, deps: GmxReconcileDeps, summa
         patch: { resolutionBasis: 'status 응답 requestId 불일치 (peer 교차 응답) — 조사 필요' },
       });
     if (t.ok) summary.unresolvedMarked += 1;
+    else summary.errors += 1;
     return;
   }
 
   const statusStr = st.status!;
-  await patchTask(row.id, {
+  const evidenceStored = await patchTask(row.id, {
     gmxApiStatus: statusStr,
     ...(st.executionTxHash ? { gmxExecutionTxHash: st.executionTxHash } : {}),
     ...(st.orderKeys && st.orderKeys.length > 0 ? { gmxOrderKeys: JSON.stringify(st.orderKeys) } : {}),
   });
+  if (!evidenceStored) {
+    summary.errors += 1;
+    return;
+  }
 
   const verdict = mapGmxApiStatus(statusStr);
 
@@ -206,6 +273,7 @@ async function reconcileOneTask(row: RelayTaskRow, deps: GmxReconcileDeps, summa
         patch: { resolutionBasis: `GMX 보고 ${statusStr}이나 txHash 없음 — 온체인 검증 불가, 조사 필요` },
       });
     if (t.ok) summary.unresolvedMarked += 1;
+    else summary.errors += 1;
     return;
   }
 
@@ -219,14 +287,23 @@ async function reconcileOneTask(row: RelayTaskRow, deps: GmxReconcileDeps, summa
   if (verdict.action === 'fail_pending_receipt') {
     // relay_reverted: 온체인 receipt reverted일 때만 FAILED
     if (receipt.status === 'reverted') {
+      // task를 먼저 terminal로 만들면 intent 저장 실패 뒤 재스캔 대상이 사라진다.
+      // intent를 먼저 저장하고, 이미 동일 증거로 terminal인 경우도 확인해 재시작 수렴한다.
+      const intentResolved = await resolveLinkedIntent(row, 'FAILED', {
+        txHash, orderKey: null, basis: '온체인 receipt revert',
+        receiptStatus: 'reverted', resolutionBlock: receipt.blockNumber == null ? null : String(receipt.blockNumber),
+      });
+      if (!intentResolved) {
+        summary.errors += 1;
+        return;
+      }
       const t = await transitionRelayTask({
         taskId: row.id, from: row.status as RelayTaskStatus, to: RELAY_TASK_STATUS.FAILED,
         patch: { txHash, resolutionBasis: `GMX relay_reverted + 온체인 receipt revert 확인 (tx=${txHash})` },
       });
       if (t.ok) {
         summary.transitioned += 1;
-        await resolveLinkedIntent(row, 'FAILED', { txHash, orderKey: null, basis: '온체인 receipt revert' });
-      }
+      } else summary.errors += 1;
     } else {
       // 보고와 온체인 모순 — 조사 필요
       const t = await transitionRelayTask({
@@ -234,6 +311,7 @@ async function reconcileOneTask(row: RelayTaskRow, deps: GmxReconcileDeps, summa
         patch: { resolutionBasis: 'GMX relay_reverted 보고 ↔ 온체인 receipt success 모순 — 조사 필요' },
       });
       if (t.ok) summary.unresolvedMarked += 1;
+      else summary.errors += 1;
     }
     return;
   }
@@ -245,6 +323,7 @@ async function reconcileOneTask(row: RelayTaskRow, deps: GmxReconcileDeps, summa
         patch: { resolutionBasis: `GMX 보고 ${statusStr} ↔ 온체인 receipt revert 모순 — 조사 필요` },
       });
     if (t.ok) summary.unresolvedMarked += 1;
+    else summary.errors += 1;
     return;
   }
 
@@ -259,6 +338,7 @@ async function reconcileOneTask(row: RelayTaskRow, deps: GmxReconcileDeps, summa
         patch: { txHash, resolutionBasis: `orderKey 확정 불가(${storedKeys.length > 1 ? '다중 보고' : (extraction.ok ? '미확인' : extraction.reason)}) — 자동 종결 금지` },
       });
       if (t.ok) summary.unresolvedMarked += 1;
+      else summary.errors += 1;
       return;
     }
   }
@@ -267,15 +347,76 @@ async function reconcileOneTask(row: RelayTaskRow, deps: GmxReconcileDeps, summa
 
   if (verdict.action === 'confirm_pending_onchain') {
     if (resolution?.kind === 'executed') {
+      // API/task status나 단일 receipt만으로는 handoff/CONFIRMED 금지.
+      // 정확한 허용-emitter OrderExecuted log + receipt block + 최신 block depth가 필수.
+      if (!resolution.blockNumber || !receipt.blockNumber
+          || BigInt(resolution.blockNumber) !== BigInt(receipt.blockNumber)
+          || !resolution.txHash || resolution.txHash.toLowerCase() !== txHash.toLowerCase()
+          || !deps.onchain.getLatestBlockNumber) {
+        return;
+      }
+      let latest: bigint | null;
+      try { latest = await deps.onchain.getLatestBlockNumber(); }
+      catch { latest = null; }
+      const resolutionBlock = BigInt(resolution.blockNumber);
+      if (latest === null || latest < resolutionBlock) return;
+      const confirmations = Number(latest - resolutionBlock);
+      if (confirmations < EVIDENCE_CONFIRMATION_DEPTH) return;
+
+      // OPEN만: terminal 전환 전에 durable INITIAL_STOP handoff가 처리되어야 한다.
+      // 미결선/선행조건 미충족/저장 실패는 task+intent를 차단 상태로 남겨 다음 pass에서 재시도한다.
+      if (row.kind === 'OPEN') {
+        if (!row.intentId || !_confirmedOpenHandoff) return;
+        let handoff: ConfirmedOpenHandoffResult;
+        try {
+          handoff = await _confirmedOpenHandoff({
+            taskId: row.id,
+            intentId: row.intentId,
+            orderKey,
+            executionTxHash: txHash,
+            emitterAddress: resolution.emitterAddress,
+            resolutionBlock: resolution.blockNumber,
+            latestBlock: latest.toString(),
+            confirmations,
+          });
+        } catch {
+          summary.errors += 1;
+          return;
+        }
+        if (!handoff.handled) return;
+
+      }
+
+      // kind와 무관하게 task를 먼저 terminal로 만들면 뒤이은 증거/intent 저장 실패 시
+      // 재스캔 대상이 사라진다. 증거와 intent를 먼저 영속화하고, 둘 다 확인된
+      // 경우에만 task를 terminal로 전환한다. 중간 재시작은 exact-match 확인으로 수렴한다.
+      const terminalEvidenceStored = await patchTask(row.id, {
+        gmxExecutionTxHash: txHash,
+        gmxOrderKeys: JSON.stringify([orderKey]),
+      });
+      if (!terminalEvidenceStored) {
+        summary.errors += 1;
+        return;
+      }
+      const intentResolved = await resolveLinkedIntent(row, 'CONFIRMED', {
+        txHash,
+        orderKey,
+        basis: '온체인 OrderExecuted',
+        receiptStatus: 'success',
+        resolutionBlock: resolution.blockNumber,
+        emitterAddress: resolution.emitterAddress,
+      });
+      if (!intentResolved) {
+        summary.errors += 1;
+        return;
+      }
       const t = await transitionRelayTask({
         taskId: row.id, from: row.status as RelayTaskStatus, to: RELAY_TASK_STATUS.CONFIRMED,
         patch: { txHash, orderKey, resolutionBasis: `GMX executed + 온체인 OrderExecuted (tx=${txHash} orderKey=${orderKey})` },
       });
       if (t.ok) {
         summary.transitioned += 1;
-        await patchTask(row.id, { gmxExecutionTxHash: txHash, gmxOrderKeys: JSON.stringify([orderKey]) });
-        await resolveLinkedIntent(row, 'CONFIRMED', { txHash, orderKey, basis: '온체인 OrderExecuted' });
-      }
+      } else summary.errors += 1;
     } else {
       // executed 보고인데 온체인 OrderExecuted 이벤트 없음 — 보고만으로 CONFIRMED 금지
       const t = await transitionRelayTask({
@@ -283,6 +424,7 @@ async function reconcileOneTask(row: RelayTaskRow, deps: GmxReconcileDeps, summa
         patch: { resolutionBasis: 'GMX executed 보고이나 허용 emitter OrderExecuted 이벤트 미확인 — 조사 필요' },
       });
       if (t.ok) summary.unresolvedMarked += 1;
+      else summary.errors += 1;
     }
     return;
   }
@@ -290,20 +432,32 @@ async function reconcileOneTask(row: RelayTaskRow, deps: GmxReconcileDeps, summa
   // cancelled — 온체인 OrderCancelled 근거 확인 후에만 CANCELLED
   if (verdict.action === 'cancelled') {
     if (resolution?.kind === 'cancelled') {
+      const intentResolved = await resolveLinkedIntent(row, 'CANCELLED', {
+        txHash,
+        orderKey,
+        basis: '온체인 OrderCancelled',
+        receiptStatus: 'success',
+        resolutionBlock: resolution.blockNumber,
+        emitterAddress: resolution.emitterAddress,
+      });
+      if (!intentResolved) {
+        summary.errors += 1;
+        return;
+      }
       const t = await transitionRelayTask({
         taskId: row.id, from: row.status as RelayTaskStatus, to: RELAY_TASK_STATUS.CANCELLED,
         patch: { txHash, orderKey, resolutionBasis: `GMX cancelled + 온체인 OrderCancelled (tx=${txHash})` },
       });
       if (t.ok) {
         summary.transitioned += 1;
-        await resolveLinkedIntent(row, 'CANCELLED', { txHash, orderKey, basis: '온체인 OrderCancelled' });
-      }
+      } else summary.errors += 1;
     } else {
       const t = await transitionRelayTask({
         taskId: row.id, from: row.status as RelayTaskStatus, to: RELAY_TASK_STATUS.UNRESOLVED,
         patch: { resolutionBasis: 'GMX cancelled 보고이나 온체인 OrderCancelled 이벤트 미확인 — 조사 필요' },
       });
       if (t.ok) summary.unresolvedMarked += 1;
+      else summary.errors += 1;
     }
   }
 }
@@ -333,6 +487,33 @@ export async function reconcileGmxApiTasks(deps: GmxReconcileDeps): Promise<GmxR
     summary.scanned += 1;
     try { await reconcileOneTask(row, deps, summary); }
     catch { summary.errors += 1; }
+  }
+  return summary;
+}
+
+/**
+ * 운영자가 선택한 단일 GMX API v2 task의 증거만 명시적으로 재확인한다.
+ * 다른 task를 스캔하지 않으며 readonly 비활성 시 외부 호출·전이 0회다.
+ */
+export async function reconcileOneGmxApiTask(
+  row: RelayTaskRow,
+  deps: GmxReconcileDeps,
+): Promise<GmxReconcileSummary> {
+  const summary: GmxReconcileSummary = {
+    scanned: 0, transitioned: 0, unresolvedMarked: 0, skippedTransient: 0, errors: 0,
+  };
+  if (row.transportGen !== GMX_API_TRANSPORT_GEN || !OPEN_GMX_STATUSES.includes(row.status as RelayTaskStatus)) {
+    return summary;
+  }
+  if (!deps.transport.readonlyEnabled) {
+    summary.skippedTransient = 1;
+    return summary;
+  }
+  summary.scanned = 1;
+  try {
+    await reconcileOneTask(row, deps, summary);
+  } catch {
+    summary.errors += 1;
   }
   return summary;
 }

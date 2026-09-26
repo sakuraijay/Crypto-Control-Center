@@ -18,7 +18,7 @@ const hoisted = vi.hoisted(() => {
   const col = (name: string) => ({ __col: name });
   return {
     store: new Map<string, Record<string, unknown>>(),
-    failFlags: { insert: false, update: false, select: false },
+    failFlags: { insert: false, update: false, updateFailuresRemaining: 0, select: false },
     protectionOrdersTable: {
       id: col('id'), parentOpenIntentId: col('parentOpenIntentId'), positionKey: col('positionKey'),
       purpose: col('purpose'), symbol: col('symbol'), marketAddress: col('marketAddress'),
@@ -93,6 +93,10 @@ vi.mock('@workspace/db', () => {
         set: (set: Record<string, unknown>) => ({
           where: (c: C) => ({
             returning: async () => {
+              if (ff.updateFailuresRemaining > 0) {
+                ff.updateFailuresRemaining -= 1;
+                throw new Error('update fail (transient)');
+              }
               if (ff.update) throw new Error('update fail');
               const hit = [...st.values()].filter((r) => match(r, c));
               for (const r of hit) {
@@ -118,7 +122,9 @@ import {
   reconcileProtections, checkStartupProtectionCoverage,
   type ProtectionSubmitOutcome,
 } from '../workers/protectionExecutor';
-import { planProtection, transitionProtection, getProtection } from '../lib/protectionOrders';
+import {
+  planProtection, transitionProtection, getProtection, getProtectionLineageForPosition,
+} from '../lib/protectionOrders';
 
 const OPEN = {
   parentOpenIntentId: 'intent-1', evidence: 'OrderExecuted tx=0xabc',
@@ -129,7 +135,7 @@ const STOP_INPUT = { open: OPEN, triggerPriceUsd: 1900, acceptablePriceUsd: 1890
 
 beforeEach(() => {
   store.clear();
-  failFlags.insert = false; failFlags.update = false; failFlags.select = false;
+  failFlags.insert = false; failFlags.update = false; failFlags.updateFailuresRemaining = 0; failFlags.select = false;
   setProtectionSubmitFn(null);
 });
 
@@ -152,6 +158,34 @@ describe('§3 planProtection / transition (durable 계층)', () => {
     expect((await transitionProtection(id, 'PLANNED', 'ACTIVE')).ok).toBe(false);   // 건너뛰기 금지
     expect((await transitionProtection(id, 'PLANNED', 'PREPARED')).ok).toBe(true);
     expect((await getProtection(id))?.status).toBe('PREPARED');
+  });
+  it('재시작 coverage는 terminal Stop에서도 원래 OPEN lineage를 복구한다', async () => {
+    await planProtection({
+      parentOpenIntentId: 'intent:open:general-sol',
+      positionKey: 'position-sol',
+      purpose: 'INITIAL_STOP',
+      symbol: 'SOL',
+      marketAddress: '0x0',
+      isLong: true,
+      sizeDeltaUsd: 10,
+      triggerPriceUsd: 100,
+      acceptablePriceUsd: 99,
+      dayKey: 'd',
+    });
+    await transitionProtection('prot:intent:open:general-sol:INITIAL_STOP', 'PLANNED', 'CANCELLED');
+    expect(await getProtectionLineageForPosition('position-sol')).toEqual({
+      ok: true,
+      parentOpenIntentId: 'intent:open:general-sol',
+    });
+  });
+  it('동일 position의 복수 lineage는 emergency-close 자동 선택을 거부한다', async () => {
+    store.set('legacy-a', {
+      id: 'legacy-a', parentOpenIntentId: 'intent:open:a', positionKey: 'position-shared',
+    });
+    store.set('legacy-b', {
+      id: 'legacy-b', parentOpenIntentId: 'intent:open:b', positionKey: 'position-shared',
+    });
+    expect((await getProtectionLineageForPosition('position-shared')).ok).toBe(false);
   });
 });
 
@@ -176,6 +210,82 @@ describe('§5 INITIAL_STOP 수명주기', () => {
     expect(submit).toHaveBeenCalledTimes(1);
     if (!r2.ok) expect(r2.reason).toContain('자동 재제출 금지');
   });
+  it('재시작 후 persisted SUBMITTED 일반 intent는 재제출하지 않는다', async () => {
+    const generic = {
+      open: {
+        ...OPEN,
+        parentOpenIntentId: 'intent:open:ai/9dc4036f-9083-4670-b28a-e69dfce5fdc3',
+        symbol: 'SOL',
+      },
+      triggerPriceUsd: 145,
+      acceptablePriceUsd: 144.275,
+    };
+    const submit = vi.fn(async (): Promise<ProtectionSubmitOutcome> => ({
+      status: 'ACCEPTED', requestId: 'req-sol', typedDataDigest: null,
+    }));
+    setProtectionSubmitFn(submit);
+    expect((await createInitialStopAfterOpenConfirmed(generic)).ok).toBe(true);
+    expect((await createInitialStopAfterOpenConfirmed(generic)).ok).toBe(false);
+    expect(submit).toHaveBeenCalledTimes(1);
+  });
+  it('deterministic ID의 기존 row 결속이 변조되면 재사용·submit을 거부한다', async () => {
+    await planProtection({
+      parentOpenIntentId: OPEN.parentOpenIntentId,
+      positionKey: 'different-position',
+      purpose: 'INITIAL_STOP',
+      symbol: OPEN.symbol,
+      marketAddress: OPEN.marketAddress,
+      isLong: OPEN.isLong,
+      sizeDeltaUsd: OPEN.confirmedSizeUsd,
+      triggerPriceUsd: STOP_INPUT.triggerPriceUsd,
+      acceptablePriceUsd: STOP_INPUT.acceptablePriceUsd,
+      dayKey: '2026-08-19',
+    });
+    const submit = vi.fn();
+    setProtectionSubmitFn(submit as never);
+    const result = await createInitialStopAfterOpenConfirmed(STOP_INPUT);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toContain('결속 불일치');
+      expect(result.emergencyCloseRequired).toBe(true);
+    }
+    expect(submit).not.toHaveBeenCalled();
+  });
+  it.each(['PREPARED', 'SUBMITTING'] as const)(
+    '동시 pass가 %s claim을 보면 emergency close 요구 없이 대기',
+    async (status) => {
+      const submit = vi.fn();
+      setProtectionSubmitFn(submit as never);
+      await planProtection({
+        parentOpenIntentId: OPEN.parentOpenIntentId,
+        positionKey: OPEN.positionKey,
+        purpose: 'INITIAL_STOP',
+        symbol: OPEN.symbol,
+        marketAddress: OPEN.marketAddress,
+        isLong: OPEN.isLong,
+        sizeDeltaUsd: OPEN.confirmedSizeUsd,
+        triggerPriceUsd: STOP_INPUT.triggerPriceUsd,
+        acceptablePriceUsd: STOP_INPUT.acceptablePriceUsd,
+        dayKey: '2026-08-19',
+      });
+      await transitionProtection('prot:intent-1:INITIAL_STOP', 'PLANNED', 'PREPARED');
+      if (status === 'SUBMITTING') {
+        await transitionProtection(
+          'prot:intent-1:INITIAL_STOP',
+          'PREPARED',
+          'SUBMITTING',
+          { incrementSubmitAttempts: true },
+        );
+      }
+      const result = await createInitialStopAfterOpenConfirmed(STOP_INPUT);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.emergencyCloseRequired).toBe(false);
+        expect(result.currentStatus).toBe(status);
+      }
+      expect(submit).not.toHaveBeenCalled();
+    },
+  );
   it('제출 결과 불명(예외) → UNRESOLVED + emergency close 요구, 재호출도 제출 0회', async () => {
     const submit = vi.fn(async () => { throw new Error('timeout'); });
     setProtectionSubmitFn(submit as never);
@@ -185,6 +295,24 @@ describe('§5 INITIAL_STOP 수명주기', () => {
     expect((await getProtection('prot:intent-1:INITIAL_STOP'))?.status).toBe('UNRESOLVED');
     const r2 = await createInitialStopAfterOpenConfirmed(STOP_INPUT);
     expect(r2.ok).toBe(false);
+    expect(submit).toHaveBeenCalledTimes(1);
+  });
+  it('결과 불명 뒤 UNRESOLVED 저장 실패 → SUBMITTING claimant 유지·emergency close 보류', async () => {
+    const submit = vi.fn(async (): Promise<ProtectionSubmitOutcome> => {
+      failFlags.updateFailuresRemaining = 1;
+      return { status: 'UNRESOLVED', reason: '전송 후 응답 없음' };
+    });
+    setProtectionSubmitFn(submit);
+
+    const result = await createInitialStopAfterOpenConfirmed(STOP_INPUT);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.currentStatus).toBe('SUBMITTING');
+      expect(result.emergencyCloseRequired).toBe(false);
+      expect(result.reason).toContain('현재 상태 SUBMITTING');
+    }
+    expect((await getProtection('prot:intent-1:INITIAL_STOP'))?.status).toBe('SUBMITTING');
     expect(submit).toHaveBeenCalledTimes(1);
   });
   it('durable 저장 실패 → 제출 0회 + emergency close 요구', async () => {

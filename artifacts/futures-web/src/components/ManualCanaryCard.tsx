@@ -14,13 +14,23 @@ import { Bird, Loader2, RefreshCw, ShieldAlert, CheckCircle2, XCircle, CircleDas
 import { cn } from '@/lib/utils';
 import { Card } from '@/components/ui/card';
 import {
-  fetchCanaryPreflight, fetchCanaryStatus, postCanaryExecute, postCanaryClose, stageTone,
+  fetchCanaryPreflight, fetchCanaryStatus, normalizeCanaryBlockers,
+  postCanaryExecute, postCanaryClose, stageTone,
   CANARY_CONFIRM_OPEN, CANARY_CONFIRM_CLOSE,
   type CanaryPreflightResponse, type CanaryStatusResponse, type CanaryExecuteResponse,
+  type CanaryBlocker,
 } from '@/lib/manualCanary';
+import { BlockerGroupSection } from '@/components/BlockerGroupSection';
 
 const SYMBOLS = ['BTC', 'ETH'] as const;
 const DIRECTIONS = ['LONG', 'SHORT'] as const;
+const COST_COMPONENT_LABELS = {
+  TICKERS: 'Tickers',
+  MARKETS_INFO: 'Markets info',
+  SDK_PRICE_IMPACT: 'SDK price impact',
+  FUNDING: 'Funding',
+  BORROWING: 'Borrowing',
+} as const;
 
 const STAGE_LABELS: { key: keyof CanaryStatusResponse['stages']; label: string }[] = [
   { key: 'open', label: 'OPEN' },
@@ -48,12 +58,16 @@ export function ManualCanaryCard() {
   const [closeConfirmText, setCloseConfirmText] = useState('');
   const [message, setMessage] = useState<{ tone: 'ok' | 'warn' | 'error'; text: string } | null>(null);
   const [lastResult, setLastResult] = useState<CanaryExecuteResponse | null>(null);
+  const [blockers, setBlockers] = useState<CanaryBlocker[] | null>(null);
 
   const pinReady = pin.length >= 4;
 
   const refreshStatus = useCallback(async (p: string) => {
     const r = await fetchCanaryStatus(p);
-    if (r.kind === 'ok') setStatus(r.data);
+    if (r.kind === 'ok') {
+      setStatus(r.data);
+      setBlockers(normalizeCanaryBlockers(r.data.blockers));
+    }
   }, []);
 
   const onPreflight = async () => {
@@ -121,6 +135,7 @@ export function ManualCanaryCard() {
   };
 
   const caps = status?.caps ?? preflight?.caps ?? null;
+  const boundedEconomics = status?.boundedCanaryEconomics?.[symbol] ?? null;
 
   return (
     <Card className="p-5 flex flex-col gap-4 border-orange-500/25 bg-orange-500/5" data-testid="card-manual-canary">
@@ -220,6 +235,74 @@ export function ManualCanaryCard() {
               <span className={cn('font-mono break-all', item.ok ? 'text-foreground/80' : 'text-red-300')}>{item.detail}</span>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* 차단 그룹 섹션 */}
+      <div className="flex flex-col gap-2">
+        <span className="text-[11px] text-muted-foreground font-medium">
+          차단 항목 그룹 · 상태 새로고침에 포함
+        </span>
+        <BlockerGroupSection blockers={blockers} />
+      </div>
+
+      {boundedEconomics && (
+        <div
+          className="flex flex-col gap-2 rounded-md border border-border/60 bg-background/40 p-3"
+          data-testid={`panel-canary-cost-diagnostics-${symbol}`}
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+            <span className="font-medium">Bounded 비용 진단 · {symbol}</span>
+            <span className={cn(
+              'rounded px-1.5 py-0.5 font-mono',
+              boundedEconomics.status === 'AVAILABLE'
+                ? 'bg-emerald-500/15 text-emerald-300'
+                : boundedEconomics.status === 'UNECONOMIC'
+                  ? 'bg-amber-500/15 text-amber-300'
+                  : 'bg-red-500/15 text-red-300',
+            )}>
+              {boundedEconomics.status}
+            </span>
+          </div>
+          {(boundedEconomics.failureId || boundedEconomics.failedNotionalUsd !== null) && (
+            <div className="text-[11px] text-red-300 font-mono break-all">
+              {boundedEconomics.failureId ?? 'COST_COMPONENT_UNAVAILABLE'}
+              {boundedEconomics.failedNotionalUsd !== null
+                ? ` · exact $${boundedEconomics.failedNotionalUsd}`
+                : ''}
+            </div>
+          )}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+            {boundedEconomics.componentDiagnostics.map(component => (
+              <div
+                key={component.componentId}
+                className="flex items-start justify-between gap-2 rounded border border-border/40 px-2 py-1.5 text-[10px]"
+                data-testid={`row-canary-cost-component-${component.componentId}`}
+              >
+                <span className="text-muted-foreground">
+                  {COST_COMPONENT_LABELS[component.componentId]}
+                </span>
+                <span className={cn(
+                  'font-mono text-right break-all',
+                  component.state === 'SUCCESS'
+                    ? 'text-emerald-300'
+                    : component.state === 'STALE'
+                      ? 'text-amber-300'
+                      : 'text-red-300',
+                )}>
+                  {component.state} · {component.code}
+                </span>
+              </div>
+            ))}
+          </div>
+          {boundedEconomics.componentDiagnostics.length === 0 && (
+            <p className="text-[10px] text-muted-foreground">
+              구성요소 진단 미평가
+            </p>
+          )}
+          <p className="text-[10px] text-muted-foreground">
+            read-only 관측 정보이며 실행 승인으로 사용되지 않습니다.
+          </p>
         </div>
       )}
 

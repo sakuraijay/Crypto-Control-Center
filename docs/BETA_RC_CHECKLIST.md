@@ -1,5 +1,10 @@
 # Beta Release Candidate — Checklist · Runbook · Go/No-Go
 
+> **HISTORICAL / NON-AUTHORITATIVE STATUS SNAPSHOT**
+>
+> 이 문서는 2026-08-19 Beta RC 시점의 과거 체크리스트와 운영 기록이다. 현재 HEAD/CI/배포/런타임 readiness, 실행 플래그, Owner Approval, Canary/LIVE 가능 여부를 판단하는 근거로 사용하지 않는다.
+> 현재 운영 기준은 `docs/CCC_CANONICAL_OPERATING_POLICY_2026-09-07.md`와 현재 canonical 대화의 최신 owner instruction이 우선한다. 라이브 상태는 GitHub/Replit/runtime의 fresh authoritative evidence로만 재확인한다.
+
 절대 마감: **Asia/Manila 2026-08-19 13:00**. 이후 2026-08-20부터 Controlled Canary(실자금) 예정.
 현 시점 기능 동결 — P0/P1 결함 수정만 허용.
 
