@@ -224,19 +224,41 @@ export async function createInitialStopAfterOpenConfirmed(
     });
     if (!t3.ok) {
       // 수락됐는데 영속 실패 — UNRESOLVED로 강등 시도, 신규 진입 차단 유지
-      await transitionProtection(id, 'SUBMITTING', 'UNRESOLVED', { error: 'SUBMITTED 영속 실패' });
+      const unresolved = await transitionProtection(
+        id,
+        'SUBMITTING',
+        'UNRESOLVED',
+        { error: 'SUBMITTED 영속 실패' },
+      );
+      if (!unresolved.ok) {
+        return lostStopTransitionResult(
+          id,
+          `stop 수락 후 SUBMITTED/UNRESOLVED 영속 실패 (${t3.reason}; ${unresolved.reason})`,
+        );
+      }
       return { ok: false, protectionId: id, reason: 'stop 수락됐으나 orderKey/requestId 영속 실패 — UNRESOLVED', emergencyCloseRequired: true };
     }
     return { ok: true, protectionId: id, finalStatus: 'SUBMITTED' };
   }
   if (outcome.status === 'UNRESOLVED') {
-    await transitionProtection(id, 'SUBMITTING', 'UNRESOLVED', { error: outcome.reason });
+    const unresolved = await transitionProtection(id, 'SUBMITTING', 'UNRESOLVED', { error: outcome.reason });
+    if (!unresolved.ok) {
+      return lostStopTransitionResult(id, `stop 결과 불명 상태 저장 실패 (${unresolved.reason})`);
+    }
     return { ok: false, protectionId: id, reason: outcome.reason, emergencyCloseRequired: true };
   }
   // FAILED_PRE_BROADCAST — SUBMITTING에서는 CANCELLED 직행이 없으므로 UNRESOLVED 대신
   // pre-broadcast 확정 근거가 있는 경우에만 SUBMITTED 건너뛰고 종결 불가 → UNRESOLVED가
   // 아닌 별도 규칙: SUBMITTING→UNRESOLVED 후 reconciliation이 증거로 CANCELLED 처리한다.
-  await transitionProtection(id, 'SUBMITTING', 'UNRESOLVED', { error: `pre-broadcast 실패: ${outcome.reason}` });
+  const unresolved = await transitionProtection(
+    id,
+    'SUBMITTING',
+    'UNRESOLVED',
+    { error: `pre-broadcast 실패: ${outcome.reason}` },
+  );
+  if (!unresolved.ok) {
+    return lostStopTransitionResult(id, `stop pre-broadcast 실패 상태 저장 실패 (${unresolved.reason})`);
+  }
   return { ok: false, protectionId: id, reason: outcome.reason, emergencyCloseRequired: true };
 }
 

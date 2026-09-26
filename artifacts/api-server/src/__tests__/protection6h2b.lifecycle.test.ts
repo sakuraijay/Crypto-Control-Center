@@ -18,7 +18,7 @@ const hoisted = vi.hoisted(() => {
   const col = (name: string) => ({ __col: name });
   return {
     store: new Map<string, Record<string, unknown>>(),
-    failFlags: { insert: false, update: false, select: false },
+    failFlags: { insert: false, update: false, updateFailuresRemaining: 0, select: false },
     protectionOrdersTable: {
       id: col('id'), parentOpenIntentId: col('parentOpenIntentId'), positionKey: col('positionKey'),
       purpose: col('purpose'), symbol: col('symbol'), marketAddress: col('marketAddress'),
@@ -93,6 +93,10 @@ vi.mock('@workspace/db', () => {
         set: (set: Record<string, unknown>) => ({
           where: (c: C) => ({
             returning: async () => {
+              if (ff.updateFailuresRemaining > 0) {
+                ff.updateFailuresRemaining -= 1;
+                throw new Error('update fail (transient)');
+              }
               if (ff.update) throw new Error('update fail');
               const hit = [...st.values()].filter((r) => match(r, c));
               for (const r of hit) {
@@ -131,7 +135,7 @@ const STOP_INPUT = { open: OPEN, triggerPriceUsd: 1900, acceptablePriceUsd: 1890
 
 beforeEach(() => {
   store.clear();
-  failFlags.insert = false; failFlags.update = false; failFlags.select = false;
+  failFlags.insert = false; failFlags.update = false; failFlags.updateFailuresRemaining = 0; failFlags.select = false;
   setProtectionSubmitFn(null);
 });
 
@@ -291,6 +295,24 @@ describe('§5 INITIAL_STOP 수명주기', () => {
     expect((await getProtection('prot:intent-1:INITIAL_STOP'))?.status).toBe('UNRESOLVED');
     const r2 = await createInitialStopAfterOpenConfirmed(STOP_INPUT);
     expect(r2.ok).toBe(false);
+    expect(submit).toHaveBeenCalledTimes(1);
+  });
+  it('결과 불명 뒤 UNRESOLVED 저장 실패 → SUBMITTING claimant 유지·emergency close 보류', async () => {
+    const submit = vi.fn(async (): Promise<ProtectionSubmitOutcome> => {
+      failFlags.updateFailuresRemaining = 1;
+      return { status: 'UNRESOLVED', reason: '전송 후 응답 없음' };
+    });
+    setProtectionSubmitFn(submit);
+
+    const result = await createInitialStopAfterOpenConfirmed(STOP_INPUT);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.currentStatus).toBe('SUBMITTING');
+      expect(result.emergencyCloseRequired).toBe(false);
+      expect(result.reason).toContain('현재 상태 SUBMITTING');
+    }
+    expect((await getProtection('prot:intent-1:INITIAL_STOP'))?.status).toBe('SUBMITTING');
     expect(submit).toHaveBeenCalledTimes(1);
   });
   it('durable 저장 실패 → 제출 0회 + emergency close 요구', async () => {
