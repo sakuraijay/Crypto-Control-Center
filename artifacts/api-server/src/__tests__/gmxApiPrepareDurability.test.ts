@@ -678,6 +678,51 @@ describe('6G-3 §6 — 중앙 게이트 blocking task', () => {
     });
   });
 
+  it('submit 불명 결과 뒤 상태 저장 실패 → 반환·durable 모두 SUBMITTING 유지', async () => {
+    const { transport, calls } = mockTransport();
+    transport.postJson = async (_path, _body, intent) => {
+      if (intent === 'submit') {
+        calls.submit++;
+        store.failUpdate = true;
+        return {
+          ok: false, kind: 'network', httpStatus: null, ambiguous: true,
+          message: 'connection reset', peerHost: 'arbitrum.gmxapi.io',
+        } as never;
+      }
+      return { ok: true, data: {}, peerHost: 'arbitrum.gmxapi.io' } as never;
+    };
+
+    const r = await runGmxApiSubmitFlow(flowInput(transport));
+
+    expect(r.submitCalls).toBe(1);
+    expect(calls.submit).toBe(1);
+    expect(r.submitted).toBe(false);
+    expect(r.finalStatus).toBe(RELAY_TASK_STATUS.SUBMITTING);
+    expect(r.blockReasons.join(' ')).toContain('submit 실패 상태 저장 실패');
+    expect(store.tasks[0]?.status).toBe(RELAY_TASK_STATUS.SUBMITTING);
+  });
+
+  it('submit 수락 뒤 TASK_ACCEPTED·UNRESOLVED 저장 모두 실패 → 반환·durable 모두 SUBMITTING 유지', async () => {
+    const { transport, calls } = mockTransport();
+    transport.postJson = async (_path, _body, intent) => {
+      if (intent === 'submit') {
+        calls.submit++;
+        store.failUpdate = true;
+        return { ok: true, data: { status: 'relay_accepted' }, peerHost: 'arbitrum.gmxapi.io' } as never;
+      }
+      return { ok: true, data: {}, peerHost: 'arbitrum.gmxapi.io' } as never;
+    };
+
+    const r = await runGmxApiSubmitFlow(flowInput(transport));
+
+    expect(r.submitCalls).toBe(1);
+    expect(calls.submit).toBe(1);
+    expect(r.submitted).toBe(false);
+    expect(r.finalStatus).toBe(RELAY_TASK_STATUS.SUBMITTING);
+    expect(r.blockReasons.join(' ')).toContain('UNRESOLVED 저장 실패');
+    expect(store.tasks[0]?.status).toBe(RELAY_TASK_STATUS.SUBMITTING);
+  });
+
   it('PAPER → durable 기록·prepare 0회', async () => {
     const { transport, calls } = mockTransport();
     const prepareSpy = vi.fn();

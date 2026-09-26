@@ -469,33 +469,38 @@ export async function runGmxApiSubmitFlow(input: GmxSubmitFlowInput): Promise<Gm
         });
         persisted = t.ok;
       }
-      result.finalStatus = RELAY_TASK_STATUS.UNRESOLVED;
+      if (persisted) result.finalStatus = RELAY_TASK_STATUS.UNRESOLVED;
+      else blockReasons.push('submit 수락 후 UNRESOLVED 저장 실패 — durable 상태 SUBMITTING 유지, 운영자 조사 필요');
     }
     return result;
   }
 
   // 11. submit 실패 분류 — §3 peer 정책
+  const persistSubmitFailure = async (
+    to: 'FAILED_PRE_BROADCAST' | 'UNRESOLVED',
+    patch: { errorClass: string; resolutionBasis?: string },
+  ) => {
+    const transitioned = await transitionRelayTask({
+      taskId: result.taskRowId!, from: RELAY_TASK_STATUS.SUBMITTING, to, patch,
+    });
+    if (transitioned.ok) result.finalStatus = to;
+    else blockReasons.push(`submit 실패 상태 저장 실패(${transitioned.reason}) — durable 상태 SUBMITTING 유지, 운영자 조사 필요`);
+  };
   if (submit.kind === 'rate_limited') {
     blockReasons.push('429 rate limit — 신규 제출 차단·backoff, 자동 재시도 금지');
-    await transitionRelayTask({
-      taskId: result.taskRowId!, from: RELAY_TASK_STATUS.SUBMITTING, to: RELAY_TASK_STATUS.FAILED_PRE_BROADCAST,
-      patch: { errorClass: 'SUBMIT_RATE_LIMITED', resolutionBasis: '429 — 서버가 요청을 거부 (pre-broadcast 확정)' },
+    await persistSubmitFailure(RELAY_TASK_STATUS.FAILED_PRE_BROADCAST, {
+      errorClass: 'SUBMIT_RATE_LIMITED', resolutionBasis: '429 — 서버가 요청을 거부 (pre-broadcast 확정)',
     });
-    result.finalStatus = RELAY_TASK_STATUS.FAILED_PRE_BROADCAST;
   } else if (submit.ambiguous) {
     blockReasons.push(`제출 결과 불명(${submit.kind}) — UNRESOLVED, 자동 재시도·재제출 금지`);
-    await transitionRelayTask({
-      taskId: result.taskRowId!, from: RELAY_TASK_STATUS.SUBMITTING, to: RELAY_TASK_STATUS.UNRESOLVED,
-      patch: { errorClass: `SUBMIT_${submit.kind.toUpperCase()}` },
+    await persistSubmitFailure(RELAY_TASK_STATUS.UNRESOLVED, {
+      errorClass: `SUBMIT_${submit.kind.toUpperCase()}`,
     });
-    result.finalStatus = RELAY_TASK_STATUS.UNRESOLVED;
   } else {
     blockReasons.push(`제출 거부(${submit.kind}) — broadcast 없음 확정 (FAILED_PRE_BROADCAST)`);
-    await transitionRelayTask({
-      taskId: result.taskRowId!, from: RELAY_TASK_STATUS.SUBMITTING, to: RELAY_TASK_STATUS.FAILED_PRE_BROADCAST,
-      patch: { errorClass: `SUBMIT_${submit.kind.toUpperCase()}`, resolutionBasis: '4xx 검증 거부 — broadcast 없음' },
+    await persistSubmitFailure(RELAY_TASK_STATUS.FAILED_PRE_BROADCAST, {
+      errorClass: `SUBMIT_${submit.kind.toUpperCase()}`, resolutionBasis: '4xx 검증 거부 — broadcast 없음',
     });
-    result.finalStatus = RELAY_TASK_STATUS.FAILED_PRE_BROADCAST;
   }
   return result;
 }
