@@ -63,6 +63,7 @@ export type HandoffStopResult =
 export interface HandoffEmergencyResult {
   ok: boolean;
   protectionId: string | null;
+  currentStatus?: string;
 }
 
 export interface ConfirmedOpenStopHandoffDeps {
@@ -97,6 +98,24 @@ function hasAddress(v: string): boolean {
   return /^0x[0-9a-fA-F]{40}$/.test(v);
 }
 
+function emergencyConvergenceResult(
+  emergency: HandoffEmergencyResult,
+  successBasis: string,
+  failureReason: string,
+): ConfirmedOpenHandoffResult {
+  if (emergency.currentStatus === 'PLANNED'
+      || emergency.currentStatus === 'PREPARED'
+      || emergency.currentStatus === 'SUBMITTING') {
+    return {
+      handled: false,
+      reason: `EMERGENCY_CLOSE ${emergency.currentStatus} — claimant 완료 전 OPEN terminal 전환 금지`,
+    };
+  }
+  return emergency.protectionId !== null
+    ? { handled: true, basis: successBasis }
+    : { handled: false, reason: failureReason };
+}
+
 async function convergeFailure(
   deps: ConfirmedOpenStopHandoffDeps,
   input: HandoffStopInput,
@@ -119,9 +138,14 @@ async function convergeFailure(
     `INITIAL_STOP handoff 실패 — ${reason}`,
     input.now,
   );
-  return stop.protectionId !== null || emergency.protectionId !== null
-    ? { handled: true, basis: `INITIAL_STOP UNRESOLVED + EMERGENCY_CLOSE convergence (${reason})` }
-    : { handled: false, reason: 'stop/emergency durable 저장 모두 실패 — OPEN terminal 전환 금지' };
+  if (stop.protectionId !== null && emergency.currentStatus === undefined) {
+    return { handled: true, basis: `INITIAL_STOP UNRESOLVED + EMERGENCY_CLOSE convergence (${reason})` };
+  }
+  return emergencyConvergenceResult(
+    emergency,
+    `INITIAL_STOP UNRESOLVED + EMERGENCY_CLOSE convergence (${reason})`,
+    'stop/emergency durable 저장 모두 실패 — OPEN terminal 전환 금지',
+  );
 }
 
 /**
@@ -198,9 +222,11 @@ export async function runConfirmedOpenStopHandoff(
       || !Number.isFinite(planned.acceptablePriceUsd) || Number(planned.acceptablePriceUsd) <= 0) {
     const reason = 'pre-OPEN durable stop plan 누락/불일치';
     const emergency = await deps.runEmergencyClose(open, `INITIAL_STOP handoff 실패 — ${reason}`, deps.now());
-    return emergency.protectionId !== null
-      ? { handled: true, basis: `INITIAL_STOP plan invalid + EMERGENCY_CLOSE convergence (${reason})` }
-      : { handled: false, reason: `${reason}; emergency durable 저장 실패 — OPEN terminal 전환 금지` };
+    return emergencyConvergenceResult(
+      emergency,
+      `INITIAL_STOP plan invalid + EMERGENCY_CLOSE convergence (${reason})`,
+      `${reason}; emergency durable 저장 실패 — OPEN terminal 전환 금지`,
+    );
   }
 
   const now = deps.now();
@@ -246,7 +272,12 @@ export async function runConfirmedOpenStopHandoff(
     `INITIAL_STOP 실패/불명 — ${result.reason}`,
     now,
   );
-  return result.protectionId || emergency.protectionId
-    ? { handled: true, basis: `INITIAL_STOP ${result.protectionId ?? 'persist-failed'} + EMERGENCY_CLOSE convergence` }
-    : { handled: false, reason: 'INITIAL_STOP 및 EMERGENCY_CLOSE durable 저장 실패' };
+  if (result.protectionId && emergency.currentStatus === undefined) {
+    return { handled: true, basis: `INITIAL_STOP ${result.protectionId} + EMERGENCY_CLOSE convergence` };
+  }
+  return emergencyConvergenceResult(
+    emergency,
+    `INITIAL_STOP ${result.protectionId ?? 'persist-failed'} + EMERGENCY_CLOSE convergence`,
+    'INITIAL_STOP 및 EMERGENCY_CLOSE durable 저장 실패',
+  );
 }
