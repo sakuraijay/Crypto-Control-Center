@@ -385,29 +385,30 @@ async function reconcileOneTask(row: RelayTaskRow, deps: GmxReconcileDeps, summa
         }
         if (!handoff.handled) return;
 
-        // Stop handoff 뒤 task를 먼저 terminal로 만들면 intent 저장 1회 실패 시
-        // 재스캔 대상이 사라진다. 증거와 intent를 먼저 영속화하고, 둘 다 확인된
-        // 경우에만 task를 terminal로 전환한다. 중간 재시작은 위 exact-match 확인으로 수렴한다.
-        const terminalEvidenceStored = await patchTask(row.id, {
-          gmxExecutionTxHash: txHash,
-          gmxOrderKeys: JSON.stringify([orderKey]),
-        });
-        if (!terminalEvidenceStored) {
-          summary.errors += 1;
-          return;
-        }
-        const intentResolved = await resolveLinkedIntent(row, 'CONFIRMED', {
-          txHash,
-          orderKey,
-          basis: '온체인 OrderExecuted',
-          receiptStatus: 'success',
-          resolutionBlock: resolution.blockNumber,
-          emitterAddress: resolution.emitterAddress,
-        });
-        if (!intentResolved) {
-          summary.errors += 1;
-          return;
-        }
+      }
+
+      // kind와 무관하게 task를 먼저 terminal로 만들면 뒤이은 증거/intent 저장 실패 시
+      // 재스캔 대상이 사라진다. 증거와 intent를 먼저 영속화하고, 둘 다 확인된
+      // 경우에만 task를 terminal로 전환한다. 중간 재시작은 exact-match 확인으로 수렴한다.
+      const terminalEvidenceStored = await patchTask(row.id, {
+        gmxExecutionTxHash: txHash,
+        gmxOrderKeys: JSON.stringify([orderKey]),
+      });
+      if (!terminalEvidenceStored) {
+        summary.errors += 1;
+        return;
+      }
+      const intentResolved = await resolveLinkedIntent(row, 'CONFIRMED', {
+        txHash,
+        orderKey,
+        basis: '온체인 OrderExecuted',
+        receiptStatus: 'success',
+        resolutionBlock: resolution.blockNumber,
+        emitterAddress: resolution.emitterAddress,
+      });
+      if (!intentResolved) {
+        summary.errors += 1;
+        return;
       }
       const t = await transitionRelayTask({
         taskId: row.id, from: row.status as RelayTaskStatus, to: RELAY_TASK_STATUS.CONFIRMED,
@@ -415,24 +416,6 @@ async function reconcileOneTask(row: RelayTaskRow, deps: GmxReconcileDeps, summa
       });
       if (t.ok) {
         summary.transitioned += 1;
-        if (row.kind !== 'OPEN') {
-          const terminalEvidenceStored = await patchTask(row.id, {
-            gmxExecutionTxHash: txHash,
-            gmxOrderKeys: JSON.stringify([orderKey]),
-          });
-          if (!terminalEvidenceStored) {
-            summary.errors += 1;
-            return;
-          }
-          await resolveLinkedIntent(row, 'CONFIRMED', {
-            txHash,
-            orderKey,
-            basis: '온체인 OrderExecuted',
-            receiptStatus: 'success',
-            resolutionBlock: resolution.blockNumber,
-            emitterAddress: resolution.emitterAddress,
-          });
-        }
       } else summary.errors += 1;
     } else {
       // executed 보고인데 온체인 OrderExecuted 이벤트 없음 — 보고만으로 CONFIRMED 금지

@@ -299,8 +299,52 @@ describe('executed — 온체인 교차검증 후에만 CONFIRMED', () => {
     expect(transitionSpy).not.toHaveBeenCalled();
   });
 
+  it('CLOSE intent terminal 저장 실패 → relay task를 terminal로 만들지 않고 재시도 가능하게 유지', async () => {
+    dbState.rows = [row({ kind: 'CLOSE', intentId: 'intent:close:d1' })];
+    eventsState.classify = {
+      kind: 'executed', txHash: TX, blockNumber: '100',
+      emitterAddress: '0x' + 'e'.repeat(40),
+    };
+    resolveIntentSpy.mockResolvedValue(false);
+    const t = makeTransport(() => ({
+      status: 'executed', requestId: 'req-1', executionTxHash: TX, orderKeys: [ORDER_KEY],
+    }));
+    const s = await reconcileGmxApiTasks(deps(t, makeOnchain(receiptSuccess)));
+    expect(s).toMatchObject({ transitioned: 0, errors: 1 });
+    expect(resolveIntentSpy).toHaveBeenCalledWith(
+      'intent:close:d1',
+      'CONFIRMED',
+      expect.objectContaining({ resolutionTxHash: TX, orderKey: ORDER_KEY }),
+    );
+    expect(transitionSpy).not.toHaveBeenCalled();
+  });
+
   it('intent 선행 terminal 뒤 재시작 → 동일 증거를 확인하고 relay task까지 수렴', async () => {
     dbState.rows = [row()];
+    eventsState.classify = {
+      kind: 'executed', txHash: TX, blockNumber: '100',
+      emitterAddress: '0x' + 'e'.repeat(40),
+    };
+    resolveIntentSpy.mockResolvedValue(false);
+    terminalIntentState.current = {
+      status: 'CONFIRMED',
+      resolutionTxHash: TX,
+      orderKey: ORDER_KEY,
+      receiptStatus: 'success',
+      resolutionBlock: '100',
+      orderEmitterAddress: '0x' + 'e'.repeat(40),
+      resolutionReason: '온체인 OrderExecuted',
+    };
+    const t = makeTransport(() => ({
+      status: 'executed', requestId: 'req-1', executionTxHash: TX, orderKeys: [ORDER_KEY],
+    }));
+    const s = await reconcileGmxApiTasks(deps(t, makeOnchain(receiptSuccess)));
+    expect(s).toMatchObject({ transitioned: 1, errors: 0 });
+    expect(transitionSpy).toHaveBeenCalledWith(expect.objectContaining({ to: 'CONFIRMED' }));
+  });
+
+  it('CLOSE intent 선행 terminal 뒤 재시작 → 동일 증거를 확인하고 relay task까지 수렴', async () => {
+    dbState.rows = [row({ kind: 'CLOSE', intentId: 'intent:close:d1' })];
     eventsState.classify = {
       kind: 'executed', txHash: TX, blockNumber: '100',
       emitterAddress: '0x' + 'e'.repeat(40),
