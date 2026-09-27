@@ -1,0 +1,1156 @@
+/**
+ * Publish 전 실행 안전성 보강 테스트
+ *
+ * 1. checkCentralExecutionGate — writeContract 직전 중앙 fail-closed 게이트
+ * 2. reconcileOnRestart — SUBMITTED → UNRESOLVED (임의 FAILED 금지, txHash 보존)
+ *
+ * 실제 온체인·DB I/O 없음 (mock 전용).
+ */
+
+import { describe, expect, it, vi, beforeEach, afterEach, afterAll } from 'vitest';
+
+// ── @workspace/db 모킹 (감사로그 상태 주입 가능) ───────────────────────────────
+let auditLogRows: { value: string }[] = [];
+const savedValues: { key: string; value: string }[] = [];
+
+let failAuditInsert = false;
+let failAuditSelect = false;
+
+const mockOnConflictDoUpdate = vi.fn().mockResolvedValue([]);
+const mockValues = vi.fn().mockImplementation((v: { key: string; value: string }) => {
+  if (failAuditInsert && v.key === 'orderAuditLog') throw new Error('DB write failed');
+  savedValues.push(v);
+  return { onConflictDoUpdate: mockOnConflictDoUpdate };
+});
+const mockWhere  = vi.fn().mockImplementation(() => {
+  if (failAuditSelect) return Promise.reject(new Error('DB read failed'));
+  return Promise.resolve(auditLogRows);
+});
+const mockFrom   = vi.fn().mockReturnValue({ where: mockWhere });
+
+vi.mock('@workspace/db', () => ({
+  db: {
+    select: vi.fn().mockReturnValue({ from: mockFrom }),
+    insert: vi.fn().mockReturnValue({ values: mockValues }),
+  },
+  workerStateTable: { key: 'key', value: 'value', updatedAt: 'updatedAt' },
+}));
+
+vi.mock('drizzle-orm', () => ({
+  eq: vi.fn((_col, val) => `eq(${String(val)})`),
+  inArray: vi.fn(),
+}));
+
+// ── executionIntents 모킹 (durable intent 상태 주입 가능) ─────────────────────
+const intentState = vi.hoisted(() => ({
+  createResult: 'created' as 'created' | 'duplicate' | 'error',
+  blocking:     false,
+  reconcile:    { ok: true, blockingCount: 0 },
+  markSubmittedOk: true,
+}));
+const intentMocks = vi.hoisted(() => ({
+  createPreparedIntent:        undefined as unknown as ReturnType<typeof vi.fn>,
+  markIntentSubmitted:         undefined as unknown as ReturnType<typeof vi.fn>,
+  markIntentUnresolved:        undefined as unknown as ReturnType<typeof vi.fn>,
+  markIntentFailedPreBroadcast: undefined as unknown as ReturnType<typeof vi.fn>,
+  hasBlockingIntents:          undefined as unknown as ReturnType<typeof vi.fn>,
+  reconcileIntentsOnRestart:   undefined as unknown as ReturnType<typeof vi.fn>,
+}));
+vi.mock('../lib/executionIntents', () => {
+  intentMocks.createPreparedIntent         = vi.fn(async () => intentState.createResult);
+  intentMocks.markIntentSubmitted          = vi.fn(async () => intentState.markSubmittedOk);
+  intentMocks.markIntentUnresolved         = vi.fn(async () => true);
+  intentMocks.markIntentFailedPreBroadcast = vi.fn(async () => true);
+  intentMocks.hasBlockingIntents           = vi.fn(async () => intentState.blocking);
+  intentMocks.reconcileIntentsOnRestart    = vi.fn(async () => intentState.reconcile);
+  return {
+    buildIntentId: (decisionId: string, orderType: string) => `intent:${orderType}:${decisionId}`,
+    createPreparedIntent:         intentMocks.createPreparedIntent,
+    markIntentSubmitted:          intentMocks.markIntentSubmitted,
+    markIntentUnresolved:         intentMocks.markIntentUnresolved,
+    markIntentFailedPreBroadcast: intentMocks.markIntentFailedPreBroadcast,
+    hasBlockingIntents:           intentMocks.hasBlockingIntents,
+    reconcileIntentsOnRestart:    intentMocks.reconcileIntentsOnRestart,
+  };
+});
+
+vi.mock('../lib/delegatedSigner', () => ({
+  isDelegatedSignerEnabled: vi.fn(() => process.env.DELEGATED_SIGNER_ENABLED === 'true'),
+  isSignerInitialized:      vi.fn().mockReturnValue(true),
+  getSignerAddress:         vi.fn().mockReturnValue('0xSigner'),
+  getSignerWalletClient:    vi.fn().mockReturnValue({
+    writeContract: vi.fn().mockResolvedValue('0xTxSubmitted'),
+  }),
+  getSignerEthBalance:      vi.fn().mockResolvedValue({ ethWei: 5_000_000_000_000_000n, ethFormatted: '0.005', readyForGas: true }),
+  isManualCanarySignerRestoreAllowed: vi.fn((env: NodeJS.ProcessEnv) => ({
+    allowed:
+      env.WORKER_ENGINE_MODE === 'PAPER'
+      && env.AUTO_WORKER_LIVE_ENABLED !== 'true'
+      && env.GMX_API_ORDER_SUBMISSION_ENABLED === 'true',
+    missing: [],
+  })),
+}));
+
+vi.mock('../lib/gmxSubaccount', () => ({
+  checkDelegationStatus: vi.fn().mockResolvedValue({
+    isAuthorized: true, remainingActions: 5,
+    expiresAtUnix: Math.floor(Date.now() / 1000) + 3600,
+    isExpired: false, queryOk: true,
+    mainAddress: '0xMain', signerAddress: '0xSigner',
+  }),
+}));
+
+vi.mock('viem', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('viem')>();
+  return { ...actual, encodeFunctionData: vi.fn().mockReturnValue('0xEncoded') };
+});
+
+vi.mock('../lib/gmxContracts', () => ({
+  USDC_ADDRESS: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831',
+  ARB_ADDRESS: '0x912CE59144191C1204E64559FE8253a0e49E6548',
+  ZERO_ADDRESS: '0x0', ZERO_BYTES32: '0x0',
+  SUBACCOUNT_ROUTER_ABI: [],
+  GMX_ORDER_TYPE: { MarketIncrease: 0, MarketDecrease: 2 },
+  GMX_DECREASE_SWAP_TYPE: { NoSwap: 0, SwapPnlTokenToCollateralToken: 1 },
+  getSubaccountRouterAddress: vi.fn(), getOrderVaultAddress: vi.fn(),
+  getExecutionFeeWei: vi.fn(), usdSizeToGmx: vi.fn(), usdToUsdcWei: vi.fn(),
+  acceptablePriceLong: vi.fn(), acceptablePriceShort: vi.fn(),
+  acceptablePriceCloseLong: vi.fn(), acceptablePriceCloseShort: vi.fn(),
+}));
+
+// ── 6G-2 — 공식 GMX API v2 flow 모킹 (기본: 게이트 차단 결과) ──────────────────
+const gmxFlowState = vi.hoisted(() => ({
+  result: {
+    submitted: false, prepareCalls: 0, signCalls: 0, submitCalls: 0,
+    finalStatus: 'FAILED_PRE_BROADCAST', taskRowId: null, gmxRequestId: null,
+    blockReasons: ['activation gate 미충족'], preBlocked: true,
+  } as Record<string, unknown>,
+}));
+vi.mock('../lib/gmxApiExecution', () => ({
+  executeViaGmxApi: vi.fn(async () => gmxFlowState.result),
+  buildActivationInput: vi.fn((x: unknown) => x),
+  usdPriceToGmxString: vi.fn(() => '0'),
+}));
+vi.mock('../lib/gmxApiTransport', () => ({
+  createGmxApiTransport: vi.fn(() => ({ readonlyEnabled: false, submissionEnabled: false, peers: [] })),
+}));
+// 6H-2B — 보호 주문 저장소: 차단 없음·활성 없음으로 고정 (별도 테스트에서 검증)
+vi.mock('../lib/protectionOrders', () => ({
+  listBlockingProtections: vi.fn(async () => ({ ok: true, rows: [] })),
+  listActiveProtections: vi.fn(async () => ({ ok: true, rows: [] })),
+}));
+
+// ── env 초기화 ────────────────────────────────────────────────────────────────
+const ENV_KEYS = [
+  'WORKER_ENGINE_MODE', 'LIVE_TEST_EXECUTION_LOCKED', 'DELEGATED_SIGNER_ENABLED', 'GMX_RPC_URL',
+  'GMX_SUBACCOUNT_GELATO_RELAY_ROUTER_ADDRESS', 'GMX_EVENT_EMITTER_ADDRESS', 'GMX_DATA_STORE_ADDRESS',
+  'AUTO_WORKER_LIVE_ENABLED', 'GMX_API_ORDER_SUBMISSION_ENABLED',
+  'GMX_RELAY_SUBMISSION_ENABLED', 'GMX_RELAY_SUBMIT_NETWORK_ENABLED',
+] as const;
+
+// legacy 주문 경로 Production 차단 가드 (gmxDelegatedTrading.test.ts에서 이동 —
+// liveTestExecutor는 lib/db를 끌어와 mock 하네스가 필요)
+describe('legacy SubaccountRouter 주문 경로 — Production 차단', () => {
+  it('테스트 환경에서는 통과, 비테스트 환경에서는 throw', async () => {
+    const { assertLegacyOrderPathAllowed } = await import('../workers/liveTestExecutor');
+    expect(() => assertLegacyOrderPathAllowed()).not.toThrow(); // vitest 환경
+
+    const prevNodeEnv = process.env.NODE_ENV;
+    const prevVitest  = process.env.VITEST;
+    try {
+      process.env.NODE_ENV = 'production';
+      delete process.env.VITEST;
+      expect(() => assertLegacyOrderPathAllowed()).toThrow(/DEPRECATED/);
+    } finally {
+      if (prevNodeEnv === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = prevNodeEnv;
+      if (prevVitest === undefined) delete process.env.VITEST; else process.env.VITEST = prevVitest;
+    }
+  });
+});
+
+describe('#142 Manual Canary execution evidence integration', () => {
+  const executionSnapshot = (
+    nowMs: number,
+    overrides: Partial<{
+      market: string;
+      isLong: boolean;
+      orderType: 'MarketIncrease' | 'MarketDecrease';
+      notionalUsd: number;
+      observedAtMs: number;
+    }> = {},
+  ) => {
+    const observedAtMs = overrides.observedAtMs ?? nowMs;
+    const at = new Date(observedAtMs).toISOString();
+    return {
+      market: overrides.market ?? '0x' + 'b'.repeat(40),
+      isLong: overrides.isLong ?? true,
+      orderType: overrides.orderType ?? 'MarketIncrease' as const,
+      notionalUsd: overrides.notionalUsd ?? 20,
+      positionFeeUsd: 0.05,
+      executionFeeUsd: 0.05,
+      estimatedPriceImpactUsd: 0.02,
+      fundingFeeUsd: 0.01,
+      borrowingFeeUsd: 0.01,
+      estimatedExitFeeUsd: 0.05,
+      estimatedExitPriceImpactUsd: 0.02,
+      fundingRatePerHourFraction: 0,
+      borrowingRatePerHourFraction: 0,
+      totalEstimatedRoundTripCostUsd: 0.21,
+      source: 'GMX_API' as const,
+      blockNumber: 123,
+      apiTimestamp: at,
+      fetchedAt: at,
+      expiresAt: new Date(observedAtMs + 60_000).toISOString(),
+    };
+  };
+
+  it('production activator preserves the exact evidence through stop refresh', async () => {
+    const nowMs = Date.now();
+    const market = '0x' + 'b'.repeat(40);
+    const expected = {
+      market,
+      isLong: true,
+      orderType: 'MarketIncrease' as const,
+      notionalUsd: 20,
+      executionScopeId: 'intent:open:manual-canary:2026-08-19',
+    };
+    const snapshot = executionSnapshot(nowMs, { market });
+    const {
+      __setStopExecutionAvailabilityForTests,
+      isStopExecutionAvailable,
+      refreshStopExecutionCapability,
+    } = await import('../workers/liveTestExecutor');
+    const {
+      __resetExecutionEligibleCostEvidenceForTests,
+      getExecutionEligibleCostEvidence,
+    } = await import('../lib/costSnapshot');
+    const { activateManualCanaryExecutionEvidence } =
+      await import('../lib/manualCanaryExecutionEvidence');
+
+    __resetExecutionEligibleCostEvidenceForTests();
+    __setStopExecutionAvailabilityForTests(true);
+    const activated = await activateManualCanaryExecutionEvidence(
+      snapshot,
+      expected,
+      nowMs,
+      {
+        refreshStopCapability: refreshStopExecutionCapability,
+        isStopCapabilityAvailable: isStopExecutionAvailable,
+      },
+    );
+
+    expect(activated).toBe(true);
+    expect(isStopExecutionAvailable()).toBe(true);
+    expect(getExecutionEligibleCostEvidence(nowMs)).toMatchObject({
+      fresh: true,
+      evidence: {
+        market,
+        isLong: true,
+        orderType: 'MarketIncrease',
+        notionalUsd: 20,
+        observedAtMs: nowMs,
+        executionScopeId: 'intent:open:manual-canary:2026-08-19',
+      },
+    });
+  });
+
+  it('production activator accepts an exact evidence rewrite during stop refresh', async () => {
+    const nowMs = Date.now();
+    const market = '0x' + 'b'.repeat(40);
+    const expected = {
+      market,
+      isLong: true,
+      orderType: 'MarketIncrease' as const,
+      notionalUsd: 20,
+      executionScopeId: 'intent:open:manual-canary:2026-08-19',
+    };
+    const snapshot = executionSnapshot(nowMs, { market });
+    const {
+      __resetExecutionEligibleCostEvidenceForTests,
+      recordExecutionEligibleCostEvidence,
+    } = await import('../lib/costSnapshot');
+    const { activateManualCanaryExecutionEvidence } =
+      await import('../lib/manualCanaryExecutionEvidence');
+
+    __resetExecutionEligibleCostEvidenceForTests();
+    const activated = await activateManualCanaryExecutionEvidence(
+      snapshot,
+      expected,
+      nowMs,
+      {
+        refreshStopCapability: async () => {
+          expect(recordExecutionEligibleCostEvidence(snapshot, expected, nowMs)).toBe(true);
+          return { available: true, reasons: [] };
+        },
+        isStopCapabilityAvailable: () => true,
+      },
+    );
+
+    expect(activated).toBe(true);
+  });
+
+  it.each([
+    ['order type', { orderType: 'MarketDecrease' as const }],
+    ['notional', { notionalUsd: 10 }],
+    ['observation time', { observedAtMs: Date.now() - 1_000 }],
+  ])('production activator rejects same-market/direction %s evidence overwrite', async (
+    _name,
+    overwrite,
+  ) => {
+    const nowMs = Date.now();
+    const market = '0x' + 'b'.repeat(40);
+    const expected = {
+      market,
+      isLong: true,
+      orderType: 'MarketIncrease' as const,
+      notionalUsd: 20,
+      executionScopeId: 'intent:open:manual-canary:2026-08-19',
+    };
+    const snapshot = executionSnapshot(nowMs, { market });
+    const {
+      __resetExecutionEligibleCostEvidenceForTests,
+      recordExecutionEligibleCostEvidence,
+    } = await import('../lib/costSnapshot');
+    const { activateManualCanaryExecutionEvidence } =
+      await import('../lib/manualCanaryExecutionEvidence');
+
+    __resetExecutionEligibleCostEvidenceForTests();
+    const activated = await activateManualCanaryExecutionEvidence(
+      snapshot,
+      expected,
+      nowMs,
+      {
+        refreshStopCapability: async () => {
+          const replacement = executionSnapshot(nowMs, { market, ...overwrite });
+          expect(recordExecutionEligibleCostEvidence(
+            replacement,
+            {
+              market,
+              isLong: true,
+              orderType: replacement.orderType,
+              notionalUsd: replacement.notionalUsd,
+              executionScopeId: expected.executionScopeId,
+            },
+            nowMs,
+          )).toBe(true);
+          return { available: true, reasons: [] };
+        },
+        isStopCapabilityAvailable: () => true,
+      },
+    );
+
+    expect(activated).toBe(false);
+  });
+
+  it.each([
+    ['exact binding', 'MarketIncrease' as const, 20, 'intent:open:manual-canary:2026-08-19', true],
+    ['different order type', 'MarketDecrease' as const, 20, 'intent:open:manual-canary:2026-08-19', false],
+    ['different notional', 'MarketIncrease' as const, 10, 'intent:open:manual-canary:2026-08-19', false],
+    ['different OPEN intent', 'MarketIncrease' as const, 20, 'intent:open:manual-canary:other', false],
+  ])('confirmed OPEN handoff cost gate: %s', async (
+    _name,
+    recordedOrderType,
+    recordedNotionalUsd,
+    recordedScopeId,
+    expectedReady,
+  ) => {
+    const nowMs = Date.now();
+    const market = '0x' + 'b'.repeat(40);
+    const snapshot = executionSnapshot(nowMs, {
+      market,
+      orderType: recordedOrderType,
+      notionalUsd: recordedNotionalUsd,
+    });
+    const {
+      __resetExecutionEligibleCostEvidenceForTests,
+      recordExecutionEligibleCostEvidence,
+    } = await import('../lib/costSnapshot');
+    const { isConfirmedOpenHandoffCostEvidenceReady } =
+      await import('../workers/liveTestExecutor');
+
+    __resetExecutionEligibleCostEvidenceForTests();
+    expect(recordExecutionEligibleCostEvidence(snapshot, {
+      market,
+      isLong: true,
+      orderType: recordedOrderType,
+      notionalUsd: recordedNotionalUsd,
+      executionScopeId: recordedScopeId,
+    }, nowMs)).toBe(true);
+
+    expect(isConfirmedOpenHandoffCostEvidenceReady({
+      parentOpenIntentId: 'intent:open:manual-canary:2026-08-19',
+      marketAddress: market,
+      isLong: true,
+      orderType: 'MarketIncrease',
+      notionalUsd: 20,
+      nowMs,
+    })).toBe(expectedReady);
+  });
+
+  it.each([
+    ['fresh authorization', 0, false, false, true],
+    ['stale readback', 60_001, false, false, false],
+    ['future readback', -60_001, false, false, false],
+    ['feature disabled', 0, true, false, false],
+    ['integration disabled', 0, false, true, false],
+  ])('confirmed OPEN initial-stop canonical gate: %s', async (
+    _name,
+    ageMs,
+    featureDisabled,
+    integrationDisabled,
+    expectedReady,
+  ) => {
+    const nowMs = Date.now();
+    const { recordCanonicalSnapshot } = await import('../lib/relayActivationStatus');
+    recordCanonicalSnapshot({
+      atMs: nowMs - ageMs,
+      confirmed: true,
+      reason: null,
+      approvalNonce: '1',
+      isSubaccountListed: true,
+      featureDisabled,
+      integrationDisabled,
+      expiresAt: String(Math.floor(nowMs / 1000) + 3600),
+      remaining: '8',
+    });
+    const { isConfirmedOpenHandoffCanonicalAuthorizationReady } =
+      await import('../workers/liveTestExecutor');
+
+    await expect(
+      isConfirmedOpenHandoffCanonicalAuthorizationReady(nowMs),
+    ).resolves.toBe(expectedReady);
+  });
+
+  it.each([
+    ['fresh canonical evidence', 0, false, false, '8', true, true],
+    ['stale readback', 60_001, false, false, '8', false, false],
+    ['future readback', -60_001, false, false, '8', false, false],
+    ['feature disabled', 0, true, false, '8', false, false],
+    ['integration disabled', 0, false, true, '8', false, false],
+    ['non-canonical remaining', 0, false, false, '1e3', true, false],
+    ['uint256 초과 remaining', 0, false, false, (1n << 256n).toString(), true, false],
+    ['zero remaining', 0, false, false, '0', true, false],
+  ])('executor common canonical gate: %s', async (
+    _name,
+    ageMs,
+    featureDisabled,
+    integrationDisabled,
+    remaining,
+    expectedAuthorized,
+    expectedRemaining,
+  ) => {
+    const nowMs = Date.now();
+    const { evaluateExecutorCanonicalAuthorization } =
+      await import('../workers/liveTestExecutor');
+    const result = evaluateExecutorCanonicalAuthorization({
+      atMs: nowMs - ageMs,
+      confirmed: true,
+      reason: null,
+      approvalNonce: '1',
+      isSubaccountListed: true,
+      featureDisabled,
+      integrationDisabled,
+      expiresAt: String(Math.floor(nowMs / 1000) + 3600),
+      remaining,
+    }, nowMs);
+
+    expect(result).toEqual({
+      canonicalAuthorized: expectedAuthorized,
+      approvalRemainingOk: expectedRemaining,
+    });
+  });
+
+  it.each([
+    ['stale readback', 60_001, false, false],
+    ['future readback', -60_001, false, false],
+    ['feature disabled', 0, true, false],
+    ['integration disabled', 0, false, true],
+  ])('Stop capability collector rejects %s canonical authorization', async (
+    _name,
+    ageMs,
+    featureDisabled,
+    integrationDisabled,
+  ) => {
+    const nowMs = Date.now();
+    const { recordCanonicalSnapshot } = await import('../lib/relayActivationStatus');
+    recordCanonicalSnapshot({
+      atMs: nowMs - ageMs,
+      confirmed: true,
+      reason: null,
+      approvalNonce: '1',
+      isSubaccountListed: true,
+      featureDisabled,
+      integrationDisabled,
+      expiresAt: String(Math.floor(nowMs / 1000) + 3600),
+      remaining: '8',
+    });
+    const { evaluateManualCanaryStopCapability } =
+      await import('../workers/liveTestExecutor');
+
+    const result = await evaluateManualCanaryStopCapability(true);
+
+    expect(result.available).toBe(false);
+    expect(result.reasons).toContain('canonical delegated authorization 미확인/미신선');
+  });
+});
+
+/** 최신 relay 구성 완비 (게이트 통과 시나리오용) — 문서 기준 공식 Arbitrum 주소 */
+function setRelayEnv() {
+  process.env.GMX_SUBACCOUNT_GELATO_RELAY_ROUTER_ADDRESS = '0xfD0596f708d9D950E0eF7b5d191e5F8e55b8a67f';
+  process.env.GMX_EVENT_EMITTER_ADDRESS = '0xC8ee91A54287DB53897056e12D9819156D3822Fb';
+  process.env.GMX_DATA_STORE_ADDRESS = '0xFD70de6b91282D8017aA4E741e9Ae325CAb992d8';
+}
+const savedEnv: Record<string, string | undefined> = {};
+for (const k of ENV_KEYS) savedEnv[k] = process.env[k];
+
+beforeEach(() => {
+  for (const k of ENV_KEYS) delete process.env[k];
+  auditLogRows = [];
+  savedValues.length = 0;
+  failAuditInsert = false;
+  failAuditSelect = false;
+  gmxFlowState.result = {
+    submitted: false, prepareCalls: 0, signCalls: 0, submitCalls: 0,
+    finalStatus: 'FAILED_PRE_BROADCAST', taskRowId: null, gmxRequestId: null,
+    blockReasons: ['activation gate 미충족'], preBlocked: true,
+  };
+  intentState.createResult    = 'created';
+  intentState.blocking        = false;
+  intentState.reconcile       = { ok: true, blockingCount: 0 };
+  intentState.markSubmittedOk = true;
+  for (const m of Object.values(intentMocks)) m?.mockClear?.();
+});
+beforeEach(async () => {
+  // 6H-2A §7 — stop 능력 게이트는 별도 테스트에서 검증; 여기서는 통과 상태로 주입
+  const { __setStopExecutionAvailabilityForTests, __setProtectionReconStateForTests } = await import('../workers/liveTestExecutor');
+  __setStopExecutionAvailabilityForTests(true);
+  // 6H-2C §5 — OPEN 게이트용 보호 reconciliation 정상 상태 주입
+  __setProtectionReconStateForTests({
+    lastRunAtMs: Date.now(), complete: true, anomalies: null, blockNewOpens: false,
+    lastPositionsFetchOkAtMs: Date.now(),
+    ambiguousCount: 0, ambiguousReasons: [], lastSource: 'periodic', confirmationDepth: 15,
+  });
+  // 6H-2B §7 — OPEN 직전 동기 action 예산 게이트 통과용 canonical snapshot (6H-2C: remaining ≥ 6 + inFlight)
+  const { recordCanonicalSnapshot } = await import('../lib/relayActivationStatus');
+  recordCanonicalSnapshot({
+    atMs: Date.now(), confirmed: true, reason: null, approvalNonce: '1',
+    isSubaccountListed: true, featureDisabled: false, integrationDisabled: false,
+    expiresAt: String(Math.floor(Date.now() / 1000) + 3600), remaining: '8',
+  });
+});
+afterEach(async () => {
+  const {
+    __setProtectionPassForTests,
+    __setProtectionReconStateForTests,
+    __setStopCapabilityCollectorForTests,
+  } = await import('../workers/liveTestExecutor');
+  __setProtectionPassForTests(null);
+  __setProtectionReconStateForTests(null);
+  __setStopCapabilityCollectorForTests(null);
+});
+afterAll(() => {
+  for (const k of ENV_KEYS) {
+    if (savedEnv[k] === undefined) delete process.env[k];
+    else process.env[k] = savedEnv[k];
+  }
+});
+
+// ── 중앙 게이트 입력 헬퍼 ─────────────────────────────────────────────────────
+function allowInput() {
+  return {
+    workerEngineMode:       'LIVE',
+    liveTestMode:           true,
+    delegatedSignerEnabled: true,
+    emergencyStop:          false,
+    signerInitialized:      true,
+    dbOk:                   true,
+    rpcOk:                  true,
+    reconciled:             true,
+    noBlockingIntents:      true,
+    eventEmitterConfigured: true,
+    relayConfigured:        true,
+  };
+}
+
+describe('checkCentralExecutionGate — fail-closed 조합', () => {
+  it('모든 조건 충족 + LOCKED=false → 허용', async () => {
+    process.env.LIVE_TEST_EXECUTION_LOCKED = 'false';
+    const { checkCentralExecutionGate } = await import('../lib/liveTestGate');
+    const r = checkCentralExecutionGate(allowInput());
+    expect(r.allowed).toBe(true);
+  });
+
+  it('환경 전부 미설정(기본값) → 차단', async () => {
+    const { checkCentralExecutionGate } = await import('../lib/liveTestGate');
+    const r = checkCentralExecutionGate({ ...allowInput(), workerEngineMode: undefined });
+    expect(r.allowed).toBe(false);
+  });
+
+  it('WORKER_ENGINE_MODE=PAPER → 차단 (unlock돼 있어도)', async () => {
+    process.env.LIVE_TEST_EXECUTION_LOCKED = 'false';
+    const { checkCentralExecutionGate } = await import('../lib/liveTestGate');
+    const r = checkCentralExecutionGate({ ...allowInput(), workerEngineMode: 'PAPER' });
+    expect(r.allowed).toBe(false);
+    expect(r.reason).toMatch(/WORKER_ENGINE_MODE/);
+  });
+
+  it('PAPER Manual Canary만 명시 마커 + AUTO Worker 비활성일 때 허용', async () => {
+    process.env.LIVE_TEST_EXECUTION_LOCKED = 'false';
+    process.env.AUTO_WORKER_LIVE_ENABLED = 'false';
+    const { checkCentralExecutionGate } = await import('../lib/liveTestGate');
+    const r = checkCentralExecutionGate({
+      ...allowInput(),
+      workerEngineMode: 'PAPER',
+      manualCanary: true,
+      relayConfigured: false,
+    });
+    expect(r.allowed).toBe(true);
+    process.env.AUTO_WORKER_LIVE_ENABLED = 'true';
+    expect(checkCentralExecutionGate({
+      ...allowInput(),
+      workerEngineMode: 'PAPER',
+      manualCanary: true,
+    }).allowed).toBe(false);
+  });
+
+  it('liveTestMode=false → 차단', async () => {
+    process.env.LIVE_TEST_EXECUTION_LOCKED = 'false';
+    const { checkCentralExecutionGate } = await import('../lib/liveTestGate');
+    expect(checkCentralExecutionGate({ ...allowInput(), liveTestMode: false }).allowed).toBe(false);
+  });
+
+  it('LIVE_TEST_EXECUTION_LOCKED 미설정(기본 잠금) → 차단', async () => {
+    const { checkCentralExecutionGate } = await import('../lib/liveTestGate');
+    const r = checkCentralExecutionGate(allowInput());
+    expect(r.allowed).toBe(false);
+    expect(r.reason).toMatch(/LOCKED/);
+  });
+
+  it('DELEGATED_SIGNER_ENABLED 비활성 → 차단', async () => {
+    process.env.LIVE_TEST_EXECUTION_LOCKED = 'false';
+    const { checkCentralExecutionGate } = await import('../lib/liveTestGate');
+    const r = checkCentralExecutionGate({ ...allowInput(), delegatedSignerEnabled: false });
+    expect(r.allowed).toBe(false);
+    expect(r.reason).toMatch(/DELEGATED_SIGNER_ENABLED/);
+  });
+
+  it('Emergency Stop 활성 → 차단', async () => {
+    process.env.LIVE_TEST_EXECUTION_LOCKED = 'false';
+    const { checkCentralExecutionGate } = await import('../lib/liveTestGate');
+    expect(checkCentralExecutionGate({ ...allowInput(), emergencyStop: true }).allowed).toBe(false);
+  });
+
+  it('signer 미초기화 → 차단', async () => {
+    process.env.LIVE_TEST_EXECUTION_LOCKED = 'false';
+    const { checkCentralExecutionGate } = await import('../lib/liveTestGate');
+    expect(checkCentralExecutionGate({ ...allowInput(), signerInitialized: false }).allowed).toBe(false);
+  });
+
+  it('dbOk=false / rpcOk=false / reconciled=false → 각각 차단', async () => {
+    process.env.LIVE_TEST_EXECUTION_LOCKED = 'false';
+    const { checkCentralExecutionGate } = await import('../lib/liveTestGate');
+    expect(checkCentralExecutionGate({ ...allowInput(), dbOk: false }).allowed).toBe(false);
+    expect(checkCentralExecutionGate({ ...allowInput(), rpcOk: false }).allowed).toBe(false);
+    expect(checkCentralExecutionGate({ ...allowInput(), reconciled: false }).allowed).toBe(false);
+  });
+
+  it('eventEmitterConfigured=false → 차단 (기본값 없음, 미설정 시 fail-closed)', async () => {
+    process.env.LIVE_TEST_EXECUTION_LOCKED = 'false';
+    const { checkCentralExecutionGate } = await import('../lib/liveTestGate');
+    const r = checkCentralExecutionGate({ ...allowInput(), eventEmitterConfigured: false });
+    expect(r.allowed).toBe(false);
+    expect(r.reason).toMatch(/EventEmitter/);
+  });
+
+  it('relayConfigured=false → 차단 (legacy 라우터만 설정된 상태로는 LIVE 불가)', async () => {
+    process.env.LIVE_TEST_EXECUTION_LOCKED = 'false';
+    const { checkCentralExecutionGate } = await import('../lib/liveTestGate');
+    const r = checkCentralExecutionGate({ ...allowInput(), relayConfigured: false });
+    expect(r.allowed).toBe(false);
+    expect(r.reason).toMatch(/relay 구성/);
+  });
+});
+
+describe('보호 주문 Manual Canary lineage 결속', () => {
+  it('parent OPEN 결정적 ID + Manual PAPER posture가 모두 맞아야 true', async () => {
+    process.env.WORKER_ENGINE_MODE = 'PAPER';
+    process.env.AUTO_WORKER_LIVE_ENABLED = 'false';
+    process.env.GMX_API_ORDER_SUBMISSION_ENABLED = 'true';
+    const { isManualCanaryProtectionRequest } = await import('../workers/liveTestExecutor');
+    expect(isManualCanaryProtectionRequest({
+      manualCanary: true,
+      parentOpenIntentId: 'intent:open:manual-canary:2026-08-19',
+    })).toBe(true);
+    expect(isManualCanaryProtectionRequest({
+      manualCanary: false,
+      parentOpenIntentId: 'intent:open:manual-canary:2026-08-19',
+    })).toBe(false);
+    expect(isManualCanaryProtectionRequest({
+      manualCanary: true,
+      parentOpenIntentId: 'intent:open:worker-cycle-1',
+    })).toBe(false);
+    process.env.AUTO_WORKER_LIVE_ENABLED = 'true';
+    expect(isManualCanaryProtectionRequest({
+      manualCanary: true,
+      parentOpenIntentId: 'intent:open:manual-canary:2026-08-19',
+    })).toBe(false);
+  });
+});
+
+describe('executeLiveTestOrder — 중앙 게이트 통합 (writeContract 도달 차단)', () => {
+  function orderParams() {
+    const now = Date.now();
+    return {
+      decisionId: 'd1', cycleNumber: 1, symbol: 'ETH', marketAddress: '0xM',
+      isLong: true, sizeUsd: 10, collateralUsd: 5, leverage: 2,
+      currentPriceUsd: 3000, mainAddress: '0xMain', accumLossUsd: 0,
+      dbOk: true, openPositionCount: 0, liveTestMode: true,
+      // 6H-2 §3 — 서버 사이징 강제 통과용 유효 컨텍스트 (LIVE 소스 스냅샷)
+      sizingContext: {
+        positionSizingCapitalUsd: 1000,
+        stopDistanceFraction: 0.01,
+        costSnapshot: {
+          market: '0xM', isLong: true, orderType: 'MarketIncrease' as const,
+          notionalUsd: 10, positionFeeUsd: 0.006, executionFeeUsd: 0.2,
+          estimatedPriceImpactUsd: 0.005, estimatedExitPriceImpactUsd: 0.005,
+          fundingFeeUsd: 0.005, borrowingFeeUsd: 0,
+          fundingRatePerHourFraction: 0.00001, borrowingRatePerHourFraction: 0.000005,
+          estimatedExitFeeUsd: 0.206, totalEstimatedRoundTripCostUsd: 0.427,
+          source: 'GMX_API' as const, blockNumber: null, apiTimestamp: new Date(now).toISOString(),
+          fetchedAt: new Date(now).toISOString(), expiresAt: new Date(now + 60_000).toISOString(),
+        },
+        liquidityCapUsd: 50_000, tierNotionalCapUsd: 30,
+        defensiveMode: false, canaryActive: true,
+      },
+    };
+  }
+
+  it('unlock돼 있어도 PAPER 모드면 실제 실행 차단 (simulated=false, ok=false)', async () => {
+    process.env.LIVE_TEST_EXECUTION_LOCKED = 'false';
+    process.env.WORKER_ENGINE_MODE = 'PAPER';
+    process.env.DELEGATED_SIGNER_ENABLED = 'true';
+    process.env.GMX_RPC_URL = 'https://rpc';
+    const { executeLiveTestOrder } = await import('../workers/liveTestExecutor');
+    const r = await executeLiveTestOrder(orderParams());
+    expect(r.ok).toBe(false);
+    expect(r.txHash).toBeNull();
+    expect(r.error).toMatch(/CENTRAL GATE/);
+  });
+
+  it('승인 플래그 3개가 켜져도 PAPER + AUTO false + Relay disabled + signer/canonical false면 prepare/sign/submit 0회', async () => {
+    process.env.WORKER_ENGINE_MODE = 'PAPER';
+    process.env.AUTO_WORKER_LIVE_ENABLED = 'false';
+    process.env.DELEGATED_SIGNER_ENABLED = 'true';
+    process.env.GMX_API_ORDER_SUBMISSION_ENABLED = 'true';
+    process.env.LIVE_TEST_EXECUTION_LOCKED = 'false';
+    process.env.GMX_RELAY_SUBMISSION_ENABLED = 'false';
+    process.env.GMX_RELAY_SUBMIT_NETWORK_ENABLED = 'false';
+    process.env.GMX_RPC_URL = 'https://rpc';
+
+    const delegatedSigner = await import('../lib/delegatedSigner');
+    vi.mocked(delegatedSigner.isSignerInitialized).mockReturnValue(false);
+    const { recordCanonicalSnapshot } = await import('../lib/relayActivationStatus');
+    recordCanonicalSnapshot({
+      atMs: Date.now(),
+      confirmed: false,
+      reason: 'canonical delegation unavailable',
+      approvalNonce: null,
+      isSubaccountListed: false,
+      expiresAt: null,
+      remaining: null,
+    });
+    const gmxExecution = await import('../lib/gmxApiExecution');
+    vi.mocked(gmxExecution.executeViaGmxApi).mockClear();
+
+    const { executeLiveTestOrder } = await import('../workers/liveTestExecutor');
+    const result = await executeLiveTestOrder(orderParams());
+
+    expect(result.ok).toBe(false);
+    expect(result.txHash).toBeNull();
+    expect(gmxExecution.executeViaGmxApi).not.toHaveBeenCalled();
+    expect(gmxFlowState.result).toMatchObject({
+      prepareCalls: 0,
+      signCalls: 0,
+      submitCalls: 0,
+    });
+
+    vi.mocked(delegatedSigner.isSignerInitialized).mockReturnValue(true);
+  });
+
+  it('unlock + LIVE여도 DELEGATED_SIGNER_ENABLED 미설정이면 차단', async () => {
+    process.env.LIVE_TEST_EXECUTION_LOCKED = 'false';
+    process.env.WORKER_ENGINE_MODE = 'LIVE';
+    process.env.GMX_RPC_URL = 'https://rpc';
+    const { executeLiveTestOrder } = await import('../workers/liveTestExecutor');
+    const r = await executeLiveTestOrder(orderParams());
+    expect(r.ok).toBe(false);
+    expect(r.txHash).toBeNull();
+    expect(r.error).toMatch(/DELEGATED_SIGNER_ENABLED/);
+  });
+
+  it('unlock + LIVE + signer 활성이어도 liveTestMode=false면 차단', async () => {
+    process.env.LIVE_TEST_EXECUTION_LOCKED = 'false';
+    process.env.WORKER_ENGINE_MODE = 'LIVE';
+    process.env.DELEGATED_SIGNER_ENABLED = 'true';
+    process.env.GMX_RPC_URL = 'https://rpc';
+    const { executeLiveTestOrder } = await import('../workers/liveTestExecutor');
+    const r = await executeLiveTestOrder({ ...orderParams(), liveTestMode: false });
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/liveTestMode/);
+  });
+
+  it('차단 사유가 감사로그(FAILED)로 기록된다', async () => {
+    process.env.LIVE_TEST_EXECUTION_LOCKED = 'false';
+    process.env.WORKER_ENGINE_MODE = 'PAPER';
+    process.env.GMX_RPC_URL = 'https://rpc';
+    const { executeLiveTestOrder } = await import('../workers/liveTestExecutor');
+    await executeLiveTestOrder(orderParams());
+    const auditWrites = savedValues.filter(v => v.key === 'orderAuditLog');
+    expect(auditWrites.length).toBeGreaterThan(0);
+    const entries = JSON.parse(auditWrites[auditWrites.length - 1].value) as { status: string; error: string }[];
+    const last = entries[entries.length - 1];
+    expect(last.status).toBe('FAILED');
+    expect(last.error).toMatch(/CENTRAL GATE/);
+  });
+
+  it('주문 제출 수락 후 감사기록 저장 실패 → ok=false + 신규 주문 차단 (fail-closed)', async () => {
+    process.env.LIVE_TEST_EXECUTION_LOCKED = 'false';
+    process.env.WORKER_ENGINE_MODE = 'LIVE';
+    process.env.DELEGATED_SIGNER_ENABLED = 'true';
+    process.env.GMX_RPC_URL = 'https://rpc';
+    setRelayEnv(); // 최신 relay 구성 없이는 중앙 게이트에서 차단되므로 완비 상태로 설정
+    const { executeLiveTestOrder, reconcileOnRestart, isReconciled } =
+      await import('../workers/liveTestExecutor');
+
+    // 사전: 빈 감사로그로 reconciliation 완료 → 게이트 통과 가능 상태
+    await reconcileOnRestart();
+    expect(isReconciled()).toBe(true);
+
+    // GMX API flow가 제출 수락(TASK_ACCEPTED)까지 성공한 상황을 주입
+    gmxFlowState.result = {
+      submitted: true, prepareCalls: 1, signCalls: 1, submitCalls: 1,
+      finalStatus: 'TASK_ACCEPTED', taskRowId: 'task-1', gmxRequestId: 'req-9',
+      blockReasons: [], preBlocked: false,
+    };
+    failAuditInsert = true; // 제출 수락 후 감사기록 저장만 실패
+    const r = await executeLiveTestOrder(orderParams());
+
+    expect(r.ok).toBe(false);                      // 성공으로 보고하지 않음
+    expect(r.error).toMatch(/감사로그 저장 실패/);
+    expect(isReconciled()).toBe(false);            // 이후 신규 주문 차단
+
+    // 차단 검증: 다음 주문은 중앙 게이트(reconciled)에서 거부
+    failAuditInsert = false;
+    const r2 = await executeLiveTestOrder(orderParams());
+    expect(r2.ok).toBe(false);
+    expect(r2.error).toMatch(/reconciliation/);
+  });
+
+  // ── 6H-2A §7/§11-12·13 — stop 실행 능력 게이트 ─────────────────────────────
+  it('stop 실행 능력 미가용 → 실제 OPEN 차단 (중앙 게이트 이전, fail-closed)', async () => {
+    process.env.LIVE_TEST_EXECUTION_LOCKED = 'false';
+    process.env.WORKER_ENGINE_MODE = 'LIVE';
+    process.env.DELEGATED_SIGNER_ENABLED = 'true';
+    process.env.GMX_RPC_URL = 'https://rpc';
+    const { executeLiveTestOrder, __setStopExecutionAvailabilityForTests, STOP_EXECUTION_UNAVAILABLE } =
+      await import('../workers/liveTestExecutor');
+    __setStopExecutionAvailabilityForTests(false);
+    const r = await executeLiveTestOrder(orderParams());
+    expect(r.ok).toBe(false);
+    expect(r.txHash).toBeNull();
+    expect(r.error).toContain(STOP_EXECUTION_UNAVAILABLE);
+    // 감사로그 FAILED 기록 확인
+    const auditWrites = savedValues.filter(v => v.key === 'orderAuditLog');
+    const entries = JSON.parse(auditWrites[auditWrites.length - 1].value) as { status: string; error: string }[];
+    expect(entries[entries.length - 1].status).toBe('FAILED');
+  });
+
+  it('stop 미가용이어도 잠금(시뮬) 경로는 영향 없음 — stop 게이트는 실제 실행에만 적용', async () => {
+    process.env.LIVE_TEST_EXECUTION_LOCKED = 'true';
+    process.env.WORKER_ENGINE_MODE = 'LIVE';
+    const { executeLiveTestOrder, __setStopExecutionAvailabilityForTests } =
+      await import('../workers/liveTestExecutor');
+    __setStopExecutionAvailabilityForTests(false);
+    const r = await executeLiveTestOrder(orderParams());
+    expect(r.simulated).toBe(true);
+    expect(r.ok).toBe(true);
+  });
+
+  it('stop 미가용이어도 close(청산)는 stop 게이트에 걸리지 않는다 (§11-13: stop 실패→close 허용)', async () => {
+    process.env.LIVE_TEST_EXECUTION_LOCKED = 'false';
+    process.env.WORKER_ENGINE_MODE = 'PAPER'; // 중앙 게이트에서 차단되지만 stop 게이트 사유가 아님을 확인
+    process.env.GMX_RPC_URL = 'https://rpc';
+    const { closeLiveTestPosition, __setStopExecutionAvailabilityForTests, STOP_EXECUTION_UNAVAILABLE } =
+      await import('../workers/liveTestExecutor');
+    __setStopExecutionAvailabilityForTests(false);
+    const r = await closeLiveTestPosition({
+      decisionId: 'c-stop', cycleNumber: 1, symbol: 'ETH', marketAddress: '0xM',
+      isLong: true, sizeUsd: 10, currentPriceUsd: 3000, mainAddress: '0xMain',
+      accumLossUsd: 0, dbOk: true, liveTestMode: true,
+    });
+    expect(r.error ?? '').not.toContain(STOP_EXECUTION_UNAVAILABLE);
+  });
+
+  it('closeLiveTestPosition도 동일 중앙 게이트로 차단된다', async () => {
+    process.env.LIVE_TEST_EXECUTION_LOCKED = 'false';
+    process.env.WORKER_ENGINE_MODE = 'PAPER';
+    process.env.GMX_RPC_URL = 'https://rpc';
+    const { closeLiveTestPosition } = await import('../workers/liveTestExecutor');
+    const r = await closeLiveTestPosition({
+      decisionId: 'c1', cycleNumber: 1, symbol: 'ETH', marketAddress: '0xM',
+      isLong: true, sizeUsd: 10, currentPriceUsd: 3000, mainAddress: '0xMain',
+      accumLossUsd: 0, dbOk: true, liveTestMode: true,
+    });
+    expect(r.ok).toBe(false);
+    expect(r.txHash).toBeNull();
+    expect(r.error).toMatch(/CENTRAL GATE/);
+  });
+});
+
+describe('reconcileOnRestart — fail-closed (UNRESOLVED)', () => {
+  function submittedEntry(overrides: Record<string, unknown> = {}) {
+    return {
+      id: 'a1', decisionId: 'd1', cycleNumber: 1, symbol: 'ETH',
+      orderType: 'MarketIncrease', isLong: true, sizeUsd: 10, collateralUsd: 5,
+      txHash: '0xTxHashPreserved', orderKey: null, status: 'SUBMITTED',
+      error: null, simulated: false, gateChecks: {},
+      submittedAt: '2026-08-15T00:00:00.000Z', confirmedAt: null,
+      ...overrides,
+    };
+  }
+
+  it('SUBMITTED 주문은 FAILED가 아닌 UNRESOLVED로 마킹되고 txHash가 보존된다', async () => {
+    auditLogRows = [{ value: JSON.stringify([submittedEntry()]) }];
+    const { reconcileOnRestart, isReconciled } = await import('../workers/liveTestExecutor');
+    await reconcileOnRestart();
+
+    const auditWrites = savedValues.filter(v => v.key === 'orderAuditLog');
+    expect(auditWrites.length).toBe(1);
+    const entries = JSON.parse(auditWrites[0].value) as { status: string; txHash: string | null }[];
+    expect(entries[0].status).toBe('UNRESOLVED');
+    expect(entries[0].txHash).toBe('0xTxHashPreserved');
+
+    // 상태불명 주문 존재 → reconciled=false 유지 (신규 주문 차단)
+    expect(isReconciled()).toBe(false);
+    const reconWrites = savedValues.filter(v => v.key === 'liveTestReconciled');
+    expect(reconWrites[reconWrites.length - 1].value).toBe('false');
+  });
+
+  it('기존 UNRESOLVED 주문이 남아 있으면 reconciled=false 유지', async () => {
+    auditLogRows = [{ value: JSON.stringify([submittedEntry({ status: 'UNRESOLVED' })]) }];
+    const { reconcileOnRestart, isReconciled, hasUnresolvedOrders } =
+      await import('../workers/liveTestExecutor');
+    await reconcileOnRestart();
+    expect(isReconciled()).toBe(false);
+    expect(await hasUnresolvedOrders()).toBe(true);
+  });
+
+  it('상태불명 주문이 없으면 reconciled=true', async () => {
+    auditLogRows = [{ value: JSON.stringify([submittedEntry({ status: 'CONFIRMED' }), submittedEntry({ id: 'a2', status: 'FAILED' })]) }];
+    const { reconcileOnRestart, isReconciled } = await import('../workers/liveTestExecutor');
+    await reconcileOnRestart();
+    expect(isReconciled()).toBe(true);
+    const reconWrites = savedValues.filter(v => v.key === 'liveTestReconciled');
+    expect(reconWrites[reconWrites.length - 1].value).toBe('true');
+  });
+
+  it('감사로그 로드 실패 시 reconciled=false 유지 (빈 로그로 오인 금지)', async () => {
+    failAuditSelect = true;
+    const { reconcileOnRestart, isReconciled, hasUnresolvedOrders } =
+      await import('../workers/liveTestExecutor');
+    await reconcileOnRestart();
+    expect(isReconciled()).toBe(false);
+    // 로드 실패 시 상태불명으로 간주 (fail-closed)
+    expect(await hasUnresolvedOrders()).toBe(true);
+  });
+
+  it('감사로그에 SUBMITTED가 있어도 durable intent reconciliation은 먼저 수행된다', async () => {
+    auditLogRows = [{ value: JSON.stringify([submittedEntry()]) }];
+    const { reconcileOnRestart, isReconciled } = await import('../workers/liveTestExecutor');
+    await reconcileOnRestart();
+    // 조기 반환(SUBMITTED 존재)과 무관하게 PREPARED→UNRESOLVED 전환이 호출됨
+    expect(intentMocks.reconcileIntentsOnRestart).toHaveBeenCalledTimes(1);
+    expect(isReconciled()).toBe(false);
+  });
+
+  it('감사로그는 깨끗해도 durable intent가 차단 상태면 reconciled=false', async () => {
+    intentState.reconcile = { ok: true, blockingCount: 1 };
+    const { reconcileOnRestart, isReconciled } = await import('../workers/liveTestExecutor');
+    await reconcileOnRestart();
+    expect(isReconciled()).toBe(false);
+  });
+
+  it('PAPER 모드 감사로그(SIMULATED)는 영향받지 않는다', async () => {
+    auditLogRows = [{ value: JSON.stringify([submittedEntry({ status: 'SIMULATED', simulated: true, txHash: null })]) }];
+    const { reconcileOnRestart, isReconciled } = await import('../workers/liveTestExecutor');
+    await reconcileOnRestart();
+    expect(isReconciled()).toBe(true);
+    // SIMULATED 항목은 재작성되지 않음 (audit log 쓰기는 SUBMITTED 존재 시에만)
+    expect(savedValues.filter(v => v.key === 'orderAuditLog').length).toBe(0);
+  });
+});
+
+describe('주기 Stop capability sequencing — actual executor function', () => {
+  function protectionState(blockNewOpens: boolean) {
+    return {
+      lastRunAtMs: Date.now(),
+      complete: !blockNewOpens,
+      anomalies: null,
+      blockNewOpens,
+      lastPositionsFetchOkAtMs: Date.now(),
+      ambiguousCount: 0,
+      ambiguousReasons: blockNewOpens ? ['fixture protection failure'] : [],
+      lastSource: 'periodic' as const,
+      confirmationDepth: 15,
+    };
+  }
+
+  it('보호 실패를 같은 invocation의 마지막 capability 평가에 반영하고 다음 invocation에서 복구한다', async () => {
+    process.env.WORKER_ENGINE_MODE = 'LIVE';
+    const {
+      __setProtectionPassForTests,
+      __setProtectionReconStateForTests,
+      __setStopCapabilityCollectorForTests,
+      __setStopExecutionAvailabilityForTests,
+      getProtectionReconState,
+      getStopExecutionCapability,
+      runPeriodicIntentReconciliation,
+    } = await import('../workers/liveTestExecutor');
+    __setStopExecutionAvailabilityForTests(null);
+    __setStopCapabilityCollectorForTests(async () => {
+      const protection = getProtectionReconState();
+      return protection.complete && !protection.blockNewOpens
+        ? { available: true, reasons: [] }
+        : { available: false, reasons: ['보호 주문 reconciliation 미완료/불일치 존재 (§5)'] };
+    });
+
+    __setProtectionPassForTests(async () => {
+      __setProtectionReconStateForTests(protectionState(true));
+    });
+    await runPeriodicIntentReconciliation();
+    expect(getStopExecutionCapability()).toMatchObject({
+      available: false,
+      reasons: ['보호 주문 reconciliation 미완료/불일치 존재 (§5)'],
+    });
+
+    __setProtectionPassForTests(async () => {
+      __setProtectionReconStateForTests(protectionState(false));
+    });
+    await runPeriodicIntentReconciliation();
+    expect(getStopExecutionCapability()).toMatchObject({ available: true, reasons: [] });
+  });
+
+  it('차단 intent가 사라진 주기에 reconciled=true를 durable 상태와 함께 복구한다', async () => {
+    process.env.WORKER_ENGINE_MODE = 'PAPER';
+    const { isReconciled, runPeriodicIntentReconciliation } =
+      await import('../workers/liveTestExecutor');
+
+    intentState.blocking = true;
+    await runPeriodicIntentReconciliation();
+    expect(isReconciled()).toBe(false);
+
+    intentState.blocking = false;
+    await runPeriodicIntentReconciliation();
+    expect(isReconciled()).toBe(true);
+    const reconWrites = savedValues.filter(v => v.key === 'liveTestReconciled');
+    expect(reconWrites.at(-1)?.value).toBe('true');
+  });
+
+  it('PAPER 주기는 LIVE collector를 호출하지 않고 unavailable 진단을 유지한다', async () => {
+    process.env.WORKER_ENGINE_MODE = 'PAPER';
+    const {
+      __setStopCapabilityCollectorForTests,
+      __setStopExecutionAvailabilityForTests,
+      getStopExecutionCapability,
+      runPeriodicIntentReconciliation,
+    } = await import('../workers/liveTestExecutor');
+    __setStopExecutionAvailabilityForTests(null);
+    const collector = vi.fn(async () => ({ available: true, reasons: [] }));
+    __setStopCapabilityCollectorForTests(collector);
+
+    await runPeriodicIntentReconciliation();
+
+    expect(collector).not.toHaveBeenCalled();
+    expect(getStopExecutionCapability()).toMatchObject({
+      available: false,
+      reasons: ['PAPER mode: 주기 LIVE stop capability 재평가 비활성'],
+    });
+  });
+
+  it('동시 refresh를 직렬화하고 마지막 평가 결과만 cache에 남긴다', async () => {
+    const {
+      __setStopCapabilityCollectorForTests,
+      __setStopExecutionAvailabilityForTests,
+      getStopExecutionCapability,
+      refreshStopExecutionCapability,
+    } = await import('../workers/liveTestExecutor');
+    __setStopExecutionAvailabilityForTests(null);
+    const releases: Array<(result: { available: boolean; reasons: string[] }) => void> = [];
+    const starts: number[] = [];
+    __setStopCapabilityCollectorForTests(async () => {
+      starts.push(starts.length + 1);
+      return new Promise(resolve => releases.push(resolve));
+    });
+
+    const first = refreshStopExecutionCapability();
+    const second = refreshStopExecutionCapability();
+    await vi.waitFor(() => expect(starts).toEqual([1]));
+    releases[0]({ available: false, reasons: ['older'] });
+    await vi.waitFor(() => expect(starts).toEqual([1, 2]));
+    releases[1]({ available: true, reasons: [] });
+    await Promise.all([first, second]);
+
+    expect(getStopExecutionCapability()).toMatchObject({ available: true, reasons: [] });
+  });
+
+  it('느린 collector 완료 시각으로 capability TTL을 갱신하지 않는다', async () => {
+    const {
+      __setStopCapabilityCollectorForTests,
+      __setStopExecutionAvailabilityForTests,
+      getStopExecutionCapability,
+      isStopExecutionAvailable,
+      refreshStopExecutionCapability,
+    } = await import('../workers/liveTestExecutor');
+    const { STOP_EXECUTION_CAPABILITY_MAX_AGE_MS } =
+      await import('../lib/stopExecutionCapabilityState');
+    __setStopExecutionAvailabilityForTests(null);
+
+    let nowMs = 1_777_000_000_000;
+    const startedAtMs = nowMs;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => nowMs);
+    try {
+      __setStopCapabilityCollectorForTests(async () => {
+        nowMs += STOP_EXECUTION_CAPABILITY_MAX_AGE_MS + 1;
+        return { available: true, reasons: [] };
+      });
+
+      await expect(refreshStopExecutionCapability()).resolves.toMatchObject({ available: true });
+      expect(getStopExecutionCapability()).toMatchObject({
+        available: true,
+        evaluatedAt: new Date(startedAtMs).toISOString(),
+      });
+      expect(isStopExecutionAvailable()).toBe(false);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('collector 예외를 fail-closed로 기록하고 다음 refresh에서 복구한다', async () => {
+    const {
+      __setStopCapabilityCollectorForTests,
+      __setStopExecutionAvailabilityForTests,
+      getStopExecutionCapability,
+      refreshStopExecutionCapability,
+    } = await import('../workers/liveTestExecutor');
+    __setStopExecutionAvailabilityForTests(null);
+    const collector = vi.fn()
+      .mockRejectedValueOnce(new Error('fixture collector failed'))
+      .mockResolvedValueOnce({ available: true, reasons: [] });
+    __setStopCapabilityCollectorForTests(collector);
+
+    await expect(refreshStopExecutionCapability()).resolves.toMatchObject({ available: false });
+    expect(getStopExecutionCapability().reasons.join(' ')).toContain('fixture collector failed');
+    await expect(refreshStopExecutionCapability()).resolves.toMatchObject({ available: true });
+    expect(getStopExecutionCapability()).toMatchObject({ available: true, reasons: [] });
+  });
+});

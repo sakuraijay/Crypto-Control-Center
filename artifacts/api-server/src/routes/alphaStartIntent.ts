@@ -1,0 +1,501 @@
+import { buildPaperLearningDataset } from '../workers/virtualPaperLearningDataset';
+import { evaluatePaperLearningValidation } from '../workers/virtualPaperLearningValidation';
+import { evaluatePaperLearningWalkForward } from '../workers/virtualPaperLearningWalkForward';
+import { evaluateVirtualPaper400Account, parseVirtualPaper400RiskState, virtualPaper400RiskKey } from '../workers/virtualPaper400Accounting';
+import { DAILY_ENTRY_OPTIONS, VIRTUAL_ENTRY_OPTIONS } from '../workers/virtualPaperTradingMode';
+import { randomUUID } from 'node:crypto';
+import { Router } from 'express';
+import { db, workerStateTable, tradesTable } from '@workspace/db';
+import { eq, sql, inArray } from 'drizzle-orm';
+import { requireOperatorAuth } from '../lib/operatorAuthGuard';
+import {
+  ALPHA_START_INTENT_KEY,
+  ALPHA_START_INTENT_SCOPE,
+  buildActiveAlphaStartIntent,
+  buildStoppedAlphaStartIntent,
+  evaluateAlphaStartIntent,
+  evaluateAlphaStartPolicy,
+  serializeAlphaStartIntentV1,
+  type PersistedAlphaStartIntentV1,
+} from '../workers/alphaStartIntent';
+import { WORKER_POLICY_CONTEXT_KEY } from '../workers/workerPolicyContext';
+import { virtualPaper400Activity } from '../workers/virtualPaper400Activity';
+import { isTradingMode, readTradingMode, tradingModeKey, MODE_VERSION, VIRTUAL_TRADING_MODES } from '../workers/virtualPaperTradingMode';
+import {
+  VIRTUAL_PAPER_400_SESSION_STATE_KEY,
+  VIRTUAL_PAPER_400_LOCK_ID,
+  buildActiveVirtualPaper400SessionState,
+  buildStoppedVirtualPaper400SessionState,
+  evaluateVirtualPaper400SessionState,
+  serializeVirtualPaper400SessionState,
+} from '../workers/virtualPaper400SessionState';
+
+export const router = Router();
+
+async function readWorkerStateValue(key: string, database: Pick<typeof db, 'select'> = db): Promise<string | null> {
+  const rows = await database.select().from(workerStateTable)
+    .where(eq(workerStateTable.key, key)).limit(1);
+  return rows[0]?.value ?? null;
+}
+
+async function persistWorkerStateValue(key: string, value: string, database: Pick<typeof db, 'insert'> = db): Promise<void> {
+  const updatedAt = new Date();
+  await database.insert(workerStateTable)
+    .values({ key, value, updatedAt })
+    .onConflictDoUpdate({
+      target: workerStateTable.key,
+      set: { value, updatedAt },
+    });
+}
+
+async function readPaperLearningDataset(database: Pick<typeof db, 'select'>) {
+  const session = evaluateVirtualPaper400SessionState(
+    await readWorkerStateValue(VIRTUAL_PAPER_400_SESSION_STATE_KEY, database));
+  if (!session.state) throw new Error('SESSION_UNAVAILABLE');
+  const identity = session.state.session;
+  const rows = await database.select().from(tradesTable).where(eq(tradesTable.strategy, identity.strategyTag));
+  const raw = await readWorkerStateValue(virtualPaper400RiskKey(identity), database);
+  if (!raw) throw new Error('RISK_EVIDENCE_UNAVAILABLE');
+  const account = evaluateVirtualPaper400Account({
+    session:identity,rows,previous:parseVirtualPaper400RiskState(raw,identity),
+    now:new Date(),quote:()=>null,aggressiveDaily:true,
+  });
+  const ids = [...new Set(rows.filter(r=>r.action==='OPEN').map(r=>r.openDecisionId).filter((id):id is string=>!!id))];
+  const records = ids.length ? await database.select().from(workerStateTable)
+    .where(inArray(workerStateTable.key,ids)) : [];
+  const audits = new Map<string,unknown>();
+  for (const record of records) {
+    try { audits.set(record.key,JSON.parse(record.value)); } catch { /* dataset validator excludes malformed evidence */ }
+  }
+  return buildPaperLearningDataset(identity,rows,audits,{
+    status:'PASS',
+    validator:'evaluateVirtualPaper400Account',
+    settlementRowCount:account.ledger.settlementCount,
+  });
+}
+
+/**
+ * Read the durable operator intent.  This endpoint is observational only: it never
+ * bootstraps missing state and never converts intent into execution authorization.
+ */
+router.get('/data/alpha-start-intent', async (_req, res) => {
+  try {
+    const raw = await readWorkerStateValue(ALPHA_START_INTENT_KEY);
+    const intent = evaluateAlphaStartIntent(raw);
+    const response = {
+      ok: intent.status !== 'INVALID',
+      scope: ALPHA_START_INTENT_SCOPE,
+      executionAuthorized: false as const,
+      intent,
+    };
+    if (intent.status === 'INVALID') return res.status(500).json(response);
+    return res.json(response);
+  } catch {
+    return res.status(503).json({
+      ok: false,
+      code: 'ALPHA_START_INTENT_READ_FAILED',
+      scope: ALPHA_START_INTENT_SCOPE,
+      executionAuthorized: false,
+      error: 'alpha start intent could not be read',
+    });
+  }
+});
+
+/**
+ * Persist explicit operator START/STOP intent only.
+ *
+ * START requires a pre-existing, valid FIXED_BETA_400 accounting policy but never
+ * changes that policy.  STOP is always allowed once operator-authenticated so a
+ * stale/malformed policy can never prevent the operator from recording STOP.
+ * Neither action submits orders, signs, moves funds, or grants execution rights.
+ */
+router.put('/data/alpha-start-intent', requireOperatorAuth, async (req, res) => {
+  const action = req.body?.action;
+  if (action !== 'START' && action !== 'STOP') {
+    return res.status(400).json({
+      ok: false,
+      code: 'ALPHA_START_INTENT_ACTION_INVALID',
+      scope: ALPHA_START_INTENT_SCOPE,
+      executionAuthorized: false,
+      error: 'action must be START or STOP',
+    });
+  }
+
+  try {
+    let value: string;
+    let expectedStatus: 'ACTIVE' | 'STOPPED';
+
+    if (action === 'START') {
+      const policyRaw = await readWorkerStateValue(WORKER_POLICY_CONTEXT_KEY);
+      const policyGate = evaluateAlphaStartPolicy(policyRaw);
+      if (!policyGate.ok) {
+        return res.status(409).json({
+          ok: false,
+          code: policyGate.reason,
+          scope: ALPHA_START_INTENT_SCOPE,
+          executionAuthorized: false,
+          error: policyGate.reason === 'FIXED_BETA_REQUIRED'
+            ? 'FIXED_BETA_400 accounting policy must already be selected before START'
+            : 'worker policy context is invalid; START is fail-closed',
+        });
+      }
+
+      if (typeof req.body?.expiresAt !== 'string') {
+        return res.status(400).json({
+          ok: false,
+          code: 'EXPIRES_AT_REQUIRED',
+          scope: ALPHA_START_INTENT_SCOPE,
+          executionAuthorized: false,
+          error: 'START requires an explicit future expiresAt timestamp',
+        });
+      }
+
+      let state: PersistedAlphaStartIntentV1;
+      try {
+        state = buildActiveAlphaStartIntent(req.body.expiresAt);
+      } catch (error) {
+        return res.status(400).json({
+          ok: false,
+          code: (error as Error).message,
+          scope: ALPHA_START_INTENT_SCOPE,
+          executionAuthorized: false,
+          error: 'expiresAt must be a valid future timestamp',
+        });
+      }
+      value = serializeAlphaStartIntentV1(state);
+      expectedStatus = 'ACTIVE';
+    } else {
+      if (req.body?.reason !== undefined && typeof req.body.reason !== 'string') {
+        return res.status(400).json({
+          ok: false,
+          code: 'STOP_REASON_INVALID',
+          scope: ALPHA_START_INTENT_SCOPE,
+          executionAuthorized: false,
+          error: 'reason must be a string when supplied',
+        });
+      }
+
+      let state: PersistedAlphaStartIntentV1;
+      try {
+        state = buildStoppedAlphaStartIntent(req.body?.reason);
+      } catch (error) {
+        return res.status(400).json({
+          ok: false,
+          code: (error as Error).message,
+          scope: ALPHA_START_INTENT_SCOPE,
+          executionAuthorized: false,
+          error: 'STOP reason is invalid',
+        });
+      }
+      value = serializeAlphaStartIntentV1(state);
+      expectedStatus = 'STOPPED';
+    }
+
+    await persistWorkerStateValue(ALPHA_START_INTENT_KEY, value);
+
+    const readbackRaw = await readWorkerStateValue(ALPHA_START_INTENT_KEY);
+    const intent = evaluateAlphaStartIntent(readbackRaw);
+    if (intent.status !== expectedStatus) {
+      return res.status(503).json({
+        ok: false,
+        code: 'ALPHA_START_INTENT_READBACK_FAILED',
+        scope: ALPHA_START_INTENT_SCOPE,
+        executionAuthorized: false,
+        intent,
+        error: 'persisted alpha start intent did not verify on readback',
+      });
+    }
+
+    return res.json({
+      ok: true,
+      scope: ALPHA_START_INTENT_SCOPE,
+      executionAuthorized: false,
+      intent,
+    });
+  } catch {
+    return res.status(503).json({
+      ok: false,
+      code: 'ALPHA_START_INTENT_PERSIST_FAILED',
+      scope: ALPHA_START_INTENT_SCOPE,
+      executionAuthorized: false,
+      error: 'alpha start intent could not be persisted',
+    });
+  }
+});
+
+/**
+ * VIRTUAL/PAPER 400 control-plane state is deliberately independent of the
+ * real-money FIXED_BETA domain. GET is observational and never bootstraps state.
+ */
+router.get('/data/virtual-paper-learning-dataset', requireOperatorAuth, async (_req, res) => {
+  res.set('Cache-Control', 'no-store');
+  try {
+    const dataset = await db.transaction(tx => readPaperLearningDataset(tx),
+      {isolationLevel:'repeatable read',accessMode:'read only'});
+    return res.json({ok:true,...dataset});
+  } catch { return res.status(503).json({ok:false,code:'PAPER_LEARNING_EVIDENCE_UNAVAILABLE'}); }
+});
+
+router.get('/data/virtual-paper-learning-validation', requireOperatorAuth, async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const validationStartAt = req.query.validationStartAt;
+  const testStartAt = req.query.testStartAt;
+  if (typeof validationStartAt !== 'string' || typeof testStartAt !== 'string'
+    || Object.keys(req.query).some(key => key !== 'validationStartAt' && key !== 'testStartAt')) {
+    return res.status(400).json({ok:false,code:'PAPER_LEARNING_BOUNDARIES_REQUIRED'});
+  }
+  try {
+    const report = await db.transaction(async tx => {
+      const dataset = await readPaperLearningDataset(tx);
+      return evaluatePaperLearningValidation({
+        datasetSha256:dataset.datasetSha256,
+        samples:dataset.samples,
+        validationStartAt,
+        testStartAt,
+        nowMs:Date.now(),
+      });
+    }, {isolationLevel:'repeatable read',accessMode:'read only'});
+    return res.json({ok:true,...report});
+  } catch {
+    return res.status(503).json({ok:false,code:'PAPER_LEARNING_VALIDATION_UNAVAILABLE'});
+  }
+});
+
+router.get('/data/virtual-paper-learning-walk-forward', requireOperatorAuth, async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const allowed = ['initialTrainCount', 'validationCount', 'testCount', 'stepCount'] as const;
+  if (Object.keys(req.query).some(key => !allowed.includes(key as typeof allowed[number]))) {
+    return res.status(400).json({ok:false,code:'PAPER_WALK_FORWARD_PARAMETERS_INVALID'});
+  }
+  const parsed = Object.fromEntries(allowed.map(key => {
+    const raw = req.query[key];
+    const value = typeof raw === 'string' && /^[1-9]\d*$/.test(raw) ? Number(raw) : NaN;
+    return [key, value];
+  })) as Record<typeof allowed[number], number>;
+  if (Object.values(parsed).some(value => !Number.isSafeInteger(value) || value <= 0 || value > 100_000)) {
+    return res.status(400).json({ok:false,code:'PAPER_WALK_FORWARD_PARAMETERS_INVALID'});
+  }
+  try {
+    const report = await db.transaction(async tx => {
+      const dataset = await readPaperLearningDataset(tx);
+      return evaluatePaperLearningWalkForward({
+        datasetSha256:dataset.datasetSha256,
+        samples:dataset.samples,
+        config:parsed,
+        nowMs:Date.now(),
+      });
+    }, {isolationLevel:'repeatable read',accessMode:'read only'});
+    return res.json({ok:true,...report});
+  } catch {
+    return res.status(503).json({ok:false,code:'PAPER_WALK_FORWARD_EVIDENCE_UNAVAILABLE'});
+  }
+});
+
+router.get('/data/virtual-paper-400-session', async (_req, res) => {
+  res.set('Cache-Control', 'no-store');
+  try {
+    const raw = await readWorkerStateValue(VIRTUAL_PAPER_400_SESSION_STATE_KEY);
+    const session = evaluateVirtualPaper400SessionState(raw);
+    const runtimeRaw = await readWorkerStateValue('virtual_paper_400_runtime_v1');
+    const tradingModeSelection = session.state ? readTradingMode(
+      await readWorkerStateValue(tradingModeKey(session.state.session.sessionId)), session.state.session.sessionId) : null;
+    let runtime = null;
+    if (runtimeRaw) {
+      const candidate = JSON.parse(runtimeRaw);
+      if (candidate?.mode === 'VIRTUAL_PAPER_400' && candidate.realFundsUsed === false
+        && session.state && candidate.sessionId === session.state.session.sessionId) runtime = candidate;
+    }
+    const age = runtime ? Date.now() - Date.parse(runtime.at) : NaN;
+    const response = {
+      ok: session.status !== 'INVALID',
+      mode: 'VIRTUAL_PAPER_400' as const,
+      realFundsUsed: false as const,
+      executionAuthorized: false as const,
+      session,
+      runtime,
+      tradingModeSelection,
+      tradingModeOptions: ['virtual400-daily/v3', 'virtual400-daily/v4', 'virtual400-daily/v5', 'virtual400-daily/v6'].includes(runtime?.policy?.version) ? DAILY_ENTRY_OPTIONS : VIRTUAL_ENTRY_OPTIONS,
+      runtimeFresh: Number.isFinite(age) && age >= 0 && age <= 120_000,
+      ...virtualPaper400Activity.read(session.state?.session.sessionId ?? null),
+    };
+    if (session.status === 'INVALID') return res.status(500).json(response);
+    return res.json(response);
+  } catch {
+    return res.status(503).json({
+      ok: false,
+      code: 'VIRTUAL_PAPER_400_SESSION_READ_FAILED',
+      mode: 'VIRTUAL_PAPER_400',
+      realFundsUsed: false,
+      executionAuthorized: false,
+      error: 'virtual PAPER 400 session state could not be read',
+    });
+  }
+});
+
+/** User preference only: shared lock with worker/START/STOP, no START and no ledger reset. */
+router.put('/data/virtual-paper-400-trading-mode', requireOperatorAuth, async (req, res) => {
+  if (!isTradingMode(req.body?.mode) || Object.keys(req.body).some(key => key !== 'mode' && key !== 'expectedUpdatedAt')
+    || (req.body.expectedUpdatedAt !== null && typeof req.body.expectedUpdatedAt !== 'string'))
+    return res.status(400).json({ ok: false, code: 'VIRTUAL_TRADING_MODE_INPUT_INVALID' });
+  try {
+    const result = await db.transaction(async tx => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(${VIRTUAL_PAPER_400_LOCK_ID})`);
+      const session = evaluateVirtualPaper400SessionState(await readWorkerStateValue(VIRTUAL_PAPER_400_SESSION_STATE_KEY, tx));
+      if (!session.state) return { status: 409, body: { ok: false, code: 'VIRTUAL_SESSION_REQUIRED' } };
+      const sessionId = session.state.session.sessionId;
+      const key = tradingModeKey(sessionId);
+      const previous = readTradingMode(await readWorkerStateValue(key, tx), sessionId);
+      if ((previous?.updatedAt ?? null) !== req.body.expectedUpdatedAt)
+        return { status: 409, body: { ok: false, code: 'VIRTUAL_TRADING_MODE_CHANGED' } };
+      const selection = previous?.mode === req.body.mode ? previous : {
+        version: MODE_VERSION, mode: req.body.mode, sessionId,
+        updatedAt: new Date(Math.max(Date.now(), previous ? Date.parse(previous.updatedAt) + 1 : 0)).toISOString() };
+      await persistWorkerStateValue(key, JSON.stringify(selection), tx);
+      const verified = readTradingMode(await readWorkerStateValue(key, tx), sessionId);
+      if (JSON.stringify(verified) !== JSON.stringify(selection)) throw new Error('MODE_READBACK_FAILED');
+      return { status: 200, body: { ok: true, selection: verified, appliesTo: 'NEXT_ENTRY', realFundsUsed: false } };
+    });
+    return res.status(result.status).json(result.body);
+  } catch { return res.status(503).json({ ok: false, code: 'VIRTUAL_TRADING_MODE_UNAVAILABLE' }); }
+});
+
+/**
+ * Persist an explicit operator START/STOP for the virtual 400-USDC PAPER session.
+ * START is idempotent while already ACTIVE and never touches wallet/FIXED_BETA
+ * accounting. STOP preserves the exact session identity. A later START resumes
+ * that same identity instead of minting a fresh 400-USDC ledger, so stop/restart
+ * cannot erase prior losses or settlement history.
+ */
+router.put('/data/virtual-paper-400-session', requireOperatorAuth, async (req, res) => {
+  const action = req.body?.action;
+  if (action !== 'START' && action !== 'STOP') {
+    return res.status(400).json({
+      ok: false,
+      code: 'VIRTUAL_PAPER_400_ACTION_INVALID',
+      mode: 'VIRTUAL_PAPER_400',
+      realFundsUsed: false,
+      executionAuthorized: false,
+      error: 'action must be START or STOP',
+    });
+  }
+
+  if (req.body?.reason !== undefined && typeof req.body.reason !== 'string') {
+    return res.status(400).json({
+      ok: false,
+      code: 'STOP_REASON_INVALID',
+      mode: 'VIRTUAL_PAPER_400',
+      realFundsUsed: false,
+      executionAuthorized: false,
+      error: 'reason must be a string when supplied',
+    });
+  }
+
+  try {
+    const reply = await db.transaction(async tx => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(${VIRTUAL_PAPER_400_LOCK_ID})`);
+      let statusCode = 200;
+      const response = {
+        status(code: number) { statusCode = code; return this; },
+        json(body: unknown) { return { statusCode, body }; },
+      };
+      const currentRaw = await readWorkerStateValue(VIRTUAL_PAPER_400_SESSION_STATE_KEY, tx);
+      const current = evaluateVirtualPaper400SessionState(currentRaw);
+
+      if (current.status === 'INVALID') {
+        return response.status(409).json({
+          ok: false,
+          code: 'VIRTUAL_PAPER_400_SESSION_INVALID',
+          mode: 'VIRTUAL_PAPER_400',
+          realFundsUsed: false,
+          executionAuthorized: false,
+          session: current,
+          error: 'invalid persisted virtual session state must be reviewed; it will not be overwritten automatically',
+        });
+      }
+
+      if (action === 'START' && current.status === 'ACTIVE') {
+        return response.json({
+          ok: true,
+          mode: 'VIRTUAL_PAPER_400',
+          realFundsUsed: false,
+          executionAuthorized: false,
+          idempotent: true,
+          session: current,
+        });
+      }
+
+      if (action === 'STOP' && (current.status === 'MISSING' || current.status === 'STOPPED')) {
+        return response.json({
+          ok: true,
+          mode: 'VIRTUAL_PAPER_400',
+          realFundsUsed: false,
+          executionAuthorized: false,
+          idempotent: true,
+          session: current,
+        });
+      }
+
+      const now = new Date();
+      const nextState = action === 'START'
+        ? current.status === 'STOPPED'
+          ? {
+              schemaVersion: 1 as const,
+              status: 'ACTIVE' as const,
+              session: current.state!.session,
+              updatedAt: now.toISOString(),
+            }
+          : buildActiveVirtualPaper400SessionState(`vp400-${randomUUID()}`, now)
+        : buildStoppedVirtualPaper400SessionState(current.state!, req.body?.reason, now);
+
+      await persistWorkerStateValue(
+        VIRTUAL_PAPER_400_SESSION_STATE_KEY,
+        serializeVirtualPaper400SessionState(nextState), tx,
+      );
+
+      const readbackRaw = await readWorkerStateValue(VIRTUAL_PAPER_400_SESSION_STATE_KEY, tx);
+      const session = evaluateVirtualPaper400SessionState(readbackRaw);
+      const expectedStatus = action === 'START' ? 'ACTIVE' : 'STOPPED';
+      if (session.status !== expectedStatus || session.state?.session.sessionId !== nextState.session.sessionId) {
+        return response.status(503).json({
+          ok: false,
+          code: 'VIRTUAL_PAPER_400_SESSION_READBACK_FAILED',
+          mode: 'VIRTUAL_PAPER_400',
+          realFundsUsed: false,
+          executionAuthorized: false,
+          session,
+          error: 'persisted virtual PAPER 400 session did not verify on readback',
+        });
+      }
+
+      return response.json({
+        ok: true,
+        mode: 'VIRTUAL_PAPER_400',
+        realFundsUsed: false,
+        executionAuthorized: false,
+        idempotent: false,
+        session,
+      });
+    });
+    return res.status(reply.statusCode).json(reply.body);
+  } catch (error) {
+    const code = (error as Error)?.message;
+    if (code === 'STOP_REASON_TOO_LONG' || code === 'STOP_REASON_INVALID') {
+      return res.status(400).json({
+        ok: false,
+        code,
+        mode: 'VIRTUAL_PAPER_400',
+        realFundsUsed: false,
+        executionAuthorized: false,
+        error: 'virtual PAPER 400 STOP reason is invalid',
+      });
+    }
+    return res.status(503).json({
+      ok: false,
+      code: 'VIRTUAL_PAPER_400_SESSION_PERSIST_FAILED',
+      mode: 'VIRTUAL_PAPER_400',
+      realFundsUsed: false,
+      executionAuthorized: false,
+      error: 'virtual PAPER 400 session could not be persisted',
+    });
+  }
+});

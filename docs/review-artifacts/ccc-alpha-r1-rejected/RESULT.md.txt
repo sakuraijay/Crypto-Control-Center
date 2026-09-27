@@ -1,0 +1,82 @@
+# CCC-ALPHA-REPLIT-B50-01/R1 — BLOCKED / NOT FOR DEPLOYMENT
+
+## Outcome
+
+A candidate was implemented in an isolated worktree, but final safety review
+rejected it. It is NOT a completed integration, release candidate, authorization,
+or alpha-readiness PASS. No commit or push was attempted. No deployment,
+operational database/capital/HWM, Secrets, PIN, flags, signing, orders, funds,
+or billing settings were changed.
+
+Baseline: `8a0757ceb7130507e69e904395c491a58d80c3ec`
+Remote: `sakuraijay/Crypto-Control-Center`, PR #1,
+`codex/handover-20260820`; confirmed unchanged after review.
+Original workspace HEAD: `8b9a6e9fd02935d54a0afda750a010fc43de3c6d`.
+Candidate: uncommitted files in `/tmp/ccc-alpha-r1`; identified by the
+machine-generated patch and checksums in this package, NOT by a new commit.
+
+## Changed candidate files
+
+- artifacts/api-server/src/workers/aiWorker.ts
+- artifacts/api-server/src/workers/serverTypes.ts
+- artifacts/api-server/src/lib/riskEngineState.ts
+- artifacts/api-server/src/__tests__/aiWorker.test.ts
+- docs/CCC_CANONICAL_OPERATING_POLICY_2026-09-07.md
+
+The proposed policy text is part of the rejected candidate, not a change to
+the running source or canonical remote policy.
+
+## Tests already performed
+
+The implementation worker reported:
+
+- `pnpm --filter @workspace/api-server run typecheck`: PASS.
+- Targeted Vitest selection: `aiWorker.test.ts`,
+  `fixedBetaWorkerCycleCapitalContext.test.ts`,
+  `fixedBetaReferenceWorkerState.test.ts`, `riskCapital.betaScope.test.ts`:
+  79/79 PASS.
+- DATABASE_URL unset for those commands; database paths mocked; temporary
+  dependency symlinks removed afterward. No application/workflow started.
+- `git diff --check`: PASS, independently confirmed by parent.
+
+The original raw test stdout was not exported by the implementation worker.
+These results are the worker's execution report, not new CI results.
+No tests were rerun merely to produce this report.
+Passing this selection does NOT establish the requested safety properties.
+
+## Final read-only safety review: BLOCKED
+
+1. Standard and Fixed Beta share one persisted risk row. Candidate context
+   switching initializes a replacement and resets losses/counts while retaining
+   only locks. Missing Beta reference can cause Standard equity/history to be
+   persisted into a Beta-marked state. Independent restart persistence is absent.
+2. Candidate zeroes Beta unrealized/rolling/LIVE-test losses and does not advance
+   protected reference accounting. It mixes global PAPER activity with scoped
+   state. Nonzero losses/counts across cycles and restarts are not proven.
+3. A denied entry is rewritten to CASH, which the downstream executor interprets
+   as close-all. Entry-only gating is therefore not preserved.
+4. The new policyContext selector is accepted through the existing strategy PUT
+   path without the operator authorization needed for a capital-domain switch.
+5. Tests omit nonzero-loss transitions, Standard/Beta/Standard restart isolation,
+   existing-position entry-veto preservation, duplicate restart behavior for this
+   path, and HTTP authorization. One missing-reference test expects close-all,
+   so its PASS is not evidence for the requested behavior.
+
+## Delivery and minimum next action
+
+No Git authentication or network failure prevented push. Push was deliberately
+withheld because safety review failed. The package preserves the complete
+candidate patch and full changed files for review only; DO NOT APPLY TO RUNNING
+OR PRODUCTION SOURCE. A fresh baseline applicability check is included in the
+manifest as a format check only, not a safety check.
+
+Any further repair requires a separately authorized finite continuation with
+isolated risk persistence, entry-only dispatch gating, nonzero scoped accounting,
+and authenticated policy selection plus their regressions. No such continuation
+was started automatically.
+
+Deadline: September 18, 2026, 13:00 Asia/Manila; beta October 1.
+Delivery of this report is not evidence that the alpha deadline can be met.
+Attributable cumulative cost: UNKNOWN. Original cumulative $50 exception was
+not reset, extended in amount, or treated as a verified remaining balance.
+Notifications: no preference or scheduler changes performed or claimed.

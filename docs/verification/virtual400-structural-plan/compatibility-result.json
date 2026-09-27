@@ -1,0 +1,78 @@
+{
+  "kind": "HISTORICAL_ENTRY_COMPATIBILITY_ONLY",
+  "dataset": {
+    "datasetId": "binance-btcusdt-spot-perpetual-2026-08-27",
+    "source": "Binance Spot REST /api/v3/klines (BTCUSDT, 15m/1h/4h); Binance USDⓈ-M Futures REST /fapi/v1/fundingRate (BTCUSDT)",
+    "license": null,
+    "immutable": true,
+    "checksumAlgorithm": "SHA-256",
+    "artifactChecksums": {
+      "15m": "09ff1a6070137a78a90053f73e0b311907f36442c7d89f7187818c27be5587f0",
+      "1h": "3fe80765ced270ce0cf54e0ddc40a723d00b93c957d9f37d1f3baf7568b64b98",
+      "4h": "f550a86107531cfeed89058061a058c24fc8806895dd70fc1e9aea9599c27a97",
+      "funding": "6b4219597b85ee51a7b0601ba1399b2775a4ca1356fe3db48c459376fad9b9a8"
+    },
+    "costEvidenceKind": "MODELED",
+    "riskEvidenceKind": "ASSUMED",
+    "checksums": {
+      "15m": "e42e7d9c09412eadf9a7e1e3fd568901830cb3f3dcd44323fc07b37baf1b357d",
+      "1h": "2c2536d036b53f8f9fb2d0475339985e47700e9c24c9a98ebdddec81964b28dc",
+      "4h": "307891a33fea83649528fa5d0b94cf7d9d70077954eb89c1062ff4d8da9b7b59",
+      "costs": "a49447b62234a0c9975dcf2d328cd8421ab6ef91d6bc7f94a5efeea476bc60db",
+      "risk": "1353c5fd7f0976dedcd161310ba159f4704f0bcf03449a4db796caca72738c80"
+    },
+    "period": {
+      "fromMs": 1786896900000,
+      "toMs": 1787796000000
+    },
+    "retrievedAtMs": 1787796612151,
+    "methodology": "Spot OHLCV base volume (field 5); final unclosed klines excluded. Funding is historical as-of abs(rate)*10000/8 bps/hour, so negative funding never becomes a rebate. Taker fee is frozen at 5 bps/side. Slippage and impact derive only from each closed 15m high-low range (5% and 2.5%, respectively, with 1bp/0.5bp floors). Borrowing is zero because Binance perpetual funding is not a separate borrowing charge."
+  },
+  "selection": "Entire committed 15m corpus after 239-candle warmup; no parameter search or period selection",
+  "limitations": [
+    "BTC only; Binance spot prices and modeled derivatives costs, not historical GMX fills",
+    "Candidate/plan comparison only: no CandleSignal final execution gate, lifecycle or portfolio simulation",
+    "No daily returns, OOS profitability, or multi-coin coverage established",
+    "Legacy and structural policies compared on identical completed candles and costs"
+  ],
+  "reports": [
+    {
+      "costStress": 1,
+      "counts": {
+        "REGIME:BREAKOUT_READY": 305,
+        "NO_TRADE": 743,
+        "REGIME:HIGH_VOLATILITY": 240,
+        "REGIME:UNKNOWN": 47,
+        "REGIME:TREND_UP": 72,
+        "REGIME:RANGE": 55,
+        "REGIME:TRANSITION": 8,
+        "SELECT": 17,
+        "DIRECTIONAL_RECORD": 17,
+        "LEGACY_PLAN_REJECTED": 8,
+        "MODE_NET_REWARD_RISK_BELOW_STRATEGY_FLOOR": 7,
+        "HORIZON_COST_OVER_CAP": 3,
+        "CONFIDENCE_BELOW_80": 5,
+        "STRUCTURAL_PLAN_COMPATIBLE": 2,
+        "LEGACY_PLAN_COMPATIBLE": 1,
+        "REGIME:TREND_DOWN": 33
+      }
+    },
+    {
+      "costStress": 2,
+      "counts": {
+        "REGIME:BREAKOUT_READY": 305,
+        "NO_TRADE": 752,
+        "REGIME:HIGH_VOLATILITY": 240,
+        "REGIME:UNKNOWN": 47,
+        "REGIME:TREND_UP": 72,
+        "REGIME:RANGE": 55,
+        "REGIME:TRANSITION": 8,
+        "SELECT": 8,
+        "DIRECTIONAL_RECORD": 8,
+        "HORIZON_COST_OVER_CAP": 5,
+        "CONFIDENCE_BELOW_80": 3,
+        "REGIME:TREND_DOWN": 33
+      }
+    }
+  ]
+}
