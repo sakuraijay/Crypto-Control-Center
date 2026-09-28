@@ -11,16 +11,16 @@ import {MARKET_BY_SYMBOL_SERVER} from '../lib/gmxMarkets';
 import {virtualReplayCost} from './helpers/virtualPaper400Replay';
 const now=Date.parse('2026-09-22T03:00:10Z'),step=900000;
 const raw=()=>({source:'gmx-official-api',prices:Array.from({length:16},(_,i)=>[(Math.floor(now/step)-16+i)*step/1000,50000+i,50100+i,49900+i,50010+i])});
-const riskInput=()=>({equity:380,referenceCapital:400,dailyLossAware:-20,dailyRealized:-20,entries:10,held:0,fresh:true,locks:{...EMPTY_LOCKS}});
+const riskInput=()=>({equity:380,referenceCapital:400,dailyLossAware:-10,dailyRealized:-10,entries:10,held:0,fresh:true,locks:{...EMPTY_LOCKS}});
 describe('explicit aggressive PAPER experiment',()=>{
  it.each([500,1000,2000])('scales daily goals and loss budget with funded principal %s, retaining accrued loss',capital=>{
   const budget=dailyPaperBudget(capital,-30,-40);
   expect(budget.profitTargetMinUsd).toBe(capital*.05);
   expect(budget.profitCapUsd).toBe(capital*.20);
-  expect(budget.lossLimitUsd).toBe(capital*.10);
-  expect(budget.remainingLossBudgetUsd).toBe(capital*.10-40);
+  expect(budget.lossLimitUsd).toBe(capital*.05);
+  expect(budget.remainingLossBudgetUsd).toBe(Math.max(0,capital*.05-40));
   const input={...riskInput(),referenceCapital:capital,equity:capital-40};
-  expect(evaluateDailyPaperRisk({...input,dailyLossAware:-capital*.10}).state).toBe('DAILY_LOSS_LOCKED');
+  expect(evaluateDailyPaperRisk({...input,dailyLossAware:-capital*.05}).state).toBe('DAILY_LOSS_LOCKED');
   expect(evaluateDailyPaperRisk({...input,dailyRealized:capital*.05}).entryAllowed).toBe(true);
   expect(evaluateDailyPaperRisk({...input,dailyRealized:capital*.20}).state).toBe('PROFIT_CAP_LOCKED');
   expect(evaluateDailyPaperRisk({...input,locks:{...EMPTY_LOCKS,dailyLockState:'DAILY_LOSS_LOCKED'}}).entryAllowed).toBe(false);
@@ -81,7 +81,7 @@ describe('explicit aggressive PAPER experiment',()=>{
   const d={sessionRaw:JSON.stringify(session),policyAppliedAt:new Date(now).toISOString(),policyVersion:DAILY_PAPER_POLICY.version,
     previous:initialVirtualPaper400RiskState(session.session),rows:[],now:new Date(now),engineMode:'PAPER',
     markets:MARKET_BY_SYMBOL_SERVER,quote:()=>({priceUsd:50025,ageMs:0}),shouldContinue:()=>true,
-    persistRisk:async()=>{},readSignals:async()=>[],readDailyCandidates:async()=>[dailyPaperCandidate('BTC',raw(),now)!],
+    persistRisk:async()=>{},readSignals:async()=>[],readDailyCandidates:async()=>[{...dailyPaperCandidate('BTC',raw(),now)!,quality:{eligible:true,reason:'TEST_TREND',regime:'TREND' as const,efficiency:.6,atrFraction:.004}}],
     readCost:async(_s:string,_l:boolean,n:number)=>virtualReplayCost(now,n),claim,open,close:async()=>true,reduce:async()=>true};
   expect((await runVirtualPaperDailyCycle(d)).status).toBe('OPENED');expect(open).toHaveBeenCalledTimes(1);
   expect((await runVirtualPaperDailyCycle({...d,engineMode:'LIVE'})).status).toBe('BLOCKED');

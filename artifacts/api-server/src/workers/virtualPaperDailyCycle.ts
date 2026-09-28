@@ -4,16 +4,18 @@ import type {DailyPaperCandidate} from './virtualPaperDailyCandidate';
 import {DAILY_PAPER_POLICY as policy,dailyPaperProfile} from './virtualPaperDailyPolicy';
 import {evaluateVirtualPaper400SessionState} from './virtualPaper400SessionState';
 import {evaluateVirtualPaper400Account} from './virtualPaper400Accounting';
-import {buildDailyTradePlan,DAILY_ENTRY_OPTIONS,MODE_DECISION_PREFIX,modeHoldingCost} from './virtualPaperTradingMode';
+import {buildDailyTradePlan,buildFilteredTradePlan,DAILY_ENTRY_OPTIONS,MODE_DECISION_PREFIX,modeHoldingCost} from './virtualPaperTradingMode';
+import type {PaperComparisonProposal} from './virtualPaperComparison';
 import {validateExecutionEligibleSnapshot} from '../lib/costSnapshot';
-export interface DailyCycleDeps extends VirtualPaper400CycleDeps {readDailyCandidates():Promise<DailyPaperCandidate[]>}
+export interface DailyCycleDeps extends VirtualPaper400CycleDeps {readDailyCandidates():Promise<DailyPaperCandidate[]>; recordComparison?(proposal:PaperComparisonProposal):void}
 export async function runVirtualPaperDailyCycle(d:DailyCycleDeps){
   const session=evaluateVirtualPaper400SessionState(d.sessionRaw);if(!session.state)throw Error('VIRTUAL_SESSION_INVALID');
   const account=evaluateVirtualPaper400Account({session:session.state.session,previous:d.previous,rows:d.rows,now:d.now,quote:d.quote,aggressiveDaily:true});
   const diagnostics:{symbol:string;reason:string;details?:string[]}[]=[];const entryStages:{symbol:string;stage:string}[]=[];
   const mode=d.tradingMode??'INTRADAY';
+  const riskPct=account.next.risk.consecutiveLossCount>=2 || (account.equityUsd??0)<account.ledger.fundedCapitalUsd*.8 ? .5 : 1;
   const outcome=(status:string,reason:string|null=null)=>({status,reason,diagnostics,entryStages,
-    policy:{...policy,...(d.policyVersion==='virtual400-daily/v3'?{version:'virtual400-daily/v3',cooldownMinutes:60,maxDailyEntries:24}:{}),...(['virtual400-daily/v4','virtual400-daily/v5'].includes(d.policyVersion??'')?{version:d.policyVersion}:{}),symbols:[...(d.markets?.keys()??[])],appliedAt:d.policyAppliedAt},
+    policy:{...policy,riskPerTradePct:riskPct,...(d.policyVersion==='virtual400-daily/v3'?{version:'virtual400-daily/v3',cooldownMinutes:60,maxDailyEntries:24}:{}),...(['virtual400-daily/v4','virtual400-daily/v5','virtual400-daily/v6'].includes(d.policyVersion??'')?{version:d.policyVersion}:{}),symbols:[...(d.markets?.keys()??[])],appliedAt:d.policyAppliedAt},
     tradingMode:{mode,...DAILY_ENTRY_OPTIONS[mode],...(['virtual400-daily/v3','virtual400-daily/v4'].includes(d.policyVersion??'')&&mode==='INTRADAY'?{maxHoldHours:.5}:{})},at:d.now.toISOString(),mode:'VIRTUAL_PAPER_400' as const,
     realFundsUsed:false,costBasis:'SIMULATED / ESTIMATED' as const,
     account:{...account,held:account.held.map(r=>({id:r.id,symbol:r.symbol,side:r.side,sizeUsd:r.sizeInUsd,entryPrice:r.price,stopPrice:r.stopPriceUsd,takeProfitPrice:r.takeProfitPriceUsd}))}});
@@ -28,10 +30,13 @@ export async function runVirtualPaperDailyCycle(d:DailyCycleDeps){
   if(d.entryBlockedReason)return outcome('BLOCKED',d.entryBlockedReason);
   if(!account.evaluation.entryAllowed)return outcome(account.held.length?'NO_TRADE':'BLOCKED',account.evaluation.blockReasons.join('; '));
   if(account.lastOpenAtMs!==null&&d.now.getTime()-account.lastOpenAtMs<policy.cooldownMinutes*60_000)return outcome('NO_TRADE','PAPER_ENTRY_COOLDOWN');
-  const profile=dailyPaperProfile(account.equityUsd??0,d.policyAppliedAt!);
+  const profile=dailyPaperProfile(account.equityUsd??0,d.policyAppliedAt!,riskPct);
   const remainingDailyLoss=account.dailyBudget!.remainingLossBudgetUsd;
-  const budget=Math.min(profile.derivedLimits.maxRiskPerTradeUsd,remainingDailyLoss);
+  const weeklyRemaining=account.ledger.fundedCapitalUsd*.10+account.next.risk.weeklyRealizedNetPnlUsd;
+  const cumulativeRemaining=(account.equityUsd??0)-account.ledger.fundedCapitalUsd*.70;
+  const budget=Math.min(profile.derivedLimits.maxRiskPerTradeUsd,remainingDailyLoss,weeklyRemaining,cumulativeRemaining);
   const candidates=(await d.readDailyCandidates()).sort((a,b)=>Math.abs(b.momentum)-Math.abs(a.momentum));
+  const ranked: Array<{candidate:DailyPaperCandidate;score:number;plan:import('./virtualPaperTradingMode').VirtualTradePlan;cost:import('../lib/costSnapshot').CostSnapshot;requested:number;current:NonNullable<ReturnType<typeof d.quote>>;submitNow:Date}> = [];
   for(const candidate of candidates){
     const reject=(reason:string)=>diagnostics.push({symbol:candidate.symbol,reason,details:['AGGRESSIVE_PAPER_EXPERIMENT: 미검증 모멘텀 시험; 손실 포함 기록']});
     const now=d.clock?.()??d.now;const q=d.quote(candidate.symbol);const market=d.markets?.get(candidate.symbol);
@@ -54,14 +59,34 @@ export async function runVirtualPaperDailyCycle(d:DailyCycleDeps){
     const roundTrip=cost.positionFeeUsd+cost.estimatedExitFeeUsd+cost.executionFeeUsd+Math.max(0,cost.estimatedPriceImpactUsd)+Math.max(0,cost.estimatedExitPriceImpactUsd)+(holding??Infinity);
     if(!checked.ok||holding===null||roundTrip>2){reject('PAPER_EXPERIMENT_COST_CAP');continue;}
     const stop=current.priceUsd*(1-direction*distance);
-    const planned=buildDailyTradePlan({mode,entryPrice:current.priceUsd,structuralStop:stop,notionalUsd:requested,maxLeverage:10,estimatedRoundTripCostUsd:roundTrip,riskBudgetUsd:budget,openedAtMs:submitNow.getTime()});
+    const planInput={mode,entryPrice:current.priceUsd,structuralStop:stop,notionalUsd:requested,maxLeverage:10,estimatedRoundTripCostUsd:roundTrip,riskBudgetUsd:budget,openedAtMs:submitNow.getTime()};
+    const baseline=buildDailyTradePlan(planInput);
+    const planned=buildFilteredTradePlan(planInput);
+    if(baseline.ok)d.recordComparison?.({id:`${candidate.symbol}:${candidate.closedAt}`,symbol:candidate.symbol,side:candidate.side,entry:current.priceUsd,stop:stop,target:baseline.plan.tpPrice,notional:requested,cost:roundTrip,openedAt:submitNow.getTime(),expiresAt:baseline.plan.expiresAtMs,accepted:!!candidate.quality?.eligible&&planned.ok});
+    if(!candidate.quality?.eligible){reject(`PAPER_MARKET_QUALITY:${candidate.quality?.reason??'MISSING'}`);continue;}
     if(!planned.ok){reject(planned.reason);continue;}
     const plan=planned.plan;
     if(plan.collateralUsd>profile.derivedLimits.maxMarginPerTradeUsd){reject('PAPER_EXPERIMENT_MARGIN_CAP');continue;}
+    const netReward=requested*distance*2-roundTrip;
+    const netRisk=requested*distance+roundTrip;
+    // A transparent target/cost score, NOT a predicted return or fitted win probability.
+    const score=netReward/netRisk*(.5+candidate.quality.efficiency)-Math.max(0,cost.estimatedPriceImpactUsd)/netRisk;
+    ranked.push({candidate,score,plan,cost,requested,current,submitNow});
+  }
+  for(const {candidate,plan:rankedPlan,cost,requested,score} of ranked.sort((a,b)=>b.score-a.score)){
+    const reject=(reason:string)=>diagnostics.push({symbol:candidate.symbol,reason});
+    const submitNow=d.clock?.()??d.now;const current=d.quote(candidate.symbol);
+    const market=d.markets?.get(candidate.symbol);
+    if(submitNow.getTime()-candidate.evaluatedAt>60_000||!market||!current||!Number.isFinite(current.priceUsd)||current.priceUsd<=0||!Number.isFinite(current.ageMs)||current.ageMs<0||current.ageMs>60_000||Math.abs(current.priceUsd/candidate.referencePrice-1)>.02
+      ||!validateExecutionEligibleSnapshot(cost,{market:market.marketToken,isLong:candidate.side==='LONG',orderType:'MarketIncrease',notionalUsd:requested},submitNow.getTime()).ok){reject('PAPER_RANKED_QUOTE_CHANGED');continue;}
+    const refreshed=buildFilteredTradePlan({mode,entryPrice:current.priceUsd,structuralStop:current.priceUsd*(1-(candidate.side==='LONG'?1:-1)*candidate.stopFraction),notionalUsd:requested,maxLeverage:rankedPlan.leverage,estimatedRoundTripCostUsd:rankedPlan.estimatedRoundTripCostUsd!,riskBudgetUsd:budget,openedAtMs:submitNow.getTime()});
+    if(!refreshed.ok){reject(refreshed.reason);continue;}
+    const plan=refreshed.plan;
+    const stop=plan.structuralStop;
     const id=MODE_DECISION_PREFIX+'daily:'+createHash('sha256').update(`${session.state.session.sessionId}:${candidate.symbol}:${candidate.closedAt}`).digest('hex');
     if(d.rows.some(r=>r.openDecisionId===id)){reject('PAPER_EXPERIMENT_DUPLICATE');continue;}
-    const audit={mode:'VIRTUAL_PAPER_400',policy,sessionId:session.state.session.sessionId,candidate,
-      signal:{strategyId:'PAPER_DAILY_MOMENTUM_EXPERIMENT',reasons:[`AGGRESSIVE_PAPER_EXPERIMENT: ${candidate.momentum} completed-candle momentum; losses retained; not ensemble success`],strategyTargetPrice:plan.tpPrice},
+    const audit={mode:'VIRTUAL_PAPER_400',policy,sessionId:session.state.session.sessionId,candidate,selection:{score,kind:'NET_TARGET_COST_QUALITY_NOT_EXPECTANCY',riskPct},
+      signal:{strategyId:'PAPER_COST_FILTERED_EXPERIMENT',reasons:[`AGGRESSIVE_PAPER_EXPERIMENT: ${candidate.momentum} completed-candle momentum; losses retained; not ensemble success`],strategyTargetPrice:plan.tpPrice},
       tradePlan:plan,sizing:{finalNotionalUsd:requested},cost};
     if(!d.shouldContinue()||!await d.claim(id,audit)){reject('PAPER_EXPERIMENT_CLAIM_EXISTS');continue;}
     if(!d.shouldContinue())return outcome('STOPPED');
@@ -69,7 +94,7 @@ export async function runVirtualPaperDailyCycle(d:DailyCycleDeps){
     const result=await d.open({strategy:session.state.session.strategyTag,decisionId:id,symbol:candidate.symbol,side:candidate.side,
       sizeUsd:requested,leverage:plan.leverage,quote:current,stopPriceUsd:stop,tpPriceUsd:plan.tpPrice,
       openPositionCount:account.held.length,maxConcurrentPositions:1,riskProfileSnapshot:profile,
-      entriesManilaDay:account.next.risk.dailyEntryCount,nowMs:submitNow.getTime()},cost);
+      entriesManilaDay:account.next.risk.dailyEntryCount,nowMs:plan.openedAtMs},cost);
     return outcome(result.ok?'OPENED':'BLOCKED',result.ok?'AGGRESSIVE_PAPER_EXPERIMENT':result.reason);
   }
   return outcome('NO_TRADE',candidates.length?'PAPER_EXPERIMENT_ENTRY_REJECTED':'PAPER_EXPERIMENT_CANDLE_UNAVAILABLE');

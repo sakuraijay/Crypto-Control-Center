@@ -49,6 +49,12 @@ export const REASON_LABELS: Record<string, string> = {
   MODE_TIME_EXIT: '설정한 최대 보유시간 도달', MODE_PLAN_UNAVAILABLE: '진입 설정 확인 실패에 따른 보호 청산',
 };
 export function explainReason(reason: string | null | undefined): string {
+  if (String(reason).includes('PAPER_DAILY_LOSS_5_PERCENT')) return '일일 손실 5% 도달 · 다음 PHT 거래일까지 신규 진입 중지';
+  if (String(reason).includes('PAPER_CUMULATIVE_LOSS_30_PERCENT')) return '누적 손실 한도 도달 · 운용 재검토 필요';
+  if (String(reason).includes('PAPER_WEEKLY_LOSS_10_PERCENT')) return '주간 손실 한도 도달 · 신규 진입 중지';
+  if (String(reason).includes('PAPER_LOSS_STREAK_COOLDOWN')) return '연속 손실 이후 4시간 동안 신규 진입을 쉽니다';
+  if (String(reason).includes('PAPER_MARKET_QUALITY')) return '추세·변동성·진입 확인 조건을 기다립니다';
+  if (String(reason).includes('PAPER_NET_REWARD_RISK')) return '비용 차감 후 손익비가 부족해 진입하지 않습니다';
   if (String(reason).includes('PAPER_DAILY_PROFIT_20_PERCENT')) return '일일 실현 순수익 20% 도달 · 다음 PHT 거래일까지 신규 진입 중지';
   if (!reason) return '서버 판단을 확인하고 있습니다.';
   if (REASON_LABELS[reason]) return REASON_LABELS[reason];

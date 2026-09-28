@@ -88,9 +88,10 @@ describe('virtual runtime routing and durable account boundary', () => {
     let calls=0;
     await maybeRunVirtualPaper400Cycle({...args,quote:()=>({priceUsd:50000-100*calls++,ageMs:0})});
     expect(calls).toBeGreaterThan(1);
+    expect(JSON.parse(fixture.rows.get(`virtual_paper_400_policy_v1:${active.session.sessionId}`)!).version).toBe('virtual400-daily/v6');
     const account=JSON.parse(fixture.rows.get(VIRTUAL_PAPER_400_RUNTIME_KEY)!).account;
     expect(account.dailyBudget.lossAwareNetPnlUsd).toBe(account.next.risk.dailyLossAwareNetPnlUsd);
-    expect(account.dailyBudget.remainingLossBudgetUsd).toBe(40+account.next.risk.dailyLossAwareNetPnlUsd);
+    expect(account.dailyBudget.remainingLossBudgetUsd).toBe(20+account.next.risk.dailyLossAwareNetPnlUsd);
   });
   it('persists diagnostic coverage across cycles and preserves corrupt evidence without disabling the runtime', async () => {
     const active = buildActiveVirtualPaper400SessionState('diagnostic-restore', new Date(Date.now() - 60_000));
@@ -115,12 +116,12 @@ describe('virtual runtime routing and durable account boundary', () => {
     fixture.rows.set(`virtual_paper_400_policy_v1:${active.session.sessionId}`,JSON.stringify({version:'virtual400-daily/v5',appliedAt:active.session.startedAt,sessionId:active.session.sessionId}));
     await maybeRunVirtualPaper400Cycle({...args,dailyExperiment:true});
     const key=`virtual_paper_400_policy_v1:${active.session.sessionId}`;
-    expect(JSON.parse(fixture.rows.get(key)!).version).toBe('virtual400-daily/v6');
+    expect(JSON.parse(fixture.rows.get(key)!).version).toBe('virtual400-daily/v7');
     expect(JSON.parse(fixture.rows.get(VIRTUAL_PAPER_400_RUNTIME_KEY)!).reason).toBe('PAPER_EXPERIMENT_CANDLE_UNAVAILABLE');
-    expect(JSON.parse(fixture.rows.get(VIRTUAL_PAPER_400_RUNTIME_KEY)!).account.dailyBudget).toMatchObject({basis:'FUNDED_PRINCIPAL',referenceCapitalUsd:400,profitTargetMinUsd:20,profitCapUsd:80,lossLimitUsd:40});
+    expect(JSON.parse(fixture.rows.get(VIRTUAL_PAPER_400_RUNTIME_KEY)!).account.dailyBudget).toMatchObject({basis:'FUNDED_PRINCIPAL',referenceCapitalUsd:400,profitTargetMinUsd:20,profitCapUsd:80,lossLimitUsd:20});
     expect(runStrategyShadowWorkerReadOnly).not.toHaveBeenCalled();
     await maybeRunVirtualPaper400Cycle(args);
-    expect(JSON.parse(fixture.rows.get(key)!).version).toBe('virtual400-daily/v6');
+    expect(JSON.parse(fixture.rows.get(key)!).version).toBe('virtual400-daily/v7');
     expect(fixture.rows.get(VIRTUAL_PAPER_400_SESSION_STATE_KEY)).toBe(raw);
   });
   it('retains the 2x policy and protection of existing inventory until it is settled', async () => {
@@ -343,7 +344,7 @@ it('credits only the authorized session once under the shared worker lock, resto
     fixture.acquired=true;await maybeRunVirtualPaper400Cycle({...args,dailyExperiment:true});
     const first=JSON.parse(fixture.rows.get(VIRTUAL_PAPER_400_RUNTIME_KEY)!);
     expect(first.account.ledger).toMatchObject({initialEquityUsd:400,netContributionsUsd:100,realizedEquityUsd:500,realizedNetPnlUsd:0});
-    expect(first.policy).toMatchObject({version:'virtual400-daily/v6',dailyProfitCapPct:20,cooldownMinutes:45,maxDailyEntries:32});
+    expect(first.policy).toMatchObject({version:'virtual400-daily/v7',dailyProfitCapPct:20,cooldownMinutes:45,maxDailyEntries:32});
     await maybeRunVirtualPaper400Cycle(args);
     const restored=JSON.parse(fixture.rows.get(VIRTUAL_PAPER_400_RUNTIME_KEY)!);
     expect(restored.account.ledger.realizedEquityUsd).toBe(500);
