@@ -6,6 +6,8 @@ import { applyAuthorizedPaperCredit } from './virtualPaperContribution';
 import { DAILY_PAPER_POLICY } from './virtualPaperDailyPolicy';
 import { runVirtualPaperDailyCycle, type DailyCycleDeps } from './virtualPaperDailyCycle';
 import { dailyPaperCandidate } from './virtualPaperDailyCandidate';
+import { readPatternCandles } from '../intel/patterns/patternReader';
+import { patternSummary } from '../intel/patterns/chartPatterns';
 import { advanceVirtualDiagnostics, virtualDiagnosticsKey } from './virtualPaper400Diagnostics';
 import type { StrategyShadowRecord } from '../intel/strategyShadowAdapterV2';
 import { discoverVirtualGmxUniverse, selectVirtualAnalysisBatch, VIRTUAL_GMX_SYMBOLS } from '../lib/virtualGmxUniverse';
@@ -166,9 +168,13 @@ export async function maybeRunVirtualPaper400Cycle(args: {
         await write(rotationKey,{...rotation,...Object.fromEntries(symbols.map(s=>[s,Date.now()]))});
         activity.stage(run,'ANALYZING_MARKETS',symbols);
         const {fetchGmxCandles}=await import('../routes/gmx');
-        const candidates=await Promise.all(symbols.map(async symbol=>dailyPaperCandidate(symbol,await fetchGmxCandles(symbol,'15m',20),Date.now())));
+        const candidates=await Promise.all(symbols.map(async symbol=>{
+          const data=await readPatternCandles(symbol,{read,write,fetch:fetchGmxCandles,now:Date.now});
+          const candidate=dailyPaperCandidate(symbol,data.raw,Date.now());
+          return candidate?{...candidate,patternAnalysis:data.analysis}:null;
+        }));
         analysis=symbols.map((symbol,i)=>({symbol,reason:candidates[i]
-          ? `AGGRESSIVE_PAPER_EXPERIMENT: ${candidates[i]!.side}; completed-candle momentum ${candidates[i]!.momentum}; 미검증 시험 거래`
+          ? `AGGRESSIVE_PAPER_EXPERIMENT: ${candidates[i]!.side}; ${patternSummary(candidates[i]!.patternAnalysis)}; 패턴은 미검증 참고 자료 · 거래량 확인 불가`
           : 'PAPER_EXPERIMENT_CANDLE_UNAVAILABLE'}));
         activity.analyzed(run,analysis.map((r,i)=>({...r,evaluated:!!candidates[i]})));
         return candidates.filter((c):c is NonNullable<typeof c>=>c!==null);

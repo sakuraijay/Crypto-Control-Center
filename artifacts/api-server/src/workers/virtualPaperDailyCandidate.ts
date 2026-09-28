@@ -1,5 +1,6 @@
 /** Transparent experimental turnover rule, NOT an ensemble signal or confidence estimate. */
 export interface DailyPaperCandidate { symbol:string; source:'gmx-official-api'; closedAt:number;
+  patternAnalysis?:import('../intel/patterns/chartPatterns').PatternAnalysis;
   evaluatedAt:number; side:'LONG'|'SHORT'; referencePrice:number; stopFraction:number; momentum:number;
   purpose:'AGGRESSIVE_PAPER_EXPERIMENT';
   quality?: { eligible:boolean; reason:string; regime:'TREND'|'RANGE'|'TRANSITION'; efficiency:number; atrFraction:number };  }

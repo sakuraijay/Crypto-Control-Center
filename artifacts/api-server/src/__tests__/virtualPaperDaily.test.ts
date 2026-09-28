@@ -86,6 +86,17 @@ describe('explicit aggressive PAPER experiment',()=>{
   expect((await runVirtualPaperDailyCycle(d)).status).toBe('OPENED');expect(open).toHaveBeenCalledTimes(1);
   expect((await runVirtualPaperDailyCycle({...d,engineMode:'LIVE'})).status).toBe('BLOCKED');
   expect((await runVirtualPaperDailyCycle({...d,shouldContinue:()=>false})).status).toBe('BLOCKED');
-  claim.mockResolvedValue(false);await runVirtualPaperDailyCycle(d);expect(open).toHaveBeenCalledTimes(1);
+  const candidates=await d.readDailyCandidates();
+  const patternAnalysis={version:'paper-chart-reference/v1' as const,purpose:'REFERENCE_ONLY_UNVALIDATED' as const,evaluatedAt:now,
+    frames:[{timeframe:'15m' as const,status:'OK' as const,closedAt:now-10_000,bars:80,volumeConfirmation:'UNAVAILABLE' as const,
+      findings:[{id:'BULLISH_ENGULFING',family:'CANDLE' as const,direction:'LONG' as const,state:'SHAPE' as const,timeframe:'15m' as const,availableAt:now-10_000,trigger:null,invalidation:null,basis:'test'}]}]};
+  const rejected={...candidates[0],patternAnalysis,quality:{...candidates[0].quality,eligible:false,reason:'WEAK_MOMENTUM'}};
+  expect((await runVirtualPaperDailyCycle({...d,readDailyCandidates:async()=>[rejected]})).status).toBe('NO_TRADE');
+  expect(open).toHaveBeenCalledTimes(1);
+  const auditClaim=vi.fn(async(_id:string,_audit:unknown)=>true);
+  await runVirtualPaperDailyCycle({...d,claim:auditClaim,readDailyCandidates:async()=>[{...candidates[0],patternAnalysis}]});
+  expect(auditClaim.mock.calls[0][1]).toMatchObject({candidate:{patternAnalysis},selection:{patternReferenceAdjustment:1/3*.1}});
+  expect(open).toHaveBeenCalledTimes(2);
+  claim.mockResolvedValue(false);await runVirtualPaperDailyCycle(d);expect(open).toHaveBeenCalledTimes(2);
  });
 });

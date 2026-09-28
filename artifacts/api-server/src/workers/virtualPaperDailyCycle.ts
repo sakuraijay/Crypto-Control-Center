@@ -1,4 +1,5 @@
 import {createHash} from 'node:crypto';
+import {patternReferenceAdjustment} from '../intel/patterns/chartPatterns';
 import type {VirtualPaper400CycleDeps} from './virtualPaper400Cycle';
 import type {DailyPaperCandidate} from './virtualPaperDailyCandidate';
 import {DAILY_PAPER_POLICY as policy,dailyPaperProfile,dailyPaperRiskPct} from './virtualPaperDailyPolicy';
@@ -71,7 +72,8 @@ export async function runVirtualPaperDailyCycle(d:DailyCycleDeps){
     const netReward=requested*distance*2-roundTrip;
     const netRisk=requested*distance+roundTrip;
     // A transparent target/cost score, NOT a predicted return or fitted win probability.
-    const score=netReward/netRisk*(.5+candidate.quality.efficiency)-Math.max(0,cost.estimatedPriceImpactUsd)/netRisk;
+    const score=netReward/netRisk*(.5+candidate.quality.efficiency)-Math.max(0,cost.estimatedPriceImpactUsd)/netRisk
+      +patternReferenceAdjustment(candidate.patternAnalysis,candidate.side,submitNow.getTime());
     ranked.push({candidate,score,plan,cost,requested,current,submitNow});
   }
   for(const {candidate,plan:rankedPlan,cost,requested,score} of ranked.sort((a,b)=>b.score-a.score)){
@@ -86,7 +88,8 @@ export async function runVirtualPaperDailyCycle(d:DailyCycleDeps){
     const stop=plan.structuralStop;
     const id=MODE_DECISION_PREFIX+'daily:'+createHash('sha256').update(`${session.state.session.sessionId}:${candidate.symbol}:${candidate.closedAt}`).digest('hex');
     if(d.rows.some(r=>r.openDecisionId===id)){reject('PAPER_EXPERIMENT_DUPLICATE');continue;}
-    const audit={mode:'VIRTUAL_PAPER_400',policy,sessionId:session.state.session.sessionId,candidate,selection:{score,kind:'NET_TARGET_COST_QUALITY_NOT_EXPECTANCY',riskPct},
+    const audit={mode:'VIRTUAL_PAPER_400',policy,sessionId:session.state.session.sessionId,candidate,selection:{score,kind:'NET_TARGET_COST_QUALITY_NOT_EXPECTANCY',riskPct,
+      ...(candidate.patternAnalysis?{patternReferenceAdjustment:patternReferenceAdjustment(candidate.patternAnalysis,candidate.side,submitNow.getTime())}:{})},
       signal:{strategyId:'PAPER_COST_FILTERED_EXPERIMENT',reasons:[`AGGRESSIVE_PAPER_EXPERIMENT: ${candidate.momentum} completed-candle momentum; losses retained; not ensemble success`],strategyTargetPrice:plan.tpPrice},
       tradePlan:plan,sizing:{finalNotionalUsd:requested},cost};
     if(!d.shouldContinue()||!await d.claim(id,audit)){reject('PAPER_EXPERIMENT_CLAIM_EXISTS');continue;}
