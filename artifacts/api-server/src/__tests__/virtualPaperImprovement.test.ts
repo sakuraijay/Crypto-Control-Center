@@ -1,5 +1,5 @@
 import {describe,it,expect} from 'vitest';
-import {dailyPaperBudget,evaluateDailyPaperRisk,dailyPaperProfile,isDailyPaperProfile} from '../workers/virtualPaperDailyPolicy';
+import {dailyPaperRiskPct,dailyPaperBudget,evaluateDailyPaperRisk,dailyPaperProfile,isDailyPaperProfile} from '../workers/virtualPaperDailyPolicy';
 import {EMPTY_LOCKS} from '../lib/riskStateMachine';
 import {dailyPaperCandidate} from '../workers/virtualPaperDailyCandidate';
 import {buildDailyTradePlan,buildFilteredTradePlan,parseVirtualTradePlan,FILTERED_PLAN_VERSION,tradingModeExit} from '../workers/virtualPaperTradingMode';
@@ -22,6 +22,11 @@ describe('PAPER v7 guardrails and prospective comparison',()=>{
   expect(evaluateDailyPaperRisk({...risk,consecutiveLosses:3,lastCloseAtMs:now-4*3600_000}).entryAllowed).toBe(true);
   expect(dailyPaperProfile(750,'2026-09-29T00:00:00Z',.5).derivedLimits.maxRiskPerTradeUsd).toBe(3.75);
   expect(isDailyPaperProfile(dailyPaperProfile(750,'2026-09-29T00:00:00Z',2))).toBe(true);
+ });
+ it('restores the one-percent tier after the loss recovery period instead of permanently freezing a losing account',()=>{
+  expect(dailyPaperRiskPct(2,now-1,now)).toBe(.5);
+  expect(dailyPaperRiskPct(2,now-4*3600_000,now)).toBe(1);
+  expect(dailyPaperRiskPct(1,now-1,now)).toBe(1);
  });
  it('rejects tiny signals even though legacy candidate exists, and ignores unfinished candles',()=>{
   const step=900_000,prices=Array.from({length:16},(_,i)=>[(Math.floor(now/step)-16+i)*step/1000,100+i*.001,100.3+i*.001,99.7+i*.001,100.01+i*.001]);

@@ -1,7 +1,7 @@
 import {createHash} from 'node:crypto';
 import type {VirtualPaper400CycleDeps} from './virtualPaper400Cycle';
 import type {DailyPaperCandidate} from './virtualPaperDailyCandidate';
-import {DAILY_PAPER_POLICY as policy,dailyPaperProfile} from './virtualPaperDailyPolicy';
+import {DAILY_PAPER_POLICY as policy,dailyPaperProfile,dailyPaperRiskPct} from './virtualPaperDailyPolicy';
 import {evaluateVirtualPaper400SessionState} from './virtualPaper400SessionState';
 import {evaluateVirtualPaper400Account} from './virtualPaper400Accounting';
 import {buildDailyTradePlan,buildFilteredTradePlan,DAILY_ENTRY_OPTIONS,MODE_DECISION_PREFIX,modeHoldingCost} from './virtualPaperTradingMode';
@@ -13,7 +13,8 @@ export async function runVirtualPaperDailyCycle(d:DailyCycleDeps){
   const account=evaluateVirtualPaper400Account({session:session.state.session,previous:d.previous,rows:d.rows,now:d.now,quote:d.quote,aggressiveDaily:true});
   const diagnostics:{symbol:string;reason:string;details?:string[]}[]=[];const entryStages:{symbol:string;stage:string}[]=[];
   const mode=d.tradingMode??'INTRADAY';
-  const riskPct=account.next.risk.consecutiveLossCount>=2 || (account.equityUsd??0)<account.ledger.fundedCapitalUsd*.8 ? .5 : 1;
+  const lastCloseAtMs=d.rows.filter(r=>r.action==='CLOSE'&&r.closeKind==='FULL').reduce<number|null>((latest,r)=>Math.max(latest??0,new Date(r.timestamp).getTime()),null);
+  const riskPct=dailyPaperRiskPct(account.next.risk.consecutiveLossCount,lastCloseAtMs,d.now.getTime());
   const outcome=(status:string,reason:string|null=null)=>({status,reason,diagnostics,entryStages,
     policy:{...policy,riskPerTradePct:riskPct,...(d.policyVersion==='virtual400-daily/v3'?{version:'virtual400-daily/v3',cooldownMinutes:60,maxDailyEntries:24}:{}),...(['virtual400-daily/v4','virtual400-daily/v5','virtual400-daily/v6'].includes(d.policyVersion??'')?{version:d.policyVersion}:{}),symbols:[...(d.markets?.keys()??[])],appliedAt:d.policyAppliedAt},
     tradingMode:{mode,...DAILY_ENTRY_OPTIONS[mode],...(['virtual400-daily/v3','virtual400-daily/v4'].includes(d.policyVersion??'')&&mode==='INTRADAY'?{maxHoldHours:.5}:{})},at:d.now.toISOString(),mode:'VIRTUAL_PAPER_400' as const,

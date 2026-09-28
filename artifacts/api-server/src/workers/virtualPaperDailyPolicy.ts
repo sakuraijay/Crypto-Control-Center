@@ -24,6 +24,10 @@ export function dailyPaperProfile(capital: number, appliedAt: string, riskPct = 
     maxLeverage:10,maxTotalExposureUsd:Math.min(1000,c*2.5),allocatedTradingCapitalUsd:c,maxRiskPerTradeUsd:c*riskPct/100,
   }};
 }
+/** Loss recovery is time-bounded: a historical drawdown must not permanently freeze the small-account tier. */
+export function dailyPaperRiskPct(consecutiveLosses:number,lastCloseAtMs:number|null,nowMs:number):.5|1 {
+  return consecutiveLosses>=2 && lastCloseAtMs!==null && nowMs-lastCloseAtMs<4*3600_000 ? .5 : 1;
+}
 export function isDailyPaperProfile(value: unknown): value is AppliedRiskProfileSnapshot {
   if (!value || typeof value!=='object') return false;
   const p=value as AppliedRiskProfileSnapshot;

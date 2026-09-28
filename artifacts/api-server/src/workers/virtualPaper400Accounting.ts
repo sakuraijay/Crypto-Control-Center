@@ -123,12 +123,17 @@ export function evaluateVirtualPaper400Account(args: {
   ].sort((a, b) => a.at - b.at);
   for (const { at, net, contribution } of cashFlows) {
     cumulative += net;
-    if(!contribution)sessionLossStreak=net<0?sessionLossStreak+1:0;
+
     hwm = Math.max(hwm, cumulative);
     if (at < dayStart) dayOpening += net;
     else if (!contribution) { dailyNet += net; losses = net < 0 ? losses + 1 : 0; }
     if (at < weekStart) weekOpening += net;
     else if (!contribution) weeklyNet += net;
+  }
+  // Count completed positions, not partial settlements, for recovery pauses.
+  for(const full of closes.filter(r=>r.closeKind==='FULL')){
+    const net=closes.filter(r=>r.closesTradeId===full.closesTradeId).reduce((n,r)=>n+fixedBetaNumber(r.netPnlEstimatedUsd),0);
+    sessionLossStreak=net<0?sessionLossStreak+1:0;
   }
   const held = opens.filter(row => row.closeTime === 0);
   let unrealizedNet = 0;
@@ -163,7 +168,7 @@ export function evaluateVirtualPaper400Account(args: {
     dailyEntryCount: opens.filter(row => new Date(row.timestamp).getTime() >= dayStart).length,
     consecutiveLossCount: args.aggressiveDaily?sessionLossStreak:losses, lastUpdatedAt: now.toISOString() };
   const evaluation: RiskEvaluationResult = args.aggressiveDaily ? evaluateDailyPaperRisk({equity,referenceCapital:ledger.fundedCapitalUsd,
-    dailyLossAware:risk.dailyLossAwareNetPnlUsd,dailyRealized:dailyNet,entries:risk.dailyEntryCount,held:held.length,fresh:quotesFresh,locks:risk.locks,weeklyLossAware:weeklyNet+Math.min(unrealizedNet,0),consecutiveLosses:risk.consecutiveLossCount,lastCloseAtMs:closes.length?new Date(closes.at(-1)!.timestamp).getTime():undefined,nowMs}) : evaluateRiskState({
+    dailyLossAware:risk.dailyLossAwareNetPnlUsd,dailyRealized:dailyNet,entries:risk.dailyEntryCount,held:held.length,fresh:quotesFresh,locks:risk.locks,weeklyLossAware:weeklyNet+Math.min(unrealizedNet,0),consecutiveLosses:risk.consecutiveLossCount,lastCloseAtMs:closes.some(r=>r.closeKind==='FULL')?new Date(closes.filter(r=>r.closeKind==='FULL').at(-1)!.timestamp).getTime():undefined,nowMs}) : evaluateRiskState({
     dailyRiskCapitalUsd: Math.min(ledger.fundedCapitalUsd, risk.startOfDayEquityUsd),
     weeklyRiskCapitalUsd: Math.min(ledger.fundedCapitalUsd, risk.startOfWeekEquityUsd),
     currentEquityUsd: equity, newHardStopEvaluationAllowed: true,
