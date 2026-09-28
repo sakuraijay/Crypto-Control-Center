@@ -23,10 +23,14 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 const dbState = vi.hoisted(() => ({
   rows: [] as Record<string, unknown>[],
   selectFail: false,
+  selectCalls: 0,
+  selectGate: null as Promise<void> | null,
   updateCount: 1,
 }));
 vi.mock('@workspace/db', () => {
   const limit = vi.fn(async () => {
+    dbState.selectCalls += 1;
+    if (dbState.selectGate) await dbState.selectGate;
     if (dbState.selectFail) throw new Error('db down');
     return dbState.rows;
   });
@@ -145,8 +149,11 @@ const deps = (transport: GmxApiTransport, onchain: unknown = null) =>
   ({ transport, onchain, nowMs: () => Date.now() }) as never;
 
 beforeEach(() => {
+  stopPeriodicGmxApiReconciliation();
   dbState.rows = [];
   dbState.selectFail = false;
+  dbState.selectCalls = 0;
+  dbState.selectGate = null;
   dbState.updateCount = 1;
   transitionSpy.mockClear();
   transitionSpy.mockResolvedValue({ ok: true } as never);
@@ -607,6 +614,44 @@ describe('periodic reconciliation lifecycle', () => {
       expect(vi.getTimerCount()).toBe(1);
     } finally {
       stopPeriodicGmxApiReconciliation();
+      vi.useRealTimers();
+    }
+  });
+
+  it('느린 scan 중 후속 tick은 중복 실행하지 않고 완료 후 재개한다', async () => {
+    vi.useFakeTimers();
+    const previousReadonly = process.env.GMX_API_READONLY_ENABLED;
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    try {
+      process.env.GMX_API_READONLY_ENABLED = 'true';
+      dbState.rows = [];
+      dbState.selectCalls = 0;
+      dbState.selectGate = gate;
+
+      startPeriodicGmxApiReconciliation(1_000);
+      vi.advanceTimersByTime(1_000);
+      await Promise.resolve();
+      expect(dbState.selectCalls).toBe(1);
+
+      vi.advanceTimersByTime(3_000);
+      await Promise.resolve();
+      expect(dbState.selectCalls).toBe(1);
+
+      release();
+      await gate;
+      await Promise.resolve();
+      await Promise.resolve();
+
+      vi.advanceTimersByTime(1_000);
+      await Promise.resolve();
+      expect(dbState.selectCalls).toBe(2);
+    } finally {
+      release();
+      stopPeriodicGmxApiReconciliation();
+      dbState.selectGate = null;
+      if (previousReadonly === undefined) delete process.env.GMX_API_READONLY_ENABLED;
+      else process.env.GMX_API_READONLY_ENABLED = previousReadonly;
       vi.useRealTimers();
     }
   });
