@@ -1,4 +1,5 @@
 import {paperPerformance} from './virtualPaperPerformance';
+import {virtualTradeEvidence} from './virtualTradeEvidence';
 import {restorePaperComparison,addPaperComparison,advancePaperComparison,summarizePaperComparison} from './virtualPaperComparison';
 import { buildVirtualPaperCalendar } from './virtualPaperCalendar';
 import { PAPER_LEARNING_CONTRACT } from './virtualPaperLearningDataset';
@@ -264,15 +265,21 @@ export async function maybeRunVirtualPaper400Cycle(args: {
       .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()).slice(0, 10).map(async close => {
         const open = finalRows.find(row => row.id === close.closesTradeId);
         const auditRaw = open?.openDecisionId && (open.openDecisionId.startsWith('vp400:') || open.openDecisionId.startsWith(MODE_DECISION_PREFIX)) ? await read(open.openDecisionId) : null;
-        let audit: { signal?: { strategyId?: string; reasons?: string[] }; sizing?: { finalNotionalUsd?: number }; cost?: { totalEstimatedRoundTripCostUsd?: number } } | null = null;
+        let audit: { signal?: { strategyId?: string; reasons?: string[] }; sizing?: { finalNotionalUsd?: number }; cost?: { totalEstimatedRoundTripCostUsd?: number }; tradePlan?:{plannedRiskUsd?:number;notionalUsd?:number;collateralUsd?:number;leverage?:number;maxHoldHours?:number} } | null = null;
         try { audit = auditRaw ? JSON.parse(auditRaw) : null; } catch { /* unavailable, never fake reasons */ }
-        const priorRisk = open && audit?.cost && audit.sizing ? Number(audit.sizing.finalNotionalUsd)
+        const calculatedRisk = open && audit?.cost && audit.sizing ? Number(audit.sizing.finalNotionalUsd)
           * Math.abs(Number(open.price) - Number(open.stopPriceUsd)) / Number(open.price)
           + Number(audit.cost.totalEstimatedRoundTripCostUsd) : null;
+        const recordedRisk=audit?.tradePlan?.plannedRiskUsd;
+        const priorRisk=typeof recordedRisk==='number'&&Number.isFinite(recordedRisk)&&recordedRisk>0?recordedRisk:calculatedRisk;
         return { id: close.id, symbol: close.symbol, side: close.side, openedAt: open?.timestamp ?? null,
           closedAt: close.timestamp, entryPrice: open?.price ?? null, exitPrice: close.price,
           stopPrice: open?.stopPriceUsd ?? null, targetPrice: open?.takeProfitPriceUsd ?? null,
           strategy: audit?.signal?.strategyId ?? null, reasons: audit?.signal?.reasons ?? [],
+          entryEvidence:open?virtualTradeEvidence(audit,open.symbol,open.side,new Date(open.timestamp).getTime()):null,
+          entryNotionalUsd:open?.sizeInUsd??null,settledNotionalUsd:close.sizeInUsd,
+          leverage:open?.leverage??null,collateralUsd:open?.collateralUsd??null,
+          holdingMinutes:open?Math.max(0,(new Date(close.timestamp).getTime()-new Date(open.timestamp).getTime())/60_000):null,
           closeReason: close.closeReason, grossPnlUsd: close.pnl, netPnlUsd: close.netPnlEstimatedUsd,
           entryCostUsd: close.estEntryCostUsd, exitCostUsd: close.estExitCostUsd, holdingCostUsd: close.estHoldingCostUsd,
           plannedRiskUsd: priorRisk !== null && Number.isFinite(priorRisk) ? priorRisk : null,

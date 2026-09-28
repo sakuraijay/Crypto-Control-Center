@@ -4,6 +4,7 @@ export const NAV_GROUPS = [
     { href: '/', label: '오버뷰', english: 'Overview', icon: LayoutDashboard, testId: 'dashboard' },
     { href: '/watchlist', label: '시장 탐색', english: 'Markets', icon: Radar, testId: 'watchlist' },
     { href: '/activity', label: '거래 기록', english: 'Activity', icon: History, testId: 'activity' },
+    { href: '/patterns', label: 'CCC 패턴 탐지', english: 'Pattern Library', icon: BrainCircuit, testId: 'patterns' },
     { href: '/calendar', label: '수익 달력', english: 'PnL Calendar', icon: CalendarDays, testId: 'calendar' },
   ] },
   { label: 'RESEARCH & CONTROL', items: [

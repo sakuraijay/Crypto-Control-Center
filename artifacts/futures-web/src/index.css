@@ -322,6 +322,13 @@ button:focus-visible, a:focus-visible, summary:focus-visible, select:focus-visib
 @media (prefers-reduced-motion: reduce) { .ccc-shell-body,.ccc-sidebar { transition: none; }.ccc-overview .animate-spin { animation: none; } }
 
 .ccc-dialog { max-height: 90dvh; overflow-y: auto; }
+.ccc-pattern-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:16px; }
+.ccc-pattern-tile { padding:16px; border:1px solid #29323b; border-radius:12px; background:#141a1e; text-align:left; color:#f1f5f2; transition:border-color .15s,background .15s; min-width:0; }
+.ccc-pattern-tile:hover { border-color:#8be0b4; background:#19251f; }
+.ccc-pattern-tile:focus-visible { outline:2px solid #8be0b4; outline-offset:4px; }
+.ccc-pattern-tile>strong { font-size:14px; }
+@media(max-width:1100px) { .ccc-pattern-grid { grid-template-columns:repeat(3,minmax(0,1fr)); } }
+@media(max-width:760px) { .ccc-pattern-grid { grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }.ccc-pattern-tile { padding:12px; } }
 
 /* Figma CCC / AI analysis activity (20:22): server observations only. */
 .ccc-ai-activity { padding: 24px; display: flex; flex-direction: column; gap: 16px; }
