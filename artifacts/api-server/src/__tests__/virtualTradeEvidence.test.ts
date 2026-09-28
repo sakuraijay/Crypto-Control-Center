@@ -1,11 +1,18 @@
 import {describe,it,expect} from 'vitest';
-import {virtualTradeEvidence} from '../workers/virtualTradeEvidence';
+import {virtualTradeEvidence,virtualEntryAmounts} from '../workers/virtualTradeEvidence';
 const now=Date.parse('2026-09-29T00:00:05Z');
 const audit=()=>({secret:'MUST_NOT_LEAK',candidate:{symbol:'BTC',side:'LONG',source:'gmx-official-api',evaluatedAt:now,closedAt:now-5000,momentum:.003,
   quality:{regime:'TREND',eligible:true,efficiency:.5,atrFraction:.003},patternAnalysis:{version:'paper-chart-reference/v1',purpose:'REFERENCE_ONLY_UNVALIDATED',evaluatedAt:now,
     frames:[{timeframe:'1h',status:'OK',closedAt:now-5000,bars:240,findings:[{id:'DOUBLE_BOTTOM',direction:'LONG',timeframe:'1h',state:'BREAKOUT',availableAt:now-5000,trigger:100,invalidation:95,basis:'recorded'},
       {id:'DOUBLE_TOP',direction:'SHORT',timeframe:'1h',state:'BREAKOUT',availableAt:now-5000,trigger:100,invalidation:105,basis:'opposing'}]}]}},selection:{patternReferenceAdjustment:0}});
 describe('immutable entry evidence projection',()=>{
+  it('uses original audited amounts, never mutable remaining-position or close sizes',()=>{
+    const raw={tradePlan:{notionalUsd:1000,collateralUsd:100},sizeInUsd:300,collateralUsd:30};
+    expect(virtualEntryAmounts(raw)).toEqual({entryNotionalUsd:'1000',collateralUsd:'100'});
+    expect(virtualEntryAmounts({sizing:{finalNotionalUsd:800},sizeInUsd:240})).toEqual({entryNotionalUsd:'800',collateralUsd:null});
+    expect(virtualEntryAmounts({sizeInUsd:300,collateralUsd:30})).toEqual({entryNotionalUsd:null,collateralUsd:null});
+    expect(virtualEntryAmounts({tradePlan:{notionalUsd:Infinity,collateralUsd:-1}})).toEqual({entryNotionalUsd:null,collateralUsd:null});
+  });
   it('preserves supporting and opposing patterns, actual adjustment, and strips private audit fields',()=>{
     const r=virtualTradeEvidence(audit(),'BTC','LONG',now+1000)!;
     expect(r.patternStatus).toBe('RECORDED');expect(r.patternAdjustment).toBe(0);

@@ -1,5 +1,5 @@
 import {paperPerformance} from './virtualPaperPerformance';
-import {virtualTradeEvidence} from './virtualTradeEvidence';
+import {virtualTradeEvidence,virtualEntryAmounts} from './virtualTradeEvidence';
 import {restorePaperComparison,addPaperComparison,advancePaperComparison,summarizePaperComparison} from './virtualPaperComparison';
 import { buildVirtualPaperCalendar } from './virtualPaperCalendar';
 import { PAPER_LEARNING_CONTRACT } from './virtualPaperLearningDataset';
@@ -272,13 +272,15 @@ export async function maybeRunVirtualPaper400Cycle(args: {
           + Number(audit.cost.totalEstimatedRoundTripCostUsd) : null;
         const recordedRisk=audit?.tradePlan?.plannedRiskUsd;
         const priorRisk=typeof recordedRisk==='number'&&Number.isFinite(recordedRisk)&&recordedRisk>0?recordedRisk:calculatedRisk;
+        // OPEN size/collateral are reduced in-place on partial settlement. Only
+        // the immutable entry audit can supply the original amounts.
+        const entryAmounts=virtualEntryAmounts(audit);
         return { id: close.id, symbol: close.symbol, side: close.side, openedAt: open?.timestamp ?? null,
           closedAt: close.timestamp, entryPrice: open?.price ?? null, exitPrice: close.price,
           stopPrice: open?.stopPriceUsd ?? null, targetPrice: open?.takeProfitPriceUsd ?? null,
           strategy: audit?.signal?.strategyId ?? null, reasons: audit?.signal?.reasons ?? [],
           entryEvidence:open?virtualTradeEvidence(audit,open.symbol,open.side,new Date(open.timestamp).getTime()):null,
-          entryNotionalUsd:open?.sizeInUsd??null,settledNotionalUsd:close.sizeInUsd,
-          leverage:open?.leverage??null,collateralUsd:open?.collateralUsd??null,
+          ...entryAmounts,settledNotionalUsd:close.sizeInUsd,leverage:open?.leverage??null,
           holdingMinutes:open?Math.max(0,(new Date(close.timestamp).getTime()-new Date(open.timestamp).getTime())/60_000):null,
           closeReason: close.closeReason, grossPnlUsd: close.pnl, netPnlUsd: close.netPnlEstimatedUsd,
           entryCostUsd: close.estEntryCostUsd, exitCostUsd: close.estExitCostUsd, holdingCostUsd: close.estHoldingCostUsd,

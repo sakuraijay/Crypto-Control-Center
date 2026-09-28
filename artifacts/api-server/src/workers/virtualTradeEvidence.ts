@@ -3,6 +3,12 @@
 const object=(v:unknown):Record<string,unknown>=>v!==null&&typeof v==='object'&&!Array.isArray(v)?v as Record<string,unknown>:{};
 const number=(v:unknown)=>typeof v==='number'&&Number.isFinite(v)?v:null;
 const text=(v:unknown)=>typeof v==='string'?v.slice(0,240):null;
+export function virtualEntryAmounts(raw:unknown) {
+  const audit=object(raw),plan=object(audit.tradePlan),sizing=object(audit.sizing);
+  const notional=number(plan.notionalUsd)??number(sizing.finalNotionalUsd),collateral=number(plan.collateralUsd);
+  return {entryNotionalUsd:notional!==null&&notional>0?String(notional):null,
+    collateralUsd:collateral!==null&&collateral>0?String(collateral):null};
+}
 export function virtualTradeEvidence(raw:unknown,symbol:string,side:string,openedAt:number) {
   const audit=object(raw),c=object(audit.candidate),p=object(c.patternAnalysis),quality=object(c.quality),selection=object(audit.selection);
   const evaluatedAt=number(c.evaluatedAt),closedAt=number(c.closedAt);
