@@ -89,7 +89,12 @@ vi.mock('../lib/intentReconciler', () => ({
 }));
 
 import {
-  reconcileGmxApiTasks, reconcileOneGmxApiTask, fetchGmxApiOrderStatus, setConfirmedOpenHandoff,
+  reconcileGmxApiTasks,
+  reconcileOneGmxApiTask,
+  fetchGmxApiOrderStatus,
+  setConfirmedOpenHandoff,
+  startPeriodicGmxApiReconciliation,
+  stopPeriodicGmxApiReconciliation,
 } from '../lib/gmxApiStatusReconciler';
 import type { GmxApiTransport } from '../lib/gmxApiTransport';
 
@@ -582,6 +587,28 @@ describe('relay_reverted / cancelled', () => {
     const t = makeTransport(() => ({ status: 'cancelled', requestId: 'req-1', executionTxHash: TX, orderKeys: [ORDER_KEY] }));
     const s = await reconcileGmxApiTasks(deps(t, makeOnchain(receiptSuccess)));
     expect(s.unresolvedMarked).toBe(1);
+  });
+});
+
+describe('periodic reconciliation lifecycle', () => {
+  it('중복 start는 타이머를 하나만 유지하고 stop 후 재시작도 하나만 만든다', () => {
+    vi.useFakeTimers();
+    try {
+      stopPeriodicGmxApiReconciliation();
+
+      startPeriodicGmxApiReconciliation(1_000);
+      startPeriodicGmxApiReconciliation(1_000);
+      expect(vi.getTimerCount()).toBe(1);
+
+      stopPeriodicGmxApiReconciliation();
+      expect(vi.getTimerCount()).toBe(0);
+
+      startPeriodicGmxApiReconciliation(1_000);
+      expect(vi.getTimerCount()).toBe(1);
+    } finally {
+      stopPeriodicGmxApiReconciliation();
+      vi.useRealTimers();
+    }
   });
 });
 
