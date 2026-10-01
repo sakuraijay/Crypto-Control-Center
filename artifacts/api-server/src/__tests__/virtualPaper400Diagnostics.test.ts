@@ -71,4 +71,71 @@ describe('bounded durable PAPER diagnostics', () => {
     }));
     expect(result.state?.cursors.ZEC).toBe(zec.sourceCandleCloseTime);
   });
+  it('aggregates measured signal and safety evidence once per symbol candle and survives restart', () => {
+    const evidence = {
+      id: `ETH:${now - 15 * 60_000}`, symbol: 'ETH', closedAt: now - 15 * 60_000,
+      evaluatedAt: new Date(now - 10_000).toISOString(),
+      policyVersion: 'virtual400-daily/v8' as const, eligible: false, reason: 'NO_OBSERVED_STRUCTURE_TARGET',
+      kind: 'SIGNAL' as const,
+      conditions: [
+        { name: 'atrFraction', value: .006, operator: 'between', threshold: .004, passed: true },
+        { name: 'netRewardRisk', value: 0.92, operator: '>=', threshold: 1, passed: false },
+        { name: 'roundTripCostUsd', value: null, operator: '<=', threshold: 2, passed: null, unit: 'USD' },
+      ],
+    };
+    const legacyEvidence = { ...evidence, policyVersion: 'virtual400-daily/v7' as const, reason: 'WEAK_MOMENTUM' };
+    const first = advanceVirtualDiagnostics({ ...input(), adaptiveEvaluations: [evidence, legacyEvidence],
+      diagnostics: [{ symbol: 'ETH', reason: 'PAPER_MARKET_QUALITY:NO_OBSERVED_STRUCTURE_TARGET' },
+        { symbol: 'ETH', reason: 'PAPER_NET_REWARD_RISK_BELOW_ONE' }], nextEvaluationAt: now + 60_000 });
+    const second = advanceVirtualDiagnostics({ ...input(), raw: JSON.stringify(first.state), now: now + 60_000,
+      adaptiveEvaluations: [evidence, legacyEvidence], nextEvaluationAt: now + 90_000 });
+    expect(first.state?.evaluationCursors).toEqual({
+      'ETH:virtual400-daily/v8': evidence.closedAt, 'ETH:virtual400-daily/v7': evidence.closedAt,
+    });
+    expect(second.summary.status).toBe('OBSERVED');
+    if (second.summary.status !== 'OBSERVED') throw Error('fixture');
+    expect(second.summary.counts).toMatchObject({
+      'EXPERIMENT_REJECT:PAPER_MARKET_QUALITY:NO_OBSERVED_STRUCTURE_TARGET': 1,
+      'EXPERIMENT_REJECT:PAPER_NET_REWARD_RISK_BELOW_ONE': 1,
+    });
+    expect(second.summary.adaptiveEvaluations).toMatchObject({
+      status: 'OBSERVED', candidates: 2, rejected: 2, eligible: 0,
+      signal: { candidates: 2, rejected: 2 }, safety: { candidates: 0 },
+      byPolicy: [
+        { version: 'virtual400-daily/v8', candidates: 1, rejected: 1 },
+        { version: 'virtual400-daily/v7', candidates: 1, rejected: 1 },
+      ],
+      rejectionReasons: expect.arrayContaining([{ reason: 'NO_OBSERVED_STRUCTURE_TARGET', count: 1 }]),
+      nextEvaluationAt: new Date(now + 90_000).toISOString(),
+      conditions: expect.arrayContaining([
+        expect.objectContaining({ name: 'netRewardRisk', observed: 2, failed: 2, mean: .92, meanThreshold: 1 }),
+        expect.objectContaining({ name: 'roundTripCostUsd', observed: 0, missing: 2, mean: null }),
+      ]),
+    });
+    expect(second.state?.buckets[0].entryEvaluations?.candidates).toBe(2);
+    expect(second.summary.entryEvaluations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ symbol: 'ETH', policyVersion: 'virtual400-daily/v8', evaluatedAt: now - 10_000 }),
+    ]));
+  });
+  it('records safety-gate failures separately from signal scores, and does not use future evaluation times', () => {
+    const evidence = {
+      id: `BTC:${now - 15 * 60_000}`, symbol: 'BTC', closedAt: now - 15 * 60_000, evaluatedAt: new Date(now).toISOString(),
+      policyVersion: 'virtual400-daily/v8' as const, eligible: false, reason: 'PAPER_DAILY_LOSS_5_PERCENT',
+      kind: 'ECONOMICS' as const, conditions: [
+        { name: 'dailyLossPct', value: 5.2, operator: '<', threshold: 5, passed: false, unit: '%' },
+        { name: 'positionCap', value: 1, operator: '=', threshold: 0, passed: false },
+      ],
+    };
+    const result = advanceVirtualDiagnostics({ ...input(), adaptiveEvaluations: [evidence], nextEvaluationAt: now - 1 });
+    expect(result.summary.status).toBe('OBSERVED');
+    if (result.summary.status !== 'OBSERVED') throw Error('fixture');
+    expect(result.summary.adaptiveEvaluations).toMatchObject({
+      candidates: 1, safety: { candidates: 1, rejected: 1 }, signal: { candidates: 0 }, nextEvaluationAt: null,
+    });
+    if (result.summary.status === 'OBSERVED') {
+      expect(result.summary.entryEvaluations).toContainEqual(expect.objectContaining({
+        kind: 'SAFETY', conditions: expect.arrayContaining([expect.objectContaining({ name: 'positionCap', operator: '==' })]),
+      }));
+    }
+  });
 });

@@ -1,15 +1,19 @@
 import {paperPerformance} from './virtualPaperPerformance';
 import {virtualTradeEvidence,virtualEntryAmounts} from './virtualTradeEvidence';
 import {restorePaperComparison,addPaperComparison,advancePaperComparison,summarizePaperComparison} from './virtualPaperComparison';
+import {recordContinuousPaperComparison,summarizeContinuousPaperComparison,
+  type ContinuousPaperPair,type ContinuousPaperComparisonStore} from './virtualPaperContinuousComparison';
 import { buildVirtualPaperCalendar } from './virtualPaperCalendar';
 import { PAPER_LEARNING_CONTRACT } from './virtualPaperLearningDataset';
 import { applyAuthorizedPaperCredit } from './virtualPaperContribution';
-import { DAILY_PAPER_POLICY } from './virtualPaperDailyPolicy';
-import { runVirtualPaperDailyCycle, type DailyCycleDeps } from './virtualPaperDailyCycle';
+import { DAILY_PAPER_POLICY, LEGACY_DAILY_PAPER_POLICY } from './virtualPaperDailyPolicy';
+import { runVirtualPaperDailyCycle, type DailyCycleDeps, type PairedDailyCandidateComparison,
+  type DailyComparisonLeg, type PaperEntryEvaluation as CycleEntryEvaluation } from './virtualPaperDailyCycle';
 import { dailyPaperCandidate } from './virtualPaperDailyCandidate';
 import { readPatternCandles } from '../intel/patterns/patternReader';
 import { patternSummary } from '../intel/patterns/chartPatterns';
-import { advanceVirtualDiagnostics, virtualDiagnosticsKey } from './virtualPaper400Diagnostics';
+import { advanceVirtualDiagnostics, virtualDiagnosticsKey,
+  type PaperDiagnosticEvaluation as DiagnosticEntryEvaluation } from './virtualPaper400Diagnostics';
 import type { StrategyShadowRecord } from '../intel/strategyShadowAdapterV2';
 import { discoverVirtualGmxUniverse, selectVirtualAnalysisBatch, VIRTUAL_GMX_SYMBOLS } from '../lib/virtualGmxUniverse';
 import { VIRTUAL_ACTIVE_POLICY, VIRTUAL_LEGACY_POLICY } from './virtualPaper400Policy';
@@ -34,6 +38,9 @@ import {
 } from './virtualPaper400StrategyContinuity';
 
 export const VIRTUAL_PAPER_400_RUNTIME_KEY = 'virtual_paper_400_runtime_v1';
+const dailyPolicyVersions: readonly string[] = [DAILY_PAPER_POLICY.version, LEGACY_DAILY_PAPER_POLICY.version,
+  'virtual400-daily/v3', 'virtual400-daily/v4', 'virtual400-daily/v5', 'virtual400-daily/v6'];
+const isDailyPolicy = (version: string | undefined) => dailyPolicyVersions.includes(version ?? '');
 // Shared with START/STOP. This is a coordination lock, not a trading permission.
 
 /** Returns false only for an absent session. A stopped/invalid virtual session
@@ -84,14 +91,14 @@ export async function maybeRunVirtualPaper400Cycle(args: {
     const policyKey = `virtual_paper_400_policy_v1:${identity.sessionId}`;
     const policyRaw = await read(policyKey);
     let applied = policyRaw ? JSON.parse(policyRaw) as { version: string; appliedAt: string; sessionId: string } : null;
-    if (policyRaw !== null && (!applied || (applied.version !== VIRTUAL_ACTIVE_POLICY.version && applied.version !== VIRTUAL_LEGACY_POLICY.version && applied.version !== DAILY_PAPER_POLICY.version && applied.version !== 'virtual400-daily/v3' && applied.version !== 'virtual400-daily/v4' && applied.version !== 'virtual400-daily/v5' && applied.version !== 'virtual400-daily/v6') || applied.sessionId !== identity.sessionId
+    if (policyRaw !== null && (!applied || (applied.version !== VIRTUAL_ACTIVE_POLICY.version && applied.version !== VIRTUAL_LEGACY_POLICY.version && !isDailyPolicy(applied.version)) || applied.sessionId !== identity.sessionId
       || !Number.isFinite(Date.parse(applied.appliedAt)) || Date.parse(applied.appliedAt) > now.getTime())) {
       throw new Error('VIRTUAL_POLICY_INVALID');
     }
     const executor = getServerPaperStatus();
-    const dailyRequested = args.dailyExperiment === true || applied?.version === DAILY_PAPER_POLICY.version || ['virtual400-daily/v3','virtual400-daily/v4','virtual400-daily/v5','virtual400-daily/v6'].includes(applied?.version ?? '');
+    const dailyRequested = args.dailyExperiment === true || isDailyPolicy(applied?.version);
     const desiredPolicy = dailyRequested ? DAILY_PAPER_POLICY : VIRTUAL_ACTIVE_POLICY;
-    const accountBefore = evaluateVirtualPaper400Account({ session: identity, previous, rows, now, quote: args.quote, aggressiveDaily:applied?.version===DAILY_PAPER_POLICY.version || ['virtual400-daily/v3','virtual400-daily/v4','virtual400-daily/v5','virtual400-daily/v6'].includes(applied?.version ?? '') });
+    const accountBefore = evaluateVirtualPaper400Account({ session: identity, previous, rows, now, quote: args.quote, aggressiveDaily:isDailyPolicy(applied?.version) });
     const universe = session.active && accountBefore.evaluation.entryAllowed && !executor.pendingClose && !executor.unresolved
       ? await discoverVirtualGmxUniverse() : null;
     const markets = new Map((universe?.complete ? universe.markets : []).map(m => [m.name.split('/')[0], m]));
@@ -116,8 +123,19 @@ export async function maybeRunVirtualPaper400Cycle(args: {
       await write(modeKey, selectedMode);
     }
     if (applied?.version !== desiredPolicy.version && session.active && !accountBefore.held.length && !executor.pendingClose && !executor.unresolved) {
+      if (!args.shouldContinue()) throw new Error('VIRTUAL_WORKER_STOPPED');
+      // Append-only policy provenance, not an account reset. The ledger, deposits,
+      // baselines, HWM and loss locks remain exactly where they were.
+      const activationKey = `virtual_paper_policy_activation_v1:${identity.sessionId}:${desiredPolicy.version}`;
+      await tx.insert(workerStateTable).values({key:activationKey,value:JSON.stringify({
+        version:'paper-policy-activation/v1',sessionId:identity.sessionId,
+        previousPolicy:applied,policyVersion:desiredPolicy.version,appliedAt:now.toISOString(),
+        reason:'ACTIVE_FLAT_NO_PENDING_OR_UNRESOLVED',realFundsUsed:false,
+      }),updatedAt:now}).onConflictDoNothing({target:workerStateTable.key});
       applied = { version: desiredPolicy.version, appliedAt: now.toISOString(), sessionId: identity.sessionId };
-      await write(policyKey, applied);
+      if (!args.shouldContinue()) throw new Error('VIRTUAL_WORKER_STOPPED');
+      await tx.insert(workerStateTable).values({key:policyKey,value:JSON.stringify(applied),updatedAt:now})
+        .onConflictDoUpdate({target:workerStateTable.key,set:{value:JSON.stringify(applied),updatedAt:now}});
     }
     let analysis: { symbol: string; reason: string }[] = [];
     let evaluatedRecords: StrategyShadowRecord[] = [];
@@ -142,12 +160,28 @@ export async function maybeRunVirtualPaper400Cycle(args: {
       // remain PAPER estimates, never observed real execution.
       return { ...result.snapshot, source: 'PAPER_GMX_ESTIMATE' };
     };
-    const dailyEnabled=applied?.version===DAILY_PAPER_POLICY.version || ['virtual400-daily/v3','virtual400-daily/v4','virtual400-daily/v5','virtual400-daily/v6'].includes(applied?.version ?? '');
+    const dailyEnabled=isDailyPolicy(applied?.version);
+    const adaptiveEnabled=applied?.version===DAILY_PAPER_POLICY.version;
     const comparisonKey=`virtual_paper_comparison_v1:${identity.sessionId}`;
     let comparison: ReturnType<typeof restorePaperComparison>|null=null;
     try { comparison=restorePaperComparison(await read(comparisonKey),identity.sessionId,Date.now());
-      advancePaperComparison(comparison,args.quote,Date.now());
+      // The historical v7 cohort is immutable after v8 activation. New evidence
+      // belongs in a separate daily-paged namespace, never in the old 2,000 cap.
+      if(!adaptiveEnabled)advancePaperComparison(comparison,args.quote,Date.now());
     } catch { /* Preserve malformed evidence; diagnostics must not disable protective exits. */ }
+    const pairedComparisons:PairedDailyCandidateComparison[]=[];
+    const entryEvaluations:CycleEntryEvaluation[]=[];
+    const continuousStore:ContinuousPaperComparisonStore={
+      read,shouldContinue:args.shouldContinue,
+      write:async(key,value)=>{
+        if(!args.shouldContinue())throw Error('VIRTUAL_WORKER_STOPPED');
+        const updatedAt=new Date();
+        // Page + checkpoint commit together with the runtime snapshot. A crash
+        // cannot commit a page without its matching cumulative checkpoint.
+        await tx.insert(workerStateTable).values({key,value,updatedAt})
+          .onConflictDoUpdate({target:workerStateTable.key,set:{value,updatedAt}});
+      },
+    };
     const cycleDeps: DailyCycleDeps = { sessionRaw: raw!, policyAppliedAt: applied?.appliedAt, policyVersion: applied?.version,
       tradingMode: selectedMode?.mode, structuralTargets: true, markets,
       entryBlockedReason: executor.unresolved || executor.pendingClose ? 'EXECUTOR_RECOVERY_PENDING'
@@ -163,7 +197,9 @@ export async function maybeRunVirtualPaper400Cycle(args: {
         activity.stage(run, 'CHECKING_ENTRY', [symbol]);
         return readCost(symbol, isLong, notionalUsd);
       },
-      recordComparison: proposal => {if(comparison)addPaperComparison(comparison,proposal);},
+      recordComparison: proposal => {if(comparison&&!adaptiveEnabled)addPaperComparison(comparison,proposal);},
+      recordPairedComparison:proposal=>{pairedComparisons.push(proposal);},
+      recordEntryEvaluation:evaluation=>{entryEvaluations.push(evaluation);},
       readDailyCandidates: async () => {
         if (!universe?.complete || !symbols.length || !args.shouldContinue()) return [];
         await write(rotationKey,{...rotation,...Object.fromEntries(symbols.map(s=>[s,Date.now()]))});
@@ -265,7 +301,7 @@ export async function maybeRunVirtualPaper400Cycle(args: {
       .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()).slice(0, 10).map(async close => {
         const open = finalRows.find(row => row.id === close.closesTradeId);
         const auditRaw = open?.openDecisionId && (open.openDecisionId.startsWith('vp400:') || open.openDecisionId.startsWith(MODE_DECISION_PREFIX)) ? await read(open.openDecisionId) : null;
-        let audit: { signal?: { strategyId?: string; reasons?: string[] }; sizing?: { finalNotionalUsd?: number }; cost?: { totalEstimatedRoundTripCostUsd?: number }; tradePlan?:{plannedRiskUsd?:number;notionalUsd?:number;collateralUsd?:number;leverage?:number;maxHoldHours?:number} } | null = null;
+        let audit: { policy?:{version?:string}; signal?: { strategyId?: string; reasons?: string[] }; sizing?: { finalNotionalUsd?: number }; cost?: { totalEstimatedRoundTripCostUsd?: number }; tradePlan?:{version?:string;plannedRiskUsd?:number;notionalUsd?:number;collateralUsd?:number;leverage?:number;maxHoldHours?:number} } | null = null;
         try { audit = auditRaw ? JSON.parse(auditRaw) : null; } catch { /* unavailable, never fake reasons */ }
         const calculatedRisk = open && audit?.cost && audit.sizing ? Number(audit.sizing.finalNotionalUsd)
           * Math.abs(Number(open.price) - Number(open.stopPriceUsd)) / Number(open.price)
@@ -279,6 +315,7 @@ export async function maybeRunVirtualPaper400Cycle(args: {
           closedAt: close.timestamp, entryPrice: open?.price ?? null, exitPrice: close.price,
           stopPrice: open?.stopPriceUsd ?? null, targetPrice: open?.takeProfitPriceUsd ?? null,
           strategy: audit?.signal?.strategyId ?? null, reasons: audit?.signal?.reasons ?? [],
+          policyVersion:audit?.policy?.version??null,planVersion:audit?.tradePlan?.version??null,
           entryEvidence:open?virtualTradeEvidence(audit,open.symbol,open.side,new Date(open.timestamp).getTime()):null,
           ...entryAmounts,settledNotionalUsd:close.sizeInUsd,leverage:open?.leverage??null,
           holdingMinutes:open?Math.max(0,(new Date(close.timestamp).getTime()-new Date(open.timestamp).getTime())/60_000):null,
@@ -289,15 +326,63 @@ export async function maybeRunVirtualPaper400Cycle(args: {
           costBasis: 'SIMULATED / ESTIMATED', closeKind: close.closeKind };
       }));
     const diagnosticKey = virtualDiagnosticsKey(identity.sessionId);
+    const diagnosticEvaluations:DiagnosticEntryEvaluation[]=entryEvaluations.map(e=>{
+      return {id:e.id,symbol:e.symbol,closedAt:e.closedAt,evaluatedAt:Date.parse(e.evaluatedAt),policyVersion:e.policyVersion,
+        eligible:e.eligible,reason:e.reason,kind:e.kind==='SIGNAL'?'SIGNAL':'SAFETY',
+        conditions:e.conditions.map(c=>({...c,operator:c.operator==='='?'==':c.operator,
+          value:typeof c.value==='number'&&Number.isFinite(c.value)?c.value:null,
+          threshold:typeof c.threshold==='number'&&Number.isFinite(c.threshold)?c.threshold:null})),
+      };
+    });
+    const diagnosticInputs:CycleEntryEvaluation[]=[
+      ...entryEvaluations.map(e=>({...e,conditions:e.conditions.map(c=>({...c,
+        value:typeof c.value==='number'&&Number.isFinite(c.value)?c.value:null,
+        threshold:typeof c.threshold==='number'&&Number.isFinite(c.threshold)?c.threshold:null}))})),
+      ...pairedComparisons.filter(p=>!entryEvaluations.some(e=>e.id===p.id&&e.policyVersion===p.legacy.version))
+        .map(p=>({id:p.id,symbol:p.symbol,closedAt:p.closedAt,evaluatedAt:new Date(p.observedAt).toISOString(),
+          policyVersion:p.legacy.version,eligible:p.legacy.eligible,reason:p.legacy.reason,
+          kind:'SIGNAL' as const,conditions:(p.legacy.conditions??[]).map(c=>({...c,
+            value:typeof c.value==='number'&&Number.isFinite(c.value)?c.value:null,
+            threshold:typeof c.threshold==='number'&&Number.isFinite(c.threshold)?c.threshold:null}))})),
+    ];
     const diagnostic = advanceVirtualDiagnostics({ raw: await read(diagnosticKey), sessionId: identity.sessionId,
       now: Date.now(), records: evaluatedRecords, analysis, diagnostics: result.diagnostics, entryStages: result.entryStages,
+      adaptiveEvaluations:diagnosticInputs,nextEvaluationAt:Date.now()+60_000,
       status: result.status, reason: result.reason, openCount: finalRows.filter(r => r.action === 'OPEN').length,
       closeCount: finalRows.filter(r => r.action === 'CLOSE').length,
       lastOpenAtMs: final.lastOpenAtMs, sessionStartedAtMs: identity.startedAtMs });
     // Corrupt diagnostic history must neither erase evidence nor disable position protection.
     if (diagnostic.state) await write(diagnosticKey, diagnostic.state);
-    if(comparison)await write(comparisonKey,comparison);
-    await write(VIRTUAL_PAPER_400_RUNTIME_KEY, { ...result, performance:paperPerformance(finalRows), comparison:comparison?summarizePaperComparison(comparison):{status:'UNAVAILABLE'}, learning: { ...PAPER_LEARNING_CONTRACT, settledRows: final.ledger.settlementCount }, tradingDiagnostics: diagnostic.summary, universe: universe ? { ...universe, batchSymbols: symbols } : null, analysis, journal, calendar: buildVirtualPaperCalendar(identity, finalRows, new Date()), sessionId: identity.sessionId,
+    if(comparison&&!adaptiveEnabled)await write(comparisonKey,comparison);
+    const armEvidence=(leg:DailyComparisonLeg):ContinuousPaperPair['legacy']=>({
+      policyVersion:leg.version,accepted:leg.eligible,reason:leg.reason,side:leg.side,
+      plan:leg.plan?{entry:leg.plan.entryPrice,stop:leg.plan.structuralStop,target:leg.plan.tpPrice,
+        notional:leg.plan.notionalUsd,maxHoldHours:leg.plan.maxHoldHours,expiresAt:leg.plan.expiresAtMs}:null,
+      cost:leg.costEvidence&&Number.isFinite(leg.costEvidence.estimatedRoundTripUsd)
+        &&leg.costEvidence.estimatedRoundTripUsd>0?leg.costEvidence:null,
+      conditions:(leg.conditions??[]).map(c=>({...c,
+        value:typeof c.value==='number'&&Number.isFinite(c.value)?c.value:null,
+        threshold:typeof c.threshold==='number'&&Number.isFinite(c.threshold)?c.threshold:null})),
+    });
+    let continuousComparison:Awaited<ReturnType<typeof summarizeContinuousPaperComparison>>|{status:'UNAVAILABLE';reason:string}|null=null;
+    if(dailyEnabled){
+      try{
+        for(const pair of pairedComparisons)await recordContinuousPaperComparison(continuousStore,identity.sessionId,{
+          id:pair.id,symbol:pair.symbol,closedAt:pair.closedAt,observedAt:pair.observedAt,
+          legacy:armEvidence(pair.legacy),adaptive:armEvidence(pair.adaptive),
+        },Date.now());
+        continuousComparison=await summarizeContinuousPaperComparison(continuousStore,identity.sessionId,Date.now());
+      }catch{
+        // Do not erase damaged research evidence, invent zero results, or
+        // disable protective exits. Runtime makes the missing comparison explicit.
+        if(!args.shouldContinue())throw Error('VIRTUAL_WORKER_STOPPED');
+        continuousComparison={status:'UNAVAILABLE',reason:'PAPER_CONTINUOUS_COMPARISON_EVIDENCE_UNAVAILABLE'};
+      }
+    }
+    await write(VIRTUAL_PAPER_400_RUNTIME_KEY, { ...result, performance:paperPerformance(finalRows),
+      comparison:comparison?{...summarizePaperComparison(comparison),...(adaptiveEnabled?{archive:true,collectionStoppedAtPolicy:'virtual400-daily/v8'}:{})}:{status:'UNAVAILABLE'},
+      continuousComparison,entryEvaluations:diagnosticEvaluations,
+      learning: { ...PAPER_LEARNING_CONTRACT, settledRows: final.ledger.settlementCount }, tradingDiagnostics: diagnostic.summary, universe: universe ? { ...universe, batchSymbols: symbols } : null, analysis, journal, calendar: buildVirtualPaperCalendar(identity, finalRows, new Date()), sessionId: identity.sessionId,
       strategyContinuity: summarizeVirtualPaper400StrategyContinuity(continuity),
       at: new Date().toISOString(), account: { ...result.account, ledger: final.ledger, dailyBudget: final.dailyBudget,
         equityUsd: final.equityUsd, unrealizedNetPnlUsd: final.unrealizedNetPnlUsd,

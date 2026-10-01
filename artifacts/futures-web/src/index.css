@@ -322,6 +322,30 @@ button:focus-visible, a:focus-visible, summary:focus-visible, select:focus-visib
 @media (prefers-reduced-motion: reduce) { .ccc-shell-body,.ccc-sidebar { transition: none; }.ccc-overview .animate-spin { animation: none; } }
 
 .ccc-dialog { max-height: 90dvh; overflow-y: auto; }
+.ccc-paper-diagnostics { padding-bottom: 2px; }
+.ccc-diagnostics-alert { display:flex; align-items:flex-start; gap:10px; margin:0 20px 14px; padding:13px 15px; border:1px solid #70513a; border-radius:7px; background:#30261d; color:#edc89d; font-size:12px; line-height:1.7; }
+.ccc-diagnostics-alert svg { flex-shrink:0; margin-top:2px; }
+.ccc-diagnostics-summary { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin:0 20px 14px; }
+.ccc-diagnostics-summary>div { min-width:0; padding:12px; border:1px solid #29383b; border-radius:7px; background:#11181b; }
+.ccc-diagnostics-summary span { display:block; color:#99a7aa; font-size:10px; line-height:1.6; }
+.ccc-diagnostics-summary strong { display:block; margin-top:6px; color:#d8e6df; font-size:20px; font-variant-numeric:tabular-nums; }
+.ccc-diagnostics-note { margin:10px 20px 14px; color:#91a0a8; font-size:11px; line-height:1.75; overflow-wrap:anywhere; }
+.ccc-diagnostics-table-wrap { margin:0 20px; overflow-x:auto; }
+.ccc-diagnostics-table { width:100%; min-width:590px; border-collapse:collapse; font-size:11px; font-variant-numeric:tabular-nums; }
+.ccc-diagnostics-table th { padding:9px 8px; border-bottom:1px solid #334047; color:#8fa0a7; font-weight:450; text-align:left; }
+.ccc-diagnostics-table td { padding:10px 8px; border-bottom:1px solid #263238; color:#c3d0d1; }
+.ccc-diagnostics-table td:first-child { color:#c4d6cc; }
+.ccc-diagnostics-reasons { display:flex; flex-direction:column; gap:7px; margin:15px 20px 0; }
+.ccc-diagnostics-reasons>strong { color:#bdcbc7; font-size:11px; font-weight:500; }
+.ccc-diagnostics-reasons>span { display:flex; justify-content:space-between; gap:12px; color:#b9c6c3; font-size:11px; }
+.ccc-diagnostics-reasons code { color:#dbbc98; overflow-wrap:anywhere; }
+.ccc-diagnostics-reasons b { flex:none; color:#92a49c; font-size:10px; font-weight:400; }
+.ccc-diagnostics-comparisons { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; margin:14px 20px 0; }
+.ccc-diagnostics-comparisons>div { display:flex; min-width:0; flex-direction:column; gap:6px; padding:11px 12px; border:1px solid #2a353a; border-radius:7px; background:#11181b; }
+.ccc-diagnostics-comparisons strong { color:#c5d3ce; font-size:11px; font-weight:500; overflow-wrap:anywhere; }
+.ccc-diagnostics-comparisons span,.ccc-diagnostics-comparisons small { color:#94a4a8; font-size:10px; line-height:1.6; overflow-wrap:anywhere; }
+.ccc-diagnostics-comparisons small { color:#b4c2bc; }
+@media (max-width:640px) { .ccc-diagnostics-summary { grid-template-columns:1fr 1fr; }.ccc-diagnostics-comparisons { grid-template-columns:1fr; }.ccc-diagnostics-alert,.ccc-diagnostics-summary,.ccc-diagnostics-table-wrap,.ccc-diagnostics-reasons,.ccc-diagnostics-comparisons,.ccc-diagnostics-note { margin-inline:13px; } }
 .ccc-pattern-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:16px; }
 .ccc-pattern-tile { padding:16px; border:1px solid #29323b; border-radius:12px; background:#141a1e; text-align:left; color:#f1f5f2; transition:border-color .15s,background .15s; min-width:0; }
 .ccc-pattern-tile:hover { border-color:#8be0b4; background:#19251f; }

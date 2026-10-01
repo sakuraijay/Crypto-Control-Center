@@ -17,6 +17,51 @@ export interface VirtualPaper400Snapshot {
     calendar?: { version: 'paper-calendar/v1'; status: 'AVAILABLE' | 'UNAVAILABLE'; timezone: 'Asia/Manila'; coverageStart: string | null; throughDate: string | null; observedAt: string | null; days: { date: string; netPnlUsd: number; grossPnlUsd: number; costUsd: number; entries: number; completedTrades: number; settlements: number }[] };
     tradingMode?: { mode: 'INTRADAY' | 'SWING'; targetRoePct: number | null; stopRoePct: number; maxHoldHours: number } | null;
     policy?: { version: string; appliedAt: string; symbols: string[]; riskPerTradePct: number; minLeverage?: number; maxLeverage: number; cooldownMinutes: number; maxDailyEntries?: number; dailyProfitCapPct?: number } | null;
+    comparison?: {
+      version?: string; status: string; candidates?: number; completedPairs?: number;
+      baseline?: { trades?: number; netPnlUsd?: number | null; costUsd?: number | null; expectancyUsd?: number | null; winRate?: number | null };
+      filtered?: { trades?: number; netPnlUsd?: number | null; costUsd?: number | null; expectancyUsd?: number | null; winRate?: number | null };
+    } | null;
+    continuousComparison?: ({
+      version: string; status: 'COLLECTING'; pages: number; candidates: number;
+      accepted: { legacyV7: number; adaptiveV8: number };
+      costEvidenceAvailable: { legacyV7: number; adaptiveV8: number };
+      costEvidenceUnavailable: { legacyV7: number; adaptiveV8: number };
+      pendingTimeWindow: number; outcomeUnknown: number;
+      maxPotentialMaturityAt: string | null;
+      outcomes: {
+        status: 'NOT_EVALUATED_NO_CLOSED_CANDLE_REPLAY'; matured: number;
+        pendingTimeWindow: number; outcomeUnknown: number;
+        opportunityArms: number;
+        netPnlUsd: null; expectancyUsd: null; winRate: null;
+      };
+      semantics?: string; selectionBias?: string;
+      outOfSampleStrategyValidated?: false; automaticPromotion?: false;
+    } | { status: 'UNAVAILABLE'; reason: string }) | null;
+    tradingDiagnostics?: {
+      status: 'OBSERVED' | 'UNAVAILABLE';
+      observedAt?: string;
+      minutesWithoutNewEntry?: number;
+      adaptiveEvaluations?: {
+        status: 'OBSERVED' | 'EMPTY';
+        windowBasis: string;
+        candidates: number;
+        eligible: number;
+        rejected: number;
+        signal: { candidates: number; eligible: number; rejected: number; reasons: { reason: string; count: number }[] };
+        safety: { candidates: number; eligible: number; rejected: number; reasons: { reason: string; count: number }[] };
+        legacy: { candidates: number; eligible: number; rejected: number; reasons: { reason: string; count: number }[] };
+        byPolicy: { version: string; candidates: number; eligible: number; rejected: number }[];
+        rejectionReasons: { reason: string; count: number }[];
+        conditions: { name: string; observed: number; missing: number; passed: number; failed: number;
+          mean: number | null; minimum: number | null; maximum: number | null; meanThreshold: number | null }[];
+        nextEvaluationAt: string | null;
+      };
+    } | { status: 'UNAVAILABLE'; reason: string; historyReconstructed: false };
+    entryEvaluations?: { id: string; symbol: string; policyVersion: string; closedAt: number; evaluatedAt: number;
+      eligible: boolean; reason: string; kind: 'SIGNAL' | 'SAFETY'; conditions: {
+        name: string; value: number | null; operator: string; threshold: number | null; passed: boolean | null;
+      }[] }[];
     diagnostics?: { symbol: string; reason: string; details?: string[] }[];
     analysis?: { symbol: string; reason: string }[];
     journal?: { id: string; symbol: string; side: string; openedAt: string | null; closedAt: string;
@@ -45,6 +90,10 @@ export function virtualSessionLabel(data: VirtualPaper400Snapshot | null, fresh:
   if (data.session.status === 'STOPPED') return '신규 진입 중지';
   if (data.session.status === 'MISSING') return '시작 전';
   if (data.session.status !== 'ACTIVE' || !fresh) return '서버 실행 확인 대기';
+  const idleMinutes = data.runtime?.tradingDiagnostics?.status === 'OBSERVED'
+    ? data.runtime.tradingDiagnostics.minutesWithoutNewEntry : undefined;
+  if (data.runtime?.status === 'NO_TRADE' && idleMinutes !== undefined && idleMinutes >= 1440)
+    return '자동매매 활성 · 24시간 이상 신규 진입 없음';
   if (data.runtime?.status === 'NO_TRADE') return '자동매매 활성 · 조건 대기';
   if (data.runtime?.status === 'BLOCKED') return '자동매매 활성 · 신규 진입 차단';
   return '자동매매 활성 · ' + (data.runtime?.status ?? '판단 확인 중');

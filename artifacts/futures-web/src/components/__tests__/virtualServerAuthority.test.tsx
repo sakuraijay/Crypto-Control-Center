@@ -160,3 +160,70 @@ it('shows server-funded daily goals independently of current equity without fund
  expect(fetcher.mock.calls.every((c:any)=>!c[1]?.method)).toBe(true);
  expect(trade.placeOrder).not.toHaveBeenCalled();
 });
+
+it('renders measured v7/v8 entry diagnostics, missing evidence, next evaluation, and a non-executing idle alert', async () => {
+ const data=snapshot();
+ data.runtime!.policy={...data.runtime!.policy!,version:'virtual400-daily/v8',minLeverage:5,maxLeverage:10};
+ data.runtime!.tradingDiagnostics={
+  status:'OBSERVED',minutesWithoutNewEntry:4424,
+  adaptiveEvaluations:{
+   status:'OBSERVED',windowBasis:'UP_TO_24_UTC_HOURLY_BUCKETS',candidates:4,eligible:1,rejected:3,
+   signal:{candidates:4,eligible:1,rejected:3,reasons:[{reason:'WEAK_MOMENTUM',count:2}]},
+   safety:{candidates:4,eligible:4,rejected:0,reasons:[]},
+   legacy:{candidates:4,eligible:0,rejected:4,reasons:[{reason:'WEAK_MOMENTUM',count:4}]},
+    byPolicy:[
+     {version:'virtual400-daily/v7',candidates:4,eligible:0,rejected:4},
+     {version:'virtual400-daily/v8',candidates:4,eligible:1,rejected:3},
+    ],
+   rejectionReasons:[{reason:'NO_OBSERVED_STRUCTURE_TARGET',count:2}],
+   conditions:[
+    {name:'netRewardRisk',observed:3,missing:1,passed:1,failed:2,mean:.93,minimum:.71,maximum:1.1,meanThreshold:1},
+    {name:'roundTripCostUsd',observed:0,missing:4,passed:0,failed:0,mean:null,minimum:null,maximum:null,meanThreshold:2},
+   ],
+   nextEvaluationAt:'2026-09-20T15:31:00.000Z',
+  },
+ };
+ data.runtime!.comparison={version:'paper-paired-comparison/v1',status:'CAP_REACHED',candidates:2000,completedPairs:2000,
+  baseline:{trades:2000,netPnlUsd:-2789.64,costUsd:2677.45},filtered:{trades:0,netPnlUsd:null,costUsd:0}};
+  data.runtime!.continuousComparison={version:'paper-paired-comparison/v2',status:'COLLECTING',pages:1,candidates:17,
+   accepted:{legacyV7:5,adaptiveV8:9},costEvidenceAvailable:{legacyV7:8,adaptiveV8:12},
+   costEvidenceUnavailable:{legacyV7:9,adaptiveV8:5},pendingTimeWindow:12,outcomeUnknown:5,
+   maxPotentialMaturityAt:'2026-09-20T16:15:00.000Z',
+    outcomes:{status:'NOT_EVALUATED_NO_CLOSED_CANDLE_REPLAY',matured:0,pendingTimeWindow:12,
+     outcomeUnknown:22,opportunityArms:34,netPnlUsd:null,expectancyUsd:null,winRate:null},
+   automaticPromotion:false,outOfSampleStrategyValidated:false};
+  data.runtime!.entryEvaluations=[{
+   id:`BTC:${Date.parse(at)-15*60_000}`,symbol:'BTC',policyVersion:'virtual400-daily/v8',
+   closedAt:Date.parse(at)-15*60_000,evaluatedAt:Date.parse(at),eligible:false,
+   reason:'NO_OBSERVED_STRUCTURE_TARGET',kind:'SIGNAL',
+   conditions:[{name:'netRewardRisk',value:.92,operator:'>=',threshold:1,passed:false},
+    {name:'roundTripCostUsd',value:null,operator:'<=',threshold:2,passed:null}],
+  }];
+ vi.stubGlobal('fetch',vi.fn(async()=>({ok:true,json:async()=>data})));mount();await flush();
+  expect(screen.getByTestId('badge').textContent).toContain('24시간 이상 신규 진입 없음');
+ expect(screen.getByTestId('paper-idle-alert').textContent).toContain('24시간 이상');
+ expect(screen.getByTestId('paper-idle-alert').textContent).toContain('주문을 강제하지 않습니다');
+ expect(screen.getByTestId('paper-evaluation-denominator').textContent).toBe('4');
+ expect(screen.getByTestId('paper-safety-vs-signal').textContent).toContain('안전 제한은 신호 점수와 분리');
+ expect(screen.getByTestId('paper-entry-diagnostics').textContent).toContain('임계값 평균');
+  expect(screen.getByTestId('paper-rejection-samples').textContent).toContain('실측 0.92');
+  expect(screen.getByTestId('paper-rejection-samples').textContent).toContain('>= 임계값 1');
+  expect(screen.getByTestId('paper-rejection-samples').textContent).toContain('실측 미확인');
+ expect(screen.getByTestId('paper-entry-diagnostics').textContent).toContain('0.93');
+ expect(screen.getByTestId('paper-entry-diagnostics').textContent).toContain('미확인');
+ expect(screen.getByTestId('paper-entry-diagnostics').textContent).toContain('다음 평가 예정 시각');
+ expect(screen.getByTestId('paper-entry-diagnostics').textContent).toContain('2000 쌍 관측');
+  expect(screen.getByTestId('paper-entry-diagnostics').textContent).toContain('진행 중 시간창 12');
+  expect(screen.getByTestId('paper-entry-diagnostics').textContent).toContain('순손익·기대값·승률은 제공하지 않습니다');
+ expect(trade.placeOrder).not.toHaveBeenCalled();
+});
+
+it('does not turn unavailable diagnostic evidence into a zero-valued normal state', async () => {
+ const data=snapshot();
+ data.runtime!.tradingDiagnostics={status:'UNAVAILABLE',reason:'DIAGNOSTICS_STATE_INVALID',historyReconstructed:false};
+ vi.stubGlobal('fetch',vi.fn(async()=>({ok:true,json:async()=>data})));mount();await flush();
+ expect(screen.getByTestId('paper-entry-diagnostics').textContent).toContain('자료를 확인할 수 없습니다');
+ expect(screen.getByTestId('paper-entry-diagnostics').textContent).toContain('DIAGNOSTICS_STATE_INVALID');
+ expect(screen.queryByTestId('paper-idle-alert')).toBeNull();
+ expect(trade.placeOrder).not.toHaveBeenCalled();
+});

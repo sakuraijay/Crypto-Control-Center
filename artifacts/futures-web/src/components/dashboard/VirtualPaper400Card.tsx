@@ -42,6 +42,105 @@ function MarketDecisions({ runtime, fresh }: { runtime: VirtualRuntime | null; f
   </section>;
 }
 
+function PaperEvaluationDiagnostics({ runtime, fresh }: { runtime: VirtualRuntime | null; fresh: boolean }) {
+  const diagnostics = fresh ? runtime?.tradingDiagnostics : null;
+  const evaluation = diagnostics?.status === 'OBSERVED' ? diagnostics.adaptiveEvaluations : undefined;
+  const idleMinutes = diagnostics?.status === 'OBSERVED' ? diagnostics.minutesWithoutNewEntry : undefined;
+  const archive = fresh ? runtime?.comparison : null;
+  const continuous = fresh ? runtime?.continuousComparison : null;
+  const continuousAvailable = continuous?.status === 'COLLECTING' ? continuous : null;
+  const entrySamples = fresh ? runtime?.entryEvaluations ?? [] : [];
+  const conditionLabel: Record<string, string> = {
+    atrFraction: '실현 ATR / 가격', symbolMedianTrueRangeFraction: '종목 중앙 TR / 가격',
+    adaptiveVolatilityMin: '적응 변동성 하한', adaptiveVolatilityMax: '적응 변동성 상한',
+    efficiency: '가격 이동 효율', momentumFraction: '완료봉 모멘텀', score: '신호 점수',
+    scoreThreshold: '최소 신호 점수', stopFraction: '구조적 손절 거리',
+    netRewardRisk: '비용 차감 손익비', roundTripCostUsd: '왕복 추정 비용',
+    roundTripCost: '왕복 추정 비용', riskBudgetUsd: '손실 위험 예산',
+  };
+  const value = (number: number | null) => number === null || !Number.isFinite(number)
+    ? '미확인' : number.toLocaleString('en-US', { maximumFractionDigits: 5 });
+  const policyRows = evaluation?.byPolicy ?? [];
+  const v7 = policyRows.find(row => row.version.includes('/v7') || row.version.includes('v7'));
+  const adaptive = policyRows.find(row => row.version.includes('/v8') || row.version.includes('v8'));
+  const rejectedSamples = entrySamples.filter(row => !row.eligible).slice(-8).reverse();
+  return <section className="ccc-panel ccc-paper-diagnostics" aria-label="PAPER 진입 진단" data-testid="paper-entry-diagnostics">
+    <div className="ccc-panel-heading"><div><p className="ccc-eyebrow">PAPER ENTRY EVIDENCE</p><h2>진입 정책 · 탈락 진단</h2></div>
+      <span className="ccc-caption"><ShieldCheck size={14} />관측 증거 · 수익 예측 아님</span></div>
+    {!fresh ? <div className="ccc-empty-row"><Radar size={23} /><div><strong>진입 진단 확인 대기</strong><p>신선한 서버 스냅샷이 없으므로 이전 수치로 채우지 않습니다.</p></div></div>
+      : diagnostics?.status === 'UNAVAILABLE' || !diagnostics ? <div className="ccc-empty-row"><WifiOff size={20} /><div><strong>진입 진단 자료를 확인할 수 없습니다</strong><p>{diagnostics && 'reason' in diagnostics ? diagnostics.reason : '서버에서 진단 요약이 제공되지 않았습니다.'}</p></div></div>
+      : <>
+        {idleMinutes !== undefined && idleMinutes >= 1440 && <div className="ccc-diagnostics-alert" role="status" data-testid="paper-idle-alert">
+          <Clock3 size={17} /><span><strong>24시간 이상 새 진입이 없습니다.</strong> 마지막 신규 진입 이후 {Math.floor(idleMinutes / 60)}시간 {idleMinutes % 60}분. 이 알림은 PAPER 관측용이며 주문을 강제하지 않습니다.</span>
+        </div>}
+        <div className="ccc-diagnostics-summary">
+          <div><span>최근 24시간 · v8 확정봉 후보</span><strong data-testid="paper-evaluation-denominator">{adaptive?.candidates ?? '—'}</strong></div>
+          <div><span>v8 조건 통과</span><strong className="ccc-positive">{adaptive?.eligible ?? '—'}</strong></div>
+          <div><span>v8 조건 탈락</span><strong className="ccc-negative">{adaptive?.rejected ?? '—'}</strong></div>
+          <div><span>v7 기존 신호 게이트</span><strong>{v7 ? `${v7.eligible}/${v7.candidates}` : '미수집'}</strong></div>
+        </div>
+        {evaluation?.status === 'OBSERVED' && <>
+          <p className="ccc-diagnostics-note" data-testid="paper-safety-vs-signal">
+            신호·시장 점수: {evaluation.signal.rejected}/{evaluation.signal.candidates} 탈락 ·
+            안전·계좌 조건: {evaluation.safety.rejected}/{evaluation.safety.candidates} 탈락.
+            안전 제한은 신호 점수와 분리해 유지합니다.
+          </p>
+          {v7 && adaptive && <p className="ccc-diagnostics-note">
+            동일 확정봉 신호 게이트 비교: v7 {v7.eligible}/{v7.candidates} 통과 · {v7.rejected} 탈락,
+            v8 {adaptive.eligible}/{adaptive.candidates} 통과 · {adaptive.rejected} 탈락. 포트폴리오 수익·승률 비교가 아닙니다.
+          </p>}
+          {!!evaluation.conditions.length && <div className="ccc-diagnostics-table-wrap">
+            <table className="ccc-diagnostics-table"><thead><tr><th>측정 조건</th><th>평균 실측</th><th>임계값 평균</th><th>실측 범위</th><th>미충족 / 미측정</th></tr></thead>
+              <tbody>{evaluation.conditions.map(condition=><tr key={condition.name}>
+                <td>{conditionLabel[condition.name] ?? condition.name}</td>
+                <td>{value(condition.mean)}</td><td>{value(condition.meanThreshold)}</td>
+                <td>{condition.minimum === null || condition.maximum === null ? '미확인' : `${value(condition.minimum)} – ${value(condition.maximum)}`}</td>
+                <td>{condition.failed} / {condition.missing} ({condition.observed} 관측)</td>
+              </tr>)}</tbody>
+            </table>
+          </div>}
+          {!!evaluation.rejectionReasons.length && <div className="ccc-diagnostics-reasons"><strong>최근 24시간 탈락 사유</strong>
+            {evaluation.rejectionReasons.map(row=><span key={row.reason}><code>{row.reason}</code><b>{row.count}회 · 양 정책 평가 합산</b></span>)}
+          </div>}
+          {!!rejectedSamples.length && <div className="ccc-diagnostics-reasons" data-testid="paper-rejection-samples">
+            <strong>최근 후보별 실제 탈락 측정값 · 이번 주기</strong>
+            {rejectedSamples.map(row=><span key={`${row.id}:${row.policyVersion}`}>
+              <code>{row.symbol} · {row.policyVersion} · {row.reason}</code>
+              <b>{row.conditions.filter(condition=>condition.passed===false||condition.value===null).map(condition=>
+                `${condition.name}: 실측 ${value(condition.value)}, ${condition.operator} 임계값 ${value(condition.threshold)}`
+              ).join(' · ') || '개별 조건 측정값 없음'}
+                {' · '}{Number.isFinite(row.evaluatedAt) ? timestamp(new Date(row.evaluatedAt).toISOString()) : '미확인'} PHT</b>
+            </span>)}
+          </div>}
+          <p className="ccc-diagnostics-note">{evaluation.nextEvaluationAt
+            ? `다음 평가 예정 시각 ${timestamp(evaluation.nextEvaluationAt)} PHT (주기 예정값이며 실행 보장은 아님).`
+            : '다음 평가 시각 미확인. 실행 주기나 주문을 추정하지 않습니다.'}
+            {' '}집계는 {evaluation.windowBasis} 기준입니다.</p>
+        </>}
+        <div className="ccc-diagnostics-comparisons">
+          <div><strong>기존 비교 보관본 · {archive?.version ?? '미확인'}</strong>
+            <span>{archive ? `${archive.completedPairs ?? '—'}/${archive.candidates ?? '—'} 쌍 관측 · ${archive.status}` : '기존 비교 결과 없음'}</span>
+            {archive?.baseline && <small>기준군 {archive.baseline.trades ?? '—'}건 · 순손익 {amount(archive.baseline.netPnlUsd, true)} · 비용 {amount(archive.baseline.costUsd)}</small>}
+            {archive?.filtered && <small>비용 필터군 {archive.filtered.trades ?? '—'}건 · 순손익 {amount(archive.filtered.netPnlUsd, true)} · 비용 {amount(archive.filtered.costUsd)}</small>}
+          </div>
+          <div><strong>지속 비교 관측 · {continuousAvailable?.version ?? (continuous ? '미확인' : '새 표본 대기')}</strong>
+            <span>{continuousAvailable ? `${continuousAvailable.candidates}개 동일 확정봉 후보 · ${continuousAvailable.pages}개 일별 페이지 · ${continuousAvailable.status}`
+              : continuous?.status === 'UNAVAILABLE' ? `자료를 확인할 수 없습니다 · ${continuous.reason}` : '연속 수집 요약 미제공'}</span>
+            {continuousAvailable && <small>후보 게이트 통과: v7 {continuousAvailable.accepted.legacyV7}/{continuousAvailable.candidates} · v8 {continuousAvailable.accepted.adaptiveV8}/{continuousAvailable.candidates}. 포트폴리오 성과가 아닙니다.</small>}
+            {continuousAvailable && <small>비용 증거 확인: v7 {continuousAvailable.costEvidenceAvailable.legacyV7}/{continuousAvailable.candidates} · v8 {continuousAvailable.costEvidenceAvailable.adaptiveV8}/{continuousAvailable.candidates}.</small>}
+            {continuousAvailable && <small>비용 증거 미확인: v7 {continuousAvailable.costEvidenceUnavailable.legacyV7}/{continuousAvailable.candidates} · v8 {continuousAvailable.costEvidenceUnavailable.adaptiveV8}/{continuousAvailable.candidates}. 이를 비용이 0인 것으로 간주하지 않습니다.</small>}
+            {continuousAvailable && <small>
+              결과 미평가 · 진행 중 시간창 {continuousAvailable.pendingTimeWindow} · 만기 후 결과 미확인 {continuousAvailable.outcomeUnknown}
+              {continuousAvailable.maxPotentialMaturityAt ? ` · 잠재적 최대 만기 ${timestamp(continuousAvailable.maxPotentialMaturityAt)} PHT` : ''}
+            </small>}
+            {continuousAvailable?.outcomes && <small>실현 결과: 가격경로는 미평가 상태입니다. 순손익·기대값·승률은 제공하지 않습니다.</small>}
+          </div>
+        </div>
+        <p className="ccc-diagnostics-note">표본 신호 적격성과 실제 포지션 성과는 별개입니다. 비용·미성숙 결과는 0 또는 승리로 간주하지 않으며, 비교만으로 정책을 자동 승격하지 않습니다.</p>
+      </>}
+  </section>;
+}
+
 export function VirtualPaper400Card() {
   const { data, error, fresh, status, refresh } = useVirtualPaper400();
   const [refreshing, setRefreshing] = useState(false);
@@ -72,15 +171,16 @@ export function VirtualPaper400Card() {
     <div className="ccc-overview-grid"><VirtualPerformanceChart runtime={runtime} fresh={fresh} />
       <section className="ccc-panel ccc-strategy-panel" aria-label="자동매매 상태와 설정"><div className="ccc-panel-heading"><div><p className="ccc-eyebrow">AUTOMATION</p><h2>자동매매 상태</h2></div><span className={`ccc-radar-icon ${active&&!blocked?'is-active':''}`}><Radar size={20} /></span></div>
         <div className="ccc-strategy-message"><h3>{headline}</h3><p>{stopped?'기존 포지션의 손절·익절 보호는 계속됩니다.':explainReason(runtime?.reason)}</p></div>
-        {policy ? <div className="ccc-policy" data-testid="virtual-active-policy"><div className="ccc-policy-name"><SlidersHorizontal size={15} /><strong>{policy.version==='virtual400-daily/v7'?'비용 선별 PAPER 시험':['virtual400-daily/v3','virtual400-daily/v4','virtual400-daily/v5','virtual400-daily/v6','virtual400-daily/v7'].includes(policy.version)?'적극적 PAPER 시험':['virtual400-active/v1','virtual400-active/v2'].includes(policy.version)?'적극적 가상 매매':'저장된 운용 설정'}</strong><span>서버 적용</span></div><dl><div><dt>1회 위험 예산</dt><dd>{policy.riskPerTradePct}%</dd></div><div><dt>레버리지 {policy.minLeverage ? '범위' : '상한'}</dt><dd>{policy.minLeverage ? `${policy.minLeverage}–${policy.maxLeverage}x` : `최대 ${policy.maxLeverage}x`}</dd></div><div><dt>진입 간격</dt><dd>{policy.cooldownMinutes}분</dd></div></dl><p className="ccc-policy-symbols">{policy.symbols.join(' · ')}</p></div>
+         {policy ? <div className="ccc-policy" data-testid="virtual-active-policy"><div className="ccc-policy-name"><SlidersHorizontal size={15} /><strong>{policy.version==='virtual400-daily/v7'?'비용 선별 PAPER 시험':['virtual400-daily/v3','virtual400-daily/v4','virtual400-daily/v5','virtual400-daily/v6','virtual400-daily/v7','virtual400-daily/v8'].includes(policy.version)?'적극적 PAPER 시험':['virtual400-active/v1','virtual400-active/v2'].includes(policy.version)?'적극적 가상 매매':'저장된 운용 설정'}</strong><span>서버 적용</span></div><dl><div><dt>1회 위험 예산</dt><dd>{policy.riskPerTradePct}%</dd></div><div><dt>레버리지 {policy.minLeverage ? '범위' : '상한'}</dt><dd>{policy.minLeverage ? `${policy.minLeverage}–${policy.maxLeverage}x` : `최대 ${policy.maxLeverage}x`}</dd></div><div><dt>진입 간격</dt><dd>{policy.cooldownMinutes}분</dd></div></dl><p className="ccc-policy-symbols">{policy.symbols.join(' · ')}</p></div>
         : <div className="ccc-callout">적용된 설정을 확인하고 있습니다. 기본값으로 대체하지 않습니다.</div>}
-        {policy && ['virtual400-daily/v3','virtual400-daily/v4','virtual400-daily/v5','virtual400-daily/v6','virtual400-daily/v7'].includes(policy.version) && <p className="ccc-callout">미검증 PAPER 전략 · 하루 최대 {policy.maxDailyEntries ?? 24}회 · 일손실 {account?.dailyBudget?.lossLimitPct ?? 5}% 제한{policy.dailyProfitCapPct ? ` · 일일 실현 순수익 ${policy.dailyProfitCapPct}% 도달 시 신규 진입 중지 (PHT)` : ''}. 일반 전략 성과와 구분하며 손실도 그대로 기록합니다.</p>}
+         {policy && ['virtual400-daily/v3','virtual400-daily/v4','virtual400-daily/v5','virtual400-daily/v6','virtual400-daily/v7','virtual400-daily/v8'].includes(policy.version) && <p className="ccc-callout">미검증 PAPER 전략 · 하루 최대 {policy.maxDailyEntries ?? 24}회 · 일손실 {account?.dailyBudget?.lossLimitPct ?? 5}% 제한{policy.dailyProfitCapPct ? ` · 일일 실현 순수익 ${policy.dailyProfitCapPct}% 도달 시 신규 진입 중지 (PHT)` : ''}. 일반 전략 성과와 구분하며 손실도 그대로 기록합니다.</p>}
         {account?.dailyBudget && <p className="ccc-callout" data-testid="virtual-daily-budget">투입 원금 {amount(account.dailyBudget.referenceCapitalUsd)} USDC 기준 · 일일 수익 목표 {account.dailyBudget.profitTargetMinPct}–{account.dailyBudget.profitCapPct}% ({amount(account.dailyBudget.profitTargetMinUsd)}–{amount(account.dailyBudget.profitCapUsd)} USDC) · 일일 손실 한도 {account.dailyBudget.lossLimitPct}% ({amount(account.dailyBudget.lossLimitUsd)} USDC) · 남은 손실 예산 {amount(account.dailyBudget.remainingLossBudgetUsd)} USDC. 목표는 수익 보장이 아니며, 입금은 손익에서 제외합니다. 한도 도달 시 진입을 중지하며 손절 체결 오차로 실제 손실은 한도를 넘을 수 있습니다.</p>}
         <VirtualTradingModeControls /><p className="ccc-caption">가상 기록은 AI 학습·검증 후보 자료입니다. 모델 학습 완료나 실자금 적용 승인을 뜻하지 않습니다.</p>
         <div className="ccc-automation-note"><ShieldCheck size={15} /><span>활성 세션은 웹페이지를 닫아도 서버에서 계속 실행됩니다.</span></div>
       </section>
     </div>
     <MarketDecisions runtime={runtime} fresh={fresh} />
+    <PaperEvaluationDiagnostics runtime={runtime} fresh={fresh} />
     <PositionPanel runtime={runtime} fresh={fresh} />
     <VirtualTradeJournal />
     <details className="ccc-session-details"><summary>운용 세부 정보 <ChevronDown size={14} /></summary><div><p>가상 정산 잔액: {amount(account?.ledger.realizedEquityUsd)} USDC · 화면 갱신 10초</p><p>설정: {policy?.version??'미확인'} · 적용 {timestamp(policy?.appliedAt,true)} PHT</p><p>비용과 체결은 SIMULATED / ESTIMATED입니다. 시작·중지·재접속으로 손익 기록이 초기화되지 않습니다.</p><Link href="/system">시스템 진단 보기 →</Link></div></details>

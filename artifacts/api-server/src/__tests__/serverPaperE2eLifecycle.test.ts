@@ -165,6 +165,8 @@ import { getPaperCostBinding } from '../lib/paperCostCache';
 import { runVirtualPaper400Cycle } from '../workers/virtualPaper400Cycle';
 import { buildActiveVirtualPaper400SessionState } from '../workers/virtualPaper400SessionState';
 import { initialVirtualPaper400RiskState, evaluateVirtualPaper400Account } from '../workers/virtualPaper400Accounting';
+import { dailyPaperCandidate } from '../workers/virtualPaperDailyCandidate';
+import { ADAPTIVE_DAILY_PLAN_VERSION } from '../workers/virtualPaperTradingMode';
 import { virtualReplaySignal, virtualReplayCost } from './helpers/virtualPaper400Replay';
 import { rawCandleVirtualReplaySignal } from './helpers/virtualPaper400RawCandleReplay';
 import type { DbTrade } from '@workspace/db';
@@ -566,6 +568,12 @@ describe('daily PAPER experiment through actual executor',()=>{
   const {DAILY_PAPER_POLICY}=await import('../workers/virtualPaperDailyPolicy');
   const {MARKET_BY_SYMBOL_SERVER}=await import('../lib/gmxMarkets');
   const now=Date.parse('2026-09-22T03:00:10Z');
+   const candidate=realDailyV8TrendCandidate(now);
+   if(!candidate?.evaluation)throw Error('v8 trend candle fixture did not produce an eligible candidate');
+   expect(candidate.evaluation.selectedSetup).toBe('TREND_PULLBACK');
+   expect(candidate.evaluation.eligible).toBe(true);
+   const trendSignal=candidate.evaluation.signals.find(signal=>signal.kind==='TREND_PULLBACK');
+   expect(trendSignal).toMatchObject({eligible:true,targetBasis:'OBSERVED_SWING',targetPrice:52500});
   const session=buildActiveVirtualPaper400SessionState('daily-e2e',new Date(now-1000));
   process.env.WORKER_ENGINE_MODE=scenario==='live'?'LIVE':'PAPER';
   let saved=initialVirtualPaper400RiskState(session.session);
@@ -574,17 +582,36 @@ describe('daily PAPER experiment through actual executor',()=>{
   try {
   const result=await runVirtualPaperDailyCycle({sessionRaw:JSON.stringify(session),policyAppliedAt:new Date(now).toISOString(),
     policyVersion:DAILY_PAPER_POLICY.version,tradingMode:'INTRADAY',engineMode:'PAPER',previous:saved,rows:[],now:new Date(now),
-    markets:MARKET_BY_SYMBOL_SERVER,quote:quoteFn(50000),shouldContinue:()=>true,persistRisk:async s=>{saved=s;},readSignals:async()=>[],
-    readDailyCandidates:async()=>[{symbol:'BTC',source:'gmx-official-api',closedAt:now-10000,evaluatedAt:now,side:'LONG',referencePrice:50000,stopFraction:.006,momentum:.01,purpose:'AGGRESSIVE_PAPER_EXPERIMENT',quality:{eligible:true,reason:'TEST_TREND',regime:'TREND',efficiency:.6,atrFraction:.006}}],
+     markets:MARKET_BY_SYMBOL_SERVER,quote:quoteFn(candidate.referencePrice),shouldContinue:()=>true,persistRisk:async s=>{saved=s;},readSignals:async()=>[],
+     readDailyCandidates:async()=>[candidate],
     readCost:async(_s,_l,n)=>virtualReplayCost(now,n),claim:async(id,audit)=>{if(store.workerState.has(id))return false;store.workerState.set(id,JSON.stringify(audit));return true;},
     open:async args=>{if(scenario==='cost_changed')vi.mocked(getPaperCostBinding).mockReturnValue({...BINDING,estEntryCostUsd:1});return openServerPaperPosition(args);},
     close:async()=>false,reduce:async()=>false});
   if(scenario==='cost_changed'||scenario==='live'){expect(result.status).toBe('BLOCKED');expect(store.trades).toHaveLength(0);return;}
   expect(result.status).toBe('OPENED');expect(store.trades).toHaveLength(1);
-  const open=store.trades[0];expect(Number(open.sizeInUsd)).toBeCloseTo(333.3333);
-  expect(store.workerState.get(String(open.openDecisionId))).toContain('PAPER_COST_FILTERED_EXPERIMENT');
+   const open=store.trades[0];
+   const audit=JSON.parse(store.workerState.get(String(open.openDecisionId))!);
+   const plan=audit.tradePlan;
+   const appliedRiskProfile=open.riskProfileSnapshot as {derivedLimits:{maxRiskPerTradeUsd:number;maxTotalExposureUsd:number}};
+   expect(audit.policy.version).toBe(DAILY_PAPER_POLICY.version);
+   expect(audit.signal.strategyId).toBe('PAPER_V8_STRUCTURAL_SIGNAL');
+   expect(plan.version).toBe(ADAPTIVE_DAILY_PLAN_VERSION);
+   expect(plan.costReserveUsd).toBe(2);
+   expect(plan.entryPrice).toBe(candidate.referencePrice);
+   expect(plan.structuralStop).toBe(candidate.evaluation.stopPrice);
+   expect(plan.tpPrice).toBe(trendSignal!.targetPrice);
+   expect(plan.notionalUsd).toBe(Number(open.sizeInUsd));
+   expect(plan.plannedRiskUsd).toBeCloseTo(plan.notionalUsd*Math.abs(plan.entryPrice-plan.structuralStop)/plan.entryPrice+2);
+   expect(plan.plannedRiskUsd).toBeLessThanOrEqual(appliedRiskProfile.derivedLimits.maxRiskPerTradeUsd+1e-8);
+   expect(plan.notionalUsd).toBeCloseTo(Math.min(appliedRiskProfile.derivedLimits.maxTotalExposureUsd,
+     Math.max(0,appliedRiskProfile.derivedLimits.maxRiskPerTradeUsd-2)
+     /(Math.abs(plan.entryPrice-plan.structuralStop)/plan.entryPrice)));
+   expect(Number(open.stopPriceUsd)).toBe(plan.structuralStop);
+   expect(Number(open.takeProfitPriceUsd)).toBe(plan.tpPrice);
   __resetServerPaperStateForTests();
-  const price=scenario==='profit'?50700:scenario==='loss'?49500:50020;
+   const price=scenario==='profit'?plan.tpPrice
+     :scenario==='loss'?plan.entryPrice-(4.1/plan.notionalUsd)*plan.entryPrice
+       :plan.entryPrice+20;
   if(scenario==='expiry'){
     await manageServerPaperTick(quoteFn(price),now+31*60000);
     expect(closeRows()).toHaveLength(0);
@@ -600,3 +627,20 @@ describe('daily PAPER experiment through actual executor',()=>{
   } finally {process.env.WORKER_ENGINE_MODE='PAPER';}
  });
 });
+
+/** A real completed-candle v8 candidate with a printed trend swing target/support. */
+function realDailyV8TrendCandidate(now:number) {
+ const interval=15*60_000;
+ const prices=Array.from({length:16},(_,index)=>{
+   const time=(Math.floor(now/interval)-16+index)*interval/1000;
+   const close=50_000+160*index;
+   const bar=index<11?[close,close+100,close-100,close]
+     :index===11?[51_600,51_650,51_580,51_600]
+       :index===12?[51_600,52_500,51_580,52_000]
+         :index===13?[52_000,52_400,51_700,51_800]
+           :index===14?[51_800,52_400,51_700,51_850]
+             :[51_750,52_300,51_700,51_800];
+   return [time,...bar];
+ });
+ return dailyPaperCandidate('BTC',{source:'gmx-official-api',prices},now);
+}

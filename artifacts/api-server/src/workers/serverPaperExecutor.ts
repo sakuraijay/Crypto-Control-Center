@@ -1,7 +1,9 @@
-import { DAILY_PAPER_POLICY, isDailyPaperProfile } from './virtualPaperDailyPolicy';
+import { DAILY_PAPER_POLICY, LEGACY_DAILY_PAPER_POLICY, isDailyPaperProfile } from './virtualPaperDailyPolicy';
+import { adaptivePaperAuditMatches } from './adaptivePaperAudit';
+import type { DailyPaperCandidate } from './virtualPaperDailyCandidate';
 import { isVirtualActiveProfile, VIRTUAL_ACTIVE_POLICY } from './virtualPaper400Policy';
 import { virtualLeverageCeiling } from './virtualPaper400Sizing';
-import { FILTERED_PLAN_VERSION, DAILY_PLAN_VERSION, STRUCTURAL_PLAN_VERSION, MODE_DECISION_PREFIX, parseVirtualTradePlan, tradingModeExit, modeHoldingCost } from './virtualPaperTradingMode';
+import { ADAPTIVE_DAILY_PLAN_VERSION, FILTERED_PLAN_VERSION, DAILY_PLAN_VERSION, STRUCTURAL_PLAN_VERSION, MODE_DECISION_PREFIX, parseVirtualTradePlan, tradingModeExit, modeHoldingCost } from './virtualPaperTradingMode';
 /**
  * serverPaperExecutor — 서버 권위 PAPER 체결·관리·정산 (Task #111).
  *
@@ -397,23 +399,27 @@ export async function openServerPaperPosition(
   let tp: number | null = null;
   if (args.decisionId.startsWith(MODE_DECISION_PREFIX)) {
     const records = await db.select().from(workerStateTable).where(eq(workerStateTable.key, args.decisionId)).limit(2);
-    let audit: { tradePlan?: unknown; signal?: { strategyTargetPrice?: number }; policy?:{version?:string};candidate?:{quality?:{eligible?:boolean};purpose?:string;side?:string;symbol?:string;closedAt?:number;evaluatedAt?:number;stopFraction?:number} } | null = null;
+    let audit: { tradePlan?: unknown; signal?: { strategyTargetPrice?: number }; policy?:{version?:string};candidate?:DailyPaperCandidate } | null = null;
     try { audit = records.length === 1 ? JSON.parse(records[0].value) : null; } catch { /* refuse malformed intent */ }
     const plan = parseVirtualTradePlan(audit?.tradePlan);
     const holding = plan ? modeHoldingCost({ notionalUsd: args.sizeUsd,
       fundingRatePerHourFraction: binding.fundingRatePerHourFraction,
       borrowingRatePerHourFraction: binding.borrowingRatePerHourFraction }, plan.maxHoldHours) : null;
-    if ((plan?.version === FILTERED_PLAN_VERSION || plan?.version === STRUCTURAL_PLAN_VERSION || plan?.version === DAILY_PLAN_VERSION) && (audit?.signal?.strategyTargetPrice !== plan.tpPrice
+    if ((plan?.version === ADAPTIVE_DAILY_PLAN_VERSION || plan?.version === FILTERED_PLAN_VERSION || plan?.version === STRUCTURAL_PLAN_VERSION || plan?.version === DAILY_PLAN_VERSION) && (audit?.signal?.strategyTargetPrice !== plan.tpPrice
       || holding === null || !fin(plan.estimatedRoundTripCostUsd)
       || Math.abs(plan.estimatedRoundTripCostUsd - (binding.estEntryCostUsd + binding.estExitCostUsd + holding)) > 1e-8)) {
       return record({ ok: false, reason: 'VIRTUAL_STRATEGY_TARGET_OR_COST_MISMATCH' });
     }
-    if (dailyExperiment !== (plan?.version === FILTERED_PLAN_VERSION)
-      || (dailyExperiment && (args.riskProfileSnapshot.derivedLimits.maxRiskPerTradePct>1 || audit?.candidate?.quality?.eligible!==true || audit?.policy?.version !== DAILY_PAPER_POLICY.version
+    const adaptiveDaily = plan?.version === ADAPTIVE_DAILY_PLAN_VERSION;
+    const dailyPlan = adaptiveDaily || plan?.version === FILTERED_PLAN_VERSION;
+    if (dailyExperiment !== dailyPlan
+      || (dailyExperiment && (args.riskProfileSnapshot.derivedLimits.maxRiskPerTradePct>1
+        || (adaptiveDaily ? audit?.policy?.version !== DAILY_PAPER_POLICY.version || !adaptivePaperAuditMatches(audit?.candidate, plan!, {symbol:args.symbol,side:args.side,nowMs})
+          : (audit?.candidate?.legacyQuality ?? audit?.candidate?.quality)?.eligible!==true || audit?.policy?.version !== LEGACY_DAILY_PAPER_POLICY.version)
         || audit?.candidate?.purpose !== 'AGGRESSIVE_PAPER_EXPERIMENT' || audit.candidate.side !== args.side || audit.candidate.symbol !== args.symbol
         || !fin(audit.candidate.closedAt) || audit.candidate.closedAt > nowMs || nowMs-audit.candidate.closedAt > 960_000
         || !fin(audit.candidate.evaluatedAt) || audit.candidate.evaluatedAt > nowMs || nowMs-audit.candidate.evaluatedAt > 60_000
-        || !fin(audit.candidate.stopFraction) || Math.abs(audit.candidate.stopFraction-stop.plan.stopDistanceFraction)>1e-8)))
+        || !fin(audit.candidate.stopFraction) || (!adaptiveDaily && Math.abs(audit.candidate.stopFraction-stop.plan.stopDistanceFraction)>1e-8))))
       return record({ok:false,reason:'PAPER_EXPERIMENT_AUDIT_INVALID'});
     if (!virtualV2 || !plan || holding === null || !shouldContinue()
       || plan.entryPrice !== q.priceUsd || plan.structuralStop !== args.stopPriceUsd
