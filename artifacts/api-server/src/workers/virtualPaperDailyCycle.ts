@@ -234,7 +234,7 @@ export async function runVirtualPaperDailyCycle(d:DailyCycleDeps){
         addArmCondition(report,condition(`${reasonPrefix.toLowerCase()}_planned_risk_usd`,priceRisk+2,'<=',budget,
           priceRisk+2<=budget+1e-8));
         addArmCondition(report,condition(`${reasonPrefix.toLowerCase()}_net_reward_risk`,netRewardRisk,'>=',
-          adaptiveBranch?1:1.5,netRewardRisk>=(adaptiveBranch?1:1.5)-1e-8));
+          1.5,netRewardRisk>=1.5-1e-8));
         if(holding===null||roundTrip>2){report.reason='PAPER_EXPERIMENT_COST_CAP';return null;}
         // Both comparison arms use the same candidate-time quote and plan
         // timestamp. Each arm obtains its own cost snapshot at its own size.

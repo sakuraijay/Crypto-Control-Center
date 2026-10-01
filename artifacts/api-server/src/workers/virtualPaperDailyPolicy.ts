@@ -7,13 +7,13 @@ export const LEGACY_DAILY_PAPER_POLICY = Object.freeze({ version: 'virtual400-da
   purpose: 'COST_FILTERED_PAPER_EXPERIMENT', confidence: null });
 /**
  * v8 changes signal selection and admits only structurally evidenced plans
- * with positive net reward and >=1 net-R:R. Principal/loss/position/exposure
+ * with positive net reward and >=1.5 net-R:R. Principal/loss/position/exposure
  * limits intentionally match v7; this is not a less-protected account policy.
  */
 export const DAILY_PAPER_POLICY = Object.freeze({ version: 'virtual400-daily/v8',
   riskPerTradePct: 1, minLeverage: 5, maxLeverage: 10, maxMarginUsd: 100, maxNotionalUsd: 1000,
   cooldownMinutes: 45, maxDailyEntries: 32, dailyLossPct: 5, dailyProfitTargetMinPct: 5, dailyProfitCapPct: 20, dailyBudgetBasis: 'FUNDED_PRINCIPAL', maxRoundTripCostUsd: 2,
-  weeklyLossPct: 10, cumulativeLossPct: 30, minimumNetRewardRisk: 1,
+  weeklyLossPct: 10, cumulativeLossPct: 30, minimumNetRewardRisk: 1.5,
   adaptiveVolatilityMultiplierMin: .45, adaptiveVolatilityMultiplierMax: 3, minimumAdaptiveAtrPct: .0002,
   maximumAdaptiveAtrPct: .02, minimumSignalScore: 45,
   purpose: 'STRUCTURAL_SIGNAL_SCORED_PAPER_EXPERIMENT', confidence: null });

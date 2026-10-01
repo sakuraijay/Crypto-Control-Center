@@ -139,8 +139,8 @@ export function buildAdaptiveDailyTradePlan(input: { mode: VirtualTradingMode; e
     return { ok: false, reason: 'ADAPTIVE_PLAN_STRUCTURE_INVALID' };
   if (risk > input.riskBudgetUsd + 1e-8)
     return { ok: false, reason: 'ADAPTIVE_PLAN_RISK_CAP' };
-  if (!Number.isFinite(netRewardRisk) || netReward <= 0 || netRewardRisk < 1 - 1e-8)
-    return { ok: false, reason: 'ADAPTIVE_PLAN_NET_REWARD_RISK_BELOW_ONE' };
+  if (!Number.isFinite(netRewardRisk) || netReward <= 0 || netRewardRisk < 1.5 - 1e-8)
+    return { ok: false, reason: 'ADAPTIVE_PLAN_NET_REWARD_RISK_BELOW_1_5' };
   const leverage = Math.floor(Math.min(10, input.maxLeverage, input.notionalUsd * .1 / risk) + 1e-10);
   const collateral = input.notionalUsd / leverage;
   if (leverage < 5 || !finitePositive(collateral) || collateral < 1.1 || collateral > 100)
@@ -189,7 +189,7 @@ export function buildFilteredTradePlan(input: Parameters<typeof buildDailyTradeP
 }
 
 export const DAILY_ENTRY_OPTIONS = Object.fromEntries(Object.entries(VIRTUAL_ENTRY_OPTIONS).map(([mode,spec])=>
-  [mode,{...spec,exitBasis:'OBSERVED_PAPER_PRICE_TARGET',minimumNetRewardRisk:1,
+  [mode,{...spec,exitBasis:'OBSERVED_PAPER_PRICE_TARGET',minimumNetRewardRisk:1.5,
     dailyAccountTargetPct:[5,20],dailyProfitCapPct:20,maxHoldHours:mode==='INTRADAY'?1:4,purpose:'COST_FILTERED_PAPER_EXPERIMENT'}]));
 export const LEGACY_DAILY_ENTRY_OPTIONS = Object.fromEntries(Object.entries(VIRTUAL_ENTRY_OPTIONS).map(([mode,spec])=>
   [mode,{...spec,exitBasis:'PAPER_EXPERIMENT_PRICE_TARGET',minimumNetRewardRisk:1.5,

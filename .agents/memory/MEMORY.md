@@ -111,4 +111,3 @@
 - [SHADOW 성과 집계 신뢰 경계](shadow-performance-trust-boundary.md) — caller 라벨·0 비용을 믿지 말고 issued candidate, fresh cost provenance, 실제 4h 구간을 재검증
 - [Owner Approval durable 복구](owner-approval-durable-recovery.md) — READY는 canonical binding·digest·decrypt·EIP-712 재검증 필수; 만료 evidence는 보존하되 복원 금지
 - [Screenshot analysis trust boundary](screenshot-analysis-trust-boundary.md) — 승인 전 browser-local 이미지; 시각적 근거는 제한된 어휘·요청 identity 결속, 주문 권한과 분리
-- [GitHub exact-object preservation](github-exact-object-preservation.md) — CLI 인증과 connector 권한은 별개; 원본 author/committer 시간대·메시지·SHA 보존 후 non-force ref 갱신

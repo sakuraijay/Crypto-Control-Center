@@ -79,14 +79,14 @@ describe('bounded durable PAPER diagnostics', () => {
       kind: 'SIGNAL' as const,
       conditions: [
         { name: 'atrFraction', value: .006, operator: 'between', threshold: .004, passed: true },
-        { name: 'netRewardRisk', value: 0.92, operator: '>=', threshold: 1, passed: false },
+        { name: 'netRewardRisk', value: 0.92, operator: '>=', threshold: 1.5, passed: false },
         { name: 'roundTripCostUsd', value: null, operator: '<=', threshold: 2, passed: null, unit: 'USD' },
       ],
     };
     const legacyEvidence = { ...evidence, policyVersion: 'virtual400-daily/v7' as const, reason: 'WEAK_MOMENTUM' };
     const first = advanceVirtualDiagnostics({ ...input(), adaptiveEvaluations: [evidence, legacyEvidence],
       diagnostics: [{ symbol: 'ETH', reason: 'PAPER_MARKET_QUALITY:NO_OBSERVED_STRUCTURE_TARGET' },
-        { symbol: 'ETH', reason: 'PAPER_NET_REWARD_RISK_BELOW_ONE' }], nextEvaluationAt: now + 60_000 });
+        { symbol: 'ETH', reason: 'PAPER_NET_REWARD_RISK_BELOW_1_5' }], nextEvaluationAt: now + 60_000 });
     const second = advanceVirtualDiagnostics({ ...input(), raw: JSON.stringify(first.state), now: now + 60_000,
       adaptiveEvaluations: [evidence, legacyEvidence], nextEvaluationAt: now + 90_000 });
     expect(first.state?.evaluationCursors).toEqual({
@@ -96,7 +96,7 @@ describe('bounded durable PAPER diagnostics', () => {
     if (second.summary.status !== 'OBSERVED') throw Error('fixture');
     expect(second.summary.counts).toMatchObject({
       'EXPERIMENT_REJECT:PAPER_MARKET_QUALITY:NO_OBSERVED_STRUCTURE_TARGET': 1,
-      'EXPERIMENT_REJECT:PAPER_NET_REWARD_RISK_BELOW_ONE': 1,
+      'EXPERIMENT_REJECT:PAPER_NET_REWARD_RISK_BELOW_1_5': 1,
     });
     expect(second.summary.adaptiveEvaluations).toMatchObject({
       status: 'OBSERVED', candidates: 2, rejected: 2, eligible: 0,
@@ -108,7 +108,7 @@ describe('bounded durable PAPER diagnostics', () => {
       rejectionReasons: expect.arrayContaining([{ reason: 'NO_OBSERVED_STRUCTURE_TARGET', count: 1 }]),
       nextEvaluationAt: new Date(now + 90_000).toISOString(),
       conditions: expect.arrayContaining([
-        expect.objectContaining({ name: 'netRewardRisk', observed: 2, failed: 2, mean: .92, meanThreshold: 1 }),
+        expect.objectContaining({ name: 'netRewardRisk', observed: 2, failed: 2, mean: .92, meanThreshold: 1.5 }),
         expect.objectContaining({ name: 'roundTripCostUsd', observed: 0, missing: 2, mean: null }),
       ]),
     });

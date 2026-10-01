@@ -177,7 +177,7 @@ it('renders measured v7/v8 entry diagnostics, missing evidence, next evaluation,
     ],
    rejectionReasons:[{reason:'NO_OBSERVED_STRUCTURE_TARGET',count:2}],
    conditions:[
-    {name:'netRewardRisk',observed:3,missing:1,passed:1,failed:2,mean:.93,minimum:.71,maximum:1.1,meanThreshold:1},
+    {name:'netRewardRisk',observed:3,missing:1,passed:1,failed:2,mean:.93,minimum:.71,maximum:1.1,meanThreshold:1.5},
     {name:'roundTripCostUsd',observed:0,missing:4,passed:0,failed:0,mean:null,minimum:null,maximum:null,meanThreshold:2},
    ],
    nextEvaluationAt:'2026-09-20T15:31:00.000Z',
@@ -196,7 +196,7 @@ it('renders measured v7/v8 entry diagnostics, missing evidence, next evaluation,
    id:`BTC:${Date.parse(at)-15*60_000}`,symbol:'BTC',policyVersion:'virtual400-daily/v8',
    closedAt:Date.parse(at)-15*60_000,evaluatedAt:Date.parse(at),eligible:false,
    reason:'NO_OBSERVED_STRUCTURE_TARGET',kind:'SIGNAL',
-   conditions:[{name:'netRewardRisk',value:.92,operator:'>=',threshold:1,passed:false},
+   conditions:[{name:'netRewardRisk',value:.92,operator:'>=',threshold:1.5,passed:false},
     {name:'roundTripCostUsd',value:null,operator:'<=',threshold:2,passed:null}],
   }];
  vi.stubGlobal('fetch',vi.fn(async()=>({ok:true,json:async()=>data})));mount();await flush();
@@ -207,7 +207,7 @@ it('renders measured v7/v8 entry diagnostics, missing evidence, next evaluation,
  expect(screen.getByTestId('paper-safety-vs-signal').textContent).toContain('안전 제한은 신호 점수와 분리');
  expect(screen.getByTestId('paper-entry-diagnostics').textContent).toContain('임계값 평균');
   expect(screen.getByTestId('paper-rejection-samples').textContent).toContain('실측 0.92');
-  expect(screen.getByTestId('paper-rejection-samples').textContent).toContain('>= 임계값 1');
+  expect(screen.getByTestId('paper-rejection-samples').textContent).toContain('>= 임계값 1.5');
   expect(screen.getByTestId('paper-rejection-samples').textContent).toContain('실측 미확인');
  expect(screen.getByTestId('paper-entry-diagnostics').textContent).toContain('0.93');
  expect(screen.getByTestId('paper-entry-diagnostics').textContent).toContain('미확인');
