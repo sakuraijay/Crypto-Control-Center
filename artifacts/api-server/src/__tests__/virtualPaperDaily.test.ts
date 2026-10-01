@@ -76,7 +76,7 @@ describe('explicit aggressive PAPER experiment',()=>{
   expect(p.plan.maxHoldHours).toBe(mode==='INTRADAY'?1:4);expect(parseVirtualTradePlan({...p.plan,tpPrice:51000})).toBeNull();
  });
   it('v8 accepts only observed-target plans within actual cost, full $2 reserve, 1% risk and net R:R limits',()=>{
-   const input={mode:'INTRADAY' as const,entryPrice:50000,structuralStop:49825,targetPrice:50600,
+   const input={mode:'INTRADAY' as const,entryPrice:50000,structuralStop:49825,targetPrice:50750,
     notionalUsd:500,maxLeverage:10,estimatedRoundTripCostUsd:1.2,riskBudgetUsd:4,openedAtMs:now};
    const p=buildAdaptiveDailyTradePlan(input);
    expect(p.ok).toBe(true);if(!p.ok)return;
@@ -161,7 +161,7 @@ describe('explicit aggressive PAPER experiment',()=>{
        costEvidence:{source:'PAPER_GMX_ESTIMATE',estimatedRoundTripUsd:expect.any(Number),observedAt:now}}});
    expect(evaluationReport.mock.calls[0][0]).toMatchObject({policyVersion:DAILY_PAPER_POLICY.version,
      eligible:true,reason:'PAPER_EXPERIMENT_OPENED',kind:'ECONOMICS',
-     conditions:expect.arrayContaining([expect.objectContaining({name:'v8_net_reward_risk',passed:true,threshold:1})])});
+     conditions:expect.arrayContaining([expect.objectContaining({name:'v8_net_reward_risk',passed:true,threshold:1.5})])});
    const expensive=await runVirtualPaperDailyCycle({...d,
      readDailyCandidates:async()=>[breakoutCandidate()],
      readCost:async(_s:string,_l:boolean,n:number)=>({...virtualReplayCost(now,n),positionFeeUsd:3}),
@@ -172,7 +172,7 @@ describe('explicit aggressive PAPER experiment',()=>{
      costEvidence:{source:'PAPER_GMX_ESTIMATE'}});
    expect(expensive.evaluations[0].conditions).toEqual(expect.arrayContaining([
      expect.objectContaining({name:'v8_round_trip_cost_usd',passed:false,threshold:2}),
-     expect.objectContaining({name:'v8_net_reward_risk',threshold:1}),
+     expect.objectContaining({name:'v8_net_reward_risk',threshold:1.5}),
    ]));
   expect((await runVirtualPaperDailyCycle({...d,engineMode:'LIVE'})).status).toBe('BLOCKED');
   expect((await runVirtualPaperDailyCycle({...d,shouldContinue:()=>false})).status).toBe('BLOCKED');
