@@ -2,6 +2,7 @@ import {useState} from 'react';
 import {PATTERN_CATALOG,type PatternDefinition} from '@/lib/patternCatalog';
 import {patternName} from '@/lib/virtualTradeEvidencePresentation';
 import {PatternPreview} from '@/components/dashboard/PatternPreview';
+import {PatternImageHelper} from '@/components/dashboard/PatternImageHelper';
 import {Dialog,DialogContent,DialogDescription,DialogHeader,DialogTitle} from '@/components/ui/dialog';
 const direction=(value:string)=>({LONG:'상승 참고',SHORT:'하락 참고',NEUTRAL:'방향 중립',BREAKOUT:'돌파 방향 참고'}[value]??value);
 export default function PatternsPage(){
@@ -9,6 +10,7 @@ export default function PatternsPage(){
   return <div className="space-y-6">
     <div className="ccc-page-heading"><div><p className="ccc-eyebrow">CCC · PATTERN LIBRARY</p><h1>CCC 패턴 탐지 <span className="ccc-count">38</span></h1>
       <p>진입 전에 참고하는 38개 규칙 · 그림을 누르면 탐지 조건을 확인할 수 있습니다.</p></div></div>
+    <PatternImageHelper/>
     <div className="ccc-callout"><strong>15분 · 1시간 · 4시간 완료봉 분석</strong><p>아래 그림은 규칙을 설명하는 예시이며 현재 시장의 탐지 결과가 아닙니다. 실제 거래에 사용된 기록은 거래 상세의 ‘진입 당시 탐지 패턴’에서 확인하세요.</p></div>
     <div className="ccc-pattern-grid">{PATTERN_CATALOG.map((p,i)=><button key={p.id} type="button" className="ccc-pattern-tile" onClick={()=>setSelected(p)} aria-label={`${patternName(p.id)} 상세 설명`}>
       <div className="flex items-center justify-between text-xs text-slate-400"><span>{String(i+1).padStart(2,'0')} · {p.category}</span><span className={p.direction==='SHORT'?'ccc-negative':p.direction==='LONG'?'ccc-positive':''}>{direction(p.direction)}</span></div>
