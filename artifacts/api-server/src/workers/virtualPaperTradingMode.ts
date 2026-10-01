@@ -12,6 +12,7 @@ export const VIRTUAL_TRADING_MODES = {
 export type VirtualTradingMode = keyof typeof VIRTUAL_TRADING_MODES;
 export const MODE_VERSION = 'virtual-trading-mode/v1';
 export const LEGACY_DAILY_PLAN_VERSION = 'virtual-daily-experiment/v3';
+export const FILTERED_PLAN_VERSION = 'virtual-cost-filtered/v1';
 export const DAILY_PLAN_VERSION = 'virtual-daily-experiment/v4';
 export const STRUCTURAL_PLAN_VERSION = 'virtual-structural-plan/v2';
 export const VIRTUAL_ENTRY_OPTIONS = Object.fromEntries(Object.entries(VIRTUAL_TRADING_MODES).map(([key, spec]) =>
@@ -31,7 +32,7 @@ export function readTradingMode(raw: string | null, sessionId: string): TradingM
   return value;
 }
 export interface VirtualTradePlan {
-  version: typeof MODE_VERSION | typeof STRUCTURAL_PLAN_VERSION | typeof DAILY_PLAN_VERSION | typeof LEGACY_DAILY_PLAN_VERSION; mode: VirtualTradingMode; basis: 'INITIAL_POSITION_MARGIN_NET_ESTIMATED';
+  version: typeof FILTERED_PLAN_VERSION | typeof MODE_VERSION | typeof STRUCTURAL_PLAN_VERSION | typeof DAILY_PLAN_VERSION | typeof LEGACY_DAILY_PLAN_VERSION; mode: VirtualTradingMode; basis: 'INITIAL_POSITION_MARGIN_NET_ESTIMATED';
   targetRoePct: number; stopRoePct: number; maxHoldHours: number;
   entryPrice: number; structuralStop: number; notionalUsd: number; leverage: number;
   collateralUsd: number; costReserveUsd: number; plannedRiskUsd: number; tpPrice: number;
@@ -129,20 +130,34 @@ export function buildDailyTradePlan(input:{mode:VirtualTradingMode;entryPrice:nu
     notionalUsd:input.notionalUsd,leverage,collateralUsd:collateral,costReserveUsd:2,plannedRiskUsd:risk,tpPrice,
     estimatedRoundTripCostUsd:input.estimatedRoundTripCostUsd,openedAtMs:input.openedAtMs,expiresAtMs:input.openedAtMs+maxHoldHours*3_600_000}};
 }
+/** Keep the original 2x price target: reject poor net economics instead of moving TP. */
+export function buildFilteredTradePlan(input: Parameters<typeof buildDailyTradePlan>[0]):
+  {ok:true;plan:VirtualTradePlan}|{ok:false;reason:string} {
+  const result=buildDailyTradePlan(input);
+  if(!result.ok)return result;
+  const priceRisk=input.notionalUsd*Math.abs(input.structuralStop/input.entryPrice-1);
+  const cost=input.estimatedRoundTripCostUsd;
+  if((2*priceRisk-cost)/(priceRisk+cost)<1.5-1e-8)
+    return {ok:false,reason:'PAPER_NET_REWARD_RISK_BELOW_1_5'};
+  return {ok:true,plan:{...result.plan,version:FILTERED_PLAN_VERSION}};
+}
+
 export const DAILY_ENTRY_OPTIONS = Object.fromEntries(Object.entries(VIRTUAL_ENTRY_OPTIONS).map(([mode,spec])=>
-  [mode,{...spec,exitBasis:'PAPER_EXPERIMENT_PRICE_TARGET',minimumNetRewardRisk:null,
-    dailyAccountTargetPct:[5,20],dailyProfitCapPct:20,maxHoldHours:mode==='INTRADAY'?1:4,purpose:'AGGRESSIVE_PAPER_EXPERIMENT'}]));
+  [mode,{...spec,exitBasis:'PAPER_EXPERIMENT_PRICE_TARGET',minimumNetRewardRisk:1.5,
+    dailyAccountTargetPct:[5,20],dailyProfitCapPct:20,maxHoldHours:mode==='INTRADAY'?1:4,purpose:'COST_FILTERED_PAPER_EXPERIMENT'}]));
 
 /** Rebuild rather than trust serialized ROE/TP/expiry values. Never repair malformed evidence silently. */
 export function parseVirtualTradePlan(value: unknown): VirtualTradePlan | null {
   if (!value || typeof value !== 'object') return null;
   const p = value as VirtualTradePlan;
   if (!isTradingMode(p.mode)) return null;
-  if (p.version !== MODE_VERSION && p.version !== STRUCTURAL_PLAN_VERSION && p.version !== DAILY_PLAN_VERSION && p.version !== LEGACY_DAILY_PLAN_VERSION) return null;
+  if (p.version !== FILTERED_PLAN_VERSION && p.version !== MODE_VERSION && p.version !== STRUCTURAL_PLAN_VERSION && p.version !== DAILY_PLAN_VERSION && p.version !== LEGACY_DAILY_PLAN_VERSION) return null;
   const args = { mode: p.mode, entryPrice: p.entryPrice, structuralStop: p.structuralStop,
     notionalUsd: p.notionalUsd, maxLeverage: p.leverage, costReserveUsd: p.costReserveUsd,
     riskBudgetUsd: p.plannedRiskUsd, openedAtMs: p.openedAtMs };
-  const rebuilt = (p.version === DAILY_PLAN_VERSION || p.version === LEGACY_DAILY_PLAN_VERSION)
+  const rebuilt = p.version === FILTERED_PLAN_VERSION
+    ? buildFilteredTradePlan({...args,estimatedRoundTripCostUsd:p.estimatedRoundTripCostUsd!})
+    : (p.version === DAILY_PLAN_VERSION || p.version === LEGACY_DAILY_PLAN_VERSION)
     ? buildDailyTradePlan({...args,estimatedRoundTripCostUsd:p.estimatedRoundTripCostUsd!},p.version===LEGACY_DAILY_PLAN_VERSION)
     : p.version === STRUCTURAL_PLAN_VERSION
     ? buildStructuralTradePlan({ ...args, targetPrice: p.tpPrice, estimatedRoundTripCostUsd: p.estimatedRoundTripCostUsd! })
@@ -173,8 +188,10 @@ export function tradingModeExit(row: DbTrade, rawPlan: unknown, price: number, n
     || ![entryCost, exitCost].every(v => Number.isFinite(v) && v >= 0)) return 'MODE_COST_UNAVAILABLE';
   const net = size * (price / entry - 1) * (row.side === 'SHORT' ? -1 : 1) - entryCost - exitCost - holding.totalUsd;
   const roe = net / margin * 100;
+  // New plans exit stalled/losing positions after half their horizon; never extend legacy plans.
+  if(plan.version===FILTERED_PLAN_VERSION && nowMs-opened>=plan.maxHoldHours*1800_000 && net<=0)return 'MODE_NO_PROGRESS_EXIT';
   if (roe <= -plan.stopRoePct) return 'MODE_NET_STOP';
-  if ((plan.version === STRUCTURAL_PLAN_VERSION || plan.version === DAILY_PLAN_VERSION || plan.version === LEGACY_DAILY_PLAN_VERSION) && (row.side === 'SHORT' ? price <= plan.tpPrice : price >= plan.tpPrice))
+  if ((plan.version === FILTERED_PLAN_VERSION || plan.version === STRUCTURAL_PLAN_VERSION || plan.version === DAILY_PLAN_VERSION || plan.version === LEGACY_DAILY_PLAN_VERSION) && (row.side === 'SHORT' ? price <= plan.tpPrice : price >= plan.tpPrice))
     return 'TAKE_PROFIT';
   if (plan.version === MODE_VERSION && roe >= plan.targetRoePct) return 'MODE_NET_TAKE_PROFIT';
   return null;

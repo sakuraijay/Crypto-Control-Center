@@ -13,6 +13,7 @@ import StandardWorkspace from '@/pages/standard';
 import SystemPage from '@/pages/system';
 import ActivityPage from '@/pages/activity';
 import CalendarPage from '@/pages/calendar';
+import PatternsPage from '@/pages/patterns';
 
 import Dashboard from '@/pages/dashboard';
 import Positions from '@/pages/positions';
@@ -66,6 +67,7 @@ export function AppRouter() {
           <Route path="/system" component={SystemPage} />
           <Route path="/activity" component={ActivityPage} />
           <Route path="/calendar" component={CalendarPage} />
+          <Route path="/patterns" component={PatternsPage} />
           <Route path="/positions" component={Positions} />
           <Route path="/watchlist" component={Watchlist} />
           <Route path="/strategy" component={Strategy} />

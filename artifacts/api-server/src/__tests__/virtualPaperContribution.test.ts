@@ -32,7 +32,7 @@ describe('authorized PAPER contribution with immutable trading history',()=>{
   expect(after.next.risk.startOfDayEquityUsd).toBe(before.next.risk.startOfDayEquityUsd);
   expect(after.next.risk.dailyRealizedNetPnlUsd).toBe(before.next.risk.dailyRealizedNetPnlUsd);
   expect(after.evaluation.state).toBe('DAILY_LOSS_LOCKED');
-  expect(after.dailyBudget).toMatchObject({referenceCapitalUsd:1000,profitTargetMinUsd:50,profitCapUsd:200,lossLimitUsd:100});
+  expect(after.dailyBudget).toMatchObject({referenceCapitalUsd:1000,profitTargetMinUsd:50,profitCapUsd:200,lossLimitUsd:50});
   const restored=parseVirtualPaper400RiskState(JSON.stringify(after.next),session);
   expect(applyAuthorizedPaperCredit(restored,session,new Date(later.getTime()+60000),'PAPER',true)).toBe(restored);
   const tomorrow=evaluateVirtualPaper400Account({session,rows:lossRows(),previous:restored,quote,now:new Date('2026-09-24T16:00:00Z'),aggressiveDaily:true});
@@ -52,11 +52,11 @@ describe('authorized PAPER contribution with immutable trading history',()=>{
     expect(()=>validatePaperContributions(invalid,session)).toThrow();
   }
  });
- it('uses capital up to 1000 for the unchanged 2% risk rate while retaining order and margin caps',()=>{
+ it('uses capital up to 1000 for the new 1% risk rate while retaining order and margin caps',()=>{
   const profile=dailyPaperProfile(1000,now.toISOString());
-  expect(profile.derivedLimits).toMatchObject({allocatedTradingCapitalUsd:1000,maxRiskPerTradeUsd:20,maxRiskPerTradePct:2,maxTotalExposureUsd:1000,maxMarginPerTradeUsd:100,maxLeverage:10,maxConcurrentPositions:1});
+  expect(profile.derivedLimits).toMatchObject({allocatedTradingCapitalUsd:1000,maxRiskPerTradeUsd:10,maxRiskPerTradePct:1,maxTotalExposureUsd:1000,maxMarginPerTradeUsd:100,maxLeverage:10,maxConcurrentPositions:1});
   expect(dailyPaperProfile(1200,now.toISOString())).toEqual(profile);
-  expect(dailyPaperProfile(500,now.toISOString()).derivedLimits.maxRiskPerTradeUsd).toBe(10);
+  expect(dailyPaperProfile(500,now.toISOString()).derivedLimits.maxRiskPerTradeUsd).toBe(5);
   expect(isDailyPaperProfile(profile)).toBe(true);
  });
  it('adds 100 exactly once across restart, preserving losses, daily budget and HWM drawdown',()=>{
@@ -83,7 +83,7 @@ describe('authorized PAPER contribution with immutable trading history',()=>{
   const capped=evaluateVirtualPaper400Account({session,rows,previous:base,quote,now,aggressiveDaily:true});
   expect(capped.next.risk.startOfDayEquityUsd).toBe(400);
   expect(capped.next.risk.dailyRealizedNetPnlUsd).toBe(100);
-  expect(capped.dailyBudget).toMatchObject({referenceCapitalUsd:500,profitCapUsd:100,lossLimitUsd:50});
+  expect(capped.dailyBudget).toMatchObject({referenceCapitalUsd:500,profitCapUsd:100,lossLimitUsd:25});
   expect(capped.evaluation.state).toBe('PROFIT_CAP_LOCKED');
   expect(capped.evaluation.actions).toEqual([]);
   const restart=parseVirtualPaper400RiskState(JSON.stringify(capped.next),session);

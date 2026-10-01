@@ -1,9 +1,14 @@
+import {paperPerformance} from './virtualPaperPerformance';
+import {virtualTradeEvidence,virtualEntryAmounts} from './virtualTradeEvidence';
+import {restorePaperComparison,addPaperComparison,advancePaperComparison,summarizePaperComparison} from './virtualPaperComparison';
 import { buildVirtualPaperCalendar } from './virtualPaperCalendar';
 import { PAPER_LEARNING_CONTRACT } from './virtualPaperLearningDataset';
 import { applyAuthorizedPaperCredit } from './virtualPaperContribution';
 import { DAILY_PAPER_POLICY } from './virtualPaperDailyPolicy';
 import { runVirtualPaperDailyCycle, type DailyCycleDeps } from './virtualPaperDailyCycle';
 import { dailyPaperCandidate } from './virtualPaperDailyCandidate';
+import { readPatternCandles } from '../intel/patterns/patternReader';
+import { patternSummary } from '../intel/patterns/chartPatterns';
 import { advanceVirtualDiagnostics, virtualDiagnosticsKey } from './virtualPaper400Diagnostics';
 import type { StrategyShadowRecord } from '../intel/strategyShadowAdapterV2';
 import { discoverVirtualGmxUniverse, selectVirtualAnalysisBatch, VIRTUAL_GMX_SYMBOLS } from '../lib/virtualGmxUniverse';
@@ -79,14 +84,14 @@ export async function maybeRunVirtualPaper400Cycle(args: {
     const policyKey = `virtual_paper_400_policy_v1:${identity.sessionId}`;
     const policyRaw = await read(policyKey);
     let applied = policyRaw ? JSON.parse(policyRaw) as { version: string; appliedAt: string; sessionId: string } : null;
-    if (policyRaw !== null && (!applied || (applied.version !== VIRTUAL_ACTIVE_POLICY.version && applied.version !== VIRTUAL_LEGACY_POLICY.version && applied.version !== DAILY_PAPER_POLICY.version && applied.version !== 'virtual400-daily/v3' && applied.version !== 'virtual400-daily/v4' && applied.version !== 'virtual400-daily/v5') || applied.sessionId !== identity.sessionId
+    if (policyRaw !== null && (!applied || (applied.version !== VIRTUAL_ACTIVE_POLICY.version && applied.version !== VIRTUAL_LEGACY_POLICY.version && applied.version !== DAILY_PAPER_POLICY.version && applied.version !== 'virtual400-daily/v3' && applied.version !== 'virtual400-daily/v4' && applied.version !== 'virtual400-daily/v5' && applied.version !== 'virtual400-daily/v6') || applied.sessionId !== identity.sessionId
       || !Number.isFinite(Date.parse(applied.appliedAt)) || Date.parse(applied.appliedAt) > now.getTime())) {
       throw new Error('VIRTUAL_POLICY_INVALID');
     }
     const executor = getServerPaperStatus();
-    const dailyRequested = args.dailyExperiment === true || applied?.version === DAILY_PAPER_POLICY.version || ['virtual400-daily/v3','virtual400-daily/v4','virtual400-daily/v5'].includes(applied?.version ?? '');
+    const dailyRequested = args.dailyExperiment === true || applied?.version === DAILY_PAPER_POLICY.version || ['virtual400-daily/v3','virtual400-daily/v4','virtual400-daily/v5','virtual400-daily/v6'].includes(applied?.version ?? '');
     const desiredPolicy = dailyRequested ? DAILY_PAPER_POLICY : VIRTUAL_ACTIVE_POLICY;
-    const accountBefore = evaluateVirtualPaper400Account({ session: identity, previous, rows, now, quote: args.quote, aggressiveDaily:applied?.version===DAILY_PAPER_POLICY.version || ['virtual400-daily/v3','virtual400-daily/v4','virtual400-daily/v5'].includes(applied?.version ?? '') });
+    const accountBefore = evaluateVirtualPaper400Account({ session: identity, previous, rows, now, quote: args.quote, aggressiveDaily:applied?.version===DAILY_PAPER_POLICY.version || ['virtual400-daily/v3','virtual400-daily/v4','virtual400-daily/v5','virtual400-daily/v6'].includes(applied?.version ?? '') });
     const universe = session.active && accountBefore.evaluation.entryAllowed && !executor.pendingClose && !executor.unresolved
       ? await discoverVirtualGmxUniverse() : null;
     const markets = new Map((universe?.complete ? universe.markets : []).map(m => [m.name.split('/')[0], m]));
@@ -137,7 +142,12 @@ export async function maybeRunVirtualPaper400Cycle(args: {
       // remain PAPER estimates, never observed real execution.
       return { ...result.snapshot, source: 'PAPER_GMX_ESTIMATE' };
     };
-    const dailyEnabled=applied?.version===DAILY_PAPER_POLICY.version || ['virtual400-daily/v3','virtual400-daily/v4','virtual400-daily/v5'].includes(applied?.version ?? '');
+    const dailyEnabled=applied?.version===DAILY_PAPER_POLICY.version || ['virtual400-daily/v3','virtual400-daily/v4','virtual400-daily/v5','virtual400-daily/v6'].includes(applied?.version ?? '');
+    const comparisonKey=`virtual_paper_comparison_v1:${identity.sessionId}`;
+    let comparison: ReturnType<typeof restorePaperComparison>|null=null;
+    try { comparison=restorePaperComparison(await read(comparisonKey),identity.sessionId,Date.now());
+      advancePaperComparison(comparison,args.quote,Date.now());
+    } catch { /* Preserve malformed evidence; diagnostics must not disable protective exits. */ }
     const cycleDeps: DailyCycleDeps = { sessionRaw: raw!, policyAppliedAt: applied?.appliedAt, policyVersion: applied?.version,
       tradingMode: selectedMode?.mode, structuralTargets: true, markets,
       entryBlockedReason: executor.unresolved || executor.pendingClose ? 'EXECUTOR_RECOVERY_PENDING'
@@ -153,14 +163,19 @@ export async function maybeRunVirtualPaper400Cycle(args: {
         activity.stage(run, 'CHECKING_ENTRY', [symbol]);
         return readCost(symbol, isLong, notionalUsd);
       },
+      recordComparison: proposal => {if(comparison)addPaperComparison(comparison,proposal);},
       readDailyCandidates: async () => {
         if (!universe?.complete || !symbols.length || !args.shouldContinue()) return [];
         await write(rotationKey,{...rotation,...Object.fromEntries(symbols.map(s=>[s,Date.now()]))});
         activity.stage(run,'ANALYZING_MARKETS',symbols);
         const {fetchGmxCandles}=await import('../routes/gmx');
-        const candidates=await Promise.all(symbols.map(async symbol=>dailyPaperCandidate(symbol,await fetchGmxCandles(symbol,'15m',20),Date.now())));
+        const candidates=await Promise.all(symbols.map(async symbol=>{
+          const data=await readPatternCandles(symbol,{read,write,fetch:fetchGmxCandles,now:Date.now});
+          const candidate=dailyPaperCandidate(symbol,data.raw,Date.now());
+          return candidate?{...candidate,patternAnalysis:data.analysis}:null;
+        }));
         analysis=symbols.map((symbol,i)=>({symbol,reason:candidates[i]
-          ? `AGGRESSIVE_PAPER_EXPERIMENT: ${candidates[i]!.side}; completed-candle momentum ${candidates[i]!.momentum}; 미검증 시험 거래`
+          ? `AGGRESSIVE_PAPER_EXPERIMENT: ${candidates[i]!.side}; ${patternSummary(candidates[i]!.patternAnalysis)}; 패턴은 미검증 참고 자료 · 거래량 확인 불가`
           : 'PAPER_EXPERIMENT_CANDLE_UNAVAILABLE'}));
         activity.analyzed(run,analysis.map((r,i)=>({...r,evaluated:!!candidates[i]})));
         return candidates.filter((c):c is NonNullable<typeof c>=>c!==null);
@@ -250,15 +265,23 @@ export async function maybeRunVirtualPaper400Cycle(args: {
       .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()).slice(0, 10).map(async close => {
         const open = finalRows.find(row => row.id === close.closesTradeId);
         const auditRaw = open?.openDecisionId && (open.openDecisionId.startsWith('vp400:') || open.openDecisionId.startsWith(MODE_DECISION_PREFIX)) ? await read(open.openDecisionId) : null;
-        let audit: { signal?: { strategyId?: string; reasons?: string[] }; sizing?: { finalNotionalUsd?: number }; cost?: { totalEstimatedRoundTripCostUsd?: number } } | null = null;
+        let audit: { signal?: { strategyId?: string; reasons?: string[] }; sizing?: { finalNotionalUsd?: number }; cost?: { totalEstimatedRoundTripCostUsd?: number }; tradePlan?:{plannedRiskUsd?:number;notionalUsd?:number;collateralUsd?:number;leverage?:number;maxHoldHours?:number} } | null = null;
         try { audit = auditRaw ? JSON.parse(auditRaw) : null; } catch { /* unavailable, never fake reasons */ }
-        const priorRisk = open && audit?.cost && audit.sizing ? Number(audit.sizing.finalNotionalUsd)
+        const calculatedRisk = open && audit?.cost && audit.sizing ? Number(audit.sizing.finalNotionalUsd)
           * Math.abs(Number(open.price) - Number(open.stopPriceUsd)) / Number(open.price)
           + Number(audit.cost.totalEstimatedRoundTripCostUsd) : null;
+        const recordedRisk=audit?.tradePlan?.plannedRiskUsd;
+        const priorRisk=typeof recordedRisk==='number'&&Number.isFinite(recordedRisk)&&recordedRisk>0?recordedRisk:calculatedRisk;
+        // OPEN size/collateral are reduced in-place on partial settlement. Only
+        // the immutable entry audit can supply the original amounts.
+        const entryAmounts=virtualEntryAmounts(audit);
         return { id: close.id, symbol: close.symbol, side: close.side, openedAt: open?.timestamp ?? null,
           closedAt: close.timestamp, entryPrice: open?.price ?? null, exitPrice: close.price,
           stopPrice: open?.stopPriceUsd ?? null, targetPrice: open?.takeProfitPriceUsd ?? null,
           strategy: audit?.signal?.strategyId ?? null, reasons: audit?.signal?.reasons ?? [],
+          entryEvidence:open?virtualTradeEvidence(audit,open.symbol,open.side,new Date(open.timestamp).getTime()):null,
+          ...entryAmounts,settledNotionalUsd:close.sizeInUsd,leverage:open?.leverage??null,
+          holdingMinutes:open?Math.max(0,(new Date(close.timestamp).getTime()-new Date(open.timestamp).getTime())/60_000):null,
           closeReason: close.closeReason, grossPnlUsd: close.pnl, netPnlUsd: close.netPnlEstimatedUsd,
           entryCostUsd: close.estEntryCostUsd, exitCostUsd: close.estExitCostUsd, holdingCostUsd: close.estHoldingCostUsd,
           plannedRiskUsd: priorRisk !== null && Number.isFinite(priorRisk) ? priorRisk : null,
@@ -273,7 +296,8 @@ export async function maybeRunVirtualPaper400Cycle(args: {
       lastOpenAtMs: final.lastOpenAtMs, sessionStartedAtMs: identity.startedAtMs });
     // Corrupt diagnostic history must neither erase evidence nor disable position protection.
     if (diagnostic.state) await write(diagnosticKey, diagnostic.state);
-    await write(VIRTUAL_PAPER_400_RUNTIME_KEY, { ...result, learning: { ...PAPER_LEARNING_CONTRACT, settledRows: final.ledger.settlementCount }, tradingDiagnostics: diagnostic.summary, universe: universe ? { ...universe, batchSymbols: symbols } : null, analysis, journal, calendar: buildVirtualPaperCalendar(identity, finalRows, new Date()), sessionId: identity.sessionId,
+    if(comparison)await write(comparisonKey,comparison);
+    await write(VIRTUAL_PAPER_400_RUNTIME_KEY, { ...result, performance:paperPerformance(finalRows), comparison:comparison?summarizePaperComparison(comparison):{status:'UNAVAILABLE'}, learning: { ...PAPER_LEARNING_CONTRACT, settledRows: final.ledger.settlementCount }, tradingDiagnostics: diagnostic.summary, universe: universe ? { ...universe, batchSymbols: symbols } : null, analysis, journal, calendar: buildVirtualPaperCalendar(identity, finalRows, new Date()), sessionId: identity.sessionId,
       strategyContinuity: summarizeVirtualPaper400StrategyContinuity(continuity),
       at: new Date().toISOString(), account: { ...result.account, ledger: final.ledger, dailyBudget: final.dailyBudget,
         equityUsd: final.equityUsd, unrealizedNetPnlUsd: final.unrealizedNetPnlUsd,

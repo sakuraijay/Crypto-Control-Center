@@ -370,14 +370,20 @@ export async function runEmergencyClose(input: EmergencyCloseInput): Promise<Sto
   if (!row) return { ok: false, protectionId: id, reason: 'emergency close 레코드 재조회 실패', emergencyCloseRequired: true };
   if (row.status !== 'PLANNED' || row.submitAttempts > 0) {
     // 이미 시도됨 — 최대 1회 규칙. 재제출 금지, 상태는 reconciliation이 해소.
-    return { ok: false, protectionId: id, reason: `emergency close 이미 시도됨 (${row.status}) — 재제출 금지, 수동/증거 해소 대기`, emergencyCloseRequired: false };
+    return {
+      ok: false,
+      protectionId: id,
+      reason: `emergency close 이미 시도됨 (${row.status}) — 재제출 금지, 수동/증거 해소 대기`,
+      emergencyCloseRequired: false,
+      currentStatus: row.status as ProtectionStatus,
+    };
   }
   if (!_submitFn) return { ok: false, protectionId: id, reason: 'emergency close 제출 함수 미구성', emergencyCloseRequired: true };
 
   const t1 = await transitionProtection(id, 'PLANNED', 'PREPARED', { evidence: input.reason });
-  if (!t1.ok) return { ok: false, protectionId: id, reason: t1.reason, emergencyCloseRequired: true };
+  if (!t1.ok) return lostStopTransitionResult(id, t1.reason);
   const t2 = await transitionProtection(id, 'PREPARED', 'SUBMITTING', { incrementSubmitAttempts: true });
-  if (!t2.ok) return { ok: false, protectionId: id, reason: t2.reason, emergencyCloseRequired: true };
+  if (!t2.ok) return lostStopTransitionResult(id, t2.reason);
 
   let outcome: ProtectionSubmitOutcome;
   try {
@@ -398,12 +404,21 @@ export async function runEmergencyClose(input: EmergencyCloseInput): Promise<Sto
       requestId: outcome.requestId, typedDataDigest: outcome.typedDataDigest,
     });
     if (!t3.ok) {
-      await transitionProtection(id, 'SUBMITTING', 'UNRESOLVED', { error: 'SUBMITTED 영속 실패' });
+      const unresolved = await transitionProtection(id, 'SUBMITTING', 'UNRESOLVED', { error: 'SUBMITTED 영속 실패' });
+      if (!unresolved.ok) {
+        return lostStopTransitionResult(
+          id,
+          `emergency close 수락 후 SUBMITTED/UNRESOLVED 영속 실패 (${t3.reason}; ${unresolved.reason})`,
+        );
+      }
       return { ok: false, protectionId: id, reason: 'emergency close 수락됐으나 영속 실패 — UNRESOLVED', emergencyCloseRequired: false };
     }
     return { ok: true, protectionId: id, finalStatus: 'SUBMITTED' };
   }
-  await transitionProtection(id, 'SUBMITTING', 'UNRESOLVED', { error: outcome.reason });
+  const unresolved = await transitionProtection(id, 'SUBMITTING', 'UNRESOLVED', { error: outcome.reason });
+  if (!unresolved.ok) {
+    return lostStopTransitionResult(id, `emergency close 결과 상태 저장 실패 (${unresolved.reason})`);
+  }
   return { ok: false, protectionId: id, reason: outcome.reason, emergencyCloseRequired: false };
 }
 

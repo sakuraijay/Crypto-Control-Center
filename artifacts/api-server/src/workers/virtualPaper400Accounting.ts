@@ -116,17 +116,24 @@ export function evaluateVirtualPaper400Account(args: {
   let dailyNet = 0;
   let weeklyNet = 0;
   let losses = 0;
+  let sessionLossStreak = 0;
   const cashFlows = [
     ...closes.map(row => ({ at: new Date(row.timestamp).getTime(), net: fixedBetaNumber(row.netPnlEstimatedUsd), contribution: false })),
     ...contributions.map(c => ({ at: Date.parse(c.appliedAt), net: c.amountUsd, contribution: true })),
   ].sort((a, b) => a.at - b.at);
   for (const { at, net, contribution } of cashFlows) {
     cumulative += net;
+
     hwm = Math.max(hwm, cumulative);
     if (at < dayStart) dayOpening += net;
     else if (!contribution) { dailyNet += net; losses = net < 0 ? losses + 1 : 0; }
     if (at < weekStart) weekOpening += net;
     else if (!contribution) weeklyNet += net;
+  }
+  // Count completed positions, not partial settlements, for recovery pauses.
+  for(const full of closes.filter(r=>r.closeKind==='FULL')){
+    const net=closes.filter(r=>r.closesTradeId===full.closesTradeId).reduce((n,r)=>n+fixedBetaNumber(r.netPnlEstimatedUsd),0);
+    sessionLossStreak=net<0?sessionLossStreak+1:0;
   }
   const held = opens.filter(row => row.closeTime === 0);
   let unrealizedNet = 0;
@@ -159,9 +166,9 @@ export function evaluateVirtualPaper400Account(args: {
     dailyLossAwareNetPnlUsd: dailyNet + Math.min(unrealizedNet, 0),
     weeklyRealizedNetPnlUsd: weeklyNet,
     dailyEntryCount: opens.filter(row => new Date(row.timestamp).getTime() >= dayStart).length,
-    consecutiveLossCount: losses, lastUpdatedAt: now.toISOString() };
+    consecutiveLossCount: args.aggressiveDaily?sessionLossStreak:losses, lastUpdatedAt: now.toISOString() };
   const evaluation: RiskEvaluationResult = args.aggressiveDaily ? evaluateDailyPaperRisk({equity,referenceCapital:ledger.fundedCapitalUsd,
-    dailyLossAware:risk.dailyLossAwareNetPnlUsd,dailyRealized:dailyNet,entries:risk.dailyEntryCount,held:held.length,fresh:quotesFresh,locks:risk.locks}) : evaluateRiskState({
+    dailyLossAware:risk.dailyLossAwareNetPnlUsd,dailyRealized:dailyNet,entries:risk.dailyEntryCount,held:held.length,fresh:quotesFresh,locks:risk.locks,weeklyLossAware:weeklyNet+Math.min(unrealizedNet,0),consecutiveLosses:risk.consecutiveLossCount,lastCloseAtMs:closes.some(r=>r.closeKind==='FULL')?new Date(closes.filter(r=>r.closeKind==='FULL').at(-1)!.timestamp).getTime():undefined,nowMs}) : evaluateRiskState({
     dailyRiskCapitalUsd: Math.min(ledger.fundedCapitalUsd, risk.startOfDayEquityUsd),
     weeklyRiskCapitalUsd: Math.min(ledger.fundedCapitalUsd, risk.startOfWeekEquityUsd),
     currentEquityUsd: equity, newHardStopEvaluationAllowed: true,
@@ -170,7 +177,7 @@ export function evaluateVirtualPaper400Account(args: {
     dailyRealizedNetPnlUsd: dailyNet, dailyLossAwareNetPnlUsd: quotesFresh ? risk.dailyLossAwareNetPnlUsd : null,
     estimatedExitNetPnlUsd: quotesFresh ? dailyNet + unrealizedNet : null,
     weeklyRealizedNetPnlUsd: weeklyNet, dailyEntryCount: risk.dailyEntryCount,
-    consecutiveLossCount: losses, openPositionCount: held.length, maxConcurrentPositions: 1,
+    consecutiveLossCount: args.aggressiveDaily?sessionLossStreak:losses, openPositionCount: held.length, maxConcurrentPositions: 1,
     dbOk: true, feeDataOk: true, marketDataFresh: quotesFresh, locks: risk.locks,
   });
   const next: VirtualPaper400RiskState = { ...previous, equityHwmUsd: hwm,

@@ -357,6 +357,29 @@ describe('§6 emergency close', () => {
     expect(a.ok).toBe(false);
     expect((await getProtection('prot:intent-1:EMERGENCY_CLOSE'))?.status).toBe('UNRESOLVED');
   });
+  it('결과 불명 저장 실패는 durable SUBMITTING을 반환해 OPEN 종결을 보류한다', async () => {
+    setProtectionSubmitFn(async () => {
+      failFlags.updateFailuresRemaining = 1;
+      return { status: 'UNRESOLVED', reason: '전송 후 응답 없음' };
+    });
+    const result = await runEmergencyClose(EC);
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('expected failure');
+    expect(result.currentStatus).toBe('SUBMITTING');
+    expect(result.emergencyCloseRequired).toBe(false);
+    expect((await getProtection('prot:intent-1:EMERGENCY_CLOSE'))?.status).toBe('SUBMITTING');
+  });
+  it('수락 후 terminal·UNRESOLVED 저장이 모두 실패하면 durable SUBMITTING을 반환한다', async () => {
+    setProtectionSubmitFn(async () => {
+      failFlags.updateFailuresRemaining = 2;
+      return { status: 'ACCEPTED', requestId: 'r', typedDataDigest: null };
+    });
+    const result = await runEmergencyClose(EC);
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('expected failure');
+    expect(result.currentStatus).toBe('SUBMITTING');
+    expect((await getProtection('prot:intent-1:EMERGENCY_CLOSE'))?.status).toBe('SUBMITTING');
+  });
   it('size 비정상 → 시도 없음', async () => {
     const submit = vi.fn();
     setProtectionSubmitFn(submit as never);

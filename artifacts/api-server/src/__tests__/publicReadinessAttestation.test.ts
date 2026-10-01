@@ -207,4 +207,58 @@ describe('public readiness observational parity', () => {
       expect(attestation.canary.ready).toBe(false);
       expect(attestation.canary.blockerIds).toContain('PUBLIC_STOP_CAPABILITY_UNAVAILABLE');
     });
+
+  it('PAPER cold start 전후 Stop 진단은 평가 시각만 전환하고 Canary는 계속 fail-closed다', () => {
+    const nowMs = 1_788_000_001_000;
+    const paper = paperSnapshot();
+    paper.paperMode = true;
+
+    const coldStart = buildPublicReadinessAttestation({
+      nowMs,
+      paper,
+      stop: {
+        available: false,
+        reasons: ['stop 실행 능력 미평가'],
+        evaluatedAt: null,
+        evidenceBinding: null,
+      },
+      canaryReady: true,
+    });
+
+    expect(coldStart.stop).toEqual({
+      ready: false,
+      evaluatedAt: null,
+      blockerIds: ['PUBLIC_STOP_CAPABILITY_UNAVAILABLE'],
+    });
+    expect(coldStart.canary.ready).toBe(false);
+    expect(coldStart.canary.blockerIds).toEqual([
+      'PUBLIC_CANARY_PAPER_MODE',
+      'PUBLIC_STOP_CAPABILITY_UNAVAILABLE',
+    ]);
+
+    const evaluatedAt = new Date(nowMs).toISOString();
+    const afterFirstReconciliation = buildPublicReadinessAttestation({
+      nowMs,
+      paper,
+      stop: {
+        available: false,
+        reasons: ['PAPER mode: 주기 LIVE stop capability 재평가 비활성'],
+        evaluatedAt,
+        evidenceBinding: null,
+      },
+      canaryReady: true,
+    });
+
+    expect(afterFirstReconciliation.stop).toEqual({
+      ready: false,
+      evaluatedAt,
+      blockerIds: ['PUBLIC_STOP_CAPABILITY_UNAVAILABLE'],
+    });
+    expect(afterFirstReconciliation.canary.ready).toBe(false);
+    expect(afterFirstReconciliation.canary.blockerIds).toEqual([
+      'PUBLIC_CANARY_PAPER_MODE',
+      'PUBLIC_STOP_CAPABILITY_UNAVAILABLE',
+    ]);
+  });
+
 });

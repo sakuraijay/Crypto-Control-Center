@@ -261,6 +261,27 @@ describe('finalized OPEN → INITIAL_STOP handoff', () => {
     expect(deps.runEmergencyClose).toHaveBeenCalledTimes(1);
   });
 
+  it.each(['PLANNED', 'PREPARED', 'SUBMITTING'] as const)(
+    'emergency-close claimant가 %s이면 protectionId가 있어도 OPEN terminal 전환을 보류',
+    async (status) => {
+      const deps = makeDeps();
+      vi.mocked(deps.createInitialStop).mockResolvedValue({
+        ok: false,
+        protectionId: null,
+        reason: 'stop persistence failure',
+        emergencyCloseRequired: true,
+      });
+      vi.mocked(deps.runEmergencyClose).mockResolvedValue({
+        ok: false,
+        protectionId: `prot:${INTENT_ID}:EMERGENCY_CLOSE`,
+        currentStatus: status,
+      });
+      const result = await runConfirmedOpenStopHandoff(evidence, deps);
+      expect(result.handled).toBe(false);
+      expect(result).toMatchObject({ reason: expect.stringContaining(status) });
+    },
+  );
+
   it('existing SUBMITTED/ACTIVE deterministic Stop은 중복 submit 없이 처리 완료로 인정', async () => {
     const deps = makeDeps();
     vi.mocked(deps.createInitialStop).mockResolvedValue({

@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { DbTrade } from '@workspace/db';
 import type { VirtualPaper400SessionV1 } from './virtualPaper400Ledger';
-import { parseVirtualTradePlan } from './virtualPaperTradingMode';
+import { parseVirtualTradePlan, FILTERED_PLAN_VERSION } from './virtualPaperTradingMode';
 
 export const PAPER_LEARNING_CONTRACT = Object.freeze({
   version: 'paper-learning/v1', status: 'COLLECTING_CANDIDATES',
@@ -64,12 +64,13 @@ export function buildPaperLearningDataset(
     const sum = (key: keyof DbTrade) => settled.reduce((n,r) => n + numeric(r[key])!,0);
     samples.push({sampleId:open.id,positionId:open.id,sessionId:session.sessionId,decisionId:open.openDecisionId,
       policyVersion:audit.policy?.version ?? null,planVersion:plan.version,
-      strategy:'PAPER_DAILY_MOMENTUM_EXPERIMENT',strategyVersion:PAPER_DAILY_MOMENTUM_STRATEGY_VERSION,
+      strategy:plan.version===FILTERED_PLAN_VERSION?'PAPER_COST_FILTERED_EXPERIMENT':'PAPER_DAILY_MOMENTUM_EXPERIMENT',strategyVersion:plan.version===FILTERED_PLAN_VERSION?'paper-cost-filtered/v1':PAPER_DAILY_MOMENTUM_STRATEGY_VERSION,
       symbol:open.symbol,side:open.side,
       featureAt:new Date(c.evaluatedAt).toISOString(),openedAt:new Date(openedAt).toISOString(),labelAvailableAt:new Date(closedAt).toISOString(),
       features:{candleClosedAt:c.closedAt,momentum:c.momentum,stopFraction:c.stopFraction,referencePrice:c.referencePrice,
         leverage:plan.leverage,notionalUsd:plan.notionalUsd,plannedRiskUsd:plan.plannedRiskUsd,maxHoldHours:plan.maxHoldHours,
-        estimatedRoundTripCostUsd:plan.estimatedRoundTripCostUsd},
+        estimatedRoundTripCostUsd:plan.estimatedRoundTripCostUsd,...(plan.version===FILTERED_PLAN_VERSION?{marketQuality:c.quality,selection:audit.selection,
+          ...(c.patternAnalysis?{patternAnalysis:c.patternAnalysis}:{})}:{})},
       labels:{netPnlUsd:sum('netPnlEstimatedUsd'),grossPnlUsd:sum('pnl'),
         estimatedCostsUsd:sum('estEntryCostUsd')+sum('estExitCostUsd')+sum('estHoldingCostUsd'),
         netR:sum('netPnlEstimatedUsd')/plan.plannedRiskUsd,closeReason:full[0].closeReason,

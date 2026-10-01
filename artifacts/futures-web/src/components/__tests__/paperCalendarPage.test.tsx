@@ -34,8 +34,9 @@ describe('PAPER calendar user journey', () => {
     expect(screen.getByRole('status')).toBeTruthy();
     expect(screen.queryByRole('table')).toBeNull();
   });
-  it('places the calendar immediately below trading history', () => {
+  it('keeps the calendar after the pattern library below trading history', () => {
     const items = NAV_GROUPS[0].items;
-    expect(items[items.findIndex(item => item.href === '/activity') + 1].href).toBe('/calendar');
+    const start=items.findIndex(item => item.href === '/activity');
+    expect(items.slice(start,start+3).map(item=>item.href)).toEqual(['/activity','/patterns','/calendar']);
   });
 });

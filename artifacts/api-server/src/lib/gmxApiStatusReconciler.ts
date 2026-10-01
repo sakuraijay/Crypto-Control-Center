@@ -521,6 +521,7 @@ export async function reconcileOneGmxApiTask(
 // ── 주기 실행 + 재시작 훅 ─────────────────────────────────────────────────────
 
 let _timer: ReturnType<typeof setInterval> | null = null;
+let _periodicRunInFlight = false;
 
 export function makeProductionDeps(): GmxReconcileDeps {
   let onchain: OnchainClient | null = null;
@@ -541,7 +542,17 @@ export async function reconcileGmxApiTasksOnStartup(): Promise<GmxReconcileSumma
 export function startPeriodicGmxApiReconciliation(intervalMs = 5 * 60_000): void {
   if (_timer) return;
   _timer = setInterval(() => {
-    void reconcileGmxApiTasks(makeProductionDeps()).catch(() => { /* 다음 주기 재시도 */ });
+    if (_periodicRunInFlight) return;
+    _periodicRunInFlight = true;
+    void (async () => {
+      try {
+        await reconcileGmxApiTasks(makeProductionDeps());
+      } catch {
+        // 다음 주기 재시도
+      } finally {
+        _periodicRunInFlight = false;
+      }
+    })();
   }, intervalMs);
   if (typeof _timer.unref === 'function') _timer.unref();
 }
