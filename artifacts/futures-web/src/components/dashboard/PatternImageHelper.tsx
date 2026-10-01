@@ -8,7 +8,6 @@ type Slot={url:string;draft:FrameDraft;v:number};
 export function PatternImageHelper(){
   const [slots,setSlots]=useState<Partial<Record<ImageFrame,Slot>>>({});
   const [errors,setErrors]=useState<Partial<Record<ImageFrame,string>>>({});
-  const [pin,setPin]=useState('');
   const [busy,setBusy]=useState(false);
   const [failure,setFailure]=useState<AnalyzeFailure|null>(null);
   const [result,setResult]=useState<ImageAnalysisResult|null>(null);
@@ -42,14 +41,14 @@ export function PatternImageHelper(){
   const drafts=IMAGE_FRAMES.flatMap(t=>slots[t]?[slots[t]!.draft]:[]);
   const revision=revisionKey(drafts,IMAGE_FRAMES.map(t=>String(slots[t]?.v??0)));
   const invalid=validateDrafts(drafts);
-  const gate=canAnalyze({busy:busy||processing>0,revision,last,now,hasPin:pin.trim().length>0});
+  const gate=canAnalyze({busy:busy||processing>0,revision,last,now});
   const analyze=async()=>{
-    if(busyRef.current||invalid||!canAnalyze({busy:false,revision,last,now:Date.now(),hasPin:pin.trim().length>0}).ok)return;
+    if(busyRef.current||invalid||!canAnalyze({busy:false,revision,last,now:Date.now()}).ok)return;
     busyRef.current=true;setBusy(true);setFailure(null);setResult(null);
     const ac=new AbortController();abortRef.current=ac;const rev=revision;let timedOut=false;const timer=setTimeout(()=>{timedOut=true;ac.abort();},REQUEST_TIMEOUT_MS);const body0=buildAnalyzeBody(drafts);
     const fail=(f:AnalyzeFailure)=>{setFailure(f);setLast({revision:rev,failure:f,at:Date.now()});setNow(Date.now());};
     try{
-      const res=await fetch(IMAGE_ANALYZE_PATH,{method:'POST',credentials:'include',signal:ac.signal,headers:{'content-type':'application/json','x-operator-pin':pin},body:JSON.stringify(body0)});
+      const res=await fetch(IMAGE_ANALYZE_PATH,{method:'POST',credentials:'include',signal:ac.signal,headers:{'content-type':'application/json'},body:JSON.stringify(body0)});
       const body=await res.json().catch(()=>null);
       if(!res.ok)fail(classifyFailure(res.status,body,res.headers.get('retry-after')));
       else{const p=parseImageAnalysisResult(body,body0.images);
@@ -73,7 +72,6 @@ export function PatternImageHelper(){
       :<label className="flex flex-col items-center gap-2 py-6 text-xs text-slate-400 cursor-pointer"><ImagePlus size={20}/>PNG·JPEG·WebP · 8 MiB 이하 · 640×360 이상<input hidden disabled={busy} type="file" accept="image/png,image/jpeg,image/webp" onChange={e=>{pick(tf,e.target.files?.[0]);e.target.value='';}}/></label>}
       {errors[tf]&&<p role="alert" className="ccc-negative text-xs">{errors[tf]}</p>}</div>;})}</div>
     <div className="flex flex-wrap items-center gap-3">
-      <input type="password" autoComplete="off" className="ccc-input max-w-56" placeholder="운영자 PIN (저장 안 됨)" aria-label="운영자 PIN" value={pin} onChange={e=>setPin(e.target.value)}/>
       <button type="button" className="ccc-session-action ccc-icon-button px-4 gap-2 whitespace-nowrap" style={{width:'auto',minWidth:112}} disabled={!gate.ok||!!invalid||processing>0} onClick={analyze} data-testid="button-analyze"><ScanSearch size={14}/>{busy?'분석 요청 중…':'분석하기'}</button>
       <span className="ccc-caption" aria-live="polite">{processing>0?`이미지 검증 중… (${processing})`:drafts.length===0?'이미지를 올려 주세요.':invalid??gate.reason??'준비되었습니다. 버튼을 눌러야만 요청합니다.'}</span></div>
     {failure&&<div className="ccc-inline-alert" role="alert" data-testid="analyze-error">{failure.message}</div>}

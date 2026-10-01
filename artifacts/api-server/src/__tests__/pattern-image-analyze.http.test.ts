@@ -1,21 +1,17 @@
-import express, { type RequestHandler } from "express";
+import express from "express";
 import request from "supertest";
 import { gzipSync } from "node:zlib";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createPatternImageAnalyzeRouter } from "../routes/pattern-image-analyze";
-import { requireOperatorAuth } from "../lib/operatorAuthGuard";
 import app from "../app";
 import { isReady, markNotReady, markReady } from "../lib/readiness";
 
-const TEST_OPERATOR_PIN = "TEST-PIN-ONLY-123";
+const TEST_OPERATOR_PIN = "TEST-ONLY-OPERATOR-PIN";
 
-function makeApp(options: {
-  auth?: RequestHandler;
-  isReady?: () => boolean;
-} = {}) {
-  const app = express();
-  app.use("/api/pattern-image/analyze", createPatternImageAnalyzeRouter(options));
-  return app;
+function makeApp(options: { isReady?: () => boolean } = {}) {
+  const testApp = express();
+  testApp.use("/api/pattern-image/analyze", createPatternImageAnalyzeRouter(options));
+  return testApp;
 }
 
 function validBody() {
@@ -34,55 +30,32 @@ function validBody() {
   };
 }
 
-function setTestPin() {
-  const previous = process.env.OPERATOR_MASTER_PIN;
-  process.env.OPERATOR_MASTER_PIN = TEST_OPERATOR_PIN;
-  return () => {
-    if (previous === undefined) delete process.env.OPERATOR_MASTER_PIN;
-    else process.env.OPERATOR_MASTER_PIN = previous;
-  };
-}
-
-function authorizedPost(app: ReturnType<typeof makeApp>) {
-  return request(app)
-    .post("/api/pattern-image/analyze")
-    .set("x-operator-pin", TEST_OPERATOR_PIN)
-    .send(validBody());
-}
-
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
 });
 
 describe("POST /api/pattern-image/analyze", () => {
-  it("requires the actual operator auth middleware and accepts only a test fixture PIN", async () => {
-    const restorePin = setTestPin();
+  it("accepts valid metadata without a PIN, ignores an extraneous wrong PIN, and never calls a provider", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch");
-    try {
-      const app = makeApp({ auth: requireOperatorAuth, isReady: () => true });
-      const denied = await request(app)
-        .post("/api/pattern-image/analyze")
-        .set("x-operator-pin", "wrong-test-pin")
-        .send(validBody());
-      expect(denied.status).toBe(401);
-      expect(denied.headers["cache-control"]).toBe("no-store");
+    const testApp = makeApp({ isReady: () => true });
+    const response = await request(testApp)
+      .post("/api/pattern-image/analyze")
+      .set("x-operator-pin", "wrong-extraneous-pin")
+      .send(validBody());
 
-      const accepted = await authorizedPost(app);
-      expect(accepted.status).toBe(503);
-      expect(accepted.body).toEqual({
-        ok: false,
-        code: "IMAGE_ANALYSIS_NOT_CONFIGURED",
-        error: "이미지 분석 제공자가 아직 설정되지 않았습니다.",
-      });
-      expect(fetchSpy).not.toHaveBeenCalled();
-    } finally {
-      restorePin();
-    }
+    expect(response.status).toBe(503);
+    expect(response.body).toEqual({
+      ok: false,
+      code: "IMAGE_ANALYSIS_NOT_CONFIGURED",
+      error: "이미지 분석 제공자가 아직 설정되지 않았습니다.",
+    });
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it("rejects malformed JSON with a bounded safe error", async () => {
-    const app = makeApp({ auth: (_req, _res, next) => next(), isReady: () => true });
-    const response = await request(app)
+    const response = await request(makeApp({ isReady: () => true }))
       .post("/api/pattern-image/analyze")
       .set("content-type", "application/json")
       .send('{"images":[');
@@ -92,18 +65,17 @@ describe("POST /api/pattern-image/analyze", () => {
   });
 
   it("rejects bodies larger than 4KB", async () => {
-    const app = makeApp({ auth: (_req, _res, next) => next(), isReady: () => true });
-    const response = await request(app)
+    const response = await request(makeApp({ isReady: () => true }))
       .post("/api/pattern-image/analyze")
       .send({ images: [], padding: "x".repeat(5_000) });
     expect(response.status).toBe(413);
     expect(response.body.error).toBe("요청 본문이 허용된 크기(4KB)를 초과했습니다.");
+    expect(response.headers["cache-control"]).toBe("no-store");
   });
 
-  it("rejects compressed JSON with a fixed 415 response", async () => {
-    const app = makeApp({ auth: (_req, _res, next) => next(), isReady: () => true });
+  it("rejects compressed JSON without attempting to inflate it", async () => {
     const compressed = gzipSync(Buffer.from(JSON.stringify(validBody())));
-    const response = await request(app)
+    const response = await request(makeApp({ isReady: () => true }))
       .post("/api/pattern-image/analyze")
       .set("content-type", "application/json")
       .set("content-encoding", "gzip")
@@ -116,6 +88,15 @@ describe("POST /api/pattern-image/analyze", () => {
     expect(response.headers["cache-control"]).toBe("no-store");
   });
 
+  it("rejects unsupported request content types", async () => {
+    const response = await request(makeApp({ isReady: () => true }))
+      .post("/api/pattern-image/analyze")
+      .set("content-type", "text/plain")
+      .send(JSON.stringify(validBody()));
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe("요청 본문은 허용된 이미지 메타데이터 형식이어야 합니다.");
+  });
+
   it.each([
     ["raw image bytes", { ...validBody(), bytes: "not-allowed" }],
     ["base64 image data", { ...validBody(), images: [{ ...validBody().images[0], data: "aGVsbG8=" }] }],
@@ -123,59 +104,61 @@ describe("POST /api/pattern-image/analyze", () => {
     ["duplicate timeframes", {
       images: [validBody().images[0], { ...validBody().images[0], symbol: "ETH/USD" }],
     }],
+    ["unsupported MIME type", {
+      images: [{ ...validBody().images[0], mimeType: "image/gif" }],
+    }],
+    ["too-small width", {
+      images: [{ ...validBody().images[0], width: 639 }],
+    }],
+    ["too-large height", {
+      images: [{ ...validBody().images[0], height: 4097 }],
+    }],
+    ["negative byte size", {
+      images: [{ ...validBody().images[0], size: -1 }],
+    }],
+    ["unsafe symbol", {
+      images: [{ ...validBody().images[0], symbol: "<script>alert(1)</script>" }],
+    }],
+    ["excessive image count", {
+      images: [
+        validBody().images[0],
+        { ...validBody().images[0], timeframe: "1h" },
+        { ...validBody().images[0], timeframe: "4h" },
+        { ...validBody().images[0], timeframe: "15m" },
+      ],
+    }],
   ])("rejects %s without exposing submitted metadata", async (_name, body) => {
-    const app = makeApp({ auth: (_req, _res, next) => next(), isReady: () => true });
-    const response = await request(app).post("/api/pattern-image/analyze").send(body);
+    const response = await request(makeApp({ isReady: () => true }))
+      .post("/api/pattern-image/analyze")
+      .send(body);
     expect(response.status).toBe(400);
     expect(response.body.error).toBe("요청 본문은 허용된 이미지 메타데이터 형식이어야 합니다.");
+    expect(JSON.stringify(response.body)).not.toContain("<script>");
   });
 
-  it("counts invalid auth attempts toward the per-IP limit and provides Retry-After", async () => {
-    const restorePin = setTestPin();
-    try {
-      const app = makeApp({ auth: requireOperatorAuth, isReady: () => true });
-      for (let attempt = 0; attempt < 8; attempt += 1) {
-        const denied = await request(app)
-          .post("/api/pattern-image/analyze")
-          .set("x-operator-pin", "wrong-test-pin")
-          .send(validBody());
-        expect(denied.status).toBe(401);
-      }
-      const limited = await authorizedPost(app);
-      expect(limited.status).toBe(429);
-      expect(limited.headers["retry-after"]).toMatch(/^\d+$/);
-      expect(limited.headers["cache-control"]).toBe("no-store");
-    } finally {
-      restorePin();
+  it("counts invalid requests toward the per-IP limit and provides Retry-After", async () => {
+    const testApp = makeApp({ isReady: () => true });
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const invalid = await request(testApp)
+        .post("/api/pattern-image/analyze")
+        .send({ invalid: true });
+      expect(invalid.status).toBe(400);
     }
+
+    const limited = await request(testApp)
+      .post("/api/pattern-image/analyze")
+      .send(validBody());
+    expect(limited.status).toBe(429);
+    expect(limited.headers["retry-after"]).toMatch(/^\d+$/);
+    expect(limited.headers["cache-control"]).toBe("no-store");
   });
 
-  it("checks readiness independently after authentication", async () => {
-    const app = makeApp({ auth: (_req, _res, next) => next(), isReady: () => false });
-    const response = await request(app).post("/api/pattern-image/analyze").send(validBody());
-    expect(response.status).toBe(503);
-    expect(response.body.code).not.toBe("IMAGE_ANALYSIS_NOT_CONFIGURED");
-
-    const malformed = await request(app)
-      .post("/api/pattern-image/analyze")
-      .set("content-type", "application/json")
-      .send('{"images":[');
-    expect(malformed.status).toBe(503);
-
-    const oversized = await request(app)
-      .post("/api/pattern-image/analyze")
-      .send({ images: [], padding: "x".repeat(5_000) });
-    expect(oversized.status).toBe(503);
-  });
-
-  it("checks readiness before parsing and mounts the local parser before app-wide JSON", async () => {
-    const restorePin = setTestPin();
+  it("checks readiness before parsing and mounting uses the local 4KB parser before app-wide JSON", async () => {
     const wasReady = isReady();
     markNotReady();
     try {
       const readinessResponse = await request(app)
         .post("/api/pattern-image/analyze")
-        .set("x-operator-pin", TEST_OPERATOR_PIN)
         .send(validBody());
       expect(readinessResponse.status).toBe(503);
       expect(readinessResponse.body).toEqual({
@@ -184,29 +167,53 @@ describe("POST /api/pattern-image/analyze", () => {
 
       const malformedWhileUnready = await request(app)
         .post("/api/pattern-image/analyze")
-        .set("x-operator-pin", TEST_OPERATOR_PIN)
         .set("content-type", "application/json")
         .send('{"images":[');
       expect(malformedWhileUnready.status).toBe(503);
 
       const oversizedWhileUnready = await request(app)
         .post("/api/pattern-image/analyze")
-        .set("x-operator-pin", TEST_OPERATOR_PIN)
         .send({ images: [], padding: "x".repeat(5_000) });
       expect(oversizedWhileUnready.status).toBe(503);
 
-      // Once ready, a body beyond the dedicated 4KB cap but below the global
-      // parser's default proves the local parser still runs before global JSON.
       markReady();
       const parserResponse = await request(app)
         .post("/api/pattern-image/analyze")
-        .set("x-operator-pin", TEST_OPERATOR_PIN)
         .send({ ...validBody(), padding: "x".repeat(5_000) });
       expect(parserResponse.status).toBe(413);
       expect(parserResponse.body.error).toBe("요청 본문이 허용된 크기(4KB)를 초과했습니다.");
       expect(parserResponse.headers["cache-control"]).toBe("no-store");
     } finally {
-      restorePin();
+      if (wasReady) markReady();
+      else markNotReady();
+    }
+  });
+
+  it("mounts the image helper in the real app without PIN while sensitive routes retain their real auth guard", async () => {
+    const wasReady = isReady();
+    vi.stubEnv("OPERATOR_MASTER_PIN", TEST_OPERATOR_PIN);
+    markReady();
+    try {
+      const imageResponse = await request(app)
+        .post("/api/pattern-image/analyze")
+        .send(validBody());
+      expect(imageResponse.status).toBe(503);
+      expect(imageResponse.body.code).toBe("IMAGE_ANALYSIS_NOT_CONFIGURED");
+      expect(imageResponse.headers["cache-control"]).toBe("no-store");
+
+      const guardedRequests = [
+        request(app).get("/api/executor/canary/status"),
+        request(app).get("/api/executor/relay/status"),
+        request(app).put("/api/data/worker-policy-context").send({}),
+        request(app).put("/api/data/risk-profile").send({}),
+        request(app).post("/api/executor/emergency-stop").send({}),
+      ];
+      const guardedResponses = await Promise.all(guardedRequests);
+      for (const guardedResponse of guardedResponses) {
+        expect(guardedResponse.status).toBe(401);
+        expect(guardedResponse.body.error).toBe("운영자 인증 실패");
+      }
+    } finally {
       if (wasReady) markReady();
       else markNotReady();
     }

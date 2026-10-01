@@ -1,5 +1,4 @@
 import express, { Router, type IRouter, type RequestHandler } from "express";
-import { requireOperatorAuth } from "../lib/operatorAuthGuard";
 import { isReady } from "../lib/readiness";
 
 const RATE_WINDOW_MS = 60_000;
@@ -61,7 +60,6 @@ function isValidAnalyzeBody(value: unknown): boolean {
 type RateEntry = { count: number; expiresAt: number };
 
 export interface PatternImageRouterOptions {
-  auth?: RequestHandler;
   isReady?: () => boolean;
 }
 
@@ -74,7 +72,6 @@ export function createPatternImageAnalyzeRouter(
 ): IRouter {
   const router: IRouter = Router();
   const rateEntries = new Map<string, RateEntry>();
-  const auth = options.auth ?? requireOperatorAuth;
   const ready = options.isReady ?? isReady;
 
   const noStore: RequestHandler = (_req, res, next) => {
@@ -133,7 +130,7 @@ export function createPatternImageAnalyzeRouter(
     next();
   };
 
-  router.post("/", noStore, rateLimit, auth, readinessGate, parseJson, (req, res) => {
+  router.post("/", noStore, rateLimit, readinessGate, parseJson, (req, res) => {
     if (!isValidAnalyzeBody(req.body)) {
       res.status(400).json({
         ok: false,

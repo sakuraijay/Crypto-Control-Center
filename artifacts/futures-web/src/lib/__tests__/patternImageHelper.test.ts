@@ -5,6 +5,7 @@ import {readFileSync} from 'node:fs';
 import {createSlotGuard,parseRetryAfter,checkImageHeader,readImageDimensions,signatureMime,buildAnalyzeBody,canAnalyze,classifyFailure,validateDrafts,RETRY_COOLDOWN_MS,type FrameDraft} from '../patternImageInput';
 import {parseImageAnalysisResult,CANONICAL_IDS,deriveAlignment,deriveFrameDirection} from '../patternImageResult';
 import {PatternImageResultView} from '@/components/dashboard/PatternImageResultView';
+import {PatternImageHelper} from '@/components/dashboard/PatternImageHelper';
 import {evaluateScreenshotPatternReview} from '../screenshotPatternReview';
 const png=(w:number,h:number)=>{const b=new Uint8Array(32);b.set([137,80,78,71,13,10,26,10]);const v=new DataView(b.buffer);v.setUint32(8,13);b.set([73,72,68,82],12);v.setUint32(16,w);v.setUint32(20,h);return b;};
 const jpeg=(w:number,h:number)=>new Uint8Array([255,216,255,224,0,4,0,0,255,192,0,11,8,h>>8,h&255,w>>8,w&255,1,0,0,0,0]);
@@ -31,7 +32,7 @@ describe('image input',()=>{
   });
   it('retry policy: cooldown for retryable, blocked for missing provider until edit',()=>{
     const nc=classifyFailure(503,{ok:false,code:'IMAGE_ANALYSIS_NOT_CONFIGURED',error:'x'});
-    const base={busy:false,revision:'r',now:1000,hasPin:true};
+    const base={busy:false,revision:'r',now:1000};
     expect(canAnalyze({...base,last:{revision:'r',failure:nc,at:0}}).ok).toBe(false);
     expect(canAnalyze({...base,revision:'r2',last:{revision:'r',failure:nc,at:0}}).ok).toBe(true);
     const net=classifyFailure(null,null);
@@ -50,6 +51,26 @@ describe('image input',()=>{
   it('helper never sends bytes and cleans up',()=>{
     const s=readFileSync('src/components/dashboard/PatternImageHelper.tsx','utf8');
     expect(s).not.toMatch(/base64|FormData|readAsDataURL/);expect(s).toContain('revokeObjectURL');expect(s).toContain('abort()');expect(s).not.toMatch(/localStorage|sessionStorage/);
+  });
+  it('allows a first manual attempt without any operator credential',()=>{
+    expect(canAnalyze({busy:false,revision:'r',now:1000,last:null})).toEqual({ok:true});
+    expect(classifyFailure(401,{}).message).not.toMatch(/PIN/);
+    expect(classifyFailure(403,{}).kind).toBe('AUTH');
+  });
+  it('renders no PIN field or advice and honestly explains the missing provider',()=>{
+    const html=renderToStaticMarkup(createElement(PatternImageHelper));
+    expect(html).not.toMatch(/PIN|type="password"/);
+    expect(html).toContain('이미지 분석 제공자 연결 안 됨');
+    expect(html).toContain('현재는 분석 결과를 만들 수 없습니다');
+    const source=readFileSync('src/components/dashboard/PatternImageHelper.tsx','utf8');
+    expect(source).not.toMatch(/hasPin|setPin|x-operator-pin/);
+    expect(source).toContain("headers:{'content-type':'application/json'}");
+  });
+  it('keeps server Retry-After restrictions even without a PIN gate',()=>{
+    const failure=classifyFailure(429,{},'30');
+    const base={busy:false,revision:'r',last:{revision:'r',failure,at:1000}};
+    expect(canAnalyze({...base,now:9000}).ok).toBe(false);
+    expect(canAnalyze({...base,now:31000}).ok).toBe(true);
   });
 });
 describe('evidence trust boundary and rendering',()=>{

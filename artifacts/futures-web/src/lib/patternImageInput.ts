@@ -89,7 +89,7 @@ export function classifyFailure(status:number|null,body:unknown,retryAfter?:stri
   const o=(body&&typeof body==='object'?body:{}) as Record<string,unknown>;
   if(status===null)return {kind:'NETWORK',message:'네트워크 오류로 요청하지 못했습니다.',retryable:true};
   if(status===503&&o.ok===false&&o.code==='IMAGE_ANALYSIS_NOT_CONFIGURED')return {kind:'NOT_CONFIGURED',message:'이미지 분석 제공자가 아직 연결되지 않았습니다. 입력을 수정하기 전에는 다시 요청하지 않습니다.',retryable:false};
-  if(status===401)return {kind:'AUTH',message:'운영자 PIN이 올바르지 않습니다.',retryable:true};
+  if(status===401||status===403)return {kind:'AUTH',message:'접근이 제한되었습니다. 현재 앱 접근 상태를 확인해 주세요.',retryable:true};
   if(status===429)return {kind:'RATE_LIMIT',message:'요청이 많습니다. 잠시 후 다시 시도해 주세요.',retryable:true,retryAfterMs:parseRetryAfter(retryAfter)};
   if(status===413)return {kind:'TOO_LARGE',message:'요청이 너무 큽니다.',retryable:false};
   if(status===400)return {kind:'BAD_REQUEST',message:'요청 형식이 올바르지 않습니다.',retryable:false};
@@ -98,9 +98,8 @@ export function classifyFailure(status:number|null,body:unknown,retryAfter?:stri
 }
 export type AttemptRecord={revision:string;failure:AnalyzeFailure;at:number};
 /** Decides whether the manual button may fire. */
-export function canAnalyze(a:{busy:boolean;revision:string;last:AttemptRecord|null;now:number;hasPin:boolean}):{ok:boolean;reason?:string}{
+export function canAnalyze(a:{busy:boolean;revision:string;last:AttemptRecord|null;now:number}):{ok:boolean;reason?:string}{
   if(a.busy)return {ok:false,reason:'분석 요청 중입니다.'};
-  if(!a.hasPin)return {ok:false,reason:'운영자 PIN을 입력해 주세요.'};
   const l=a.last;
   if(l&&l.revision===a.revision){
     if(!l.failure.retryable)return {ok:false,reason:'같은 입력으로는 다시 요청하지 않습니다. 이미지나 확인 항목을 수정해 주세요.'};
