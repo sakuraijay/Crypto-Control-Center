@@ -62,6 +62,10 @@ describe('stored pattern-led evidence presentation', () => {
       waiting: [], conflicts: [] };
     const html = renderToStaticMarkup(createElement(PatternEntryDiagnostics, { snapshot, fresh: false }));
     expect(html).toContain('패턴 진입 자료 확인 대기');
+    expect(html).toContain('virtual400-daily/v10');
+    expect(html).toContain('paper-pattern-entry/v10');
+    expect(html).toContain('이전 정책의 패턴 기록은 순위 참고 자료');
+    expect(html).toContain('정책 적용·진입 여부도 확인 대기');
     expect(html).not.toContain('진입 주도 패턴');
     expect(html).not.toContain('이번 평가 · 확인된 패턴 후보');
     const cached = renderToStaticMarkup(createElement(PatternEntryDiagnostics, {

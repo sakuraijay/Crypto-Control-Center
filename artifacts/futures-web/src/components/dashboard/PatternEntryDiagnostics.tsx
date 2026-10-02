@@ -12,6 +12,7 @@ export function PatternEntryDiagnostics({ snapshot, fresh, now = Date.now() }: {
   return <section className="ccc-panel" aria-label="패턴 주도 진입 상태" data-testid="pattern-entry-diagnostics">
     <div className="ccc-panel-heading"><div><p className="ccc-eyebrow">PATTERN ENTRY STRATEGIES</p>
       <h2>38개 패턴 · 독립 진입 판단</h2></div><span className="ccc-caption">완료봉 · 확정 pivot · 수익성 미검증</span></div>
+    <p className="ccc-diagnostics-note">새 진입 정책: virtual400-daily/v10 · paper-pattern-entry/v10. 각 패턴은 진입 주도 후보를 만들며, 이전 정책의 패턴 기록은 순위 참고 자료입니다. 과거 참고 기록이나 이미지 분석을 새 주문 근거로 바꾸지 않습니다. 아래 서버 증거가 없으면 정책 적용·진입 여부도 확인 대기로 표시합니다.</p>
     {!current || !snapshot ? <div className="ccc-empty-row"><div><strong>패턴 진입 자료 확인 대기</strong>
       <p>신선한 새 정책 평가가 없으므로 대기·후보·진입 횟수를 추정하지 않습니다. 과거 기록은 재작성하지 않습니다.</p></div></div> : <>
       <div className="ccc-diagnostics-summary">
