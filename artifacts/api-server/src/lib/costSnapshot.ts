@@ -50,6 +50,8 @@ export interface CostSnapshotExpectation {
   isLong: boolean;
   orderType: 'MarketIncrease' | 'MarketDecrease';
   notionalUsd: number;
+  /** 실행 전용 증거를 특정 durable intent에 결속. 일반 read-only 검증은 생략 가능. */
+  executionScopeId?: string;
 }
 
 export type CostValidation =
@@ -87,9 +89,20 @@ export function validateExecutionEligibleSnapshot(
 ): CostValidation {
   const base = validateCostSnapshot(snap, expected, nowMs);
   if (!base.ok) return base;
-  const fetched = Date.parse((snap as CostSnapshot).fetchedAt);
-  if (nowMs - fetched > EXECUTION_ELIGIBLE_MAX_AGE_MS) {
-    return { ok: false, reason: `실행 적격 초과: 스냅샷 age ${(nowMs - fetched) / 1000}s > ${EXECUTION_ELIGIBLE_MAX_AGE_MS / 1000}s — 재조회 필요 (fail-closed)` };
+  const s = snap as CostSnapshot;
+  if (typeof s.apiTimestamp !== 'string' || s.apiTimestamp.length === 0) {
+    return { ok: false, reason: `${COST_DATA_UNAVAILABLE}: upstream 비용 관측 시각 부재 — 로컬 시각 대체 금지` };
+  }
+  const observed = Date.parse(s.apiTimestamp);
+  const fetched = Date.parse(s.fetchedAt);
+  if (!Number.isFinite(observed) || observed <= 0 || observed > nowMs + 5_000) {
+    return { ok: false, reason: `${COST_DATA_UNAVAILABLE}: upstream 비용 관측 시각 비정상` };
+  }
+  if (observed !== fetched) {
+    return { ok: false, reason: `${COST_DATA_UNAVAILABLE}: fetchedAt은 가장 이른 upstream 관측 시각과 일치해야 함` };
+  }
+  if (nowMs - observed > EXECUTION_ELIGIBLE_MAX_AGE_MS) {
+    return { ok: false, reason: `실행 적격 초과: 스냅샷 age ${(nowMs - observed) / 1000}s > ${EXECUTION_ELIGIBLE_MAX_AGE_MS / 1000}s — 재조회 필요 (fail-closed)` };
   }
   return base;
 }
@@ -184,9 +197,13 @@ export interface LiveCostFetchers {
 }
 
 export interface ExecutionEligibleCostEvidence {
-  market: string;
-  isLong: boolean;
-  observedAtMs: number;
+  readonly market: string;
+  readonly isLong: boolean;
+  readonly orderType: CostSnapshotExpectation['orderType'];
+  readonly notionalUsd: number;
+  readonly observedAtMs: number;
+  readonly effectiveRoundTripCostUsd: number;
+  readonly executionScopeId?: string;
 }
 
 let executionEligibleEvidence: ExecutionEligibleCostEvidence | null = null;
@@ -198,11 +215,19 @@ export function recordExecutionEligibleCostEvidence(
 ): boolean {
   const valid = validateExecutionEligibleSnapshot(snap, expected, nowMs);
   if (!valid.ok) return false;
-  executionEligibleEvidence = {
+  if (expected.executionScopeId !== undefined
+      && (expected.executionScopeId.length === 0 || expected.executionScopeId.trim() !== expected.executionScopeId)) {
+    return false;
+  }
+  executionEligibleEvidence = Object.freeze({
     market: snap.market,
     isLong: snap.isLong,
-    observedAtMs: Date.parse(snap.fetchedAt),
-  };
+    orderType: snap.orderType,
+    notionalUsd: snap.notionalUsd,
+    observedAtMs: Date.parse(snap.apiTimestamp as string),
+    effectiveRoundTripCostUsd: valid.effectiveRoundTripCostUsd,
+    ...(expected.executionScopeId === undefined ? {} : { executionScopeId: expected.executionScopeId }),
+  });
   return true;
 }
 
@@ -213,7 +238,9 @@ export function getExecutionEligibleCostEvidence(nowMs: number = Date.now()): {
   return {
     fresh: executionEligibleEvidence !== null
       && nowMs - executionEligibleEvidence.observedAtMs <= EXECUTION_ELIGIBLE_MAX_AGE_MS,
-    evidence: executionEligibleEvidence,
+    evidence: executionEligibleEvidence === null
+      ? null
+      : { ...executionEligibleEvidence },
   };
 }
 
@@ -250,7 +277,10 @@ async function fetchCostSnapshotWithSource(
     if (c.fundingRatePerHourFraction === undefined || c.borrowingRatePerHourFraction === undefined) {
       return { ok: false, reason: `${COST_DATA_UNAVAILABLE}: funding/borrowing rate 필드 부재 — 누락은 null로 명시해야 함` };
     }
-    const sourceObservedAtMs = c.apiTimestamp === null ? args.now.getTime() : Date.parse(c.apiTimestamp);
+    if (typeof c.apiTimestamp !== 'string' || c.apiTimestamp.length === 0) {
+      return { ok: false, reason: `${COST_DATA_UNAVAILABLE}: upstream 비용 관측 시각 부재 — 로컬 시각 대체 금지` };
+    }
+    const sourceObservedAtMs = Date.parse(c.apiTimestamp);
     if (!Number.isFinite(sourceObservedAtMs) || sourceObservedAtMs > args.now.getTime() + 5_000) {
       return { ok: false, reason: `${COST_DATA_UNAVAILABLE}: 비용 관측 시각 비정상` };
     }

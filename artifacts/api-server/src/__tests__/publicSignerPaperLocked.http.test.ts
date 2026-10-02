@@ -252,6 +252,10 @@ describe('#125 PAPER·잠금 상태 canonical readback (stored_public 경로)', 
     expect(res.body.orderSubmissionEnabled).toBe(false);
     // canonical 판정 도달 (SIGNER_DISABLED로 좌초하지 않음)
     expect(res.body.state).toBe('OWNER_SIGNATURE_REQUIRED');
+    expect(res.body.ownerApprovalRecovery).toMatchObject({
+      ready: false,
+      code: 'NO_DURABLE_READY_SESSION',
+    });
     expect(res.body.liveEligible).toBe(false); // LIVE는 여전히 차단
     // eth_call 상당(readContract)만 호출됨 — 클라이언트에 쓰기 능력 자체가 없음
     expect(canonical.calls.length).toBeGreaterThan(0);

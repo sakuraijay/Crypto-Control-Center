@@ -9,7 +9,8 @@
     "start": "node --enable-source-maps ./dist/index.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:settlement-handoff": "vitest run src/__tests__/confirmedOpenStopHandoff.test.ts src/__tests__/closeSettlementEvidence.test.ts"
   },
   "dependencies": {
     "@gmx-io/sdk": "1.7.0",

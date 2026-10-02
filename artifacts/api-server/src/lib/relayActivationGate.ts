@@ -7,6 +7,12 @@
  */
 
 import { validateEnvAgainstManifest } from './gmxDeploymentManifest';
+import { getCanonicalSnapshot } from './relayActivationStatus';
+import {
+  buildCanonicalActionBudgetEvidenceBinding,
+  evaluateManualCanaryCanonicalAuthorization,
+} from './manualCanaryCanonicalAuthorization';
+import { isStopExecutionAvailableForEvidence } from './stopExecutionCapabilityState';
 
 export interface ActivationGateInput {
   env: NodeJS.ProcessEnv;
@@ -14,6 +20,8 @@ export interface ActivationGateInput {
   manualCanary?: boolean;           // PAPER/manual-only GMX API v2 경로
   signerInitialized: boolean;
   canonicalAuthorized: boolean;     // AUTHORIZED 또는 유효한 첫-action approval(READY 세션+canonical nonce 일치)
+  /** Manual Canary OPEN의 기존 action-budget 정책에 포함할 DB 파생 예약분. 누락/실패 = 차단. */
+  canonicalInFlightReservedActions?: number | null;
   emergencyStopActive: boolean;
   dbOk: boolean;
   rpcOk: boolean;
@@ -26,6 +34,8 @@ export interface ActivationGateInput {
   /** 6C §7 — 저장된 배포 코드 존재 검증 스냅샷이 ok인가 (읽기 전용 refresh로만 갱신) */
   deploymentVerified: boolean;
   kind: 'OPEN' | 'CLOSE' | 'REVOKE';
+  /** 테스트/결정적 검증용. 생략 시 현재 시각 사용. */
+  nowMs?: number;
 }
 
 export interface ActivationGateResult {
@@ -56,6 +66,28 @@ export function evaluateActivationGate(input: ActivationGateInput): ActivationGa
   if (!input.freshLiveFeeQuote) missing.push('fresh live fee quote 없음 (mock 불인정)');
   if (input.currentChainId !== 42161) missing.push(`chainId ${input.currentChainId ?? '미확인'} ≠ 42161`);
   if (!manualPaper && !input.gmxConfigOk) missing.push('GMX public config 미해결');
+
+  // Controlled Canary OPEN은 caller의 canonicalAuthorized boolean만 신뢰하지 않고,
+  // 저장 canonical readback의 freshness + 실제 authorization 의미 + 기존 action budget을
+  // 최종 activation gate에서 다시 확인한다. 모순/누락이면 prepare·서명·제출 0회.
+  if (input.manualCanary === true && input.kind === 'OPEN') {
+    const snapshot = getCanonicalSnapshot();
+    const nowMs = input.nowMs ?? Date.now();
+    const canonical = evaluateManualCanaryCanonicalAuthorization(
+      snapshot,
+      nowMs,
+      input.canonicalInFlightReservedActions ?? null,
+    );
+    if (!canonical.ok) missing.push(`canonical authorization evidence 미충족: ${canonical.detail}`);
+    const evidenceBinding = buildCanonicalActionBudgetEvidenceBinding(
+      snapshot,
+      input.canonicalInFlightReservedActions ?? null,
+    );
+    if (canonical.ok && !isStopExecutionAvailableForEvidence(evidenceBinding, nowMs)) {
+      missing.push('Stop capability가 현재 canonical/action-budget 증거와 불일치·미신선');
+    }
+  }
+
   // 6C §6 — env 주소가 감사된 manifest와 다르면 LIVE fail-closed (자동 대입 없음)
   if (!manualPaper) {
     const manifest = validateEnvAgainstManifest(env);

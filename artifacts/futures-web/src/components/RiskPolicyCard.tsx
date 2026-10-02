@@ -1,5 +1,5 @@
 /**
- * RiskPolicyCard — $1,000 최종 운용 정책 표시 (6H-1 §14).
+ * RiskPolicyCard — Planned/Active/Reserve를 분리한 운용 정책 표시.
  *
  * 데이터 소스: GET /api/risk/policy (서버 코드 상수 — UI에서 변경 불가).
  * API 실패 시 "Unavailable" + 거래 차단(fail-closed) 안내를 표시하고
@@ -12,6 +12,37 @@ import { Button } from '@/components/ui/button';
 import { apiUrl } from '@/lib/apiUrl';
 
 interface RiskPolicyResponse {
+  paperTestAllocationPlan: {
+    totalAllocationUsd: number;
+    reservePercent: number;
+    reserveUsd: number;
+    deployableUsd: number;
+    futureActiveCapitalPolicyCandidate: {
+      baseRiskPerTradeUsd: number;
+      maxRiskPerTradeUsd: number;
+      hardStopEquityUsd: number;
+      maxLeverage: number;
+      recommendedMaxMarginPerTradeUsd: number;
+    };
+    applied: false;
+    executionAuthorized: false;
+    runtimeDbHwmUnchanged: true;
+  };
+  capital: {
+    plannedSeedCapitalUsd: number;
+    activeTradingCapitalUsd: number;
+    reserveCapitalPercent: number;
+    reserveCapitalUsd: number;
+    deployableActiveCapitalUsd: number;
+    riskSizingCapitalUsd: number;
+    riskSizingReserveUsd: number;
+    riskSizingReservePercent: number;
+    currentRiskEquityUsd: number | null;
+    equityHwmUsd: number | null;
+    onchainBalanceUsd: number | null;
+    onchainBalanceAuthoritative: boolean;
+    monthlyNetReturnReferenceRangePercent: readonly [number, number];
+  };
   policy: {
     initialCapitalUsd: number;
     maxRiskCapitalUsd: number;
@@ -52,6 +83,8 @@ interface RiskPolicyResponse {
     riskOperatingState: string | null;
     riskEntryAllowed: boolean;
     riskBlockReasons: string[];
+    currentHardStopPolicyEquityUsd: number;
+    historicalHardStopTriggerReason: string | null;
     riskDbOk: boolean;
     dailyEntryCount: number | null;
     consecutiveLossCount: number | null;
@@ -132,20 +165,29 @@ export function RiskPolicyCard() {
     );
   }
 
-  const { policy: p, derived: d, state: s, canary, manila } = data;
+  const { policy: p, capital, derived: d, state: s, canary, manila, paperTestAllocationPlan: testPlan } = data;
   const stateLabel = s.riskOperatingState ?? '미평가';
   const stateColor = STATE_COLORS[s.riskOperatingState ?? ''] ?? 'text-muted-foreground';
 
   const rows: Array<[string, string]> = [
-    ['운용 자본 (상한)', `$${p.maxRiskCapitalUsd.toLocaleString()} (초과분 위험 산정 제외 · 복리 금지)`],
-    ['일일 목표 (+5%)', `$${d.primaryProfitTargetUsd.toFixed(0)} — 달성 시 신규 진입 금지`],
-    ['일일 절대 상한 (+10%)', `$${d.absoluteProfitCapUsd.toFixed(0)} — 전량 청산 + 당일 잠금`],
+    ['Planned Seed', `$${capital.plannedSeedCapitalUsd.toLocaleString()} (계획 기준 · 입금/승격 권한 아님)`],
+    ['PAPER Test Allocation', `$${testPlan.totalAllocationUsd} total = $${testPlan.deployableUsd} deployable + $${testPlan.reserveUsd} reserve (${testPlan.reservePercent}%) · proposed/approved plan`],
+    ['400 후보 Risk / Hard Stop', `$${testPlan.futureActiveCapitalPolicyCandidate.baseRiskPerTradeUsd} 기본 · $${testPlan.futureActiveCapitalPolicyCandidate.maxRiskPerTradeUsd} 최대 · equity $${testPlan.futureActiveCapitalPolicyCandidate.hardStopEquityUsd} · margin $${testPlan.futureActiveCapitalPolicyCandidate.recommendedMaxMarginPerTradeUsd}`],
+    ['400 적용 상태', '미적용 · runtime/DB/HWM unchanged · 실행 권한 없음'],
+    ['Approved Active / Reserve', `$${capital.activeTradingCapitalUsd.toLocaleString()} / $${capital.reserveCapitalUsd.toLocaleString()} (${capital.reserveCapitalPercent}%)`],
+    ['Current Risk Sizing / Reserve', `$${capital.riskSizingCapitalUsd.toLocaleString()} / $${capital.riskSizingReserveUsd.toLocaleString()} (${capital.riskSizingReservePercent}%) · 승인 단계 이하`],
+    ['Current Equity / HWM', `${capital.currentRiskEquityUsd === null ? 'Unavailable' : `$${capital.currentRiskEquityUsd.toLocaleString()}`} / ${capital.equityHwmUsd === null ? 'Unavailable' : `$${capital.equityHwmUsd.toLocaleString()}`} · RiskEngine 관측 상태`],
+    ['On-chain balance', capital.onchainBalanceAuthoritative ? `$${capital.onchainBalanceUsd?.toLocaleString()}` : '별도 GMX RPC 카드에서 확인'],
+    ['단계', '$1,000 → $2,500 → $5,000 → $10,000 · 증거+사용자 승인 필수'],
+    ['일일 과열 경계 (+5%)', `$${d.primaryProfitTargetUsd.toFixed(0)} — 신규 진입 억제, 수익 목표 아님`],
+    ['일일 절대 과열 상한 (+10%)', `$${d.absoluteProfitCapUsd.toFixed(0)} — 전량 청산 + 당일 잠금`],
+    ['월 순수익 참고치', `${capital.monthlyNetReturnReferenceRangePercent[0]}~${capital.monthlyNetReturnReferenceRangePercent[1]}% — 보장/강제 목표 아님`],
     ['이익 보호 floor (+3.5%)', `$${d.protectedProfitFloorUsd.toFixed(0)} — 후퇴 시 전량 종료`],
     ['거래당 위험', `$${d.baseRiskPerTradeUsd.toFixed(2)} 기본 · $${d.absoluteMaxRiskPerTradeUsd.toFixed(2)} 최대 (${p.baseRiskPerTradePercent}%/${p.maxRiskPerTradePercent}%)`],
-    ['Defensive Mode (-2%)', `-$${d.defensiveModeLossUsd.toFixed(0)} — size 50% · 2x · 잔여 1회`],
-    ['일일 손실 한도 (-3%)', `-$${d.dailyMaxLossUsd.toFixed(0)} — 당일 거래 종료`],
+    ['Defensive Mode (-0.5%)', `-$${d.defensiveModeLossUsd.toFixed(0)} — size 50% · 2x · 잔여 1회`],
+    ['일일 손실 한도 (-1%)', `-$${d.dailyMaxLossUsd.toFixed(0)} — 당일 거래 종료`],
     ['주간 손실 한도 (-8%)', `-$${d.weeklyMaxLossUsd.toFixed(0)} — 주간 잠금 (일일 reset 무관)`],
-    ['Hard Stop', `equity ≤ $${p.hardStopEquityUsd} — 자동 해제 없음`],
+    ['현재 Hard Stop 정책 기준', `equity ≤ $${s.currentHardStopPolicyEquityUsd} — 현재 authoritative 기준 · 자동 해제 없음`],
     ['레버리지', `기본 ${p.baseMaxLeverage}x — 조건부 ${p.conditionalMaxLeverage}x ${p.conditional5xEnabled ? '활성' : '비활성'}`],
     ['동시 포지션 / 일일 진입', `${p.maxConcurrentPositions}개 / ${p.maxDailyEntries}회`],
     ['연속 손실 중단', `${p.maxConsecutiveLosses}회`],
@@ -159,13 +201,22 @@ export function RiskPolicyCard() {
     <Card className="p-5 flex flex-col gap-3">
       <div className="flex items-center gap-2">
         <ShieldAlert className="w-4 h-4 text-primary" />
-        <h3 className="text-sm font-semibold">운용 정책 — $1,000 최종 (6H-1)</h3>
+        <h3 className="text-sm font-semibold">자본·위험 정책 — Planned $10,000 / Active $1,000</h3>
         <span className={`ml-auto text-xs font-bold font-mono ${stateColor}`}>{stateLabel}</span>
       </div>
 
       {!s.riskEntryAllowed && s.riskBlockReasons.length > 0 && (
         <div className="text-[10px] rounded border border-amber-500/40 bg-amber-500/8 p-2 text-amber-300">
           진입 차단: {s.riskBlockReasons.join(' · ')}
+        </div>
+      )}
+      {s.historicalHardStopTriggerReason && (
+        <div className="text-[10px] rounded border border-red-500/40 bg-red-500/8 p-2 text-red-300">
+          <span className="font-semibold">과거 HARD_STOP 발동 스냅샷:</span>{' '}
+          {s.historicalHardStopTriggerReason}
+          <span className="block mt-1 text-muted-foreground">
+            상태 발생 당시 기록이며 현재 정책 기준은 아래 별도 행을 따릅니다.
+          </span>
         </div>
       )}
       {!s.riskDbOk && (

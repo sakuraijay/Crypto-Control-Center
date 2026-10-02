@@ -16,19 +16,19 @@
  *  - allowance 부족/조회 실패 = 제출 차단 (§7). 서버는 approve tx를 전송하지 않는다.
  */
 
-import { and, desc, eq } from 'drizzle-orm';
 import { hashTypedData, getAddress, isAddress, keccak256, toHex, type Hex, type Address } from 'viem';
 import { randomUUID } from 'node:crypto';
-import { db, subaccountApprovalSessionsTable, type SubaccountApprovalSessionRow } from '@workspace/db';
 import {
   isDelegatedSignerEnabled,
   isSignerInitialized,
   isSignerStorageAccessAllowed,
   getSignerAddress,
   signDigestWithDelegatedSigner,
-  decryptSensitiveHex,
 } from './delegatedSigner';
-import { SESSION_STATUS, APPROVAL_PURPOSE, APPROVAL_LIMITS, getConfiguredMainAccount } from './ownerApprovalSession';
+import {
+  getConfiguredMainAccount,
+  getVerifiedOwnerApprovalCapability,
+} from './ownerApprovalSession';
 import { GMX_DEPLOYMENT_MANIFEST } from './gmxDeploymentManifest';
 import { USDC_ADDRESS, ZERO_ADDRESS, usdSizeToGmx, usdToUsdcWei } from './gmxContracts';
 import { GMX_API_CHAIN_ID, type GmxApiResult, type GmxApiTransport } from './gmxApiTransport';
@@ -51,6 +51,7 @@ export function __setUsdcCollateralGateForTests(f: CheckUsdcCollateralGateFn | n
 import { runGmxApiSubmitFlow, type GmxSubmitFlowResult } from './gmxApiSubmitFlow';
 import { evaluateActivationGate, type ActivationGateInput } from './relayActivationGate';
 import { isPreflightPassedFresh, getLastPreflight, runGmxLivePreflight } from './gmxLivePreflight';
+import { resolveGmxLiveRelayConfig } from './gmxLiveConfig';
 
 // ── 주문 요청 (worker 수치 → GMX 1e30/1e6 문자열 변환은 여기서 단일 규칙) ──────
 
@@ -468,52 +469,26 @@ export async function getReadyApprovalForSubmit(params: {
   if (!isDelegatedSignerEnabled()) return { ok: false, reason: 'DELEGATED_SIGNER_ENABLED!=true — approval 복호화 0회 (fail-closed)' };
   const storage = isSignerStorageAccessAllowed();
   if (!storage.allowed) return { ok: false, reason: `storage 게이트 미충족(${storage.missing.join(', ')}) — approval 복호화 0회` };
-
-  let row: SubaccountApprovalSessionRow | undefined;
-  try {
-    const rows = await db.select().from(subaccountApprovalSessionsTable)
-      .where(and(
-        eq(subaccountApprovalSessionsTable.purpose, APPROVAL_PURPOSE),
-        eq(subaccountApprovalSessionsTable.status, SESSION_STATUS.OWNER_SIGNATURE_READY),
-      ))
-      .orderBy(desc(subaccountApprovalSessionsTable.createdAt)).limit(1);
-    row = rows[0];
-  } catch {
-    return { ok: false, reason: 'approval 세션 조회 실패 — 차단 (fail-closed)' };
+  if (params.canonicalNonce === null) {
+    return { ok: false, reason: 'canonical approval nonce 미확인 — approval 제출 차단 (fail-closed)' };
   }
-  if (!row) return { ok: false, reason: 'OWNER_SIGNATURE_READY approval 세션 없음' };
-  if (row.mainAccount !== params.expectedOwner.toLowerCase()) return { ok: false, reason: 'approval main account 불일치' };
-  if (row.subaccount !== params.expectedSubaccount.toLowerCase()) return { ok: false, reason: 'approval subaccount 불일치' };
-  if (params.canonicalNonce !== null && BigInt(row.approvalNonce) !== params.canonicalNonce) {
-    return { ok: false, reason: 'approval nonce가 canonical과 불일치' };
+  const relayConfig = resolveGmxLiveRelayConfig();
+  if (!relayConfig.ok) {
+    return { ok: false, reason: 'canonical relay 구성 미완비 — approval 제출 차단 (fail-closed)' };
   }
-  // canonical 8 불변식 — 레거시(≠8) 세션의 서명은 복호화·제출 자체를 차단 (fail-closed)
-  if (BigInt(row.maxAllowedCount) !== APPROVAL_LIMITS.CANONICAL_MAX_ALLOWED_COUNT) {
-    return { ok: false, reason: 'approval maxAllowedCount ≠ canonical(8) — 레거시 세션, 새로 준비 필요' };
-  }
-  if (!row.encryptedSignature) return { ok: false, reason: 'approval 서명 미저장' };
-
-  let signature: string;
-  try {
-    signature = decryptSensitiveHex(row.encryptedSignature);
-  } catch {
-    return { ok: false, reason: 'approval 서명 복호화 실패 — 차단 (fail-closed)' };
+  const recovery = await getVerifiedOwnerApprovalCapability({
+    expectedOwner: params.expectedOwner,
+    expectedSubaccount: params.expectedSubaccount,
+    expectedVerifyingContract: relayConfig.config.subaccountGelatoRelayRouter as Address,
+    canonicalNonce: params.canonicalNonce,
+  });
+  if (!recovery.ok) {
+    return { ok: false, reason: `durable Owner Approval 검증 실패(${recovery.code}) — 제출 차단` };
   }
   return {
     ok: true,
-    sessionId: row.id,
-    approval: {
-      subaccount: row.subaccount,
-      shouldAdd: row.shouldAdd,
-      expiresAt: row.expiresAt,
-      maxAllowedCount: row.maxAllowedCount,
-      actionType: row.actionType,
-      nonce: row.approvalNonce,
-      desChainId: row.desChainId,
-      deadline: row.deadline,
-      integrationId: row.integrationId,
-      signature,
-    },
+    sessionId: recovery.capability.sessionId,
+    approval: recovery.capability.approval,
   };
 }
 
@@ -540,6 +515,7 @@ export interface ActivationSourceDeps {
   reconciled: boolean;
   canonicalAuthorized: boolean;
   approvalRemainingOk: boolean;      // remainingActions > 0 && not expired
+  inFlightReservedActions: number | null; // null = DB 조회 실패 → Manual Canary OPEN 차단
   blockingIntentCount: number | null; // null = 조회 실패 → 차단
   activeRevokeInProgress: boolean;
   freshLiveFeeQuote: boolean;
@@ -558,6 +534,7 @@ export function buildActivationInput(d: ActivationSourceDeps): ActivationGateInp
     signerInitialized: isSignerInitialized(),
     // §6 — canonical verified + approval 미만료·잔여 액션 확인까지 묶어서 결속
     canonicalAuthorized: d.canonicalAuthorized && d.approvalRemainingOk,
+    canonicalInFlightReservedActions: d.inFlightReservedActions,
     emergencyStopActive: d.emergencyStopActive,
     dbOk: d.dbOk && d.blockingIntentCount !== null,
     rpcOk: d.rpcOk,
@@ -575,9 +552,16 @@ export function buildActivationInput(d: ActivationSourceDeps): ActivationGateInp
 // ── §5 실행 오케스트레이터 ────────────────────────────────────────────────────
 
 export interface OpenPositionEvidence {
+  /** GMX V2 canonical position key from PositionReader inputs. */
+  positionKey?: string;
+  /** PositionReader account address; required for exact CLOSE settlement binding. */
+  accountAddress?: string;
   marketAddress: string;
+  collateralToken?: string;
   isLong: boolean;
   sizeUsd: number;
+  /** PositionReader exact sizeInUsd uint256 (1e30 integer string). */
+  sizeUsd30?: string;
 }
 
 export interface ExecuteViaGmxApiInput {
@@ -590,6 +574,14 @@ export interface ExecuteViaGmxApiInput {
   openPosition?: OpenPositionEvidence | null;
   /** canonical approval nonce (재확인용). null = 미확인 → approval 동봉 불가 */
   canonicalNonce: bigint | null;
+  /**
+   * confirmed OPEN 보호 flow에서만: finality 검증된 source OPEN relay task 한 건.
+   * submit flow는 이 ID만 blocking count에서 제외하며 다른 task는 모두 보존한다.
+   */
+  allowedBlockingSourceOpen?: {
+    taskId: string;
+    intentId: string;
+  } | null;
   nowMs?: number;
 }
 
@@ -716,6 +708,7 @@ function makeFlowInput(
     // STOP_LOSS는 위험감소 주문 — durable flow/activation gate에는 CLOSE 계열로 취급
     kind: req.kind === 'OPEN' ? 'OPEN' as const : 'CLOSE' as const,
     intentId: input.intentId,
+    allowedBlockingSourceOpen: input.allowedBlockingSourceOpen ?? null,
     approvalSessionId: null,
     // 6G-3 §3 — 외부 prepare 호출 전에 결정되는 flow idempotency key.
     // intent 1건당 relay task 1건 (intent id 자체가 결정적 idempotent id).

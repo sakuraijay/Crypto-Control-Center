@@ -15,6 +15,7 @@ const lib = (name: string) => readFileSync(join(__dir, '../lib', name), 'utf-8')
 
 const relayCard = comp('RelayStatusCard.tsx');
 const readinessCard = comp('ReadinessRefreshCard.tsx');
+const betaRcCard = comp('dashboard/BetaRcStatusCard.tsx');
 const relayStatusLib = lib('relayStatus.ts');
 
 describe('ReadinessRefreshCard — basis/failures 전체 표시', () => {
@@ -26,6 +27,29 @@ describe('ReadinessRefreshCard — basis/failures 전체 표시', () => {
   });
   it('실패 섹션은 fail-closed 표기를 유지한다', () => {
     expect(readinessCard).toContain('fail-closed');
+  });
+});
+
+describe('BetaRcStatusCard — build/approved/effective 진단과 provenance', () => {
+  it('세 상태를 분리하고 승인 목표와 runtime만 운영 drift로 판정한다', () => {
+    expect(betaRcCard).toContain('build-time 관측 / 승인된 Production 목표 / effective runtime');
+    expect(betaRcCard).toMatch(/value\.buildObserved/);
+    expect(betaRcCard).toMatch(/value\.approvedTarget/);
+    expect(betaRcCard).toMatch(/value\.effective/);
+    expect(betaRcCard).toMatch(/value\.driftReason/);
+    expect(betaRcCard).toContain('운영 Drift는 승인 목표와 runtime만 비교');
+    expect(betaRcCard).toContain('Build 환경 관측값 차이 있음 (정보)');
+  });
+  it('legacy 또는 unknown schema를 false-positive drift로 재사용하지 않는다', () => {
+    expect(betaRcCard).toMatch(/value\.configured/);
+    expect(betaRcCard).toContain('지원되지 않는 운영 진단 schema');
+    expect(betaRcCard).toContain('운영 Drift를 재판정하지 않습니다 (fail-closed)');
+    expect(betaRcCard).toMatch(/diagnostics\?\.schemaVersion === 2/);
+  });
+  it('provenance mismatch와 누락을 fail-closed로 표시한다', () => {
+    expect(betaRcCard).toContain('Build workspace snapshot / embedded release provenance');
+    expect(betaRcCard).toContain('UNAVAILABLE (fail-closed)');
+    expect(betaRcCard).toContain('DRIFT / UNAVAILABLE (fail-closed)');
   });
 });
 

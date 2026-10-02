@@ -34,8 +34,10 @@ import {
 } from '../lib/relayTransport';
 import {
   isRelayReadonlyNetworkEnabled, recordReadinessRefresh, getReadinessRefreshState,
-  __resetReadinessRefreshForTests,
+  __resetReadinessRefreshForTests, recordCanonicalSnapshot,
 } from '../lib/relayActivationStatus';
+import { buildCanonicalActionBudgetEvidenceBinding } from '../lib/manualCanaryCanonicalAuthorization';
+import { setStopExecutionCapability } from '../lib/stopExecutionCapabilityState';
 import { performReadinessRefresh } from '../lib/relayReadinessRefresh';
 import { createRelayReadonlyClient, __setRelayReadonlyPublicClientFactoryForTests } from '../lib/relayReadonlyClient';
 import { evaluateActivationGate, type ActivationGateInput } from '../lib/relayActivationGate';
@@ -338,6 +340,24 @@ describe('6단계 §6 — activation 게이트에 read-only 플래그 요구', (
   });
 
   it('PAPER Manual Canary는 AUTO Worker 비활성 + GMX API 플래그만 요구하고 legacy relay 플래그를 요구하지 않는다', () => {
+    const nowMs = Date.now();
+    const canonicalSnapshot = {
+      atMs: nowMs,
+      confirmed: true,
+      reason: null,
+      approvalNonce: '7',
+      isSubaccountListed: true,
+      featureDisabled: false,
+      integrationDisabled: false,
+      expiresAt: String(Math.floor(nowMs / 1000) + 3600),
+      remaining: '8',
+    };
+    recordCanonicalSnapshot(canonicalSnapshot);
+    setStopExecutionCapability(
+      { available: true, reasons: [] },
+      new Date(nowMs).toISOString(),
+      buildCanonicalActionBudgetEvidenceBinding(canonicalSnapshot, 0),
+    );
     const env = {
       WORKER_ENGINE_MODE: 'PAPER',
       AUTO_WORKER_LIVE_ENABLED: 'false',
@@ -348,7 +368,9 @@ describe('6단계 §6 — activation 게이트에 read-only 플래그 요구', (
     };
     const input = fullInput(env);
     input.manualCanary = true;
+    input.canonicalInFlightReservedActions = 0;
     input.gmxConfigOk = false;
+    input.nowMs = nowMs;
     expect(evaluateActivationGate(input)).toMatchObject({ networkEligible: true, missing: [] });
 
     input.env.AUTO_WORKER_LIVE_ENABLED = 'true';

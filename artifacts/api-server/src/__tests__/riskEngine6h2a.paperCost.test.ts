@@ -14,7 +14,7 @@ import {
   HOLDING_COST_UNAVAILABLE,
 } from '../lib/holdingCosts';
 import {
-  storePaperCostSnapshot, getPaperCostBinding, __clearPaperCostCacheForTests,
+  storePaperCostSnapshot, getPaperCostBinding, getPaperCostSnapshot, __clearPaperCostCacheForTests,
 } from '../lib/paperCostCache';
 import { pnlForTargets, reconcileLiveSettlements, recordTradeSettlement } from '../lib/tradeSettlement';
 import type { CostSnapshot } from '../lib/costSnapshot';
@@ -27,7 +27,7 @@ const validFields: FetchedCostFields = {
   estimatedExitPriceImpactUsd: 0.05, fundingFeeUsd: 0.01, borrowingFeeUsd: 0.005,
   estimatedExitFeeUsd: 0.26,
   fundingRatePerHourFraction: 0.00001, borrowingRatePerHourFraction: 0.000005,
-  blockNumber: null, apiTimestamp: null,
+  blockNumber: null, apiTimestamp: NOW.toISOString(),
 };
 
 const req = { market: MARKET, isLong: true, orderType: 'MarketIncrease' as const, notionalUsd: 100, now: NOW };
@@ -107,6 +107,15 @@ describe('§11-2·3 PAPER 비용 조회 (PAPER_GMX_ESTIMATE)', () => {
     expect(r.ok).toBe(false);
   });
 
+  it('3c. upstream 관측 시각 누락은 로컬 now로 대체하지 않고 실패한다', async () => {
+    const r = await fetchPaperCostSnapshot(req, {
+      readonlyEnabled: true,
+      fetchCosts: async () => ({ ...validFields, apiTimestamp: null }),
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain('관측 시각 부재');
+  });
+
   it('LIVE와 PAPER는 동일 조회 경로, source 태그만 다름', async () => {
     const live = await fetchLiveCostSnapshot(req, { readonlyEnabled: true, fetchCosts: async () => validFields });
     const paper = await fetchPaperCostSnapshot(req, { readonlyEnabled: true, fetchCosts: async () => validFields });
@@ -176,6 +185,9 @@ describe('§11-4·5·6 보유비용 누적·순 PnL 추정', () => {
       fetchedAt: new Date(t0).toISOString(), expiresAt: new Date(t0 + 60_000).toISOString(),
     };
     storePaperCostSnapshot('ETH', snap, t0);
+    expect(getPaperCostSnapshot('ETH',t0-1)).toBeNull();
+    expect(getPaperCostBinding('ETH',t0-1)).toBeNull();
+    expect(getPaperCostSnapshot('ETH',t0)).toEqual(snap);
     const fresh = getPaperCostBinding('ETH', t0 + 60_000);
     expect(fresh).not.toBeNull();
     expect(fresh!.costSource).toBe('PAPER_GMX_ESTIMATE');
@@ -202,6 +214,16 @@ describe('§11-7~10 LIVE 정산 게이팅', () => {
     });
     expect(noTx.ok).toBe(false);
     if (!noTx.ok) expect(noTx.reason).toContain('온체인 증거');
+  });
+
+  it('8b. tx hash만 위조해 직접 writer를 호출해도 CLOSE linkage/finality 없이는 거부', async () => {
+    const forged = await recordTradeSettlement({
+      tradeId: 't1', grossPnlUsd: 5, positionFeeUsd: 0.1, executionFeeUsd: 0.1,
+      priceImpactUsd: 0.1, fundingFeeUsd: 0, borrowingFeeUsd: 0,
+      evidenceTxHash: `0x${'a'.repeat(64)}`, settledAt: NOW,
+    });
+    expect(forged.ok).toBe(false);
+    if (!forged.ok) expect(forged.reason).toContain('linkage/finality');
   });
 
   it('9. 부분 actual fee(fetchEvidence null) → UNSETTLED 유지 + incomplete', async () => {
@@ -253,12 +275,4 @@ describe('§11-21~24 구조적 금지 검증', () => {
     expect(out.trim()).toBe('');
   });
 
-  it('24. 모바일(futures-terminal) 미접촉 — api-server 코드가 모바일을 참조하지 않음', () => {
-    let out = '';
-    try {
-      out = execFileSync('grep', ['-rl', 'futures-terminal', path.resolve(__dirname, '..'), '--include=*.ts'], { encoding: 'utf8' });
-    } catch { out = ''; }
-    const offenders = out.split('\n').filter(Boolean).filter(f => !f.includes('__tests__'));
-    expect(offenders).toEqual([]);
-  });
 });

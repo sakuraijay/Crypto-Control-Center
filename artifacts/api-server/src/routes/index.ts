@@ -2,6 +2,7 @@ import { Router, type IRouter } from "express";
 import healthRouter from "./health";
 import gmxRouter from "./gmx";
 import dataRouter from "./data";
+import { router as alphaStartIntentRouter } from "./alphaStartIntent";
 import aiRouter from "./ai";
 import approvalsRouter from "./approvals";
 import executorRouter from "./executor";
@@ -13,22 +14,33 @@ import gmxapiRouter from "./gmxapi";
 import riskRouter from "./risk";
 import intelRouter from "./intel";
 import canaryRouter from "./canary";
+import signerReadinessRouter from "./signer-readiness";
+import offlineBacktestRouter from "./offline-backtest";
+import releaseRouter from "./release";
+import { requireOperatorAuth } from "../lib/operatorAuthGuard";
 
 const router: IRouter = Router();
 
 router.use(healthRouter);
 router.use(gmxRouter);
 router.use(dataRouter);
+router.use(alphaStartIntentRouter);
 router.use(aiRouter);
 router.use(approvalsRouter);
 router.use(executorRouter);
 router.use(walletDiagnosticRouter);
 router.use(notificationsRouter);
+// Manual Emergency Stop is a persistent operator mutation. Keep internal Risk/Stop
+// behavior unchanged, but require the existing operator contract on its public HTTP seam.
+router.post("/executor/emergency-stop", requireOperatorAuth);
 router.use(livetestRouter);
 router.use(relayRouter);
 router.use(gmxapiRouter);
 router.use(riskRouter);
 router.use(intelRouter);
 router.use(canaryRouter);
+router.use(signerReadinessRouter);
+router.use(offlineBacktestRouter);
+router.use(releaseRouter);
 
 export default router;

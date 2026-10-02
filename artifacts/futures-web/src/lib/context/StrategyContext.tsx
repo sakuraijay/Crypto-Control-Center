@@ -1,4 +1,5 @@
 import { createContext, useContext, useState, useEffect, ReactNode, useCallback, useRef } from 'react';
+import { apiUrl, postApiJson, readApiJson } from '@/lib/apiUrl';
 
 // 6E-2 §4 — 구형 SubaccountConfig(브라우저 localStorage 기반 "위임 준비 완료")는 제거됨.
 // 승인 파라미터(maxAllowedCount·expiry·deadline)는 서버가 canonical 값으로 고정하며,
@@ -15,7 +16,8 @@ export interface IndicatorConfig {
 export interface RiskLimits {
   // ── Capital settings ─────────────────────────────────────────────────────
   /**
-   * Seed money committed to trading (USDT).
+   * Current risk-sizing capital (USDT), bounded by the approved Active stage.
+   * This is not Planned Seed Capital and may be smaller than the approved stage.
    * Must not exceed actual wallet USDC equity — validated on the Strategy page.
    * Basis for drawdown %, max-risk-per-symbol, and profit-lock calculations.
    */
@@ -82,7 +84,7 @@ const DEFAULT_INDICATORS: IndicatorConfig[] = [
   { id: 'combined', name: 'Combined Scoring',     enabled: true,  params: { minScore: 60 } },
 ];
 
-// 6H-1 $1,000 최종 운용 정책 기본값 — 서버 clampRiskLimits와 정합.
+// 현재 승인된 Active $1,000 운용 정책 기본값 — Planned Seed $10,000과 분리.
 // 구형 $10,000/$500/$1,500/10x 기본값은 제거됨.
 const DEFAULT_LIMITS: RiskLimits = {
   // Capital
@@ -94,9 +96,9 @@ const DEFAULT_LIMITS: RiskLimits = {
   maxMarginPerTrade:           334,   // ≈ capital/3 — 1포지션 담보 상한
   maxLeverage:                   3,   // 기본 3x — 조건부 5x 비활성
   maxSimultaneousPositions:      1,   // 동시 포지션 1개
-  dailyLossLimitUSDT:           30,   // -3% 일일 손실 한도
+  dailyLossLimitUSDT:           10,   // -1% 일일 손실 한도
   weeklyLossLimitUSDT:          80,   // -8% 주간 손실 한도
-  maxDrawdownPercent:           15,   // hard stop equity $850 (-15%)
+  maxDrawdownPercent:            8,   // hard stop equity $920 (-8%)
   consecutiveLossLimit:          3,   // 연속 손실 3회 중단
   cooldownMinutes:              30,
   maxTradesPerHour:              6,
@@ -129,6 +131,29 @@ export function clampDailyTargetWeb(value: unknown): number {
 }
 
 /** Server sync state for the debounced PUT /api/data/strategy call. */
+export type ProfileName = 'conservative' | 'aggressive';
+
+export interface DesiredRiskProfileStatus {
+  name: ProfileName;
+  version: 'risk-profile/v1';
+  requestedAt: string;
+}
+
+export interface AppliedRiskProfileStatus {
+  name: ProfileName;
+  version: 'risk-profile/v1';
+  appliedAt: string;
+  derivedLimits: Record<string, unknown>;
+}
+
+export interface RiskProfileResponse {
+  desired: DesiredRiskProfileStatus;
+  applied: AppliedRiskProfileStatus;
+  pending: boolean;
+  safeBoundary: boolean;
+  reason: string | null;
+}
+
 export type StrategySyncStatus = 'idle' | 'saving' | 'saved' | 'error';
 
 interface StrategyContextType {
@@ -138,6 +163,11 @@ interface StrategyContextType {
   syncStatus: StrategySyncStatus;
   /** 동기화 실패 시 오류 메시지 */
   syncError: string | null;
+
+  riskProfile: RiskProfileResponse | null;
+  fetchRiskProfile: () => Promise<void>;
+  requestRiskProfile: (profile: ProfileName, pin: string) => Promise<void>;
+
   updateIndicator: (id: string, updates: Partial<IndicatorConfig>) => void;
   updateLimit: (key: keyof RiskLimits, value: number) => void;
   /** Toggle LIVE TEST MODE on/off (saves all liveTest fields together) */
@@ -180,6 +210,52 @@ export function StrategyProvider({ children }: { children: ReactNode }) {
   const [syncError, setSyncError]   = useState<string | null>(null);
   const serverSyncTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const initializedFromServer = useRef(false);
+
+  const [riskProfile, setRiskProfile] = useState<RiskProfileResponse | null>(null);
+
+  const fetchRiskProfile = useCallback(async () => {
+    try {
+      const res = await fetch(apiUrl('data/risk-profile'), { signal: AbortSignal.timeout(5_000) });
+      if (res.ok) {
+        const body = await readApiJson(res);
+        if (body.kind === 'json') {
+          setRiskProfile(body.json as RiskProfileResponse);
+        }
+      }
+    } catch (e) {
+      // ignore
+    }
+  }, []);
+
+  const requestRiskProfile = useCallback(async (profile: ProfileName, pin: string) => {
+    const res = await postApiJson('data/risk-profile', {
+      method: 'PUT',
+      headers: { 'x-operator-pin': pin },
+      body: { profile }
+    });
+    const body = await readApiJson(res);
+    if (!res.ok) {
+      const err = (body.kind === 'json' && (body.json as any).error) ? (body.json as any).error : `HTTP ${res.status}`;
+      throw new Error(err);
+    }
+    if (body.kind === 'json') {
+      setRiskProfile(body.json as RiskProfileResponse);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchRiskProfile();
+  }, [fetchRiskProfile]);
+
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout>;
+    if (riskProfile?.pending) {
+      timer = setTimeout(() => {
+        fetchRiskProfile();
+      }, 3000);
+    }
+    return () => clearTimeout(timer);
+  }, [riskProfile?.pending, fetchRiskProfile]);
 
   // Always-current snapshot used by the debounced callback (avoids stale closures)
   const latestDataRef = useRef({ indicators, limits });
@@ -287,6 +363,7 @@ export function StrategyProvider({ children }: { children: ReactNode }) {
     <StrategyContext.Provider value={{
       indicators, limits,
       syncStatus, syncError,
+      riskProfile, fetchRiskProfile, requestRiskProfile,
       updateIndicator, updateLimit, updateLiveTestConfig, resetToDefaults,
     }}>
       {children}

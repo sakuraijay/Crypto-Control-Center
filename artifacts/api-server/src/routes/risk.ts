@@ -4,10 +4,12 @@
  */
 import { Router, type IRouter } from 'express';
 import {
-  RISK_POLICY, CANARY_POLICY, CAPITAL_TIER_LADDER,
+  RISK_POLICY, CANARY_POLICY, CAPITAL_PLAN, CAPITAL_TIER_LADDER,
+  PAPER_TEST_ALLOCATION_PLAN,
   deriveDailyTargets, deriveWeeklyMaxLossUsd, deriveTradeRiskUsd,
   isAutoPromotionAllowed,
 } from '../lib/riskPolicy';
+import { assessActiveCapitalSemantics } from '../lib/activeCapitalSemantics';
 import { msUntilNextManilaDay, manilaDayStartIso, manilaWeekStartIso } from '../lib/manilaTime';
 import { getWorkerStatus } from '../workers/aiWorker';
 
@@ -22,10 +24,34 @@ router.get('/risk/policy', (_req, res) => {
     const derived = status.riskDerivedTargets
       ?? deriveDailyTargets(RISK_POLICY.maxRiskCapitalUsd);
     const trade = deriveTradeRiskUsd(RISK_POLICY.maxRiskCapitalUsd);
+    const riskSizingCapitalUsd = status.lastLimitsUsed?.tradingCapital
+      ?? CAPITAL_PLAN.activeTradingCapitalUsd;
+    const riskSizingReservePercent = status.lastLimitsUsed?.reserveCashPct
+      ?? CAPITAL_PLAN.reserveCapitalPercent;
+    const riskSizingReserveUsd = riskSizingCapitalUsd * riskSizingReservePercent / 100;
+    const capitalSemantics = assessActiveCapitalSemantics({
+      runtimeConfiguredCapitalUsd: status.lastLimitsUsed?.tradingCapital,
+      // 지갑 잔액은 이 endpoint의 Risk 상태와 결합하지 않는다. 별도 RPC read-only 원본이 필요하다.
+      observedWalletBalanceUsd: null,
+      currentRiskEquityUsd: status.currentEquityUsd,
+      historicalHardStopTriggerReason: status.riskHistoricalHardStopTriggerReason,
+    });
 
     res.json({
       policy: RISK_POLICY,
+      capital: {
+        ...CAPITAL_PLAN,
+        riskSizingCapitalUsd,
+        riskSizingReserveUsd,
+        riskSizingReservePercent,
+        currentRiskEquityUsd: status.currentEquityUsd,
+        equityHwmUsd: status.equityHwm,
+        onchainBalanceUsd: null,
+        onchainBalanceAuthoritative: false,
+        semantics: capitalSemantics,
+      },
       canary: CANARY_POLICY,
+      paperTestAllocationPlan: PAPER_TEST_ALLOCATION_PLAN,
       tierLadder: CAPITAL_TIER_LADDER,
       autoPromotionAllowed: isAutoPromotionAllowed(),
       derived: {
@@ -38,6 +64,8 @@ router.get('/risk/policy', (_req, res) => {
         riskOperatingState:       status.riskOperatingState,
         riskEntryAllowed:         status.riskEntryAllowed,
         riskBlockReasons:         status.riskBlockReasons,
+        currentHardStopPolicyEquityUsd: RISK_POLICY.hardStopEquityUsd,
+        historicalHardStopTriggerReason: status.riskHistoricalHardStopTriggerReason,
         riskDbOk:                 status.riskDbOk,
         dailyEntryCount:          status.riskDailyEntryCount,
         consecutiveLossCount:     status.riskConsecutiveLossCount,

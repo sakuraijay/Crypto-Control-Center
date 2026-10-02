@@ -5,8 +5,9 @@
  *  1. marketAddress → 공식 SDK MARKETS[42161] registry에서 indexTokenAddress 확정
  *  2. chainId=42161 강제
  *  3. indexToken이 공식 SDK TOKENS metadata에 존재하는지 확인 (decimals 포함)
- *  4. 허용 read-only RPC로 ERC-20 decimals() 조회 (의존성 주입 — 테스트 실 RPC 0회)
- *  5. SDK metadata와 온체인 decimals()가 모두 존재 → 불일치 시 차단
+ *  4. 일반 ERC-20은 허용 read-only RPC로 decimals() 조회
+ *  5. synthetic placeholder는 SDK synthetic=true + Arbitrum bytecode 없음 교차검증
+ *  6. 일반 ERC-20은 SDK metadata와 온체인 decimals() 불일치 시 차단
  *
  * 금지: 하드코딩·심볼 기반 추측·브라우저 전달값. 실패/불일치 = 제출 0회 (fail-closed).
  * 캐시: key=`${chainId}:${indexToken소문자}`; 검증 시각 기록; 실행은 VERIFIED_MAX_AGE_MS
@@ -30,10 +31,10 @@ export interface DecimalsEvidence {
   marketAddress: string;
   indexTokenAddress: string;
   decimals: number;
-  /** 'sdk+onchain' 만 실행 허용 — 단일 출처는 실행 금지 */
-  source: 'sdk+onchain';
+  source: 'sdk+onchain' | 'sdk-synthetic+onchain-no-code';
+  synthetic: boolean;
   sdkDecimals: number;
-  onchainDecimals: number;
+  onchainDecimals: number | null;
   verifiedAtMs: number;
 }
 
@@ -43,6 +44,8 @@ export type DecimalsResult =
 
 /** 온체인 ERC-20 decimals() 조회 함수 — 프로덕션은 viem readContract, 테스트는 mock */
 export type OnchainDecimalsFetcher = (tokenAddress: string) => Promise<number | null>;
+/** null=RPC 판정 실패, true=code 존재, false=Arbitrum에서 bytecode 없음 */
+export type OnchainCodeFetcher = (tokenAddress: string) => Promise<boolean | null>;
 
 const _cache = new Map<string, DecimalsEvidence>();
 
@@ -56,7 +59,7 @@ export function isDecimalsEvidenceFresh(e: DecimalsEvidence, nowMs: number): boo
 export function lookupSdkIndexToken(
   chainId: number,
   marketAddress: string,
-): { ok: true; indexTokenAddress: string; sdkDecimals: number } | { ok: false; reason: string } {
+): { ok: true; indexTokenAddress: string; sdkDecimals: number; synthetic: boolean } | { ok: false; reason: string } {
   if (chainId !== ARBITRUM_CHAIN_ID) return { ok: false, reason: `chainId ${chainId} ≠ 42161 — 차단` };
   let checksummed: string;
   try { checksummed = getAddress(marketAddress); } catch { return { ok: false, reason: 'market 주소 형식 오류 — 차단' }; }
@@ -65,13 +68,18 @@ export function lookupSdkIndexToken(
     ?? Object.entries(markets).find(([k]) => k.toLowerCase() === checksummed.toLowerCase())?.[1];
   if (!entry) return { ok: false, reason: 'SDK market registry에 없는 market — 차단 (추측 금지)' };
   const idx = entry.indexTokenAddress;
-  const tokens = (TOKENS as Record<number, Array<{ address: string; decimals: number; synthetic?: boolean }>>)[chainId] ?? [];
+  const tokens = (TOKENS as Record<number, Array<{ address: string; decimals: number; isSynthetic?: boolean }>>)[chainId] ?? [];
   const tok = tokens.find((t) => t.address.toLowerCase() === idx.toLowerCase());
   if (!tok) return { ok: false, reason: 'SDK token metadata에 없는 index token — 차단' };
   if (!Number.isInteger(tok.decimals) || tok.decimals < 0 || tok.decimals > 30) {
     return { ok: false, reason: 'SDK decimals 범위 밖 — 차단' };
   }
-  return { ok: true, indexTokenAddress: idx, sdkDecimals: tok.decimals };
+  return {
+    ok: true,
+    indexTokenAddress: idx,
+    sdkDecimals: tok.decimals,
+    synthetic: tok.isSynthetic === true,
+  };
 }
 
 /**
@@ -82,6 +90,7 @@ export async function resolveIndexTokenDecimals(args: {
   chainId: number;
   marketAddress: string;
   fetchOnchainDecimals: OnchainDecimalsFetcher;
+  fetchOnchainCode?: OnchainCodeFetcher;
   nowMs?: number;
 }): Promise<DecimalsResult> {
   const nowMs = args.nowMs ?? Date.now();
@@ -91,11 +100,37 @@ export async function resolveIndexTokenDecimals(args: {
   const cacheKey = `${args.chainId}:${sdk.indexTokenAddress.toLowerCase()}`;
   const cached = _cache.get(cacheKey);
   if (cached && isDecimalsEvidenceFresh(cached, nowMs)) {
-    if (cached.sdkDecimals !== sdk.sdkDecimals) {
+    if (cached.sdkDecimals !== sdk.sdkDecimals || cached.synthetic !== sdk.synthetic) {
       _cache.delete(cacheKey); // registry 변경 감지 — 캐시 폐기 후 재검증
     } else {
       return { ok: true, evidence: cached, fromCache: true };
     }
+  }
+
+  if (sdk.synthetic) {
+    let codePresent: boolean | null = null;
+    try { codePresent = args.fetchOnchainCode ? await args.fetchOnchainCode(sdk.indexTokenAddress) : null; }
+    catch { codePresent = null; }
+    if (codePresent === null) {
+      return { ok: false, reason: 'synthetic index token bytecode 판정 실패 — 제출 0회 (fail-closed)' };
+    }
+    if (codePresent === false) {
+      const evidence: DecimalsEvidence = {
+        chainId: args.chainId,
+        marketAddress: args.marketAddress,
+        indexTokenAddress: sdk.indexTokenAddress,
+        decimals: sdk.sdkDecimals,
+        source: 'sdk-synthetic+onchain-no-code',
+        synthetic: true,
+        sdkDecimals: sdk.sdkDecimals,
+        onchainDecimals: null,
+        verifiedAtMs: nowMs,
+      };
+      _cache.set(cacheKey, evidence);
+      return { ok: true, evidence, fromCache: false };
+    }
+    // 미래에 placeholder 주소에 code가 배포되면 일반 ERC-20 교차검증으로
+    // 자동 강화한다. decimals() 실패/불일치는 아래에서 그대로 차단된다.
   }
 
   let onchain: number | null;
@@ -115,6 +150,7 @@ export async function resolveIndexTokenDecimals(args: {
     indexTokenAddress: sdk.indexTokenAddress,
     decimals: onchain,
     source: 'sdk+onchain',
+    synthetic: sdk.synthetic,
     sdkDecimals: sdk.sdkDecimals,
     onchainDecimals: onchain,
     verifiedAtMs: nowMs,

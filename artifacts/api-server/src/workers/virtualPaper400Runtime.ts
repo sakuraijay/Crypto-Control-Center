@@ -1,0 +1,514 @@
+import {paperPerformance} from './virtualPaperPerformance';
+import {virtualTradeEvidence,virtualEntryAmounts} from './virtualTradeEvidence';
+import {restorePaperComparison,addPaperComparison,advancePaperComparison,summarizePaperComparison} from './virtualPaperComparison';
+import {recordContinuousPaperComparison,summarizeContinuousPaperComparison,
+  type ContinuousPaperPair,type ContinuousPaperComparisonStore} from './virtualPaperContinuousComparison';
+import { buildVirtualPaperCalendar } from './virtualPaperCalendar';
+import { PAPER_LEARNING_CONTRACT } from './virtualPaperLearningDataset';
+import { applyAuthorizedPaperCredit } from './virtualPaperContribution';
+import { DAILY_PAPER_POLICY, LEGACY_DAILY_PAPER_POLICY, V8_DAILY_PAPER_POLICY, PATTERN_DAILY_PAPER_POLICY } from './virtualPaperDailyPolicy';
+import { runVirtualPaperDailyCycle, type DailyCycleDeps, type PairedDailyCandidateComparison,
+  type DailyComparisonLeg, type PaperEntryEvaluation as CycleEntryEvaluation } from './virtualPaperDailyCycle';
+import { dailyPaperCandidate } from './virtualPaperDailyCandidate';
+import { readPatternCandles } from '../intel/patterns/patternReader';
+import { patternSummary } from '../intel/patterns/chartPatterns';
+import { PATTERN_ENTRY_VERSION, evaluatePatternEntries } from '../intel/patterns/patternEntryStrategies';
+import { runVirtualPaperPatternDailyCycle, type PatternDailyCycleDeps } from './virtualPaperPatternDailyCycle';
+import { advanceVirtualDiagnostics, virtualDiagnosticsKey,
+  type PaperDiagnosticEvaluation as DiagnosticEntryEvaluation } from './virtualPaper400Diagnostics';
+import type { StrategyShadowRecord } from '../intel/strategyShadowAdapterV2';
+import { discoverVirtualGmxUniverse, selectVirtualAnalysisBatch, VIRTUAL_GMX_SYMBOLS } from '../lib/virtualGmxUniverse';
+import { VIRTUAL_ACTIVE_POLICY, VIRTUAL_LEGACY_POLICY } from './virtualPaper400Policy';
+import { readTradingMode, tradingModeKey, MODE_VERSION, MODE_DECISION_PREFIX } from './virtualPaperTradingMode';
+import { eq, sql } from 'drizzle-orm';
+import { evaluateVirtualPaper400SessionState, VIRTUAL_PAPER_400_SESSION_STATE_KEY, VIRTUAL_PAPER_400_LOCK_ID } from './virtualPaper400SessionState';
+import { initialVirtualPaper400RiskState, parseVirtualPaper400RiskState, virtualPaper400RiskKey,
+  evaluateVirtualPaper400Account } from './virtualPaper400Accounting';
+import { runVirtualPaper400Cycle } from './virtualPaper400Cycle';
+import { openServerPaperPosition, closeServerPaperPosition, reduceServerPaper70,
+  getServerPaperStatus, type PriceLookup } from './serverPaperExecutor';
+import { storePaperCostSnapshot } from '../lib/paperCostCache';
+import { sanitizeCostError, type CostSnapshot } from '../lib/costSnapshot';
+import { virtualPaper400Activity as activity } from './virtualPaper400Activity';
+import {
+  advanceVirtualPaper400StrategyContinuity,
+  filterNewVirtualPaper400StrategyRecords,
+  restoreVirtualPaper400StrategyContinuity,
+  summarizeVirtualPaper400StrategyContinuity,
+  virtualPaper400StrategyContinuityKey,
+  type VirtualPaper400StrategyContinuityRestore,
+} from './virtualPaper400StrategyContinuity';
+
+export const VIRTUAL_PAPER_400_RUNTIME_KEY = 'virtual_paper_400_runtime_v1';
+const dailyPolicyVersions: readonly string[] = [DAILY_PAPER_POLICY.version, LEGACY_DAILY_PAPER_POLICY.version, V8_DAILY_PAPER_POLICY.version,
+  PATTERN_DAILY_PAPER_POLICY.version,
+  'virtual400-daily/v3', 'virtual400-daily/v4', 'virtual400-daily/v5', 'virtual400-daily/v6'];
+const isDailyPolicy = (version: string | undefined) => dailyPolicyVersions.includes(version ?? '');
+// Shared with START/STOP. This is a coordination lock, not a trading permission.
+
+/** Returns false only for an absent session. A stopped/invalid virtual session
+ * must not silently fall back to Standard entries. No financial modules are called. */
+export async function maybeRunVirtualPaper400Cycle(args: {
+  cycleNumber: number; quote: PriceLookup; shouldContinue(): boolean; dailyExperiment?: boolean;
+}): Promise<boolean> {
+  const { db, workerStateTable, tradesTable } = await import('@workspace/db');
+  const observed = await db.select().from(workerStateTable)
+    .where(eq(workerStateTable.key, VIRTUAL_PAPER_400_SESSION_STATE_KEY)).limit(2);
+  if (observed.length === 0) return false;
+  if (observed.length !== 1) throw new Error('VIRTUAL_SESSION_DUPLICATE');
+  let activityRun: number | null = null;
+  let activityOutcome: { status: string; reason: string | null } | null = null;
+  try {
+  await db.transaction(async tx => {
+    const lock = await tx.execute(sql`SELECT pg_try_advisory_xact_lock(${VIRTUAL_PAPER_400_LOCK_ID}) AS acquired`);
+    if (lock.rows[0]?.acquired !== true) return;
+    const read = async (key: string) => {
+      const rows = await tx.select().from(workerStateTable).where(eq(workerStateTable.key, key)).limit(2);
+      if (rows.length > 1) throw new Error('VIRTUAL_STATE_DUPLICATE');
+      return rows[0]?.value ?? null;
+    };
+    const write = async (key: string, value: unknown) => {
+      if (!args.shouldContinue()) throw new Error('VIRTUAL_WORKER_STOPPED');
+      const updatedAt = new Date();
+      await db.insert(workerStateTable).values({ key, value: JSON.stringify(value), updatedAt })
+        .onConflictDoUpdate({ target: workerStateTable.key,
+          set: { value: JSON.stringify(value), updatedAt } });
+    };
+    const raw = await read(VIRTUAL_PAPER_400_SESSION_STATE_KEY);
+    const session = evaluateVirtualPaper400SessionState(raw);
+    if (!session.state) throw new Error('VIRTUAL_SESSION_INVALID');
+    if ((process.env.WORKER_ENGINE_MODE ?? 'PAPER') !== 'PAPER') throw new Error('VIRTUAL_PAPER_MODE_REQUIRED');
+    const identity = session.state.session;
+    const run = activity.begin(identity.sessionId, args.cycleNumber);
+    activityRun = run;
+    const riskKey = virtualPaper400RiskKey(identity);
+    const loadTrades = () => db.select().from(tradesTable).where(eq(tradesTable.strategy, identity.strategyTag));
+    const rows = await loadTrades();
+    const riskRaw = await read(riskKey);
+    // Missing risk state may initialize only a completely unused virtual ledger.
+    if (riskRaw === null && rows.length !== 0) throw new Error('VIRTUAL_RISK_STATE_MISSING_WITH_HISTORY');
+    let previous = riskRaw === null ? initialVirtualPaper400RiskState(identity)
+      : parseVirtualPaper400RiskState(riskRaw, identity);
+    const now = new Date();
+    previous = applyAuthorizedPaperCredit(previous, identity, now, process.env.WORKER_ENGINE_MODE ?? 'PAPER', session.active);
+    const policyKey = `virtual_paper_400_policy_v1:${identity.sessionId}`;
+    const policyRaw = await read(policyKey);
+    let applied = policyRaw ? JSON.parse(policyRaw) as { version: string; appliedAt: string; sessionId: string } : null;
+    if (policyRaw !== null && (!applied || (applied.version !== VIRTUAL_ACTIVE_POLICY.version && applied.version !== VIRTUAL_LEGACY_POLICY.version && !isDailyPolicy(applied.version)) || applied.sessionId !== identity.sessionId
+      || !Number.isFinite(Date.parse(applied.appliedAt)) || Date.parse(applied.appliedAt) > now.getTime())) {
+      throw new Error('VIRTUAL_POLICY_INVALID');
+    }
+    const executor = getServerPaperStatus();
+    const dailyRequested = args.dailyExperiment === true || isDailyPolicy(applied?.version);
+    const desiredPolicy = dailyRequested ? PATTERN_DAILY_PAPER_POLICY : VIRTUAL_ACTIVE_POLICY;
+    const accountBefore = evaluateVirtualPaper400Account({ session: identity, previous, rows, now, quote: args.quote,
+      aggressiveDaily:isDailyPolicy(applied?.version),patternDaily:applied?.version===PATTERN_DAILY_PAPER_POLICY.version });
+    const universe = session.active && accountBefore.evaluation.entryAllowed && !executor.pendingClose && !executor.unresolved
+      ? await discoverVirtualGmxUniverse() : null;
+    const markets = new Map((universe?.complete ? universe.markets : []).map(m => [m.name.split('/')[0], m]));
+    const rotationKey = `virtual_universe_rotation_v1:${identity.sessionId}`;
+    const rotationRaw = await read(rotationKey);
+    let rotation: Record<string, number> = {};
+    let rotationInvalid = false;
+    try {
+      rotation = rotationRaw === null ? {} : JSON.parse(rotationRaw);
+      rotationInvalid = !rotation || typeof rotation !== 'object' || Array.isArray(rotation) || Object.entries(rotation).some(([s,t]) => !VIRTUAL_GMX_SYMBOLS.includes(s) || !Number.isFinite(t) || t < 0 || t > Date.now());
+    } catch { rotationInvalid = true; }
+    const symbols = universe && !rotationInvalid ? selectVirtualAnalysisBatch(universe, rotation) : [];
+    const continuityKey = virtualPaper400StrategyContinuityKey(identity.sessionId);
+    let continuity: VirtualPaper400StrategyContinuityRestore =
+      restoreVirtualPaper400StrategyContinuity(
+        await read(continuityKey), identity.sessionId, now.getTime(), VIRTUAL_GMX_SYMBOLS,
+      );
+    const modeKey = tradingModeKey(identity.sessionId);
+    let selectedMode = readTradingMode(await read(modeKey), identity.sessionId);
+    if (!selectedMode && session.active) {
+      selectedMode = { version: MODE_VERSION, mode: 'INTRADAY', sessionId: identity.sessionId, updatedAt: now.toISOString() };
+      await write(modeKey, selectedMode);
+    }
+    if (applied?.version !== desiredPolicy.version && session.active && !accountBefore.held.length && !executor.pendingClose && !executor.unresolved) {
+      if (!args.shouldContinue()) throw new Error('VIRTUAL_WORKER_STOPPED');
+      // Append-only policy provenance, not an account reset. The ledger, deposits,
+      // baselines, HWM and loss locks remain exactly where they were.
+      if(desiredPolicy.version===PATTERN_DAILY_PAPER_POLICY.version){
+        const activationKey = `virtual_paper_policy_activation_v1:${identity.sessionId}:${desiredPolicy.version}`;
+        await tx.insert(workerStateTable).values({key:activationKey,value:JSON.stringify({
+          version:'paper-policy-activation/v1',sessionId:identity.sessionId,
+          previousPolicy:applied,policyVersion:desiredPolicy.version,appliedAt:now.toISOString(),
+           reason:'ACTIVE_FLAT_NO_PENDING_OR_UNRESOLVED',approvalScope:'USER_APPROVED_PAPER_PATTERN_ENTRY_V10_ONLY',realFundsUsed:false,
+        }),updatedAt:now}).onConflictDoNothing({target:workerStateTable.key});
+      }
+      applied = { version: desiredPolicy.version, appliedAt: now.toISOString(), sessionId: identity.sessionId };
+      if (!args.shouldContinue()) throw new Error('VIRTUAL_WORKER_STOPPED');
+      await tx.insert(workerStateTable).values({key:policyKey,value:JSON.stringify(applied),updatedAt:now})
+        .onConflictDoUpdate({target:workerStateTable.key,set:{value:JSON.stringify(applied),updatedAt:now}});
+    }
+    let analysis: { symbol: string; reason: string }[] = [];
+    let evaluatedRecords: StrategyShadowRecord[] = [];
+    const costFailureBySymbol: Record<string, { long: string | null; short: string | null }> = {};
+    const readCost = async (symbol: string, isLong: boolean, notionalUsd: number): Promise<CostSnapshot | null> => {
+      const { fetchVirtualGmxReadonlyCost } = await import('../lib/manualCanaryReadonlyEvidence');
+      const market = markets.get(symbol);
+      if (!market) return null;
+      const result = await fetchVirtualGmxReadonlyCost({ symbol, marketAddress: market.marketToken, isLong, notionalUsd });
+      const side = isLong ? 'long' : 'short';
+      costFailureBySymbol[symbol] ??= { long: null, short: null };
+      if (!result.ok) {
+        const reason = typeof result.reason === 'string' && result.reason.trim().length > 0
+          ? result.reason : 'COST_DATA_UNAVAILABLE: 비용 공급자가 실패 사유를 제공하지 않음';
+        // The provider already returns a sanitized reason, but sanitize again at
+        // this public runtime boundary and bound its size. Never expose raw errors.
+        costFailureBySymbol[symbol][side] = sanitizeCostError(reason).slice(0, 300);
+        return null;
+      }
+      costFailureBySymbol[symbol][side] = null;
+      // Inputs are official read-only observations; simulated fills/settlement
+      // remain PAPER estimates, never observed real execution.
+      return { ...result.snapshot, source: 'PAPER_GMX_ESTIMATE' };
+    };
+    const dailyEnabled=isDailyPolicy(applied?.version);
+    const patternEnabled=applied?.version===PATTERN_DAILY_PAPER_POLICY.version;
+    const adaptiveEnabled=applied?.version===DAILY_PAPER_POLICY.version;
+    const comparisonKey=`virtual_paper_comparison_v1:${identity.sessionId}`;
+    let comparison: ReturnType<typeof restorePaperComparison>|null=null;
+    try { comparison=restorePaperComparison(await read(comparisonKey),identity.sessionId,Date.now());
+      // Historical v7/v8 cohorts are immutable. New v9 evidence uses a distinct
+      // continuous-comparison namespace and never rewrites archive v2.
+      if(!adaptiveEnabled)advancePaperComparison(comparison,args.quote,Date.now());
+    } catch { /* Preserve malformed evidence; diagnostics must not disable protective exits. */ }
+    const pairedComparisons:PairedDailyCandidateComparison[]=[];
+    const entryEvaluations:CycleEntryEvaluation[]=[];
+    let patternEntries:{version:typeof PATTERN_ENTRY_VERSION;evaluatedAt:number|null;
+      candidates:Array<import('../intel/patterns/patternEntryStrategies').PatternEntryEvidence&{
+        auxiliaryConditions:import('./virtualPaperPatternDailyCycle').PatternAuxiliaryCondition[]}>;
+      waiting:Array<import('../intel/patterns/patternEntryStrategies').PatternEntryWaiting&{symbol:string}>;
+      conflicts:Array<import('../intel/patterns/patternEntryStrategies').PatternEntryConflict&{symbol:string}>}=
+      {version:PATTERN_ENTRY_VERSION,evaluatedAt:null,candidates:[],waiting:[],conflicts:[]};
+    let patternEntryEvaluations:import('./virtualPaperPatternDailyCycle').PatternEntryEvaluation[]=[];
+    let patternEntryCandidates:Array<{patternEntry:import('../intel/patterns/patternEntryStrategies').PatternEntryEvidence;
+      auxiliaryConditions:import('./virtualPaperPatternDailyCycle').PatternAuxiliaryCondition[]}>=[];
+    const continuousStore:ContinuousPaperComparisonStore={
+      read,shouldContinue:args.shouldContinue,
+      write:async(key,value)=>{
+        if(!args.shouldContinue())throw Error('VIRTUAL_WORKER_STOPPED');
+        const updatedAt=new Date();
+        // Page + checkpoint commit together with the runtime snapshot. A crash
+        // cannot commit a page without its matching cumulative checkpoint.
+        await tx.insert(workerStateTable).values({key,value,updatedAt})
+          .onConflictDoUpdate({target:workerStateTable.key,set:{value,updatedAt}});
+      },
+    };
+    const cycleDeps: DailyCycleDeps&Pick<PatternDailyCycleDeps,'readPatternCandidates'> = { sessionRaw: raw!, policyAppliedAt: applied?.appliedAt, policyVersion: applied?.version,
+      tradingMode: selectedMode?.mode, structuralTargets: true, markets,
+      entryBlockedReason: executor.unresolved || executor.pendingClose ? 'EXECUTOR_RECOVERY_PENDING'
+        : !dailyEnabled && continuity.status === 'BLOCKED' ? continuity.reason
+        : !applied ? 'POLICY_SAFE_BOUNDARY_PENDING'
+        : rotationInvalid ? 'VIRTUAL_UNIVERSE_ROTATION_INVALID'
+        : universe && !universe.complete ? universe.reason ?? 'UNIVERSE_UNAVAILABLE'
+        : universe && !symbols.length ? 'NO_ELIGIBLE_GMX_MARKETS' : null, previous, rows, now, clock: () => new Date(),
+      engineMode: process.env.WORKER_ENGINE_MODE ?? 'PAPER', quote: args.quote,
+      shouldContinue: args.shouldContinue,
+      persistRisk: state => write(riskKey, state),
+      readCost: async (symbol, isLong, notionalUsd) => {
+        activity.stage(run, 'CHECKING_ENTRY', [symbol]);
+        return readCost(symbol, isLong, notionalUsd);
+      },
+      recordComparison: proposal => {if(comparison&&!adaptiveEnabled)addPaperComparison(comparison,proposal);},
+      recordPairedComparison:proposal=>{pairedComparisons.push(proposal);},
+      recordEntryEvaluation:evaluation=>{entryEvaluations.push(evaluation);},
+     readDailyCandidates: async () => {
+        if (!universe?.complete || !symbols.length || !args.shouldContinue()) return [];
+        await write(rotationKey,{...rotation,...Object.fromEntries(symbols.map(s=>[s,Date.now()]))});
+        activity.stage(run,'ANALYZING_MARKETS',symbols);
+        const {fetchGmxCandles}=await import('../routes/gmx');
+        const candidates=await Promise.all(symbols.map(async symbol=>{
+          const data=await readPatternCandles(symbol,{read,write,fetch:fetchGmxCandles,now:Date.now});
+          const candidate=dailyPaperCandidate(symbol,data.raw,Date.now(),'v9',selectedMode?.mode??'INTRADAY');
+          return candidate?{...candidate,patternAnalysis:data.analysis}:null;
+        }));
+        analysis=symbols.map((symbol,i)=>({symbol,reason:candidates[i]
+          ? `AGGRESSIVE_PAPER_EXPERIMENT: ${candidates[i]!.side}; ${patternSummary(candidates[i]!.patternAnalysis)}; 패턴은 미검증 참고 자료 · 거래량 확인 불가`
+          : 'PAPER_EXPERIMENT_CANDLE_UNAVAILABLE'}));
+        activity.analyzed(run,analysis.map((r,i)=>({...r,evaluated:!!candidates[i]})));
+        return candidates.filter((c):c is NonNullable<typeof c>=>c!==null);
+      },
+      readPatternCandidates: async () => {
+        if(!patternEnabled||!universe?.complete||!symbols.length||!args.shouldContinue())return [];
+        await write(rotationKey,{...rotation,...Object.fromEntries(symbols.map(s=>[s,Date.now()]))});
+        activity.stage(run,'ANALYZING_MARKETS',symbols);
+        const {fetchGmxCandles}=await import('../routes/gmx');
+        const gathered=await Promise.all(symbols.map(async symbol=>{
+          const nowMs=Date.now();
+          const data=await readPatternCandles(symbol,{read,write,fetch:fetchGmxCandles,now:Date.now});
+          const result=evaluatePatternEntries(symbol,data.rawCandlesByTimeframe,nowMs,selectedMode?.mode??'INTRADAY');
+          const auxiliary=dailyPaperCandidate(symbol,data.raw,nowMs,'v9',selectedMode?.mode??'INTRADAY');
+          const auxiliaryConditions=[
+            {name:'v9_signal_quality',value:auxiliary?.quality.eligible?1:0,operator:'AUXILIARY',threshold:null,
+              passed:auxiliary?.quality.eligible??null,role:'AUXILIARY' as const},
+            {name:'v9_momentum_fraction',value:auxiliary?.momentum??null,operator:'AUXILIARY',threshold:null,
+              passed:null,role:'AUXILIARY' as const},
+            {name:'v9_regime_trend',value:auxiliary?.quality.regime==='TREND'?1:auxiliary?0:null,operator:'AUXILIARY',
+              threshold:null,passed:null,role:'AUXILIARY' as const},
+            {name:'v9_atr_fraction',value:auxiliary?.quality.atrFraction??null,operator:'AUXILIARY',threshold:null,
+              passed:null,role:'AUXILIARY' as const},
+            {name:'v9_score',value:auxiliary?.evaluation?.selectedScore??null,operator:'AUXILIARY',threshold:null,
+              passed:null,role:'AUXILIARY' as const},
+            {name:'v9_minimum_net_reward_risk',value:null,operator:'AUXILIARY',threshold:1.5,
+              passed:null,role:'AUXILIARY' as const},
+            {name:'v9_expected_net_positive',value:null,operator:'AUXILIARY',threshold:0,
+              passed:null,role:'AUXILIARY' as const},
+            ...(auxiliary?.evaluation?.signalConditions??[]).flatMap(signal=>[
+              {name:`v9_${signal.setup.toLowerCase()}_score`,value:signal.score,operator:'AUXILIARY',
+                threshold:signal.threshold,passed:null,role:'AUXILIARY' as const},
+              {name:`v9_${signal.setup.toLowerCase()}_mode_allowed`,value:signal.modeAllowed===null?null:signal.modeAllowed?1:0,
+                operator:'AUXILIARY',threshold:1,passed:null,role:'AUXILIARY' as const},
+              {name:`v9_${signal.setup.toLowerCase()}_horizon_move_fraction`,value:signal.observedHorizonMoveFraction,
+                operator:'AUXILIARY',threshold:signal.targetMoveFraction,passed:null,role:'AUXILIARY' as const},
+              {name:`v9_${signal.setup.toLowerCase()}_stop_failure`,value:signal.stopFailure==='NO_SIGNAL'?0:1,
+                operator:'AUXILIARY',threshold:null,passed:null,role:'AUXILIARY' as const},
+            ]),
+          ];
+          return {symbol,result,evaluatedAt:nowMs,auxiliaryConditions,analysis:auxiliary
+            ?`${auxiliary.side}; v9 AUX: ${auxiliary.quality.reason}; ${patternSummary(data.analysis)}`
+            :`PATTERN_ONLY; ${patternSummary(data.analysis)}`};
+        }));
+        const allCandidates=gathered.flatMap(x=>x.result.candidates);
+        const candidates=allCandidates.filter(c=>c.timeframe==='15m'||c.timeframe==='1h'||c.timeframe==='4h');
+        const unsupportedCandidates=allCandidates.filter(c=>!['15m','1h','4h'].includes(c.timeframe));
+        const crossSideSymbols=new Set([...new Set(candidates.map(c=>c.symbol))].filter(symbol=>{
+          const sides=new Set(candidates.filter(c=>c.symbol===symbol).map(c=>c.direction));
+          return sides.size>1;
+        }));
+        const crossTfConflicts=[...crossSideSymbols].flatMap(symbol=>{
+          const rows=candidates.filter(c=>c.symbol===symbol);
+          return [...new Set(rows.map(c=>c.timeframe))].map(timeframe=>{
+            const local=rows.filter(c=>c.timeframe===timeframe);
+            const formationAt=Math.max(...local.map(c=>c.formationAt));
+            return {symbol,eventId:`${symbol}:CROSS_TIMEFRAME_CONFLICT:${timeframe}:${formationAt}`,
+              timeframe,formationAt,
+              reason:`Opposite issued pattern directions across ${[...new Set(rows.map(c=>c.timeframe))].join(', ')}; all entries withheld pending explicit deterministic arbitration.`,
+              longPatternIds:rows.filter(x=>x.direction==='LONG').flatMap(x=>x.supportingPatternIds),
+              shortPatternIds:rows.filter(x=>x.direction==='SHORT').flatMap(x=>x.supportingPatternIds)};
+          });
+        });
+        patternEntries={version:PATTERN_ENTRY_VERSION,evaluatedAt:Math.max(...gathered.map(x=>x.evaluatedAt)),
+           candidates:candidates.filter(c=>!crossSideSymbols.has(c.symbol)).map(patternEntry=>({
+             ...patternEntry,auxiliaryConditions:gathered.find(x=>x.symbol===patternEntry.symbol)?.auxiliaryConditions??[]})),
+           waiting:[...gathered.flatMap(x=>x.result.waiting.map(w=>({...w,symbol:x.symbol}))),
+             ...unsupportedCandidates.map(c=>({symbol:c.symbol,eventId:c.eventId,patternId:c.patternId,
+               timeframe:c.timeframe,formationAt:c.formationAt,reason:'UNSUPPORTED_ENTRY_TIMEFRAME',
+               upperTrigger:null,lowerTrigger:null})),
+            ...candidates.filter(c=>crossSideSymbols.has(c.symbol)).map(c=>({symbol:c.symbol,eventId:c.eventId,
+              patternId:c.patternId,timeframe:c.timeframe,formationAt:c.formationAt,
+              reason:'CROSS_TIMEFRAME_OPPOSING_EVIDENCE_WITHHELD',upperTrigger:null,lowerTrigger:null}))],
+          conflicts:[...gathered.flatMap(x=>x.result.conflicts.map(c=>({...c,symbol:x.symbol}))),...crossTfConflicts]};
+        patternEntryCandidates=gathered.filter(x=>!crossSideSymbols.has(x.symbol))
+          .flatMap(x=>x.result.candidates.map(patternEntry=>({patternEntry,auxiliaryConditions:x.auxiliaryConditions})));
+        analysis=symbols.map(symbol=>{
+          const item=gathered.find(x=>x.symbol===symbol)!;
+          const waits=patternEntries.waiting.filter(w=>w.symbol===symbol).map(w=>`${w.eventId}:${w.reason}`);
+          const conflicts=patternEntries.conflicts.filter(c=>c.symbol===symbol).map(c=>`${c.eventId}:${c.reason}`);
+          return {symbol,reason:`${item.analysis}; issued=${item.result.candidates.length}; waiting=${waits.join('|')||'none'}; conflicts=${conflicts.join('|')||'none'}`};
+        });
+        activity.analyzed(run,analysis.map(row=>({...row,evaluated:true})));
+        activity.patternEntries(run,patternEntries);
+        return gathered.filter(x=>!crossSideSymbols.has(x.symbol))
+          .flatMap(x=>x.result.candidates.map(patternEntry=>({patternEntry,auxiliaryConditions:x.auxiliaryConditions})));
+      },
+      readSignals: async () => {
+        if (getServerPaperStatus().unresolved) return [];
+        const { runStrategyShadowWorkerReadOnly } = await import('../intel/intelService');
+        if (!universe?.complete || !symbols.length) return [];
+        await write(rotationKey, { ...rotation, ...Object.fromEntries(symbols.map(s => [s, Date.now()])) });
+        activity.stage(run, 'CHECKING_COSTS', symbols);
+        const notionalUsd = 100;
+        const costsBySymbol: NonNullable<import('../intel/intelService').StrategyShadowWorkerReadOnlyInput['costsBySymbol']> =
+          Object.fromEntries(await Promise.all(symbols.map(async symbol => {
+            const market = markets.get(symbol);
+            if (!market) return [symbol, null];
+            const [long, short] = await Promise.all([readCost(symbol, true, notionalUsd), readCost(symbol, false, notionalUsd)]);
+            return [symbol, { market: market.marketToken, notionalUsd, holdingHorizonHours: 1, long, short }];
+          })));
+        if (!args.shouldContinue()) return [];
+        const evaluatedAt = Date.now();
+        activity.stage(run, 'ANALYZING_MARKETS', symbols);
+        const envelope = await runStrategyShadowWorkerReadOnly({ cycleNumber: args.cycleNumber,
+          evaluatedAt, expectedSymbols: symbols, existingAi: { decisionId: `vp400-analysis:${evaluatedAt}`,
+            action: 'NO_TRADE', confidence: 0, primarySymbol: null, createdAt: new Date(evaluatedAt).toISOString() },
+          lifecycleSnapshot: continuity.status === 'BLOCKED' ? null : continuity.lifecycleSnapshot,
+          previousRegimes: continuity.status === 'BLOCKED' ? {} : continuity.previousRegimes,
+          allowedRegimeSymbols: VIRTUAL_GMX_SYMBOLS, costsBySymbol });
+        const filtered = filterNewVirtualPaper400StrategyRecords(continuity, envelope, evaluatedAt);
+        const acceptedEnvelope = filtered?.envelope ?? envelope;
+        const nextContinuity = filtered ? advanceVirtualPaper400StrategyContinuity(
+          identity.sessionId, continuity, acceptedEnvelope, evaluatedAt,
+        ) : null;
+        if (nextContinuity && filtered) {
+          nextContinuity.lastSourceCandleCloseTimeBySymbol = filtered.cursors;
+        }
+        if (!nextContinuity) {
+          analysis = symbols.map(symbol => ({ symbol, reason: 'STRATEGY_CONTINUITY_ADVANCE_INVALID' }));
+          activity.analyzed(run, analysis.map(row => ({ ...row, evaluated: false })));
+          return [];
+        }
+        await write(continuityKey, nextContinuity);
+        evaluatedRecords = acceptedEnvelope.records;
+        continuity = restoreVirtualPaper400StrategyContinuity(
+          nextContinuity, identity.sessionId, evaluatedAt, VIRTUAL_GMX_SYMBOLS,
+        );
+        analysis = symbols.map(symbol => ({ symbol, reason: acceptedEnvelope.records.find(record => record.symbol === symbol)
+          ?.reasons.join('; ') || (!costsBySymbol[symbol]?.long || !costsBySymbol[symbol]?.short
+            ? `COST_UNAVAILABLE: long=${costFailureBySymbol[symbol]?.long ?? 'AVAILABLE'}; short=${costFailureBySymbol[symbol]?.short ?? 'AVAILABLE'}`
+            : `ANALYSIS_${acceptedEnvelope.status}: ${acceptedEnvelope.reasons.join('; ')}`) }));
+        activity.analyzed(run, analysis.map(row => ({ ...row,
+          evaluated: ['EVALUATED', 'PARTIAL'].includes(acceptedEnvelope.status)
+            && acceptedEnvelope.records.some(record => record.symbol === row.symbol) })));
+        activity.stage(run, 'CHECKING_ENTRY', symbols);
+        return ['EVALUATED', 'PARTIAL'].includes(acceptedEnvelope.status) ? acceptedEnvelope.records : [];
+      },
+      claim: async (id, audit) => {
+        const claimed = await db.insert(workerStateTable).values({ key: id, value: JSON.stringify(audit), updatedAt: new Date() })
+          .onConflictDoNothing({ target: workerStateTable.key }).returning({ key: workerStateTable.key });
+        return claimed.length === 1;
+      },
+      open: async (open, cost) => {
+        activity.stage(run, 'EXECUTING_PAPER', [open.symbol]);
+        storePaperCostSnapshot(open.symbol, cost, open.nowMs);
+        return openServerPaperPosition(open, args.shouldContinue);
+      },
+      close: async (row, reason) => {
+        activity.stage(run, 'EXECUTING_PAPER', [row.symbol]);
+        return (await closeServerPaperPosition({ openTradeId: row.id,
+          expectedStrategy: identity.strategyTag, reason, kind: 'FULL', quote: args.quote(row.symbol) }, args.shouldContinue)).ok;
+      },
+      reduce: async row => {
+        activity.stage(run, 'EXECUTING_PAPER', [row.symbol]);
+        return (await reduceServerPaper70({ openRow: row, quote: args.quote(row.symbol),
+          shouldContinue: args.shouldContinue })).ok;
+      },
+    };
+     const result = patternEnabled
+       ? await runVirtualPaperPatternDailyCycle({...cycleDeps,readPatternCandidates:cycleDeps.readPatternCandidates})
+       : await (dailyEnabled ? runVirtualPaperDailyCycle(cycleDeps) : runVirtualPaper400Cycle(cycleDeps));
+     if('entryEvaluations' in result&&Array.isArray(result.entryEvaluations)) {
+       if(patternEnabled)patternEntryEvaluations=result.entryEvaluations as typeof patternEntryEvaluations;
+     }
+    activity.decisions(run, result.diagnostics);
+    activity.stage(run, 'RECONCILING');
+    // Read back the durable executor rows after OPEN/CLOSE/REDUCE. No invented PnL.
+    const finalRows = await loadTrades();
+    const currentRisk = parseVirtualPaper400RiskState((await read(riskKey))!, identity);
+     const final = evaluateVirtualPaper400Account({ session: identity, rows: finalRows,
+       previous: currentRisk, now: new Date(), quote: args.quote, aggressiveDaily:dailyEnabled,patternDaily:patternEnabled });
+    await write(riskKey, final.next);
+    const journal = await Promise.all([...finalRows].filter(row => row.action === 'CLOSE')
+      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()).slice(0, 10).map(async close => {
+        const open = finalRows.find(row => row.id === close.closesTradeId);
+        const auditRaw = open?.openDecisionId && (open.openDecisionId.startsWith('vp400:') || open.openDecisionId.startsWith(MODE_DECISION_PREFIX)) ? await read(open.openDecisionId) : null;
+        let audit: { policy?:{version?:string}; signal?: { strategyId?: string; reasons?: string[] }; sizing?: { finalNotionalUsd?: number }; cost?: { totalEstimatedRoundTripCostUsd?: number }; tradePlan?:{version?:string;plannedRiskUsd?:number;notionalUsd?:number;collateralUsd?:number;leverage?:number;maxHoldHours?:number} } | null = null;
+        try { audit = auditRaw ? JSON.parse(auditRaw) : null; } catch { /* unavailable, never fake reasons */ }
+        const calculatedRisk = open && audit?.cost && audit.sizing ? Number(audit.sizing.finalNotionalUsd)
+          * Math.abs(Number(open.price) - Number(open.stopPriceUsd)) / Number(open.price)
+          + Number(audit.cost.totalEstimatedRoundTripCostUsd) : null;
+        const recordedRisk=audit?.tradePlan?.plannedRiskUsd;
+        const priorRisk=typeof recordedRisk==='number'&&Number.isFinite(recordedRisk)&&recordedRisk>0?recordedRisk:calculatedRisk;
+        // OPEN size/collateral are reduced in-place on partial settlement. Only
+        // the immutable entry audit can supply the original amounts.
+        const entryAmounts=virtualEntryAmounts(audit);
+        return { id: close.id, symbol: close.symbol, side: close.side, openedAt: open?.timestamp ?? null,
+          closedAt: close.timestamp, entryPrice: open?.price ?? null, exitPrice: close.price,
+          stopPrice: open?.stopPriceUsd ?? null, targetPrice: open?.takeProfitPriceUsd ?? null,
+          strategy: audit?.signal?.strategyId ?? null, reasons: audit?.signal?.reasons ?? [],
+          policyVersion:audit?.policy?.version??null,planVersion:audit?.tradePlan?.version??null,
+          entryEvidence:open?virtualTradeEvidence(audit,open.symbol,open.side,new Date(open.timestamp).getTime()):null,
+          ...entryAmounts,settledNotionalUsd:close.sizeInUsd,leverage:open?.leverage??null,
+          holdingMinutes:open?Math.max(0,(new Date(close.timestamp).getTime()-new Date(open.timestamp).getTime())/60_000):null,
+          closeReason: close.closeReason, grossPnlUsd: close.pnl, netPnlUsd: close.netPnlEstimatedUsd,
+          entryCostUsd: close.estEntryCostUsd, exitCostUsd: close.estExitCostUsd, holdingCostUsd: close.estHoldingCostUsd,
+          plannedRiskUsd: priorRisk !== null && Number.isFinite(priorRisk) ? priorRisk : null,
+          netR: priorRisk !== null && priorRisk > 0 ? Number(close.netPnlEstimatedUsd) / priorRisk : null,
+          costBasis: 'SIMULATED / ESTIMATED', closeKind: close.closeKind };
+      }));
+    const diagnosticKey = virtualDiagnosticsKey(identity.sessionId);
+    const diagnosticEvaluations:DiagnosticEntryEvaluation[]=entryEvaluations.map(e=>{
+      return {id:e.id,symbol:e.symbol,closedAt:e.closedAt,evaluatedAt:Date.parse(e.evaluatedAt),policyVersion:e.policyVersion,
+         eligible:e.eligible,reason:e.reason,kind:e.kind==='SIGNAL'?'SIGNAL':'SAFETY',evidence:e.evidence,
+        conditions:e.conditions.map(c=>({...c,operator:c.operator==='='?'==':c.operator,
+          value:typeof c.value==='number'&&Number.isFinite(c.value)?c.value:null,
+          threshold:typeof c.threshold==='number'&&Number.isFinite(c.threshold)?c.threshold:null})),
+      };
+    });
+    const diagnosticInputs:CycleEntryEvaluation[]=[
+      ...entryEvaluations.map(e=>({...e,conditions:e.conditions.map(c=>({...c,
+        value:typeof c.value==='number'&&Number.isFinite(c.value)?c.value:null,
+        threshold:typeof c.threshold==='number'&&Number.isFinite(c.threshold)?c.threshold:null}))})),
+      ...pairedComparisons.filter(p=>!entryEvaluations.some(e=>e.id===p.id&&e.policyVersion===p.legacy.version))
+        .map(p=>({id:p.id,symbol:p.symbol,closedAt:p.closedAt,evaluatedAt:new Date(p.observedAt).toISOString(),
+          policyVersion:p.legacy.version,eligible:p.legacy.eligible,reason:p.legacy.reason,
+          kind:'SIGNAL' as const,conditions:(p.legacy.conditions??[]).map(c=>({...c,
+            value:typeof c.value==='number'&&Number.isFinite(c.value)?c.value:null,
+            threshold:typeof c.threshold==='number'&&Number.isFinite(c.threshold)?c.threshold:null}))})),
+    ];
+    const diagnostic = advanceVirtualDiagnostics({ raw: await read(diagnosticKey), sessionId: identity.sessionId,
+      now: Date.now(), records: evaluatedRecords, analysis, diagnostics: result.diagnostics, entryStages: result.entryStages,
+      adaptiveEvaluations:diagnosticInputs,nextEvaluationAt:Date.now()+60_000,
+      status: result.status, reason: result.reason, openCount: finalRows.filter(r => r.action === 'OPEN').length,
+      closeCount: finalRows.filter(r => r.action === 'CLOSE').length,
+      lastOpenAtMs: final.lastOpenAtMs, sessionStartedAtMs: identity.startedAtMs });
+    // Corrupt diagnostic history must neither erase evidence nor disable position protection.
+    if (diagnostic.state) await write(diagnosticKey, diagnostic.state);
+    if(comparison&&!adaptiveEnabled)await write(comparisonKey,comparison);
+    const armEvidence=(leg:DailyComparisonLeg):ContinuousPaperPair['legacy']=>{
+      if(leg.version==='virtual400-daily/v8')throw Error('V8_POLICY_NOT_COLLECTED_IN_V9_COMPARISON');
+      return {policyVersion:leg.version,accepted:leg.eligible,reason:leg.reason,side:leg.side,
+      plan:leg.plan?{entry:leg.plan.entryPrice,stop:leg.plan.structuralStop,target:leg.plan.tpPrice,
+        notional:leg.plan.notionalUsd,maxHoldHours:leg.plan.maxHoldHours,expiresAt:leg.plan.expiresAtMs}:null,
+      cost:leg.costEvidence&&Number.isFinite(leg.costEvidence.estimatedRoundTripUsd)
+        &&leg.costEvidence.estimatedRoundTripUsd>0?leg.costEvidence:null,
+      conditions:(leg.conditions??[]).map(c=>({...c,
+        value:typeof c.value==='number'&&Number.isFinite(c.value)?c.value:null,
+        threshold:typeof c.threshold==='number'&&Number.isFinite(c.threshold)?c.threshold:null})),
+    };};
+    let continuousComparison:Awaited<ReturnType<typeof summarizeContinuousPaperComparison>>|{status:'UNAVAILABLE';reason:string}|null=null;
+    if(dailyEnabled){
+      try{
+        for(const pair of pairedComparisons)await recordContinuousPaperComparison(continuousStore,identity.sessionId,{
+          id:pair.id,symbol:pair.symbol,closedAt:pair.closedAt,observedAt:pair.observedAt,
+          legacy:armEvidence(pair.legacy),adaptive:armEvidence(pair.adaptive),
+        },Date.now());
+        continuousComparison=await summarizeContinuousPaperComparison(continuousStore,identity.sessionId,Date.now());
+      }catch{
+        // Do not erase damaged research evidence, invent zero results, or
+        // disable protective exits. Runtime makes the missing comparison explicit.
+        if(!args.shouldContinue())throw Error('VIRTUAL_WORKER_STOPPED');
+        continuousComparison={status:'UNAVAILABLE',reason:'PAPER_CONTINUOUS_COMPARISON_EVIDENCE_UNAVAILABLE'};
+      }
+    }
+    await write(VIRTUAL_PAPER_400_RUNTIME_KEY, { ...result, performance:paperPerformance(finalRows),
+       comparison:comparison?{...summarizePaperComparison(comparison),
+         ...((adaptiveEnabled||patternEnabled)?{archive:true,
+           collectionStoppedAtPolicy:patternEnabled?'virtual400-daily/v10':'virtual400-daily/v9'}:{})}:{status:'UNAVAILABLE'},
+      continuousComparison,entryEvaluations:diagnosticEvaluations,
+       patternEntries:patternEnabled?patternEntries:null,patternEntryCandidates,patternEntryEvaluations,
+      learning: { ...PAPER_LEARNING_CONTRACT, settledRows: final.ledger.settlementCount }, tradingDiagnostics: diagnostic.summary, universe: universe ? { ...universe, batchSymbols: symbols } : null, analysis, journal, calendar: buildVirtualPaperCalendar(identity, finalRows, new Date()), sessionId: identity.sessionId,
+      strategyContinuity: summarizeVirtualPaper400StrategyContinuity(continuity),
+      at: new Date().toISOString(), account: { ...result.account, ledger: final.ledger, dailyBudget: final.dailyBudget,
+        equityUsd: final.equityUsd, unrealizedNetPnlUsd: final.unrealizedNetPnlUsd,
+        evaluation: final.evaluation, next: final.next,
+        held: final.held.map(row => ({ id: row.id, symbol: row.symbol, side: row.side,
+          sizeUsd: row.sizeInUsd, entryPrice: row.price, stopPrice: row.stopPriceUsd,
+          takeProfitPrice: row.takeProfitPriceUsd })) } });
+    activityOutcome = { status: result.status, reason: result.reason };
+  });
+  // Publish completion only after the transaction commits; rollback must never
+  // look like a successful cycle. Raw errors are not exposed in public telemetry.
+  if (activityRun !== null && activityOutcome !== null) {
+    const outcome = activityOutcome as { status: string; reason: string | null };
+    activity.finish(activityRun, outcome.status, outcome.reason);
+  }
+  } catch (error) {
+    if (activityRun !== null) activity.finish(activityRun, 'ERROR', 'CYCLE_FAILED');
+    throw error;
+  }
+  return true;
+}

@@ -15,6 +15,7 @@
  *  4. requestId 등 증거 저장 실패 = UNRESOLVED — 서명·제출 0회, 신규 실행 차단 유지.
  *  5. 서명 직전 typed data 재계산·결속 검증 실패 = 서명 0회.
  *  6. submit 직전 게이트 재평가 + 다른 blocking relay task 재확인(자기 task 1건만 제외).
+ *     SUBMITTING 영속 전환 뒤에도 둘 다 최종 재검증해 전이 중 TOCTOU를 차단한다.
  *  7. submit은 정확히 1회 — ambiguous는 UNRESOLVED, 4xx는 FAILED_PRE_BROADCAST,
  *     429는 차단(rate_limited·재시도 금지).
  *  8. 자동 재제출·자동 peer 재시도 금지 (transport가 구조적으로 차단).
@@ -40,6 +41,11 @@ export interface GmxSubmitFlowInput {
   activation: ActivationGateInput;
   kind: 'OPEN' | 'CLOSE';
   intentId: string | null;
+  /** confirmed OPEN 보호 handoff의 finality 검증된 source OPEN 결속 한 건만 제외. */
+  allowedBlockingSourceOpen?: {
+    taskId: string;
+    intentId: string;
+  } | null;
   approvalSessionId: string | null;
   /**
    * 6G-3 §3 — 외부 prepare 호출 전에 결정 가능한 flow idempotency key.
@@ -120,6 +126,30 @@ export async function runGmxApiSubmitFlow(input: GmxSubmitFlowInput): Promise<Gm
     submitted: false, prepareCalls: 0, signCalls: 0, submitCalls: 0,
     finalStatus: null, taskRowId: null, gmxRequestId: null, blockReasons,
   };
+  const reflectDurableTransition = (
+    transitioned: Awaited<ReturnType<typeof transitionRelayTask>>,
+    to: string,
+    context: string,
+  ): boolean => {
+    if (transitioned.ok) {
+      result.finalStatus = to;
+      return true;
+    }
+    blockReasons.push(
+      `${context} 상태 저장 실패(${transitioned.reason}) — durable 상태 ${result.finalStatus ?? 'UNKNOWN'} 유지, 운영자 조사 필요`,
+    );
+    return false;
+  };
+
+  // 실제 durable flow의 주문 의미와 activation gate의 의미를 먼저 결속한다.
+  // OPEN을 CLOSE로 위장해 Manual Canary canonical 검증을 우회하는 모순 입력은
+  // durable task 생성·prepare·서명·submit 이전에 fail-closed.
+  if (input.activation.kind !== input.kind) {
+    blockReasons.push(
+      `activation kind ${input.activation.kind} ≠ flow kind ${input.kind} — prepare·서명·제출 0회 (fail-closed)`,
+    );
+    return result;
+  }
 
   // 1. 중앙 게이트 — 미충족이면 durable 기록·prepare 호출 0회 (PAPER/LOCK 포함)
   const gate = evaluateActivationGate(input.activation);
@@ -133,7 +163,11 @@ export async function runGmxApiSubmitFlow(input: GmxSubmitFlowInput): Promise<Gm
   }
 
   // 1b. §6 — 다른 blocking relay task 존재/조회 실패 시 신규 실행 차단 (prepare 0회)
-  const blockingBefore = await countBlockingRelayTasksOrNull({ transportGen: GMX_API_TRANSPORT_GEN });
+  const sourceOpen = input.allowedBlockingSourceOpen ?? null;
+  const blockingBefore = await countBlockingRelayTasksOrNull({
+    transportGen: GMX_API_TRANSPORT_GEN,
+    excludeSourceOpen: sourceOpen,
+  });
   if (blockingBefore === null) {
     blockReasons.push('blocking relay task 조회 실패 — 신규 실행 차단 (fail-closed)');
     return result;
@@ -165,17 +199,19 @@ export async function runGmxApiSubmitFlow(input: GmxSubmitFlowInput): Promise<Gm
   // 제외하고 다시 센다. 동시 flow가 있으면 양쪽 다 여기서 CANCELLED(외부 호출 0회)
   // — 승자 선출 대신 fail-closed. 조회 실패도 CANCELLED.
   const blockingAfterInsert = await countBlockingRelayTasksOrNull({
-    transportGen: GMX_API_TRANSPORT_GEN, excludeTaskId: created.taskId,
+    transportGen: GMX_API_TRANSPORT_GEN,
+    excludeTaskIds: [created.taskId],
+    excludeSourceOpen: sourceOpen,
   });
   if (blockingAfterInsert === null || blockingAfterInsert > 0) {
     blockReasons.push(blockingAfterInsert === null
       ? '삽입 후 blocking 재확인 조회 실패 — prepare 0회 취소 (fail-closed)'
       : `동시 실행 감지 — 다른 미종결 relay task ${blockingAfterInsert}건, prepare 0회 취소 (fail-closed)`);
-    await transitionRelayTask({
+    const cancelled = await transitionRelayTask({
       taskId: created.taskId, from: RELAY_TASK_STATUS.PREPARED, to: RELAY_TASK_STATUS.CANCELLED,
       patch: { errorClass: 'CONCURRENT_FLOW_FENCE', resolutionBasis: '외부 prepare 미호출 — broadcast 없음' },
     });
-    result.finalStatus = RELAY_TASK_STATUS.CANCELLED;
+    reflectDurableTransition(cancelled, RELAY_TASK_STATUS.CANCELLED, '동시 실행 취소');
     return result;
   }
 
@@ -195,23 +231,23 @@ export async function runGmxApiSubmitFlow(input: GmxSubmitFlowInput): Promise<Gm
   if (!stampOk) {
     // 외부 호출 전 — broadcast 없음 확정. 증거 기록조차 못 하면 진행 금지.
     blockReasons.push('prepare 요청 증거 저장 실패 — prepare 0회 (fail-closed)');
-    await transitionRelayTask({
+    const failed = await transitionRelayTask({
       taskId: created.taskId, from: RELAY_TASK_STATUS.PREPARE_REQUESTED, to: RELAY_TASK_STATUS.FAILED_PRE_BROADCAST,
       patch: { errorClass: 'PREPARE_STAMP_PERSIST_FAILED', resolutionBasis: '외부 prepare 미호출 — broadcast 없음' },
     });
-    result.finalStatus = RELAY_TASK_STATUS.FAILED_PRE_BROADCAST;
+    reflectDurableTransition(failed, RELAY_TASK_STATUS.FAILED_PRE_BROADCAST, 'prepare 요청 증거 실패');
     return result;
   }
   result.finalStatus = RELAY_TASK_STATUS.PREPARE_REQUESTED;
 
   // 실패 시 PREPARE_REQUESTED에서 목표 상태로 전이하는 공용 헬퍼
   const failPrepare = async (to: 'FAILED_PRE_BROADCAST' | 'UNRESOLVED', errorClass: string, basis: string) => {
-    await transitionRelayTask({
+    const transitioned = await transitionRelayTask({
       taskId: created.taskId, from: RELAY_TASK_STATUS.PREPARE_REQUESTED,
       to: RELAY_TASK_STATUS[to],
       patch: { errorClass, resolutionBasis: basis },
     });
-    result.finalStatus = RELAY_TASK_STATUS[to];
+    reflectDurableTransition(transitioned, RELAY_TASK_STATUS[to], 'prepare 실패');
   };
 
   // 4. 외부 prepare — 정확히 1회
@@ -282,11 +318,11 @@ export async function runGmxApiSubmitFlow(input: GmxSubmitFlowInput): Promise<Gm
   const binding = await input.verifyTypedDataBinding(prepared);
   if (!binding.ok) {
     blockReasons.push(`typed data 결속 검증 실패: ${binding.reason ?? '불명'} — 서명 금지`);
-    await transitionRelayTask({
+    const failed = await transitionRelayTask({
       taskId: result.taskRowId!, from: RELAY_TASK_STATUS.API_PREPARED, to: RELAY_TASK_STATUS.FAILED_PRE_BROADCAST,
       patch: { errorClass: 'TYPED_DATA_BINDING', resolutionBasis: '서명 전 결속 검증 실패 — broadcast 없음' },
     });
-    result.finalStatus = RELAY_TASK_STATUS.FAILED_PRE_BROADCAST;
+    reflectDurableTransition(failed, RELAY_TASK_STATUS.FAILED_PRE_BROADCAST, 'typed data 결속 실패');
     return result;
   }
 
@@ -299,11 +335,11 @@ export async function runGmxApiSubmitFlow(input: GmxSubmitFlowInput): Promise<Gm
     catch { signed = { ok: false, reason: '서명 예외' }; }
     if (!signed.ok) {
       blockReasons.push(`서명 실패: ${signed.reason} — 제출 0회`);
-      await transitionRelayTask({
+      const failed = await transitionRelayTask({
         taskId: result.taskRowId!, from: RELAY_TASK_STATUS.API_PREPARED, to: RELAY_TASK_STATUS.FAILED_PRE_BROADCAST,
         patch: { errorClass: 'SIGNING_FAILED', resolutionBasis: '서명 실패 — broadcast 없음' },
       });
-      result.finalStatus = RELAY_TASK_STATUS.FAILED_PRE_BROADCAST;
+      reflectDurableTransition(failed, RELAY_TASK_STATUS.FAILED_PRE_BROADCAST, '서명 실패');
       return result;
     }
     signature = signed.signature;
@@ -312,16 +348,22 @@ export async function runGmxApiSubmitFlow(input: GmxSubmitFlowInput): Promise<Gm
   // 8. submit 직전 게이트 재평가 + blocking task 재확인 (자기 task 정확히 1건만 제외)
   const cancelBeforeSubmit = async (reason: string) => {
     blockReasons.push(reason);
-    await transitionRelayTask({
+    const cancelled = await transitionRelayTask({
       taskId: result.taskRowId!, from: RELAY_TASK_STATUS.API_PREPARED, to: RELAY_TASK_STATUS.CANCELLED,
       patch: { errorClass: 'PRE_SUBMIT_GATE', resolutionBasis: '제출 전 게이트/차단 재확인 미충족 — 제출 0회' },
     });
-    result.finalStatus = RELAY_TASK_STATUS.CANCELLED;
+    reflectDurableTransition(cancelled, RELAY_TASK_STATUS.CANCELLED, '제출 전 취소');
   };
   let regate: ActivationGateInput;
   try { regate = await input.reevaluateActivation(); }
   catch {
     await cancelBeforeSubmit('게이트 재평가 실패 — 제출 0회 (fail-closed)');
+    return result;
+  }
+  if (regate.kind !== input.kind) {
+    await cancelBeforeSubmit(
+      `제출 직전 activation kind ${regate.kind} ≠ flow kind ${input.kind} — 제출 0회 (fail-closed)`,
+    );
     return result;
   }
   const gate2 = evaluateActivationGate(regate);
@@ -331,7 +373,9 @@ export async function runGmxApiSubmitFlow(input: GmxSubmitFlowInput): Promise<Gm
     return result;
   }
   const blockingAtSubmit = await countBlockingRelayTasksOrNull({
-    transportGen: GMX_API_TRANSPORT_GEN, excludeTaskId: result.taskRowId,
+    transportGen: GMX_API_TRANSPORT_GEN,
+    excludeTaskIds: [result.taskRowId!],
+    excludeSourceOpen: sourceOpen,
   });
   if (blockingAtSubmit === null || blockingAtSubmit > 0) {
     await cancelBeforeSubmit(blockingAtSubmit === null
@@ -350,10 +394,71 @@ export async function runGmxApiSubmitFlow(input: GmxSubmitFlowInput): Promise<Gm
   }
   result.finalStatus = RELAY_TASK_STATUS.SUBMITTING;
 
+  // SUBMITTING 영속 전환 자체가 DB await이므로, 그 사이 canonical readback이나
+  // action-budget 예약이 바뀔 수 있다. 위 gate2 결과를 그대로 전송 권한으로
+  // 재사용하지 않고 외부 submit 호출 직전에 한 번 더 실제 파생값을 읽는다.
+  // 이 시점은 아직 broadcast 전이므로 실패를 확정 FAILED_PRE_BROADCAST로 남긴다.
+  const failFinalPreBroadcast = async (
+    reason: string,
+    errorClass = 'FINAL_PRE_BROADCAST_GATE',
+    resolutionBasis = 'SUBMITTING 영속 전환 후 최종 게이트 미충족 — 외부 submit 호출 0회',
+  ) => {
+    blockReasons.push(reason);
+    const transitioned = await transitionRelayTask({
+      taskId: result.taskRowId!, from: RELAY_TASK_STATUS.SUBMITTING,
+      to: RELAY_TASK_STATUS.FAILED_PRE_BROADCAST,
+      patch: {
+        errorClass,
+        resolutionBasis,
+      },
+    });
+    if (transitioned.ok) result.finalStatus = RELAY_TASK_STATUS.FAILED_PRE_BROADCAST;
+    else blockReasons.push(`최종 게이트 실패 상태 저장 실패(${transitioned.reason}) — 운영자 조사 필요`);
+  };
+  let finalActivation: ActivationGateInput;
+  try { finalActivation = await input.reevaluateActivation(); }
+  catch {
+    await failFinalPreBroadcast('SUBMITTING 후 최종 게이트 재평가 실패 — 제출 0회 (fail-closed)');
+    return result;
+  }
+  if (finalActivation.kind !== input.kind) {
+    await failFinalPreBroadcast(
+      `SUBMITTING 후 activation kind ${finalActivation.kind} ≠ flow kind ${input.kind} — 제출 0회 (fail-closed)`,
+    );
+    return result;
+  }
+  const finalGate = evaluateActivationGate(finalActivation);
+  if (!finalGate.networkEligible) {
+    blockReasons.push(...finalGate.missing);
+    await failFinalPreBroadcast('SUBMITTING 후 최종 게이트 미충족 — 제출 0회');
+    return result;
+  }
+  const finalBlockingAtSubmit = await countBlockingRelayTasksOrNull({
+    transportGen: GMX_API_TRANSPORT_GEN,
+    excludeTaskIds: [result.taskRowId!],
+    excludeSourceOpen: sourceOpen,
+  });
+  if (finalBlockingAtSubmit === null || finalBlockingAtSubmit > 0) {
+    await failFinalPreBroadcast(finalBlockingAtSubmit === null
+      ? 'SUBMITTING 후 blocking relay task 최종 재조회 실패 — 제출 0회 (fail-closed)'
+      : `SUBMITTING 후 다른 미종결 relay task ${finalBlockingAtSubmit}건 — 제출 0회`);
+    return result;
+  }
+
   // 10. submit — 정확히 1회, transport가 단일 peer·무재시도 보장
+  let submitBody: unknown;
+  try { submitBody = input.buildSubmitBody(prepared, signature); }
+  catch {
+    await failFinalPreBroadcast(
+      'submit 본문 생성 실패 — 외부 submit 호출 0회 (fail-closed)',
+      'SUBMIT_BODY_BUILD_FAILED',
+      'submit 본문 생성 예외 — 외부 submit 미호출, broadcast 없음',
+    );
+    return result;
+  }
   result.submitCalls = 1;
   const submit = await input.transport.postJson<Record<string, unknown>>(
-    '/orders/txns/submit', input.buildSubmitBody(prepared, signature), 'submit',
+    '/orders/txns/submit', submitBody, 'submit',
   );
 
   if (submit.ok) {
@@ -378,33 +483,38 @@ export async function runGmxApiSubmitFlow(input: GmxSubmitFlowInput): Promise<Gm
         });
         persisted = t.ok;
       }
-      result.finalStatus = RELAY_TASK_STATUS.UNRESOLVED;
+      if (persisted) result.finalStatus = RELAY_TASK_STATUS.UNRESOLVED;
+      else blockReasons.push('submit 수락 후 UNRESOLVED 저장 실패 — durable 상태 SUBMITTING 유지, 운영자 조사 필요');
     }
     return result;
   }
 
   // 11. submit 실패 분류 — §3 peer 정책
+  const persistSubmitFailure = async (
+    to: 'FAILED_PRE_BROADCAST' | 'UNRESOLVED',
+    patch: { errorClass: string; resolutionBasis?: string },
+  ) => {
+    const transitioned = await transitionRelayTask({
+      taskId: result.taskRowId!, from: RELAY_TASK_STATUS.SUBMITTING, to, patch,
+    });
+    if (transitioned.ok) result.finalStatus = to;
+    else blockReasons.push(`submit 실패 상태 저장 실패(${transitioned.reason}) — durable 상태 SUBMITTING 유지, 운영자 조사 필요`);
+  };
   if (submit.kind === 'rate_limited') {
     blockReasons.push('429 rate limit — 신규 제출 차단·backoff, 자동 재시도 금지');
-    await transitionRelayTask({
-      taskId: result.taskRowId!, from: RELAY_TASK_STATUS.SUBMITTING, to: RELAY_TASK_STATUS.FAILED_PRE_BROADCAST,
-      patch: { errorClass: 'SUBMIT_RATE_LIMITED', resolutionBasis: '429 — 서버가 요청을 거부 (pre-broadcast 확정)' },
+    await persistSubmitFailure(RELAY_TASK_STATUS.FAILED_PRE_BROADCAST, {
+      errorClass: 'SUBMIT_RATE_LIMITED', resolutionBasis: '429 — 서버가 요청을 거부 (pre-broadcast 확정)',
     });
-    result.finalStatus = RELAY_TASK_STATUS.FAILED_PRE_BROADCAST;
   } else if (submit.ambiguous) {
     blockReasons.push(`제출 결과 불명(${submit.kind}) — UNRESOLVED, 자동 재시도·재제출 금지`);
-    await transitionRelayTask({
-      taskId: result.taskRowId!, from: RELAY_TASK_STATUS.SUBMITTING, to: RELAY_TASK_STATUS.UNRESOLVED,
-      patch: { errorClass: `SUBMIT_${submit.kind.toUpperCase()}` },
+    await persistSubmitFailure(RELAY_TASK_STATUS.UNRESOLVED, {
+      errorClass: `SUBMIT_${submit.kind.toUpperCase()}`,
     });
-    result.finalStatus = RELAY_TASK_STATUS.UNRESOLVED;
   } else {
     blockReasons.push(`제출 거부(${submit.kind}) — broadcast 없음 확정 (FAILED_PRE_BROADCAST)`);
-    await transitionRelayTask({
-      taskId: result.taskRowId!, from: RELAY_TASK_STATUS.SUBMITTING, to: RELAY_TASK_STATUS.FAILED_PRE_BROADCAST,
-      patch: { errorClass: `SUBMIT_${submit.kind.toUpperCase()}`, resolutionBasis: '4xx 검증 거부 — broadcast 없음' },
+    await persistSubmitFailure(RELAY_TASK_STATUS.FAILED_PRE_BROADCAST, {
+      errorClass: `SUBMIT_${submit.kind.toUpperCase()}`, resolutionBasis: '4xx 검증 거부 — broadcast 없음',
     });
-    result.finalStatus = RELAY_TASK_STATUS.FAILED_PRE_BROADCAST;
   }
   return result;
 }

@@ -19,7 +19,7 @@ import { decodeAbiParameters } from 'viem';
 import {
   isRelayReadonlyNetworkEnabled, recordReadinessRefresh, recordDeploymentVerification,
   recordFeeEstimateState, recordSponsorBalanceState,
-  type ReadinessRefreshState,
+  type ReadinessRefreshState, type DeploymentVerificationState,
 } from './relayActivationStatus';
 import { fetchGmxFeeEstimateInputs } from './gmxFeeEstimate';
 import { GMX_DEPLOYMENT_MANIFEST, validateEnvAgainstManifest } from './gmxDeploymentManifest';
@@ -57,9 +57,9 @@ export interface ReadinessRefreshDeps {
  * 조회 실패·empty bytecode·decode 실패·manifest 불일치·chainId 불일치 전부
  * failures로 기록 → ok=false (activation 차단 근거).
  */
-async function verifyDeployment(
+async function evaluateDeploymentReadOnly(
   deps: Pick<ReadinessRefreshDeps, 'env' | 'readonlyClient' | 'nowMs'>,
-): Promise<void> {
+): Promise<Omit<DeploymentVerificationState, 'attempted'>> {
   const basis: string[] = [];
   const failures: string[] = [];
   const env = deps.env;
@@ -127,11 +127,42 @@ async function verifyDeployment(
     }
   }
 
-  recordDeploymentVerification({
+  return {
     atMs: deps.nowMs(), ok: failures.length === 0,
     manifestVersion: GMX_DEPLOYMENT_MANIFEST.manifestVersion,
     basis, failures,
-  });
+  };
+}
+
+async function verifyDeployment(
+  deps: Pick<ReadinessRefreshDeps, 'env' | 'readonlyClient' | 'nowMs'>,
+): Promise<void> {
+  recordDeploymentVerification(await evaluateDeploymentReadOnly(deps));
+}
+
+/**
+ * PAPER background diagnostics 전용 배포/RPC 검증 진입점.
+ *
+ * performReadinessRefresh와 달리 DB task 조회·legacy 상태 전이·canonical signer
+ * 결속 조회·peer 조회·fee 상태 갱신을 전혀 수행하지 않는다. relay read-only
+ * 플래그가 꺼져 있으면 외부 호출 및 기존 deployment cache 변경 없이
+ * attempted=false를 반환한다.
+ */
+export async function refreshDeploymentReadOnlyEvidence(
+  deps: Pick<ReadinessRefreshDeps, 'env' | 'readonlyClient' | 'nowMs'>,
+): Promise<DeploymentVerificationState> {
+  if (!isRelayReadonlyNetworkEnabled(deps.env)) {
+    return {
+      attempted: false,
+      atMs: null,
+      ok: false,
+      manifestVersion: null,
+      basis: [],
+      failures: ['relay read-only 네트워크 비활성 — 배포/RPC 미평가'],
+    };
+  }
+  const evaluated = await evaluateDeploymentReadOnly(deps);
+  return { attempted: true, ...evaluated };
 }
 
 export async function performReadinessRefresh(deps: ReadinessRefreshDeps): Promise<ReadinessRefreshState> {

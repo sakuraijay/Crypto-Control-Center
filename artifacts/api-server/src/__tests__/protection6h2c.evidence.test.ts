@@ -21,6 +21,8 @@ import {
 // 공식 ETH/USD market (SDK MARKETS[42161]) — WETH decimals 18
 const ETH_MARKET = '0x70d95587d40A2caf56bd97485aB3Eec10Bee6336';
 const WETH = '0x82aF49447D8a07e3bd95BD0d56f35241523fBab1';
+const BTC_MARKET = '0x7C11F78Ce78768518D743E81Fdfa2F860C6b9A77';
+const BTC_SYNTHETIC = '0x47904963fc8b2340414262125aF798B9655E58Cd';
 
 describe('§3 indexTokenDecimals — SDK+온체인 교차검증', () => {
   beforeEach(() => __clearDecimalsCacheForTests());
@@ -37,6 +39,43 @@ describe('§3 indexTokenDecimals — SDK+온체인 교차검증', () => {
     expect(lookupSdkIndexToken(1, ETH_MARKET).ok).toBe(false);
     expect(lookupSdkIndexToken(ARBITRUM_CHAIN_ID, '0x' + '11'.repeat(20)).ok).toBe(false);
     expect(lookupSdkIndexToken(ARBITRUM_CHAIN_ID, 'not-an-address').ok).toBe(false);
+  });
+  it('SDK 결속: BTC market → synthetic placeholder decimals 8', () => {
+    const r = lookupSdkIndexToken(ARBITRUM_CHAIN_ID, BTC_MARKET);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.indexTokenAddress.toLowerCase()).toBe(BTC_SYNTHETIC.toLowerCase());
+      expect(r.sdkDecimals).toBe(8);
+      expect(r.synthetic).toBe(true);
+    }
+  });
+  it('synthetic placeholder는 SDK synthetic + 온체인 no-code 결속으로 검증한다', async () => {
+    let decimalsCalls = 0;
+    const r = await resolveIndexTokenDecimals({
+      chainId: ARBITRUM_CHAIN_ID,
+      marketAddress: BTC_MARKET,
+      fetchOnchainCode: async () => false,
+      fetchOnchainDecimals: async () => { decimalsCalls++; return null; },
+    });
+    expect(r.ok).toBe(true);
+    expect(decimalsCalls).toBe(0);
+    if (r.ok) {
+      expect(r.evidence.decimals).toBe(8);
+      expect(r.evidence.source).toBe('sdk-synthetic+onchain-no-code');
+      expect(r.evidence.onchainDecimals).toBeNull();
+    }
+  });
+  it('synthetic bytecode 판정 실패는 차단하고, code가 있으면 decimals 교차검증한다', async () => {
+    const base = {
+      chainId: ARBITRUM_CHAIN_ID,
+      marketAddress: BTC_MARKET,
+      fetchOnchainDecimals: async () => 8,
+    };
+    expect((await resolveIndexTokenDecimals({ ...base })).ok).toBe(false);
+    expect((await resolveIndexTokenDecimals({ ...base, fetchOnchainCode: async () => null })).ok).toBe(false);
+    const withCode = await resolveIndexTokenDecimals({ ...base, fetchOnchainCode: async () => true });
+    expect(withCode.ok).toBe(true);
+    if (withCode.ok) expect(withCode.evidence.source).toBe('sdk+onchain');
   });
   it('교차검증 일치 → ok, source=sdk+onchain', async () => {
     const r = await resolveIndexTokenDecimals({

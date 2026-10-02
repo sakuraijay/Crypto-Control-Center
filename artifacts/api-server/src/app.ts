@@ -4,6 +4,7 @@ import pinoHttp from "pino-http";
 import router from "./routes";
 import { logger } from "./lib/logger";
 import { isReady } from "./lib/readiness";
+import patternImageAnalyzeRouter from "./routes/pattern-image-analyze";
 
 const app: Express = express();
 
@@ -27,6 +28,7 @@ app.use(
   }),
 );
 app.use(cors({ origin: true, credentials: true }));
+app.use("/api/pattern-image/analyze", patternImageAnalyzeRouter);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 

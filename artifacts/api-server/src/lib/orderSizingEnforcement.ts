@@ -37,6 +37,8 @@ export interface EnforcementInput {
   canaryActive: boolean;
   /** 운영자 승인 상한 (없으면 null) — §11 min() 요소 */
   operatorApprovedNotionalCapUsd?: number | null;
+  /** 적용 프로필의 거래당 위험 %. 생략 시 보수적 0.75% */
+  riskBudgetPct?: number;
   expected: { market: string; isLong: boolean; orderType: 'MarketIncrease' };
   now: Date;
 }
@@ -110,6 +112,7 @@ export function enforceOrderSizing(input: EnforcementInput): EnforcementResult {
     liquidityCapUsd: input.liquidityCapUsd,
     tierNotionalCapUsd: input.tierNotionalCapUsd,
     defensiveMode: input.defensiveMode,
+    riskBudgetPct: input.riskBudgetPct,
   });
   if (!sizing.ok) return { ok: false, reason: sizing.reason };
 

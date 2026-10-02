@@ -9,7 +9,7 @@
  */
 
 import { useCallback, useState } from 'react';
-import { Radio, RefreshCw, Loader2, ShieldAlert, CheckCircle2, PenLine, Lock, Ban } from 'lucide-react';
+import { Radio, RefreshCw, Loader2, ShieldAlert, CheckCircle2, PenLine, Lock, Ban, Clock3 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useWallet } from '@/lib/context';
 import { canRequestOwnerSignature, mapSignError, formatUnixSeconds } from '@/lib/subaccountApproval';
@@ -49,6 +49,8 @@ export function RelayStatusCard({ snapshot = null }: RelayStatusCardProps = {}) 
   const [prepared, setPrepared] = useState<{ sessionId: string; typedData: unknown; summary?: Record<string, string> } | null>(null);
   const [dryRun, setDryRun] = useState<DryRunView | null>(null);
   const [unresolved, setUnresolved] = useState<UnresolvedTaskView[]>([]);
+  const [investigationState, setInvestigationState] = useState<'idle' | 'ready' | 'unavailable'>('idle');
+  const [recheckResults, setRecheckResults] = useState<Record<string, { tone: 'ok' | 'warn' | 'error'; text: string }>>({});
   const [activation, setActivation] = useState<ActivationStatusResponse | null>(null);
   const [recheckBusy, setRecheckBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<{ tone: 'ok' | 'warn' | 'error'; text: string } | null>(null);
@@ -69,7 +71,13 @@ export function RelayStatusCard({ snapshot = null }: RelayStatusCardProps = {}) 
       fetchActivationStatus(p),
     ]);
     setStatus(s.kind === 'ok' ? s.data : null);
-    setUnresolved(u.kind === 'ok' ? u.data : []);
+    if (u.kind === 'ok') {
+      setUnresolved(u.data);
+      setInvestigationState('ready');
+    } else {
+      setUnresolved([]);
+      setInvestigationState('unavailable');
+    }
     setActivation(a.kind === 'ok' ? a.data : null);
     // 6E-10 §7 — 401/503/네트워크 오류를 silent null로 삼키지 않고 구분 표시
     const failure = [s, u, a].find((r) => r.kind !== 'ok') as { kind: string; message: string } | undefined;
@@ -81,10 +89,22 @@ export function RelayStatusCard({ snapshot = null }: RelayStatusCardProps = {}) 
     setRecheckBusy(taskId);
     const r = await postUnresolvedRecheck({ pin: pin.trim(), taskId });
     setRecheckBusy(null);
-    if (!r.ok) { setMessage({ tone: 'error', text: r.error ?? '재조회 실패' }); return; }
+    if (r.kind !== 'ok') {
+      const result = { tone: 'error' as const, text: r.message };
+      setRecheckResults((current) => ({ ...current, [taskId]: result }));
+      setMessage(result);
+      return;
+    }
+    const result = {
+      tone: r.data.rechecked ? 'ok' as const : 'warn' as const,
+      text: r.data.rechecked
+        ? `증거 재확인 완료${r.data.verdictBasis ? ` — ${r.data.verdictBasis}` : ''}`
+        : (r.data.reason ?? '증거 부족 — 상태 유지 (fail-closed)'),
+    };
+    setRecheckResults((current) => ({ ...current, [taskId]: result }));
     setMessage({
-      tone: r.rechecked ? 'ok' : 'warn',
-      text: r.rechecked ? '증거를 재수집했습니다 — 상태는 증거 기반으로만 전이됩니다.' : (r.reason ?? '재수집 불가 — 상태 유지'),
+      tone: result.tone,
+      text: result.text,
     });
     void refresh();
   }, [pin, refresh]);
@@ -527,6 +547,16 @@ export function RelayStatusCard({ snapshot = null }: RelayStatusCardProps = {}) 
       )}
 
       {/* UNRESOLVED 조사 (4단계) — 증거 재수집만 가능, 강제 종결·재제출 없음 */}
+      {investigationState === 'unavailable' && (
+        <div className="p-3 rounded border border-[var(--color-short)]/40 bg-[var(--color-short)]/5 text-[10px] text-[var(--color-short)]" data-testid="relay-investigation-unavailable">
+          조사 목록 확인 실패 — 인증 또는 서버/RPC 상태를 확인하세요. 안전을 위해 해소된 것으로 간주하지 않습니다.
+        </div>
+      )}
+      {investigationState === 'ready' && unresolved.length === 0 && (
+        <div className="p-3 rounded border border-border bg-secondary/30 text-[10px] text-muted-foreground" data-testid="relay-investigation-empty">
+          현재 UNRESOLVED 또는 stale SUBMITTING 조사 항목이 없습니다.
+        </div>
+      )}
       {unresolved.length > 0 && (
         <div className="flex flex-col gap-2 p-3 rounded border border-[var(--color-short)]/40 bg-[var(--color-short)]/5" data-testid="list-unresolved-tasks">
           <div className="text-[11px] font-semibold text-[var(--color-short)] flex items-center gap-1">
@@ -534,12 +564,26 @@ export function RelayStatusCard({ snapshot = null }: RelayStatusCardProps = {}) 
           </div>
           {unresolved.map((t) => (
             <div key={t.id} className="flex flex-col gap-1 p-2 rounded border border-border bg-background/50 text-[10px]">
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className={cn('text-[9px] px-1.5 py-0.5 rounded-full border font-bold', toneCls[mapRelayTaskStatusToView(t.status).tone])}>
+                  {mapRelayTaskStatusToView(t.status).label}
+                </span>
+                {t.staleSubmitting && <span className={cn('text-[9px] px-1.5 py-0.5 rounded-full border font-bold', toneCls.warn)}>STALE SUBMITTING</span>}
+                <span className={cn('text-[9px] px-1.5 py-0.5 rounded-full border font-bold', t.blocking ? toneCls.error : toneCls.muted)}>
+                  {t.blocking ? '신규 제출 차단' : '조사 대상'}
+                </span>
+              </div>
               <div className="grid grid-cols-2 gap-x-4 gap-y-0.5">
                 <span className="text-muted-foreground">Intent/Task</span>
                 <span className="font-mono truncate">{t.id}{t.relayTaskId ? ` / ${t.relayTaskId}` : ''}</span>
                 <span className="text-muted-foreground">Purpose</span><span>{t.kind}</span>
                 <span className="text-muted-foreground">시각</span>
                 <span>{new Date(t.createdAt).toLocaleString()} → {new Date(t.updatedAt).toLocaleString()}</span>
+                <span className="text-muted-foreground">마지막 갱신 경과</span>
+                <span className="flex items-center gap-1"><Clock3 className="w-3 h-3" />{formatInvestigationAge(t.ageMs)}</span>
+                <span className="text-muted-foreground">Transport</span><span>{t.transportGen ?? '미확인 (legacy 가능성)'}</span>
+                <span className="text-muted-foreground">userNonce / approvalNonce</span>
+                <span className="font-mono truncate">{t.userNonce ?? '—'} / {t.approvalNonce ?? '—'}</span>
                 <span className="text-muted-foreground">txHash</span><span className="font-mono truncate">{t.txHash ?? '미확보'}</span>
                 <span className="text-muted-foreground">orderKey</span><span className="font-mono truncate">{t.orderKey ?? '미확보'}</span>
                 <span className="text-muted-foreground">마지막 판정</span><span>{t.resolutionBasis ?? '—'}</span>
@@ -557,11 +601,13 @@ export function RelayStatusCard({ snapshot = null }: RelayStatusCardProps = {}) 
                 {t.links.arbiscanTx && (
                   <a href={t.links.arbiscanTx} target="_blank" rel="noreferrer" className="underline text-muted-foreground">Arbiscan</a>
                 )}
-                {t.links.gelatoTask && (
-                  <a href={t.links.gelatoTask} target="_blank" rel="noreferrer" className="underline text-muted-foreground">Gelato Task</a>
-                )}
                 <span className="text-muted-foreground/70">강제 종결·재제출·삭제 불가 — 온체인/Task 증거로만 전이</span>
               </div>
+              {recheckResults[t.id] && (
+                <div className={cn('px-2 py-1 rounded border text-[10px]', toneCls[recheckResults[t.id].tone])} data-testid={`recheck-result-${t.id}`}>
+                  {recheckResults[t.id].text}
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -580,4 +626,13 @@ export function RelayStatusCard({ snapshot = null }: RelayStatusCardProps = {}) 
       </div>
     </div>
   );
+}
+
+export function formatInvestigationAge(ageMs: number): string {
+  if (!Number.isFinite(ageMs) || ageMs < 0) return '확인 불가';
+  const seconds = Math.floor(ageMs / 1000);
+  if (seconds < 60) return `${seconds}초`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}분`;
+  return `${Math.floor(minutes / 60)}시간 ${minutes % 60}분`;
 }
