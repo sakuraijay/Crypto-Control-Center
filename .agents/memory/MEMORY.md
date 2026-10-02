@@ -111,3 +111,4 @@
 - [SHADOW 성과 집계 신뢰 경계](shadow-performance-trust-boundary.md) — caller 라벨·0 비용을 믿지 말고 issued candidate, fresh cost provenance, 실제 4h 구간을 재검증
 - [Owner Approval durable 복구](owner-approval-durable-recovery.md) — READY는 canonical binding·digest·decrypt·EIP-712 재검증 필수; 만료 evidence는 보존하되 복원 금지
 - [Screenshot analysis trust boundary](screenshot-analysis-trust-boundary.md) — 승인 전 browser-local 이미지; 시각적 근거는 제한된 어휘·요청 identity 결속, 주문 권한과 분리
+- [PAPER 신호·위험 분리](paper-signal-risk-separation.md) — 손실 연속 횟수만의 장기 대기는 제거하되 계좌 보호·원장 보존 유지; 가정 비용으로 경제성 승격 금지

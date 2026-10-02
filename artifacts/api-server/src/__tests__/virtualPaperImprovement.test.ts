@@ -15,10 +15,10 @@ describe('PAPER v7 guardrails and prospective comparison',()=>{
   expect(locked.state).toBe('DAILY_LOSS_LOCKED');expect(locked.actions).toEqual(['CLOSE_ALL_POSITIONS']);
   expect(evaluateDailyPaperRisk({...risk,locks:locked.locks}).entryAllowed).toBe(false);
  });
- it('limits cumulative and weekly losses and waits four hours after three losses',()=>{
+ it('limits cumulative and weekly losses without a PAPER-only three-loss time lock',()=>{
   expect(evaluateDailyPaperRisk({...risk,equity:700}).locks.hardStopReason).toBe('PAPER_CUMULATIVE_LOSS_30_PERCENT');
   expect(evaluateDailyPaperRisk({...risk,weeklyLossAware:-100}).state).toBe('WEEKLY_LOSS_LOCKED');
-  expect(evaluateDailyPaperRisk({...risk,consecutiveLosses:3,lastCloseAtMs:now-1}).entryAllowed).toBe(false);
+  expect(evaluateDailyPaperRisk({...risk,consecutiveLosses:3,lastCloseAtMs:now-1}).entryAllowed).toBe(true);
   expect(evaluateDailyPaperRisk({...risk,consecutiveLosses:3,lastCloseAtMs:now-4*3600_000}).entryAllowed).toBe(true);
   expect(dailyPaperProfile(750,'2026-09-29T00:00:00Z',.5).derivedLimits.maxRiskPerTradeUsd).toBe(3.75);
   expect(isDailyPaperProfile(dailyPaperProfile(750,'2026-09-29T00:00:00Z',2))).toBe(true);

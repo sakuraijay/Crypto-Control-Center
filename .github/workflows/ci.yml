@@ -63,6 +63,12 @@ jobs:
           test -f artifacts/futures-web/dist/public/index.html
           test -f artifacts/api-server/dist/index.mjs
 
+      - name: PAPER replay — causal evidence and stop diagnosis
+        id: tests-paper-replay
+        run: |
+          node --test scripts/paper-v9-replay.test.mjs
+          node scripts/paper-v9-root-repro.mjs > /tmp/paper-stop-reproduction.json
+
       # ── Step 4: Regression tests (api-server) ──────────────────────────────
       - name: Tests — api-server (153+ tests)
         id: tests-api
@@ -101,6 +107,7 @@ jobs:
           echo "- TypeScript (all):              ${{ steps.typecheck.outcome || 'skipped' }}"
           echo "- Build futures-web:             ${{ steps.build-web.outcome || 'skipped' }}"
           echo "- Build deploy bundle:           ${{ steps.build-deploy.outcome || 'skipped' }}"
+          echo "- PAPER causal replay:           ${{ steps.tests-paper-replay.outcome || 'skipped' }}"
           echo "- Tests api-server:              ${{ steps.tests-api.outcome || 'skipped' }}"
           echo "- Tests #140/#141 pinned:        ${{ steps.tests-settlement-handoff.outcome || 'skipped' }}"
           echo "- Tests web:                     ${{ steps.tests-web.outcome || 'skipped' }}"

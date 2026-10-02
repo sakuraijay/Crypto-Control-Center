@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  CONTINUOUS_PAPER_COMPARISON_PREFIX,
   continuousPaperComparisonHeadKey,
   continuousPaperComparisonPageKey,
   recordContinuousPaperComparison,
@@ -30,7 +31,7 @@ function pair(symbol: string, closedAt: number, observedAt: number): ContinuousP
       conditions: [{ name: 'netRewardRisk', value: 1.46, operator: '>=', threshold: 1.5, passed: false }],
     },
     adaptive: {
-      policyVersion: 'virtual400-daily/v8',
+      policyVersion: 'virtual400-daily/v9',
       accepted: true,
       reason: 'ADAPTIVE_SIGNAL_SCORE_ACCEPTED',
       side: 'LONG',
@@ -60,6 +61,8 @@ function store(options: { failHeadWrite?: boolean } = {}) {
 describe('continuous matched PAPER comparison evidence', () => {
   it('records old and new decisions for the same candle, with honest missing-outcome and cost reporting', async () => {
     const repository = store();
+    const archiveKey=`virtual_paper_comparison_v2_head:${sessionId}`;
+    repository.values.set(archiveKey,'immutable-v2-archive');
     const current = pair('BTC', at - 900_000, at);
     const result = await recordContinuousPaperComparison(repository, sessionId, current, at);
     expect(result).toEqual({ recorded: true, candidates: 1 });
@@ -68,8 +71,12 @@ describe('continuous matched PAPER comparison evidence', () => {
     });
 
     const report = await summarizeContinuousPaperComparison(repository, sessionId, at);
-    expect(report.accepted).toEqual({ legacyV7: 0, adaptiveV8: 1 });
-    expect(report.costEvidenceAvailable).toEqual({ legacyV7: 1, adaptiveV8: 1 });
+    expect(CONTINUOUS_PAPER_COMPARISON_PREFIX).toBe('virtual_paper_comparison_v3');
+    expect(repository.values.get(archiveKey)).toBe('immutable-v2-archive');
+    expect(report.version).toBe('paper-paired-comparison/v3');
+    expect(report.policyVersions).toEqual({legacy:'virtual400-daily/v7',adaptive:'virtual400-daily/v9'});
+    expect(report.accepted).toEqual({ legacyV7: 0, adaptiveV9: 1 });
+    expect(report.costEvidenceAvailable).toEqual({ legacyV7: 1, adaptiveV9: 1 });
     expect(report.outcomes).toEqual({
       status: 'NOT_EVALUATED_NO_CLOSED_CANDLE_REPLAY',
       matured: 0,
@@ -165,8 +172,8 @@ describe('continuous matched PAPER comparison evidence', () => {
     await recordContinuousPaperComparison(repository, sessionId, current, at);
 
     const report = await summarizeContinuousPaperComparison(repository, sessionId, at);
-    expect(report.costEvidenceAvailable).toEqual({ legacyV7: 0, adaptiveV8: 0 });
-    expect(report.costEvidenceUnavailable).toEqual({ legacyV7: 1, adaptiveV8: 1 });
+    expect(report.costEvidenceAvailable).toEqual({ legacyV7: 0, adaptiveV9: 0 });
+    expect(report.costEvidenceUnavailable).toEqual({ legacyV7: 1, adaptiveV9: 1 });
     const page = JSON.parse(repository.values.get(continuousPaperComparisonPageKey(sessionId, '2026-10-01'))!);
     expect(page.samples[0].legacy.cost).toBeNull();
     expect(page.samples[0].adaptive.cost).toBeNull();
@@ -175,7 +182,7 @@ describe('continuous matched PAPER comparison evidence', () => {
   it('rejects invalid policy versions and an accepted arm without a fully costed plan', async () => {
     const repository = store();
     const wrongVersion = pair('DOGE', at - 900_000, at);
-    wrongVersion.adaptive.policyVersion = 'virtual400-daily/v7' as 'virtual400-daily/v8';
+    wrongVersion.adaptive.policyVersion = 'virtual400-daily/v7' as 'virtual400-daily/v9';
     await expect(recordContinuousPaperComparison(repository, sessionId, wrongVersion, at))
       .rejects.toThrow('PAPER_CONTINUOUS_COMPARISON_PAIR_INVALID');
 

@@ -6,8 +6,8 @@
  * This module records entry-evaluation evidence only. It does not infer or
  * synthesize price paths, fills, matured outcomes, returns, or probabilities.
  */
-export const CONTINUOUS_PAPER_COMPARISON_VERSION = 'paper-paired-comparison/v2' as const;
-export const CONTINUOUS_PAPER_COMPARISON_PREFIX = 'virtual_paper_comparison_v2';
+export const CONTINUOUS_PAPER_COMPARISON_VERSION = 'paper-paired-comparison/v3' as const;
+export const CONTINUOUS_PAPER_COMPARISON_PREFIX = 'virtual_paper_comparison_v3';
 export const CONTINUOUS_PAPER_PAGE_LIMIT = 2000;
 
 export interface ContinuousPaperCondition {
@@ -34,7 +34,7 @@ export interface ContinuousPaperCostEvidence {
 }
 
 export interface ContinuousPaperPolicyEvidence {
-  policyVersion: 'virtual400-daily/v7' | 'virtual400-daily/v8';
+  policyVersion: 'virtual400-daily/v7' | 'virtual400-daily/v9';
   accepted: boolean;
   reason: string;
   side: 'LONG' | 'SHORT' | null;
@@ -55,7 +55,7 @@ export interface ContinuousPaperPair {
 }
 
 interface Page {
-  version: 2;
+  version: 3;
   sessionId: string;
   day: string;
   revision: number;
@@ -72,7 +72,7 @@ interface PageSummary {
 }
 
 export interface ContinuousPaperComparisonState {
-  version: 2;
+  version: 3;
   sessionId: string;
   startedAt: number;
   pages: Record<string, PageSummary>;
@@ -137,16 +137,16 @@ function validatePair(value: unknown, sessionId: string, now: number): value is 
     || !/^[A-Z0-9_]{1,24}$/.test(value.symbol) || value.id !== `${value.symbol}:${value.closedAt}`
     || !positive(value.closedAt) || !positive(value.observedAt) || value.closedAt > value.observedAt || value.observedAt > now
     || !validateArm(value.legacy, 'virtual400-daily/v7', now)
-    || !validateArm(value.adaptive, 'virtual400-daily/v8', now)) return false;
+    || !validateArm(value.adaptive, 'virtual400-daily/v9', now)) return false;
   // Session is bound by the containing per-session key and page.
   return sessionId.length > 0;
 }
 
 function restoreHead(raw: string | null, sessionId: string, now: number): ContinuousPaperComparisonState {
-  if (raw === null) return { version: 2, sessionId, startedAt: now, pages: {} };
+  if (raw === null) return { version: 3, sessionId, startedAt: now, pages: {} };
   let parsed: unknown;
   try { parsed = JSON.parse(raw); } catch { throw new Error('PAPER_CONTINUOUS_COMPARISON_HEAD_INVALID'); }
-  if (!isRecord(parsed) || parsed.version !== 2 || parsed.sessionId !== sessionId
+  if (!isRecord(parsed) || parsed.version !== 3 || parsed.sessionId !== sessionId
     || !finite(parsed.startedAt) || parsed.startedAt <= 0 || parsed.startedAt > now || !isRecord(parsed.pages))
     throw new Error('PAPER_CONTINUOUS_COMPARISON_HEAD_INVALID');
   for (const [day, summary] of Object.entries(parsed.pages)) {
@@ -178,10 +178,10 @@ function summarizePage(samples: ContinuousPaperPair[], revision: number): PageSu
 }
 
 function restorePage(raw: string | null, sessionId: string, day: string, now: number): Page {
-  if (raw === null) return { version: 2, sessionId, day, revision: 0, samples: [] };
+  if (raw === null) return { version: 3, sessionId, day, revision: 0, samples: [] };
   let parsed: unknown;
   try { parsed = JSON.parse(raw); } catch { throw new Error('PAPER_CONTINUOUS_COMPARISON_PAGE_INVALID'); }
-  if (!isRecord(parsed) || parsed.version !== 2 || parsed.sessionId !== sessionId || parsed.day !== day
+  if (!isRecord(parsed) || parsed.version !== 3 || parsed.sessionId !== sessionId || parsed.day !== day
     || !Number.isInteger(parsed.revision) || Number(parsed.revision) < 1 || !Array.isArray(parsed.samples)
     || parsed.samples.length > CONTINUOUS_PAPER_PAGE_LIMIT
     || new Set(parsed.samples.map(sample => isRecord(sample) ? sample.id : null)).size !== parsed.samples.length
@@ -281,15 +281,16 @@ export async function summarizeContinuousPaperComparison(
   const outcomeUnknown = Math.max(0, count.candidates * 2 - pendingTimeWindow);
   return {
     version: CONTINUOUS_PAPER_COMPARISON_VERSION,
+    policyVersions: { legacy: 'virtual400-daily/v7' as const, adaptive: 'virtual400-daily/v9' as const },
     status: 'COLLECTING' as const,
     startedAt: new Date(state.startedAt).toISOString(),
     pages: Object.keys(state.pages).length,
     candidates: count.candidates,
-    accepted: { legacyV7: count.legacyAccepted, adaptiveV8: count.adaptiveAccepted },
-    costEvidenceAvailable: { legacyV7: count.legacyCostAvailable, adaptiveV8: count.adaptiveCostAvailable },
+    accepted: { legacyV7: count.legacyAccepted, adaptiveV9: count.adaptiveAccepted },
+    costEvidenceAvailable: { legacyV7: count.legacyCostAvailable, adaptiveV9: count.adaptiveCostAvailable },
     costEvidenceUnavailable: {
       legacyV7: count.candidates - count.legacyCostAvailable,
-      adaptiveV8: count.candidates - count.adaptiveCostAvailable,
+      adaptiveV9: count.candidates - count.adaptiveCostAvailable,
     },
     pendingTimeWindow,
     outcomeUnknown,
@@ -304,7 +305,7 @@ export async function summarizeContinuousPaperComparison(
       winRate: null,
     },
     maxPotentialMaturityAt: maxPotentialMaturityAt === null ? null : new Date(maxPotentialMaturityAt).toISOString(),
-    semantics: 'MATCHED_V7_V8_EVALUATION_ON_THE_SAME_SYMBOL_CLOSED_CANDLE_AND_OBSERVATION',
+    semantics: 'MATCHED_V7_V9_EVALUATION_ON_THE_SAME_SYMBOL_CLOSED_CANDLE_AND_OBSERVATION',
     selectionBias: 'OBSERVED_WHEN_PRODUCTION_DAILY_ENTRY_EVALUATES',
     outOfSampleStrategyValidated: false,
     automaticPromotion: false,

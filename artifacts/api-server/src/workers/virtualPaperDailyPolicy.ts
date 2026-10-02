@@ -5,18 +5,26 @@ export const LEGACY_DAILY_PAPER_POLICY = Object.freeze({ version: 'virtual400-da
   cooldownMinutes: 45, maxDailyEntries: 32, dailyLossPct: 5, dailyProfitTargetMinPct: 5, dailyProfitCapPct: 20, dailyBudgetBasis: 'FUNDED_PRINCIPAL', maxRoundTripCostUsd: 2,
   weeklyLossPct: 10, cumulativeLossPct: 30, minimumNetRewardRisk: 1.5,
   purpose: 'COST_FILTERED_PAPER_EXPERIMENT', confidence: null });
-/**
- * v8 changes signal selection and admits only structurally evidenced plans
- * with positive net reward and >=1.5 net-R:R. Principal/loss/position/exposure
- * limits intentionally match v7; this is not a less-protected account policy.
- */
-export const DAILY_PAPER_POLICY = Object.freeze({ version: 'virtual400-daily/v8',
+/** Immutable v8 snapshot retained for replay and historical policy attribution. */
+export const V8_DAILY_PAPER_POLICY = Object.freeze({ version: 'virtual400-daily/v8',
   riskPerTradePct: 1, minLeverage: 5, maxLeverage: 10, maxMarginUsd: 100, maxNotionalUsd: 1000,
   cooldownMinutes: 45, maxDailyEntries: 32, dailyLossPct: 5, dailyProfitTargetMinPct: 5, dailyProfitCapPct: 20, dailyBudgetBasis: 'FUNDED_PRINCIPAL', maxRoundTripCostUsd: 2,
   weeklyLossPct: 10, cumulativeLossPct: 30, minimumNetRewardRisk: 1.5,
   adaptiveVolatilityMultiplierMin: .45, adaptiveVolatilityMultiplierMax: 3, minimumAdaptiveAtrPct: .0002,
   maximumAdaptiveAtrPct: .02, minimumSignalScore: 45,
   purpose: 'STRUCTURAL_SIGNAL_SCORED_PAPER_EXPERIMENT', confidence: null });
+/**
+ * v9 independently evaluates evidence-backed trend/pullback, closed-bar
+ * breakout/retest, and range-edge reversal setups. It relaxes signal admission
+ * only; cost, structural-stop, target, and account protection remain intact.
+ */
+export const DAILY_PAPER_POLICY = Object.freeze({ version: 'virtual400-daily/v9',
+  riskPerTradePct: 1, minLeverage: 5, maxLeverage: 10, maxMarginUsd: 100, maxNotionalUsd: 1000,
+  cooldownMinutes: 45, maxDailyEntries: 32, dailyLossPct: 5, dailyProfitTargetMinPct: 5, dailyProfitCapPct: 20, dailyBudgetBasis: 'FUNDED_PRINCIPAL', maxRoundTripCostUsd: 2,
+  weeklyLossPct: 10, cumulativeLossPct: 30, minimumNetRewardRisk: 1.5,
+  adaptiveVolatilityMultiplierMin: .2, adaptiveVolatilityMultiplierMax: 5, minimumAdaptiveAtrPct: .0001,
+  maximumAdaptiveAtrPct: .03, minimumSignalScore: 30,
+  purpose: 'INDEPENDENT_STRUCTURAL_SIGNAL_PAPER_EXPERIMENT', confidence: null });
 /** Deposits change principal, never daily PnL; equity gains/losses do not resize these daily targets. */
 export function dailyPaperBudget(fundedCapitalUsd: number, dailyRealized: number, dailyLossAware: number) {
   if (![fundedCapitalUsd, dailyRealized, dailyLossAware].every(Number.isFinite) || fundedCapitalUsd <= 0)
@@ -79,7 +87,9 @@ export function evaluateDailyPaperRisk(i:{equity:number|null;referenceCapital:nu
   if(i.dailyRealized>=i.referenceCapital*DAILY_PAPER_POLICY.dailyProfitCapPct/100 || i.locks.dailyLockState==='PROFIT_CAP_LOCKED'){
     r.state='PROFIT_CAP_LOCKED';locks.dailyLockState='PROFIT_CAP_LOCKED';locks.dailyLockReason='PAPER_DAILY_PROFIT_20_PERCENT';return block(locks.dailyLockReason);
   }
-  if((i.consecutiveLosses??0)>=3 && i.lastCloseAtMs!==undefined && i.nowMs!==undefined && i.nowMs-i.lastCloseAtMs<4*3600_000)return block('PAPER_LOSS_STREAK_COOLDOWN');
+  // Consecutive losses are retained in account evidence, but are not a
+  // PAPER-only time lock. Daily/weekly/cumulative and unresolved protections
+  // above remain hard gates; optional sizing reduction is handled separately.
   if(i.held>=1)return block('PAPER_POSITION_HELD');
   if(i.entries>=DAILY_PAPER_POLICY.maxDailyEntries)return block('PAPER_DAILY_ENTRY_CAP');
   return r;

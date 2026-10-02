@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { adaptivePaperAuditMatches } from '../workers/adaptivePaperAudit';
 import { buildAdaptiveDailyTradePlan, parseVirtualTradePlan } from '../workers/virtualPaperTradingMode';
-import type { DailyPaperCandidate } from '../workers/virtualPaperDailyCandidate';
+import {ADAPTIVE_SIGNAL_VERSION, type DailyPaperCandidate} from '../workers/virtualPaperDailyCandidate';
 
 const nowMs = Date.parse('2026-10-01T20:00:02Z');
 function fixture() {
@@ -13,13 +13,20 @@ function fixture() {
     referencePrice:100,closedAt:nowMs-2000,evaluatedAt:nowMs,stopFraction:.004,momentum:.001,
     legacyQuality:{eligible:false,reason:'WEAK_MOMENTUM',regime:'RANGE',efficiency:.2,atrFraction:.001},
     quality:{eligible:true,reason:'ADAPTIVE_SIGNAL_SCORE_ACCEPTED',regime:'RANGE',efficiency:.2,atrFraction:.001,score:67},
-    evaluation:{version:'paper-entry-signals/v8',regime:'RANGE',atrFraction:.001,
+     evaluation:{version:'paper-entry-signals/v8',regime:'RANGE',tradingMode:'INTRADAY',atrFraction:.001,
       symbolMedianTrueRangeFraction:.001,adaptiveVolatilityMin:.00045,adaptiveVolatilityMax:.003,
       efficiency:.2,momentumFraction:.001,stopPrice:99.6,stopFraction:.004,
       observedHorizonMoveFraction:{INTRADAY:.02,SWING:.035},
-      signals:[{kind:'RANGE_MEAN_REVERSION',side:'LONG',score:67,threshold:45,eligible:true,
-        reason:'CLOSED_BAR_RANGE_EDGE_REJECTION',targetPrice:101.4,targetBasis:'OBSERVED_SWING'}],
+       signals:[{kind:'RANGE_MEAN_REVERSION',side:'LONG',score:67,threshold:45,eligible:true,
+         reason:'CLOSED_BAR_RANGE_EDGE_REJECTION',targetPrice:101.4,targetBasis:'OBSERVED_SWING',
+         admissionEligible:true,modeAllowed:null,targetMoveFraction:null,observedHorizonMoveFraction:null,
+         modeRejection:null,horizonRejection:null}],
       selectedSetup:'RANGE_MEAN_REVERSION',selectedScore:67,scoreThreshold:45,eligible:true,
+       observedStopPrice:99.6,stopFailure:null,
+       signalConditions:[{setup:'RANGE_MEAN_REVERSION',side:'LONG',score:67,threshold:45,eligible:true,
+         reason:'CLOSED_BAR_RANGE_EDGE_REJECTION',targetPrice:101.4,targetBasis:'OBSERVED_SWING',
+         observedStopPrice:99.6,stopDistanceFraction:.004,stopFailure:null,admissionEligible:true,
+         modeAllowed:null,targetMoveFraction:null,observedHorizonMoveFraction:null,modeRejection:null,horizonRejection:null}],
       reason:'ADAPTIVE_SIGNAL_SCORE_ACCEPTED'},
   };
   return {candidate,plan:built.plan};
@@ -33,6 +40,18 @@ describe('final server PAPER structural evidence binding',()=>{
     expect(plan.tpPrice).toBe(101.4);
     expect(parseVirtualTradePlan(plan)).toEqual(plan);
     expect(adaptivePaperAuditMatches(candidate,plan,args)).toBe(true);
+  });
+  it("accepts v9's explicitly versioned lower score threshold without changing the v8 gate",()=>{
+    const {candidate,plan}=fixture();
+    candidate.evaluation!.version=ADAPTIVE_SIGNAL_VERSION;
+    candidate.evaluation!.scoreThreshold=30;
+    candidate.evaluation!.signals[0].threshold=30;
+    candidate.evaluation!.signals[0].modeAllowed=true;
+    candidate.evaluation!.signals[0].admissionEligible=true;
+    candidate.evaluation!.signalConditions[0].threshold=30;
+    expect(adaptivePaperAuditMatches(candidate,plan,args)).toBe(true);
+    candidate.evaluation!.signals[0].threshold=29;
+    expect(adaptivePaperAuditMatches(candidate,plan,args)).toBe(false);
   });
   it('cannot lower a setup threshold or claim unobserved reachable prices',()=>{
     const {candidate,plan}=fixture();

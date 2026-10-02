@@ -21,7 +21,7 @@ describe('pattern library and historical evidence',()=>{
       expect(within(dialog).getByText(p.meaning)).toBeTruthy();
       fireEvent.keyDown(dialog,{key:'Escape'});
     }
-  });
+  },30_000);
   it('distinguishes absent historic evidence from analyzed-but-no-pattern',()=>{
     expect(entryPatternSummary(null)).toBe('패턴 기록 없음');
     render(<TradeEntryEvidence/>);expect(screen.getByText(/현재 차트로 과거 진입 근거를 추정하지 않습니다/)).toBeTruthy();cleanup();

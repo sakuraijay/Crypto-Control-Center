@@ -227,3 +227,40 @@ it('does not turn unavailable diagnostic evidence into a zero-valued normal stat
  expect(screen.queryByTestId('paper-idle-alert')).toBeNull();
  expect(trade.placeOrder).not.toHaveBeenCalled();
 });
+
+it('shows v9 application time, independent signal rejection and actual prices without inventing a fill or v8 comparison count',async()=>{
+ const data=snapshot();
+ data.runtime!.policy={...data.runtime!.policy!,version:'virtual400-daily/v9',minimumNetRewardRisk:1.5,minLeverage:5,maxLeverage:10};
+ data.runtime!.tradingDiagnostics={status:'OBSERVED',minutesWithoutNewEntry:60,adaptiveEvaluations:{
+  status:'OBSERVED',windowBasis:'UP_TO_24_UTC_HOURLY_BUCKETS',candidates:3,eligible:1,rejected:2,
+  signal:{candidates:3,eligible:1,rejected:2,reasons:[]},safety:{candidates:3,eligible:3,rejected:0,reasons:[]},
+  legacy:{candidates:3,eligible:0,rejected:3,reasons:[]},
+  byPolicy:[{version:'virtual400-daily/v8',candidates:99,eligible:98,rejected:1},
+   {version:'virtual400-daily/v9',candidates:3,eligible:1,rejected:2}],
+  rejectionReasons:[{reason:'V9_NO_SIGNAL',count:2}],conditions:[],nextEvaluationAt:null}};
+ data.runtime!.continuousComparison={version:'paper-paired-comparison/v3',policyVersions:{
+  legacy:'virtual400-daily/v7',adaptive:'virtual400-daily/v9'},status:'COLLECTING',pages:1,candidates:3,
+  accepted:{legacyV7:0,adaptiveV9:1},costEvidenceAvailable:{legacyV7:0,adaptiveV9:1},
+  costEvidenceUnavailable:{legacyV7:3,adaptiveV9:2},pendingTimeWindow:0,outcomeUnknown:6,maxPotentialMaturityAt:null,
+  outcomes:{status:'NOT_EVALUATED_NO_CLOSED_CANDLE_REPLAY',matured:0,pendingTimeWindow:0,outcomeUnknown:6,
+   opportunityArms:6,netPnlUsd:null,expectancyUsd:null,winRate:null}};
+ data.runtime!.entryEvaluations=[{id:'LINK:1',symbol:'LINK',policyVersion:'virtual400-daily/v9',
+  closedAt:Date.parse(at)-15*60_000,evaluatedAt:Date.parse(at),eligible:false,reason:'V9_NO_SIGNAL',kind:'SIGNAL',
+  conditions:[],evidence:{candidateId:'LINK:1',source:'gmx-official-api',referencePrice:14.3392,currentEntryPrice:14.41294,
+   executionEntryPrice:null,direction:'SHORT',observedStopPrice:null,observedTargetPrice:null,actualStopDistanceFraction:null,
+   stopBounds:{minimum:.002,maximum:.008},candidateReason:'NO_EXPLAINABLE_PATTERN_SCORE',selectedSetup:null,selectedScore:0,
+   signalConditions:[],stopFailure:'NO_SIGNAL'}}];
+ const fetcher=vi.fn(async()=>({ok:true,json:async()=>data}));vi.stubGlobal('fetch',fetcher);
+ mount();await flush();
+ expect(screen.getByTestId('paper-evaluation-denominator').textContent).toBe('3');
+ expect(screen.getByTestId('virtual-active-policy').textContent).toContain('완화형 PAPER 시험');
+ expect(screen.getByTestId('virtual-active-policy').textContent).toContain('virtual400-daily/v9 · 적용');
+ expect(screen.getByTestId('virtual-active-policy').textContent).toContain('연속 손실만으로 장시간 진입을 중단하지 않습니다');
+ expect(screen.getByTestId('paper-price-evidence').textContent).toContain('기준가 14.3392 · 현재 호가 14.41294');
+ expect(screen.getByTestId('paper-price-evidence').textContent).toContain('실행 진입가 미확인 · 관측 손절 미확인');
+ expect(screen.getByTestId('paper-price-evidence').textContent).toContain('손절 판정 NO_SIGNAL');
+ expect(screen.getByTestId('paper-entry-diagnostics').textContent).toContain('v9 1/3');
+ expect(screen.getByTestId('paper-entry-diagnostics').textContent).not.toContain('v8 1/3');
+ expect(fetcher.mock.calls.every((call:any)=>!call[1]?.method)).toBe(true);
+ expect(trade.placeOrder).not.toHaveBeenCalled();
+});

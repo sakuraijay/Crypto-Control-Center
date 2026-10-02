@@ -2,7 +2,8 @@ const BAR_MS = 15 * 60_000;
 const INPUT_CANDLES = 16;
 const V7_MIN_ATR_FRACTION = 0.002;
 const V7_MAX_ATR_FRACTION = 0.008;
-export const ADAPTIVE_SIGNAL_VERSION = 'paper-entry-signals/v8' as const;
+export const V8_SIGNAL_VERSION = 'paper-entry-signals/v8' as const;
+export const ADAPTIVE_SIGNAL_VERSION = 'paper-entry-signals/v9' as const;
 export type DailyRegime = 'TREND' | 'BREAKOUT' | 'RANGE' | 'TRANSITION';
 export type DailySetup = 'TREND_PULLBACK' | 'VOLATILITY_BREAKOUT' | 'RANGE_MEAN_REVERSION';
 export interface SignalEvidence {
@@ -14,9 +15,15 @@ export interface SignalEvidence {
   reason: string;
   targetPrice: number | null;
   targetBasis: 'OBSERVED_SWING' | 'OBSERVED_RANGE_PROJECTION' | null;
+  admissionEligible: boolean;
+  modeAllowed: boolean | null;
+  targetMoveFraction: number | null;
+  observedHorizonMoveFraction: number | null;
+  modeRejection: 'SETUP_NOT_ALLOWED_FOR_MODE' | null;
+  horizonRejection: 'TARGET_OUTSIDE_OBSERVED_HORIZON' | null;
 }
 export interface DailyCandidateEvaluation {
-  version: typeof ADAPTIVE_SIGNAL_VERSION;
+  version: typeof ADAPTIVE_SIGNAL_VERSION | typeof V8_SIGNAL_VERSION;
   regime: DailyRegime;
   atrFraction: number;
   symbolMedianTrueRangeFraction: number;
@@ -32,6 +39,17 @@ export interface DailyCandidateEvaluation {
   selectedSetup: DailySetup | null;
   selectedScore: number;
   scoreThreshold: number;
+  observedStopPrice: number | null;
+  stopFailure: 'NO_SIGNAL' | 'NO_OBSERVED_STOP' | 'WRONG_SIDE' | 'OUTSIDE_EXECUTOR_BOUNDS'
+    | 'REFERENCE_PRICE_DRIFT' | 'EXECUTION_STOP_WRONG_SIDE' | 'EXECUTION_STOP_OUTSIDE_EXECUTOR_BOUNDS' | null;
+  signalConditions: Array<{ setup: DailySetup; side: 'LONG' | 'SHORT' | null; score: number;
+    threshold: number; eligible: boolean; reason: string; targetPrice: number | null;
+    targetBasis: SignalEvidence['targetBasis']; observedStopPrice: number | null;
+    stopDistanceFraction: number | null; stopFailure: DailyCandidateEvaluation['stopFailure'];
+    admissionEligible: boolean; modeAllowed: boolean | null; targetMoveFraction: number | null;
+    observedHorizonMoveFraction: number | null; modeRejection: SignalEvidence['modeRejection'];
+    horizonRejection: SignalEvidence['horizonRejection'] }>;
+  tradingMode: 'INTRADAY' | 'SWING';
   eligible: boolean;
   reason: string;
 }
@@ -65,6 +83,27 @@ const median = (values: number[]) => {
   return sorted.length % 2 ? sorted[(sorted.length - 1) / 2] : (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2;
 };
 const sideFor = (direction: number): 'LONG' | 'SHORT' => direction >= 0 ? 'LONG' : 'SHORT';
+type ObservedStopAssessment = { stop: number | null; distance: number | null; failure: DailyCandidateEvaluation['stopFailure'] };
+export function selectV9SignalAfterObservedStopValidation(
+  signals: SignalEvidence[], stopEvidence: ReadonlyMap<DailySetup, ObservedStopAssessment>,
+): SignalEvidence | null {
+  return signals.filter(signal => signal.admissionEligible && stopEvidence.get(signal.kind)?.failure === null)
+    .sort((a, b) => b.score - a.score)[0] ?? null;
+}
+export function applyV9ModeHorizonAdmission(
+  signal:SignalEvidence,mode:'INTRADAY'|'SWING',referencePrice:number,observedHorizon:number|null,
+):SignalEvidence{
+  const modeAllowed=mode==='INTRADAY'||signal.kind==='TREND_PULLBACK';
+  const targetMove=signal.targetPrice!==null&&referencePrice>0
+    ?Math.abs(signal.targetPrice/referencePrice-1):null;
+  const horizonValid=targetMove!==null&&observedHorizon!==null&&Number.isFinite(observedHorizon)
+    &&observedHorizon>0&&targetMove<=observedHorizon+1e-10;
+  return {...signal,modeAllowed,targetMoveFraction:targetMove,
+    observedHorizonMoveFraction:observedHorizon,
+    modeRejection:modeAllowed?null:'SETUP_NOT_ALLOWED_FOR_MODE',
+    horizonRejection:targetMove!==null&&!horizonValid?'TARGET_OUTSIDE_OBSERVED_HORIZON':null,
+    admissionEligible:signal.eligible&&modeAllowed&&horizonValid};
+}
 
 /**
  * Preserves the exact v7 gate for paired retrospective comparison. The v8
@@ -106,7 +145,8 @@ export interface DailyCandidateComparison {
   symbol: string;
   closedAt: number;
   legacy: { version: 'virtual400-daily/v7'; eligible: boolean; reason: string; atrFraction: number };
-  adaptive: { version: typeof ADAPTIVE_SIGNAL_VERSION; eligible: boolean; reason: string; selectedSetup: DailySetup | null; score: number };
+  adaptive: { version: typeof ADAPTIVE_SIGNAL_VERSION | typeof V8_SIGNAL_VERSION; eligible: boolean;
+    reason: string; selectedSetup: DailySetup | null; score: number };
 }
 export function dailyCandidateComparison(candidate: DailyPaperCandidate): DailyCandidateComparison {
   const legacyQuality=candidate.legacyQuality??candidate.quality;
@@ -116,13 +156,14 @@ export function dailyCandidateComparison(candidate: DailyPaperCandidate): DailyC
     closedAt: candidate.closedAt,
     legacy: { version: 'virtual400-daily/v7', eligible: !!legacyQuality?.eligible,
       reason: legacyQuality?.reason??'V7_QUALITY_EVIDENCE_MISSING', atrFraction: legacyQuality?.atrFraction??0 },
-    adaptive: { version: ADAPTIVE_SIGNAL_VERSION, eligible: candidate.evaluation?.eligible??false,
-      reason: candidate.evaluation?.reason??'V8_SIGNAL_EVIDENCE_MISSING',
+    adaptive: { version: candidate.evaluation?.version??ADAPTIVE_SIGNAL_VERSION, eligible: candidate.evaluation?.eligible??false,
+      reason: candidate.evaluation?.reason??'V9_SIGNAL_EVIDENCE_MISSING',
       selectedSetup: candidate.evaluation?.selectedSetup??null, score: candidate.evaluation?.selectedScore??0 },
   };
 }
 
-export function dailyPaperCandidate(symbol: string, raw: { prices: number[][]; source: string } | null, now: number): DailyPaperCandidate | null {
+export function dailyPaperCandidate(symbol: string, raw: { prices: number[][]; source: string } | null, now: number,
+  version: 'v8' | 'v9' = 'v9', mode: 'INTRADAY' | 'SWING' = 'INTRADAY'): DailyPaperCandidate | null {
   if (!raw || raw.source !== 'gmx-official-api' || !/^[A-Z0-9_]{1,24}$/.test(symbol)) return null;
   const rows = raw.prices.map(row => [row[0] < 1e12 ? row[0] * 1000 : row[0], ...row.slice(1, 5)] as Bar)
     .filter(row => row[0] + BAR_MS <= now - 2000).sort((a, b) => a[0] - b[0]).slice(-INPUT_CANDLES);
@@ -141,8 +182,10 @@ export function dailyPaperCandidate(symbol: string, raw: { prices: number[][]; s
   // A per-symbol median of its own completed-candle true ranges adapts the
   // signal screen to that symbol's current regime; it is not a future forecast.
   const symbolMedianTrueRangeFraction = median(rangeFractions);
-  const adaptiveVolatilityMin = Math.max(.0002, symbolMedianTrueRangeFraction * .45);
-  const adaptiveVolatilityMax = Math.min(.02, symbolMedianTrueRangeFraction * 3);
+  const adaptiveVolatilityMin = Math.max(version === 'v9' ? .0001 : .0002,
+    symbolMedianTrueRangeFraction * (version === 'v9' ? .2 : .45));
+  const adaptiveVolatilityMax = Math.min(version === 'v9' ? .03 : .02,
+    symbolMedianTrueRangeFraction * (version === 'v9' ? 5 : 3));
   const observedHorizonMoveFraction = (side: 'LONG' | 'SHORT', barCount: number): number => {
     const completedBeforeSignal = rows.slice(0, -1);
     let best = 0;
@@ -175,13 +218,29 @@ export function dailyPaperCandidate(symbol: string, raw: { prices: number[][]; s
   const recentResistance = Math.max(...recentSwingBars.map(row => row[2]));
   const supportBelow = Math.min(...recentSwingBars.filter(row => row[3] < last[4]).map(row => row[3]));
   const resistanceAbove = Math.max(...recentSwingBars.filter(row => row[2] > last[4]).map(row => row[2]));
+  const observedStopFor = (side: 'LONG' | 'SHORT' | null) => {
+    const raw = side === 'LONG' ? supportBelow : side === 'SHORT' ? resistanceAbove : NaN;
+    return Number.isFinite(raw) && raw > 0 ? raw : null;
+  };
+  const assessObservedStop = (side: 'LONG' | 'SHORT' | null) => {
+    const stop = observedStopFor(side);
+    if (side === null) return { stop, distance: null, failure: 'NO_SIGNAL' as const };
+    if (stop === null) return { stop, distance: null, failure: 'NO_OBSERVED_STOP' as const };
+    if ((side === 'LONG' && stop >= last[4]) || (side === 'SHORT' && stop <= last[4]))
+      return { stop, distance: Math.abs(last[4] - stop) / last[4], failure: 'WRONG_SIDE' as const };
+    const distance = Math.abs(last[4] - stop) / last[4];
+    if (distance < .002 || distance > .008)
+      return { stop, distance, failure: 'OUTSIDE_EXECUTOR_BOUNDS' as const };
+    return { stop, distance, failure: null };
+  };
   const direction = momentum >= 0 ? 'LONG' : 'SHORT';
   const adaptiveVolatilityOk = atrFraction >= adaptiveVolatilityMin && atrFraction <= adaptiveVolatilityMax
-    && atrFraction <= .02 && symbolMedianTrueRangeFraction > 0;
+    && atrFraction <= (version === 'v9' ? .03 : .02) && symbolMedianTrueRangeFraction > 0;
   const candleShapeOk = candleRange > 0;
-  const regime: DailyRegime = efficiency >= .45 && momentum * earlierMomentum > 0 ? 'TREND'
+  const regime: DailyRegime = efficiency >= (version === 'v9' ? .2 : .45)
+      && (version === 'v9' || momentum * earlierMomentum > 0) ? 'TREND'
     : efficiency <= .30 ? 'RANGE' : 'TRANSITION';
-  const scoreThreshold = 45;
+  const scoreThreshold = version === 'v9' ? 30 : 45;
 
   const targetFor = (side: 'LONG' | 'SHORT', setup: DailySetup): { price: number | null; basis: SignalEvidence['targetBasis'] } => {
     // Targets are pre-existing, actually printed swing prices. We deliberately
@@ -214,70 +273,118 @@ export function dailyPaperCandidate(symbol: string, raw: { prices: number[][]; s
     reason: string, target: { price: number | null; basis: SignalEvidence['targetBasis'] }): SignalEvidence =>
     ({ kind, side, score, threshold, eligible: side !== null && score >= threshold && adaptiveVolatilityOk
       && target.price !== null && Number.isFinite(target.price) && (side === 'LONG' ? target.price > last[4] : target.price < last[4]),
-    reason, targetPrice: target.price, targetBasis: target.basis });
+    reason, targetPrice: target.price, targetBasis: target.basis,admissionEligible:false,modeAllowed:null,
+    targetMoveFraction:null,observedHorizonMoveFraction:null,modeRejection:null,horizonRejection:null });
 
   const normalizedTrendStrength = Math.min(1, Math.abs(momentum) / Math.max(symbolMedianTrueRangeFraction * 4, .0001));
   const trendSide = momentum === 0 ? null : sideFor(momentum);
-  const trendScore = Math.round(20 + Math.min(30, efficiency * 30) + normalizedTrendStrength * 30
+  const trendScore = Math.round((version === 'v9' ? 25 : 20) + Math.min(30, efficiency * 30) + normalizedTrendStrength * 30
     + (momentum * earlierMomentum > 0 ? 10 : 0) + (Math.sign(last[4] - last[1]) === Math.sign(momentum) ? 10 : 0));
-  const trendSignal = result('TREND_PULLBACK', regime === 'TREND' && Math.abs(momentum) >= symbolMedianTrueRangeFraction * .35 ? trendSide : null,
+  const trendSignal = result('TREND_PULLBACK', regime === 'TREND'
+    && (version === 'v9' || Math.abs(momentum) >= symbolMedianTrueRangeFraction * .35) ? trendSide : null,
     Math.min(100, trendScore), scoreThreshold,
-    regime !== 'TREND' ? 'REGIME_NOT_TREND' : Math.abs(momentum) < symbolMedianTrueRangeFraction * .35 ? 'TREND_MOMENTUM_BELOW_SYMBOL_THRESHOLD' : 'MEASURED_TREND_SCORE',
+    regime !== 'TREND' ? 'REGIME_NOT_TREND' : version === 'v8' && Math.abs(momentum) < symbolMedianTrueRangeFraction * .35 ? 'TREND_MOMENTUM_BELOW_SYMBOL_THRESHOLD' : 'MEASURED_TREND_SCORE',
     trendSide ? targetFor(trendSide, 'TREND_PULLBACK') : { price: null, basis: null });
 
-  const breakoutSide: 'LONG' | 'SHORT' | null = last[4] > priorHigh && last[4] > last[1] ? 'LONG'
-    : last[4] < priorLow && last[4] < last[1] ? 'SHORT' : null;
+  const breakoutHigh = version === 'v9' ? Math.max(...rows.slice(0, -2).map(row => row[2])) : priorHigh;
+  const breakoutLow = version === 'v9' ? Math.min(...rows.slice(0, -2).map(row => row[3])) : priorLow;
+  const breakoutRetestLong = version === 'v9' && last[3] <= breakoutHigh && last[4] > breakoutHigh && last[4] > last[1];
+  const breakoutRetestShort = version === 'v9' && last[2] >= breakoutLow && last[4] < breakoutLow && last[4] < last[1];
+  const breakoutSide: 'LONG' | 'SHORT' | null = (last[4] > priorHigh && last[4] > last[1]) || breakoutRetestLong ? 'LONG'
+    : (last[4] < priorLow && last[4] < last[1]) || breakoutRetestShort ? 'SHORT' : null;
   const breakoutExcess = breakoutSide === 'LONG' ? (last[4] - priorHigh) / last[4]
     : breakoutSide === 'SHORT' ? (priorLow - last[4]) / last[4] : 0;
   const breakoutScore = Math.round(40 + Math.min(30, breakoutExcess / Math.max(symbolMedianTrueRangeFraction, .0001) * 20)
     + (candleShapeOk ? Math.min(20, body / candleRange * 20) : 0) + (momentum * earlierMomentum > 0 ? 10 : 0));
-  const breakoutSignal = result('VOLATILITY_BREAKOUT', breakoutSide, Math.min(100, breakoutScore), 50,
+  const breakoutSignal = result('VOLATILITY_BREAKOUT', breakoutSide, Math.min(100, breakoutScore), version === 'v9' ? 30 : 50,
     breakoutSide ? 'CLOSED_BAR_RANGE_BREAK' : 'NO_CLOSED_BAR_RANGE_BREAK',
     breakoutSide ? targetFor(breakoutSide, 'VOLATILITY_BREAKOUT') : { price: null, basis: null });
 
-  const rangeSide: 'LONG' | 'SHORT' | null = regime === 'RANGE' && location <= .30 && last[4] > last[1]
+  const rangeEdge = version === 'v9' ? .4 : .30;
+  const rangeSide: 'LONG' | 'SHORT' | null = (version === 'v9' || regime === 'RANGE') && location <= rangeEdge && last[4] > last[1]
     && lowerWick > body * .5 ? 'LONG'
-    : regime === 'RANGE' && location >= .70 && last[4] < last[1] && upperWick > body * .5 ? 'SHORT' : null;
+    : (version === 'v9' || regime === 'RANGE') && location >= 1-rangeEdge && last[4] < last[1] && upperWick > body * .5 ? 'SHORT' : null;
   const edgeProximity = rangeSide === 'LONG' ? Math.max(0, .30 - location) / .30
     : rangeSide === 'SHORT' ? Math.max(0, location - .70) / .30 : 0;
   const wickRatio = rangeSide === 'LONG' ? lowerWick / Math.max(candleRange, Number.EPSILON)
     : rangeSide === 'SHORT' ? upperWick / Math.max(candleRange, Number.EPSILON) : 0;
-  const rangeScore = Math.round(35 + edgeProximity * 25 + Math.min(.8, wickRatio) * 25
+  const rangeScore = Math.round((version === 'v9' ? 30 : 35) + edgeProximity * 25 + Math.min(.8, wickRatio) * 25
     + (momentum * (rangeSide === 'LONG' ? 1 : -1) >= 0 ? 15 : 0));
-  const rangeSignal = result('RANGE_MEAN_REVERSION', rangeSide, Math.min(100, rangeScore), 45,
+  const rangeSignal = result('RANGE_MEAN_REVERSION', rangeSide, Math.min(100, rangeScore), version === 'v9' ? 30 : 45,
     rangeSide ? 'CLOSED_BAR_RANGE_EDGE_REJECTION' : 'NO_CLOSED_BAR_RANGE_REJECTION',
     rangeSide ? targetFor(rangeSide, 'RANGE_MEAN_REVERSION') : { price: null, basis: null });
 
   const signals = [trendSignal, breakoutSignal, rangeSignal];
   for (const signal of signals) {
+    if (version==='v9') {
+      const horizon=signal.side&&signal.targetPrice!==null
+        ?observedHorizonMoveFraction(signal.side,mode==='INTRADAY'?4:15):null;
+      Object.assign(signal,applyV9ModeHorizonAdmission(signal,mode,last[4],horizon));
+    }else{
+      signal.admissionEligible=signal.eligible;
+      signal.modeAllowed=null;
+      signal.targetMoveFraction=null;
+      signal.observedHorizonMoveFraction=null;
+      signal.modeRejection=null;
+      signal.horizonRejection=null;
+    }
+  }
+  for (const signal of signals) {
     if (!adaptiveVolatilityOk) signal.reason = 'VOLATILITY_OUTSIDE_SYMBOL_ADAPTIVE_RANGE';
     else if (signal.side && signal.targetPrice === null) signal.reason = 'NO_OBSERVED_STRUCTURE_TARGET';
   }
-  const selected = signals.filter(signal => signal.eligible).sort((a, b) => b.score - a.score)[0] ?? null;
-  const pivot = selected?.side === 'LONG' ? supportBelow : selected?.side === 'SHORT' ? resistanceAbove : NaN;
-  const structuralStop = selected?.side === 'LONG' ? pivot : selected?.side === 'SHORT' ? pivot : NaN;
-  const stopFraction = selected && Number.isFinite(structuralStop) && structuralStop > 0
-    ? Math.abs(last[4] - structuralStop) / last[4] : NaN;
+  const signalStopEvidence = new Map<DailySetup, ObservedStopAssessment>(
+    signals.map(signal => [signal.kind, assessObservedStop(signal.side)]));
+  // V9 resolves independent setup, mode, causal-horizon, and structural-stop gates here.
+  // Shared quote/cost/sizing gates run later and remain fail-closed; this builder does
+  // not retry another setup if those later common-evidence checks fail.
+  const selected = version === 'v9' ? selectV9SignalAfterObservedStopValidation(signals, signalStopEvidence)
+    : signals.filter(signal => signal.eligible).sort((a, b) => b.score - a.score)[0] ?? null;
+  const failedAdmissionSignal=version==='v9'&&!selected&&!signals.some(signal=>signal.admissionEligible)
+    ?signals.filter(signal=>signal.eligible).sort((a,b)=>b.score-a.score)[0]??null:null;
+  const failedStopSignal = version === 'v9' && !selected && !failedAdmissionSignal?.modeRejection
+      && !failedAdmissionSignal?.horizonRejection
+    ? signals.filter(signal => signal.admissionEligible).sort((a, b) => b.score - a.score)[0] ?? null : null;
+  const observedStopEvidence = selected ? signalStopEvidence.get(selected.kind)
+    : failedStopSignal ? signalStopEvidence.get(failedStopSignal.kind) : null;
+  const structuralStop = observedStopEvidence?.stop ?? NaN;
+  const stopFraction = selected ? observedStopEvidence?.distance ?? NaN : NaN;
   // These are unchanged PAPER executor stop bounds; no target-distance is
   // used to tighten the stop or manufacture a better net-R/R.
-  const stopOk = Number.isFinite(stopFraction) && stopFraction >= .002 && stopFraction <= .008;
+  const stopOk = !!selected && observedStopEvidence?.failure === null;
   const eligible = selected !== null && stopOk;
-  const reason = selected === null ? !adaptiveVolatilityOk ? 'VOLATILITY_OUTSIDE_SYMBOL_ADAPTIVE_RANGE'
-    : signals.every(signal => signal.side === null) ? 'NO_EXPLAINABLE_PATTERN_SCORE'
-      : signals.some(signal => signal.side !== null && signal.targetPrice === null) ? 'NO_OBSERVED_STRUCTURE_TARGET'
-        : signals.find(signal => signal.side !== null && signal.score < signal.threshold)?.reason ?? 'NO_PATTERN_PASSED_SCORE_THRESHOLD'
+  const stopFailure: DailyCandidateEvaluation['stopFailure'] = observedStopEvidence?.failure
+    ?? (!selected ? 'NO_SIGNAL' : null);
+  const reason = !selected && failedAdmissionSignal?.modeRejection ? 'SETUP_NOT_ALLOWED_FOR_MODE'
+    : !selected && failedAdmissionSignal?.horizonRejection ? 'TARGET_OUTSIDE_OBSERVED_HORIZON'
+    : !selected && failedStopSignal ? stopFailure === 'WRONG_SIDE'
+    ? 'OBSERVED_STRUCTURAL_STOP_WRONG_SIDE' : 'OBSERVED_STRUCTURAL_STOP_OUTSIDE_EXECUTOR_BOUNDS'
+    : selected === null ? !adaptiveVolatilityOk ? 'VOLATILITY_OUTSIDE_SYMBOL_ADAPTIVE_RANGE'
+      : signals.every(signal => signal.side === null) ? 'NO_EXPLAINABLE_PATTERN_SCORE'
+        : signals.some(signal => signal.side !== null && signal.targetPrice === null) ? 'NO_OBSERVED_STRUCTURE_TARGET'
+          : 'NO_PATTERN_PASSED_SCORE_THRESHOLD'
     : !stopOk ? 'OBSERVED_STRUCTURAL_STOP_OUTSIDE_EXECUTOR_BOUNDS' : 'ADAPTIVE_SIGNAL_SCORE_ACCEPTED';
   const side = selected?.side ?? direction;
   const evaluation: DailyCandidateEvaluation = {
-    version: ADAPTIVE_SIGNAL_VERSION, regime, atrFraction, symbolMedianTrueRangeFraction,
+    version: version === 'v9' ? ADAPTIVE_SIGNAL_VERSION : V8_SIGNAL_VERSION, regime, atrFraction, symbolMedianTrueRangeFraction,
     adaptiveVolatilityMin, adaptiveVolatilityMax, efficiency, momentumFraction: momentum,
-    stopPrice: eligible ? structuralStop : null, stopFraction: eligible ? stopFraction : null,
+    tradingMode:version==='v9'?mode:'INTRADAY',
+    stopPrice: version==='v9'?selected?structuralStop:null:eligible?structuralStop:null,
+    stopFraction: eligible ? stopFraction : null,
     observedHorizonMoveFraction: {
       INTRADAY: observedHorizonMoveFraction(selected?.side ?? direction, 4),
       SWING: observedHorizonMoveFraction(selected?.side ?? direction, 15),
     },
     signals, selectedSetup: selected?.kind ?? null, selectedScore: selected?.score ?? 0,
-    scoreThreshold: selected?.threshold ?? scoreThreshold, eligible, reason,
+    scoreThreshold: selected?.threshold ?? scoreThreshold, observedStopPrice: Number.isFinite(structuralStop) ? structuralStop : null,
+    stopFailure, signalConditions: signals.map(s => ({ setup: s.kind, side: s.side, score: s.score,
+      threshold: s.threshold, eligible:s.eligible, reason: s.reason, targetPrice: s.targetPrice,
+      targetBasis:s.targetBasis,observedStopPrice:signalStopEvidence.get(s.kind)?.stop??null,
+      stopDistanceFraction:signalStopEvidence.get(s.kind)?.distance??null,
+      stopFailure:signalStopEvidence.get(s.kind)?.failure??'NO_SIGNAL',admissionEligible:s.admissionEligible,
+      modeAllowed:s.modeAllowed,targetMoveFraction:s.targetMoveFraction,
+      observedHorizonMoveFraction:s.observedHorizonMoveFraction,modeRejection:s.modeRejection,
+      horizonRejection:s.horizonRejection })), eligible, reason,
   };
   const legacyQuality = evaluateLegacyDailyQuality({
     momentum, earlierMomentum, efficiency, atrFraction,

@@ -594,7 +594,7 @@ describe('daily PAPER experiment through actual executor',()=>{
    const plan=audit.tradePlan;
    const appliedRiskProfile=open.riskProfileSnapshot as {derivedLimits:{maxRiskPerTradeUsd:number;maxTotalExposureUsd:number}};
    expect(audit.policy.version).toBe(DAILY_PAPER_POLICY.version);
-   expect(audit.signal.strategyId).toBe('PAPER_V8_STRUCTURAL_SIGNAL');
+   expect(audit.signal.strategyId).toBe('PAPER_V9_STRUCTURAL_SIGNAL');
    expect(plan.version).toBe(ADAPTIVE_DAILY_PLAN_VERSION);
    expect(plan.costReserveUsd).toBe(2);
    expect(plan.entryPrice).toBe(candidate.referencePrice);

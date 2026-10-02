@@ -25,6 +25,8 @@ export interface PaperDiagnosticEvaluation {
   reason: string;
   kind: 'SIGNAL' | 'SAFETY';
   conditions: PaperEntryConditionEvidence[];
+  /** Candidate/entry and structural-stop observations retained for the current runtime report. */
+  evidence?: DailyPaperEntryEvaluation['evidence'];
 }
 interface FeatureAggregate { observed: number; missing: number; passed: number; failed: number; sum: number; min: number | null; max: number | null; thresholdSum: number; thresholdCount: number }
 interface EntryAggregate {

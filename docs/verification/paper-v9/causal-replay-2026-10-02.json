@@ -1,0 +1,2966 @@
+{
+  "schema": "paper-v9-causal-replay/v1",
+  "capture": {
+    "source": "https://arbitrum-api.gmxinfra.io/prices/candles",
+    "fetchedAt": "2026-10-02T13:40:54.979Z",
+    "captureSha256": "427b906cdd0629efe32fd1ec42e08e9988e2d22d22abb7e71b64cc0daef8c54c",
+    "symbols": {
+      "BTC": {
+        "closedCandles": 199,
+        "from": 1790768700000,
+        "to": 1790947800000,
+        "rawResponseSha256": "ede5c91c23bcbabbc88d279773637b7345931c622339ed892d6a7e2efb8f5694"
+      },
+      "ETH": {
+        "closedCandles": 199,
+        "from": 1790768700000,
+        "to": 1790947800000,
+        "rawResponseSha256": "3d496f2cae0e72f711ed9c54e5656a840754e0377471c51bcfc6169ed31cb5eb"
+      },
+      "LINK": {
+        "closedCandles": 199,
+        "from": 1790768700000,
+        "to": 1790947800000,
+        "rawResponseSha256": "3876ec9fcafcb29edd44957ef8cf58f4d7fd2d5cfa5d905c75f12b5bb2de67b0"
+      },
+      "SOL": {
+        "closedCandles": 199,
+        "from": 1790768700000,
+        "to": 1790947800000,
+        "rawResponseSha256": "afd84e305b9f94d7ff096ac5afc9e9c3dc9cc725a21806a81d2aabd21734e22d"
+      },
+      "XRP": {
+        "closedCandles": 199,
+        "from": 1790768700000,
+        "to": 1790947800000,
+        "rawResponseSha256": "d9d51f4f0a575454a208d872291f3f7cce9bbadd6b7378c7557cd60d61b39178"
+      }
+    }
+  },
+  "replayMethod": {
+    "decisionWindow": {
+      "timezone": "Asia/Manila (UTC+08:00)",
+      "from": "2026-10-01T16:00:00.000Z",
+      "toExclusive": "2026-10-02T16:00:00.000Z",
+      "fromLocal": "2026-10-02T00:00:00+08:00",
+      "toExclusiveLocal": "2026-10-03T00:00:00+08:00",
+      "rawCaptureAt": "2026-10-02T13:40:54.979Z",
+      "closedCandleCoverageThrough": "2026-10-02T13:30:00.000Z"
+    },
+    "decisionInput": "Only the latest 16 consecutive completed 15m candles ending at each decision close.",
+    "candidateMode": "INTRADAY (explicitly supplied after the v8/v9 version argument).",
+    "entry": "Next 15m candle open; candidates without the next bar are excluded.",
+    "horizon": "INTRADAY; at most 4 bars / 60 minutes, per existing v8/v9 mode.",
+    "sameBar": "If stop and target are both touched in one candle, stop is selected first.",
+    "riskControls": "Model assumptions only: each pool/arm has independent $400 starting equity. Risk size is min(current modeled equity, $1,000) × 1%, or 0.5% after two recent losses in the optional reduced-risk scenario, then limited by remaining $400-principal daily loss ($20), weekly loss ($40), and cumulative drawdown ($120) budgets after $2 reserve. V8 only gets a modeled 3-consecutive-loss/4h gate; v9 does not. Preserve 32 daily entries, $100 margin cap, 5–10x leverage, $1,000 notional cap, one position, 45m cooldown, -5% daily, -10% weekly, -30% cumulative, +20% daily cap. UTC account-loss buckets; PHT market decision window.",
+    "drawdown": "Modeled maximum drawdown is settled-close equity peak-to-trough only; intratrade mark-to-market drawdown is unknown from OHLC and is not claimed.",
+    "lossStreakPolicy": {
+      "v8": "Modeled 3 consecutive settled losses blocks new entries for 4h after the last settled close.",
+      "v9": "No consecutive-loss entry lock.",
+      "both": "Optional separate risk mode halves sizing after at least 2 consecutive settled losses when the last settled close was within 4h."
+    },
+    "candidateSourceSha256": "9e414adaf49b20ea1ee3515733ca13c76c9f243e5f4f96f5089293fe3bccff35"
+  },
+  "formalFinancialEvidence": {
+    "classification": "UNAVAILABLE",
+    "reason": "No point-in-time side-specific exact-notional quote, impact, fee, funding, borrow, or replayed risk-state evidence was captured.",
+    "measuredNetPnlUsd": null,
+    "measuredMaxDrawdownUsd": null,
+    "measuredWinRate": null
+  },
+  "eligibleCounts": {
+    "perSymbol": {
+      "BTC": {
+        "v8": {
+          "decisions": 86,
+          "firstDecisionAt": 1790870400000,
+          "lastDecisionAt": 1790946900000,
+          "firstEntryAt": 1790870400000,
+          "lastEntryAt": 1790946900000,
+          "eligibleBeforeEconomics": 2,
+          "declines": {
+            "NO_EXPLAINABLE_PATTERN_SCORE": 69,
+            "OBSERVED_STRUCTURAL_STOP_OUTSIDE_EXECUTOR_BOUNDS": 5,
+            "NO_OBSERVED_STRUCTURE_TARGET": 4,
+            "TARGET_EXCEEDS_PRIOR_OBSERVED_HORIZON": 6,
+            "ELIGIBLE_BEFORE_ECONOMICS": 2
+          },
+          "stopFailureConditions": {
+            "NO_SIGNAL": 73,
+            "OUTSIDE_EXECUTOR_BOUNDS": 5
+          },
+          "setupConditionDeclines": {
+            "TREND_PULLBACK:REGIME_NOT_TREND": 79,
+            "VOLATILITY_BREAKOUT:NO_CLOSED_BAR_RANGE_BREAK": 76,
+            "RANGE_MEAN_REVERSION:NO_CLOSED_BAR_RANGE_REJECTION": 83,
+            "RANGE_MEAN_REVERSION:CLOSED_BAR_RANGE_EDGE_REJECTION": 3,
+            "VOLATILITY_BREAKOUT:CLOSED_BAR_RANGE_BREAK": 9,
+            "TREND_PULLBACK:NO_OBSERVED_STRUCTURE_TARGET": 5,
+            "VOLATILITY_BREAKOUT:NO_OBSERVED_STRUCTURE_TARGET": 1,
+            "TREND_PULLBACK:MEASURED_TREND_SCORE": 1,
+            "TREND_PULLBACK:TREND_MOMENTUM_BELOW_SYMBOL_THRESHOLD": 1
+          }
+        },
+        "v9": {
+          "decisions": 86,
+          "firstDecisionAt": 1790870400000,
+          "lastDecisionAt": 1790946900000,
+          "firstEntryAt": 1790870400000,
+          "lastEntryAt": 1790946900000,
+          "eligibleBeforeEconomics": 28,
+          "declines": {
+            "NO_EXPLAINABLE_PATTERN_SCORE": 26,
+            "TARGET_OUTSIDE_OBSERVED_HORIZON": 19,
+            "ELIGIBLE_BEFORE_ECONOMICS": 28,
+            "NO_OBSERVED_STRUCTURE_TARGET": 6,
+            "OBSERVED_STRUCTURAL_STOP_OUTSIDE_EXECUTOR_BOUNDS": 7
+          },
+          "stopFailureConditions": {
+            "NO_SIGNAL": 51,
+            "OUTSIDE_EXECUTOR_BOUNDS": 7
+          },
+          "setupConditionDeclines": {
+            "TREND_PULLBACK:REGIME_NOT_TREND": 30,
+            "VOLATILITY_BREAKOUT:NO_CLOSED_BAR_RANGE_BREAK": 74,
+            "RANGE_MEAN_REVERSION:NO_CLOSED_BAR_RANGE_REJECTION": 74,
+            "RANGE_MEAN_REVERSION:CLOSED_BAR_RANGE_EDGE_REJECTION": 12,
+            "TREND_PULLBACK:MEASURED_TREND_SCORE": 39,
+            "TREND_PULLBACK:NO_OBSERVED_STRUCTURE_TARGET": 17,
+            "VOLATILITY_BREAKOUT:CLOSED_BAR_RANGE_BREAK": 11,
+            "VOLATILITY_BREAKOUT:NO_OBSERVED_STRUCTURE_TARGET": 1
+          }
+        }
+      },
+      "ETH": {
+        "v8": {
+          "decisions": 86,
+          "firstDecisionAt": 1790870400000,
+          "lastDecisionAt": 1790946900000,
+          "firstEntryAt": 1790870400000,
+          "lastEntryAt": 1790946900000,
+          "eligibleBeforeEconomics": 0,
+          "declines": {
+            "NO_EXPLAINABLE_PATTERN_SCORE": 74,
+            "OBSERVED_STRUCTURAL_STOP_OUTSIDE_EXECUTOR_BOUNDS": 8,
+            "TARGET_EXCEEDS_PRIOR_OBSERVED_HORIZON": 4
+          },
+          "stopFailureConditions": {
+            "NO_SIGNAL": 74,
+            "OUTSIDE_EXECUTOR_BOUNDS": 8
+          },
+          "setupConditionDeclines": {
+            "TREND_PULLBACK:REGIME_NOT_TREND": 86,
+            "VOLATILITY_BREAKOUT:NO_CLOSED_BAR_RANGE_BREAK": 78,
+            "RANGE_MEAN_REVERSION:NO_CLOSED_BAR_RANGE_REJECTION": 82,
+            "VOLATILITY_BREAKOUT:CLOSED_BAR_RANGE_BREAK": 8,
+            "RANGE_MEAN_REVERSION:CLOSED_BAR_RANGE_EDGE_REJECTION": 4
+          }
+        },
+        "v9": {
+          "decisions": 86,
+          "firstDecisionAt": 1790870400000,
+          "lastDecisionAt": 1790946900000,
+          "firstEntryAt": 1790870400000,
+          "lastEntryAt": 1790946900000,
+          "eligibleBeforeEconomics": 26,
+          "declines": {
+            "ELIGIBLE_BEFORE_ECONOMICS": 26,
+            "NO_EXPLAINABLE_PATTERN_SCORE": 33,
+            "TARGET_OUTSIDE_OBSERVED_HORIZON": 17,
+            "OBSERVED_STRUCTURAL_STOP_OUTSIDE_EXECUTOR_BOUNDS": 8,
+            "NO_OBSERVED_STRUCTURE_TARGET": 2
+          },
+          "stopFailureConditions": {
+            "NO_SIGNAL": 52,
+            "OUTSIDE_EXECUTOR_BOUNDS": 8
+          },
+          "setupConditionDeclines": {
+            "TREND_PULLBACK:MEASURED_TREND_SCORE": 36,
+            "VOLATILITY_BREAKOUT:NO_CLOSED_BAR_RANGE_BREAK": 76,
+            "RANGE_MEAN_REVERSION:NO_CLOSED_BAR_RANGE_REJECTION": 77,
+            "TREND_PULLBACK:REGIME_NOT_TREND": 40,
+            "VOLATILITY_BREAKOUT:CLOSED_BAR_RANGE_BREAK": 10,
+            "RANGE_MEAN_REVERSION:CLOSED_BAR_RANGE_EDGE_REJECTION": 9,
+            "TREND_PULLBACK:NO_OBSERVED_STRUCTURE_TARGET": 10
+          }
+        }
+      },
+      "LINK": {
+        "v8": {
+          "decisions": 86,
+          "firstDecisionAt": 1790870400000,
+          "lastDecisionAt": 1790946900000,
+          "firstEntryAt": 1790870400000,
+          "lastEntryAt": 1790946900000,
+          "eligibleBeforeEconomics": 3,
+          "declines": {
+            "NO_EXPLAINABLE_PATTERN_SCORE": 73,
+            "OBSERVED_STRUCTURAL_STOP_OUTSIDE_EXECUTOR_BOUNDS": 8,
+            "ELIGIBLE_BEFORE_ECONOMICS": 3,
+            "NO_PATTERN_PASSED_SCORE_THRESHOLD": 1,
+            "TARGET_EXCEEDS_PRIOR_OBSERVED_HORIZON": 1
+          },
+          "stopFailureConditions": {
+            "NO_SIGNAL": 74,
+            "OUTSIDE_EXECUTOR_BOUNDS": 8
+          },
+          "setupConditionDeclines": {
+            "TREND_PULLBACK:REGIME_NOT_TREND": 86,
+            "VOLATILITY_BREAKOUT:NO_CLOSED_BAR_RANGE_BREAK": 79,
+            "RANGE_MEAN_REVERSION:NO_CLOSED_BAR_RANGE_REJECTION": 80,
+            "VOLATILITY_BREAKOUT:CLOSED_BAR_RANGE_BREAK": 7,
+            "RANGE_MEAN_REVERSION:CLOSED_BAR_RANGE_EDGE_REJECTION": 6
+          }
+        },
+        "v9": {
+          "decisions": 86,
+          "firstDecisionAt": 1790870400000,
+          "lastDecisionAt": 1790946900000,
+          "firstEntryAt": 1790870400000,
+          "lastEntryAt": 1790946900000,
+          "eligibleBeforeEconomics": 17,
+          "declines": {
+            "NO_EXPLAINABLE_PATTERN_SCORE": 44,
+            "TARGET_OUTSIDE_OBSERVED_HORIZON": 12,
+            "ELIGIBLE_BEFORE_ECONOMICS": 17,
+            "OBSERVED_STRUCTURAL_STOP_OUTSIDE_EXECUTOR_BOUNDS": 13
+          },
+          "stopFailureConditions": {
+            "NO_SIGNAL": 56,
+            "OUTSIDE_EXECUTOR_BOUNDS": 13
+          },
+          "setupConditionDeclines": {
+            "TREND_PULLBACK:REGIME_NOT_TREND": 59,
+            "VOLATILITY_BREAKOUT:NO_CLOSED_BAR_RANGE_BREAK": 77,
+            "RANGE_MEAN_REVERSION:NO_CLOSED_BAR_RANGE_REJECTION": 68,
+            "VOLATILITY_BREAKOUT:CLOSED_BAR_RANGE_BREAK": 9,
+            "RANGE_MEAN_REVERSION:CLOSED_BAR_RANGE_EDGE_REJECTION": 17,
+            "TREND_PULLBACK:MEASURED_TREND_SCORE": 22,
+            "TREND_PULLBACK:NO_OBSERVED_STRUCTURE_TARGET": 5,
+            "RANGE_MEAN_REVERSION:NO_OBSERVED_STRUCTURE_TARGET": 1
+          }
+        }
+      },
+      "SOL": {
+        "v8": {
+          "decisions": 86,
+          "firstDecisionAt": 1790870400000,
+          "lastDecisionAt": 1790946900000,
+          "firstEntryAt": 1790870400000,
+          "lastEntryAt": 1790946900000,
+          "eligibleBeforeEconomics": 2,
+          "declines": {
+            "NO_EXPLAINABLE_PATTERN_SCORE": 68,
+            "OBSERVED_STRUCTURAL_STOP_OUTSIDE_EXECUTOR_BOUNDS": 9,
+            "TARGET_EXCEEDS_PRIOR_OBSERVED_HORIZON": 3,
+            "NO_PATTERN_PASSED_SCORE_THRESHOLD": 1,
+            "NO_OBSERVED_STRUCTURE_TARGET": 3,
+            "ELIGIBLE_BEFORE_ECONOMICS": 2
+          },
+          "stopFailureConditions": {
+            "NO_SIGNAL": 72,
+            "OUTSIDE_EXECUTOR_BOUNDS": 9
+          },
+          "setupConditionDeclines": {
+            "TREND_PULLBACK:REGIME_NOT_TREND": 72,
+            "VOLATILITY_BREAKOUT:NO_CLOSED_BAR_RANGE_BREAK": 75,
+            "RANGE_MEAN_REVERSION:NO_CLOSED_BAR_RANGE_REJECTION": 85,
+            "VOLATILITY_BREAKOUT:CLOSED_BAR_RANGE_BREAK": 11,
+            "RANGE_MEAN_REVERSION:CLOSED_BAR_RANGE_EDGE_REJECTION": 1,
+            "TREND_PULLBACK:TREND_MOMENTUM_BELOW_SYMBOL_THRESHOLD": 2,
+            "TREND_PULLBACK:NO_OBSERVED_STRUCTURE_TARGET": 9,
+            "TREND_PULLBACK:MEASURED_TREND_SCORE": 3
+          }
+        },
+        "v9": {
+          "decisions": 86,
+          "firstDecisionAt": 1790870400000,
+          "lastDecisionAt": 1790946900000,
+          "firstEntryAt": 1790870400000,
+          "lastEntryAt": 1790946900000,
+          "eligibleBeforeEconomics": 19,
+          "declines": {
+            "NO_EXPLAINABLE_PATTERN_SCORE": 41,
+            "TARGET_OUTSIDE_OBSERVED_HORIZON": 15,
+            "ELIGIBLE_BEFORE_ECONOMICS": 19,
+            "NO_OBSERVED_STRUCTURE_TARGET": 4,
+            "OBSERVED_STRUCTURAL_STOP_OUTSIDE_EXECUTOR_BOUNDS": 6,
+            "NO_PATTERN_PASSED_SCORE_THRESHOLD": 1
+          },
+          "stopFailureConditions": {
+            "NO_SIGNAL": 61,
+            "OUTSIDE_EXECUTOR_BOUNDS": 6
+          },
+          "setupConditionDeclines": {
+            "TREND_PULLBACK:REGIME_NOT_TREND": 45,
+            "VOLATILITY_BREAKOUT:NO_CLOSED_BAR_RANGE_BREAK": 74,
+            "RANGE_MEAN_REVERSION:NO_CLOSED_BAR_RANGE_REJECTION": 77,
+            "VOLATILITY_BREAKOUT:CLOSED_BAR_RANGE_BREAK": 12,
+            "TREND_PULLBACK:NO_OBSERVED_STRUCTURE_TARGET": 16,
+            "RANGE_MEAN_REVERSION:CLOSED_BAR_RANGE_EDGE_REJECTION": 9,
+            "TREND_PULLBACK:MEASURED_TREND_SCORE": 25
+          }
+        }
+      },
+      "XRP": {
+        "v8": {
+          "decisions": 86,
+          "firstDecisionAt": 1790870400000,
+          "lastDecisionAt": 1790946900000,
+          "firstEntryAt": 1790870400000,
+          "lastEntryAt": 1790946900000,
+          "eligibleBeforeEconomics": 4,
+          "declines": {
+            "NO_EXPLAINABLE_PATTERN_SCORE": 71,
+            "OBSERVED_STRUCTURAL_STOP_OUTSIDE_EXECUTOR_BOUNDS": 7,
+            "ELIGIBLE_BEFORE_ECONOMICS": 4,
+            "TARGET_EXCEEDS_PRIOR_OBSERVED_HORIZON": 3,
+            "NO_OBSERVED_STRUCTURE_TARGET": 1
+          },
+          "stopFailureConditions": {
+            "NO_SIGNAL": 72,
+            "OUTSIDE_EXECUTOR_BOUNDS": 7
+          },
+          "setupConditionDeclines": {
+            "TREND_PULLBACK:REGIME_NOT_TREND": 83,
+            "VOLATILITY_BREAKOUT:NO_CLOSED_BAR_RANGE_BREAK": 77,
+            "RANGE_MEAN_REVERSION:NO_CLOSED_BAR_RANGE_REJECTION": 82,
+            "VOLATILITY_BREAKOUT:CLOSED_BAR_RANGE_BREAK": 9,
+            "RANGE_MEAN_REVERSION:CLOSED_BAR_RANGE_EDGE_REJECTION": 4,
+            "TREND_PULLBACK:NO_OBSERVED_STRUCTURE_TARGET": 2,
+            "TREND_PULLBACK:MEASURED_TREND_SCORE": 1
+          }
+        },
+        "v9": {
+          "decisions": 86,
+          "firstDecisionAt": 1790870400000,
+          "lastDecisionAt": 1790946900000,
+          "firstEntryAt": 1790870400000,
+          "lastEntryAt": 1790946900000,
+          "eligibleBeforeEconomics": 32,
+          "declines": {
+            "NO_EXPLAINABLE_PATTERN_SCORE": 25,
+            "ELIGIBLE_BEFORE_ECONOMICS": 32,
+            "OBSERVED_STRUCTURAL_STOP_OUTSIDE_EXECUTOR_BOUNDS": 10,
+            "TARGET_OUTSIDE_OBSERVED_HORIZON": 15,
+            "NO_OBSERVED_STRUCTURE_TARGET": 3,
+            "STOP_OUTSIDE_EXECUTOR_BOUNDS_AT_NEXT_OPEN": 1
+          },
+          "stopFailureConditions": {
+            "NO_SIGNAL": 43,
+            "OUTSIDE_EXECUTOR_BOUNDS": 10
+          },
+          "setupConditionDeclines": {
+            "TREND_PULLBACK:REGIME_NOT_TREND": 37,
+            "VOLATILITY_BREAKOUT:NO_CLOSED_BAR_RANGE_BREAK": 72,
+            "RANGE_MEAN_REVERSION:NO_CLOSED_BAR_RANGE_REJECTION": 72,
+            "RANGE_MEAN_REVERSION:CLOSED_BAR_RANGE_EDGE_REJECTION": 14,
+            "VOLATILITY_BREAKOUT:CLOSED_BAR_RANGE_BREAK": 14,
+            "TREND_PULLBACK:NO_OBSERVED_STRUCTURE_TARGET": 14,
+            "TREND_PULLBACK:MEASURED_TREND_SCORE": 35
+          }
+        }
+      }
+    },
+    "primaryPool": {
+      "v8": {
+        "decisions": 258,
+        "firstDecisionAt": 1790870400000,
+        "lastDecisionAt": 1790946900000,
+        "firstEntryAt": 1790870400000,
+        "lastEntryAt": 1790946900000,
+        "eligibleBeforeEconomics": 8,
+        "declines": {
+          "NO_EXPLAINABLE_PATTERN_SCORE": 208,
+          "OBSERVED_STRUCTURAL_STOP_OUTSIDE_EXECUTOR_BOUNDS": 21,
+          "NO_OBSERVED_STRUCTURE_TARGET": 8,
+          "ELIGIBLE_BEFORE_ECONOMICS": 8,
+          "TARGET_EXCEEDS_PRIOR_OBSERVED_HORIZON": 12,
+          "NO_PATTERN_PASSED_SCORE_THRESHOLD": 1
+        },
+        "stopFailureConditions": {
+          "NO_SIGNAL": 217,
+          "OUTSIDE_EXECUTOR_BOUNDS": 21
+        },
+        "setupConditionDeclines": {
+          "TREND_PULLBACK:REGIME_NOT_TREND": 234,
+          "VOLATILITY_BREAKOUT:NO_CLOSED_BAR_RANGE_BREAK": 228,
+          "RANGE_MEAN_REVERSION:NO_CLOSED_BAR_RANGE_REJECTION": 250,
+          "RANGE_MEAN_REVERSION:CLOSED_BAR_RANGE_EDGE_REJECTION": 8,
+          "VOLATILITY_BREAKOUT:CLOSED_BAR_RANGE_BREAK": 29,
+          "TREND_PULLBACK:NO_OBSERVED_STRUCTURE_TARGET": 16,
+          "TREND_PULLBACK:TREND_MOMENTUM_BELOW_SYMBOL_THRESHOLD": 3,
+          "TREND_PULLBACK:MEASURED_TREND_SCORE": 5,
+          "VOLATILITY_BREAKOUT:NO_OBSERVED_STRUCTURE_TARGET": 1
+        }
+      },
+      "v9": {
+        "decisions": 258,
+        "firstDecisionAt": 1790870400000,
+        "lastDecisionAt": 1790946900000,
+        "firstEntryAt": 1790870400000,
+        "lastEntryAt": 1790946900000,
+        "eligibleBeforeEconomics": 79,
+        "declines": {
+          "NO_EXPLAINABLE_PATTERN_SCORE": 92,
+          "TARGET_OUTSIDE_OBSERVED_HORIZON": 49,
+          "ELIGIBLE_BEFORE_ECONOMICS": 79,
+          "OBSERVED_STRUCTURAL_STOP_OUTSIDE_EXECUTOR_BOUNDS": 23,
+          "NO_OBSERVED_STRUCTURE_TARGET": 13,
+          "STOP_OUTSIDE_EXECUTOR_BOUNDS_AT_NEXT_OPEN": 1,
+          "NO_PATTERN_PASSED_SCORE_THRESHOLD": 1
+        },
+        "stopFailureConditions": {
+          "NO_SIGNAL": 155,
+          "OUTSIDE_EXECUTOR_BOUNDS": 23
+        },
+        "setupConditionDeclines": {
+          "TREND_PULLBACK:REGIME_NOT_TREND": 112,
+          "VOLATILITY_BREAKOUT:NO_CLOSED_BAR_RANGE_BREAK": 220,
+          "RANGE_MEAN_REVERSION:NO_CLOSED_BAR_RANGE_REJECTION": 223,
+          "RANGE_MEAN_REVERSION:CLOSED_BAR_RANGE_EDGE_REJECTION": 35,
+          "TREND_PULLBACK:MEASURED_TREND_SCORE": 99,
+          "TREND_PULLBACK:NO_OBSERVED_STRUCTURE_TARGET": 47,
+          "VOLATILITY_BREAKOUT:CLOSED_BAR_RANGE_BREAK": 37,
+          "VOLATILITY_BREAKOUT:NO_OBSERVED_STRUCTURE_TARGET": 1
+        }
+      }
+    },
+    "supplementaryPool": {
+      "v8": {
+        "decisions": 172,
+        "firstDecisionAt": 1790870400000,
+        "lastDecisionAt": 1790946900000,
+        "firstEntryAt": 1790870400000,
+        "lastEntryAt": 1790946900000,
+        "eligibleBeforeEconomics": 3,
+        "declines": {
+          "NO_EXPLAINABLE_PATTERN_SCORE": 147,
+          "OBSERVED_STRUCTURAL_STOP_OUTSIDE_EXECUTOR_BOUNDS": 16,
+          "ELIGIBLE_BEFORE_ECONOMICS": 3,
+          "TARGET_EXCEEDS_PRIOR_OBSERVED_HORIZON": 5,
+          "NO_PATTERN_PASSED_SCORE_THRESHOLD": 1
+        },
+        "stopFailureConditions": {
+          "NO_SIGNAL": 148,
+          "OUTSIDE_EXECUTOR_BOUNDS": 16
+        },
+        "setupConditionDeclines": {
+          "TREND_PULLBACK:REGIME_NOT_TREND": 172,
+          "VOLATILITY_BREAKOUT:NO_CLOSED_BAR_RANGE_BREAK": 157,
+          "RANGE_MEAN_REVERSION:NO_CLOSED_BAR_RANGE_REJECTION": 162,
+          "VOLATILITY_BREAKOUT:CLOSED_BAR_RANGE_BREAK": 15,
+          "RANGE_MEAN_REVERSION:CLOSED_BAR_RANGE_EDGE_REJECTION": 10
+        }
+      },
+      "v9": {
+        "decisions": 172,
+        "firstDecisionAt": 1790870400000,
+        "lastDecisionAt": 1790946900000,
+        "firstEntryAt": 1790870400000,
+        "lastEntryAt": 1790946900000,
+        "eligibleBeforeEconomics": 43,
+        "declines": {
+          "ELIGIBLE_BEFORE_ECONOMICS": 43,
+          "NO_EXPLAINABLE_PATTERN_SCORE": 77,
+          "TARGET_OUTSIDE_OBSERVED_HORIZON": 29,
+          "OBSERVED_STRUCTURAL_STOP_OUTSIDE_EXECUTOR_BOUNDS": 21,
+          "NO_OBSERVED_STRUCTURE_TARGET": 2
+        },
+        "stopFailureConditions": {
+          "NO_SIGNAL": 108,
+          "OUTSIDE_EXECUTOR_BOUNDS": 21
+        },
+        "setupConditionDeclines": {
+          "TREND_PULLBACK:MEASURED_TREND_SCORE": 58,
+          "VOLATILITY_BREAKOUT:NO_CLOSED_BAR_RANGE_BREAK": 153,
+          "RANGE_MEAN_REVERSION:NO_CLOSED_BAR_RANGE_REJECTION": 145,
+          "TREND_PULLBACK:REGIME_NOT_TREND": 99,
+          "VOLATILITY_BREAKOUT:CLOSED_BAR_RANGE_BREAK": 19,
+          "RANGE_MEAN_REVERSION:CLOSED_BAR_RANGE_EDGE_REJECTION": 26,
+          "TREND_PULLBACK:NO_OBSERVED_STRUCTURE_TARGET": 15,
+          "RANGE_MEAN_REVERSION:NO_OBSERVED_STRUCTURE_TARGET": 1
+        }
+      }
+    }
+  },
+  "netRewardRiskSensitivity": {
+    "costs": "MODELED ONLY; 10 bps or 20 bps round trip on each arm’s own notional. No observed production cost evidence.",
+    "thresholds": [
+      1.5,
+      1.25,
+      1
+    ],
+    "riskModes": [
+      "POLICY_HALF_AFTER_2_LOSSES_4H",
+      "NO_HALF_RISK_SENSITIVITY"
+    ],
+    "scenarios": [
+      {
+        "pool": "PRIMARY_BTC_SOL_XRP",
+        "symbols": [
+          "BTC",
+          "SOL",
+          "XRP"
+        ],
+        "version": "v8",
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "netRewardRiskFloor": 1.5,
+        "modeledCostScenario": "LOW_MODELED",
+        "structuralEconomicsPassesAtInitialState": 0,
+        "entries": 0,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 8
+        },
+        "modeledNetPnlUsd": 0,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 400
+      },
+      {
+        "pool": "PRIMARY_BTC_SOL_XRP",
+        "symbols": [
+          "BTC",
+          "SOL",
+          "XRP"
+        ],
+        "version": "v8",
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "netRewardRiskFloor": 1.5,
+        "modeledCostScenario": "LOW_MODELED",
+        "structuralEconomicsPassesAtInitialState": 0,
+        "entries": 0,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 8
+        },
+        "modeledNetPnlUsd": 0,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 400
+      },
+      {
+        "pool": "PRIMARY_BTC_SOL_XRP",
+        "symbols": [
+          "BTC",
+          "SOL",
+          "XRP"
+        ],
+        "version": "v9",
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "netRewardRiskFloor": 1.5,
+        "modeledCostScenario": "LOW_MODELED",
+        "structuralEconomicsPassesAtInitialState": 0,
+        "entries": 0,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 79
+        },
+        "modeledNetPnlUsd": 0,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 400
+      },
+      {
+        "pool": "PRIMARY_BTC_SOL_XRP",
+        "symbols": [
+          "BTC",
+          "SOL",
+          "XRP"
+        ],
+        "version": "v9",
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "netRewardRiskFloor": 1.5,
+        "modeledCostScenario": "LOW_MODELED",
+        "structuralEconomicsPassesAtInitialState": 0,
+        "entries": 0,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 79
+        },
+        "modeledNetPnlUsd": 0,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 400
+      },
+      {
+        "pool": "PRIMARY_BTC_SOL_XRP",
+        "symbols": [
+          "BTC",
+          "SOL",
+          "XRP"
+        ],
+        "version": "v8",
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "netRewardRiskFloor": 1.25,
+        "modeledCostScenario": "LOW_MODELED",
+        "structuralEconomicsPassesAtInitialState": 1,
+        "entries": 1,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 7
+        },
+        "modeledNetPnlUsd": -1.1593583959898413,
+        "modeledRealizedSettlementMaxDrawdownUsd": 1.159358395989841,
+        "modeledEndingEquityUsd": 398.84064160401016
+      },
+      {
+        "pool": "PRIMARY_BTC_SOL_XRP",
+        "symbols": [
+          "BTC",
+          "SOL",
+          "XRP"
+        ],
+        "version": "v8",
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "netRewardRiskFloor": 1.25,
+        "modeledCostScenario": "LOW_MODELED",
+        "structuralEconomicsPassesAtInitialState": 1,
+        "entries": 1,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 7
+        },
+        "modeledNetPnlUsd": -1.1593583959898413,
+        "modeledRealizedSettlementMaxDrawdownUsd": 1.159358395989841,
+        "modeledEndingEquityUsd": 398.84064160401016
+      },
+      {
+        "pool": "PRIMARY_BTC_SOL_XRP",
+        "symbols": [
+          "BTC",
+          "SOL",
+          "XRP"
+        ],
+        "version": "v9",
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "netRewardRiskFloor": 1.25,
+        "modeledCostScenario": "LOW_MODELED",
+        "structuralEconomicsPassesAtInitialState": 1,
+        "entries": 1,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 71,
+          "SINGLE_POSITION_HELD": 7
+        },
+        "modeledNetPnlUsd": -1.1593583959898413,
+        "modeledRealizedSettlementMaxDrawdownUsd": 1.159358395989841,
+        "modeledEndingEquityUsd": 398.84064160401016
+      },
+      {
+        "pool": "PRIMARY_BTC_SOL_XRP",
+        "symbols": [
+          "BTC",
+          "SOL",
+          "XRP"
+        ],
+        "version": "v9",
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "netRewardRiskFloor": 1.25,
+        "modeledCostScenario": "LOW_MODELED",
+        "structuralEconomicsPassesAtInitialState": 1,
+        "entries": 1,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 71,
+          "SINGLE_POSITION_HELD": 7
+        },
+        "modeledNetPnlUsd": -1.1593583959898413,
+        "modeledRealizedSettlementMaxDrawdownUsd": 1.159358395989841,
+        "modeledEndingEquityUsd": 398.84064160401016
+      },
+      {
+        "pool": "PRIMARY_BTC_SOL_XRP",
+        "symbols": [
+          "BTC",
+          "SOL",
+          "XRP"
+        ],
+        "version": "v8",
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "netRewardRiskFloor": 1,
+        "modeledCostScenario": "LOW_MODELED",
+        "structuralEconomicsPassesAtInitialState": 1,
+        "entries": 1,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 7
+        },
+        "modeledNetPnlUsd": -1.1593583959898413,
+        "modeledRealizedSettlementMaxDrawdownUsd": 1.159358395989841,
+        "modeledEndingEquityUsd": 398.84064160401016
+      },
+      {
+        "pool": "PRIMARY_BTC_SOL_XRP",
+        "symbols": [
+          "BTC",
+          "SOL",
+          "XRP"
+        ],
+        "version": "v8",
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "netRewardRiskFloor": 1,
+        "modeledCostScenario": "LOW_MODELED",
+        "structuralEconomicsPassesAtInitialState": 1,
+        "entries": 1,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 7
+        },
+        "modeledNetPnlUsd": -1.1593583959898413,
+        "modeledRealizedSettlementMaxDrawdownUsd": 1.159358395989841,
+        "modeledEndingEquityUsd": 398.84064160401016
+      },
+      {
+        "pool": "PRIMARY_BTC_SOL_XRP",
+        "symbols": [
+          "BTC",
+          "SOL",
+          "XRP"
+        ],
+        "version": "v9",
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "netRewardRiskFloor": 1,
+        "modeledCostScenario": "LOW_MODELED",
+        "structuralEconomicsPassesAtInitialState": 2,
+        "entries": 2,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 48,
+          "SINGLE_POSITION_HELD": 10,
+          "ASSUMED_RISK_BUDGET_TOO_SMALL": 19
+        },
+        "modeledNetPnlUsd": -3.9591717612512385,
+        "modeledRealizedSettlementMaxDrawdownUsd": 3.959171761251241,
+        "modeledEndingEquityUsd": 396.04082823874876
+      },
+      {
+        "pool": "PRIMARY_BTC_SOL_XRP",
+        "symbols": [
+          "BTC",
+          "SOL",
+          "XRP"
+        ],
+        "version": "v9",
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "netRewardRiskFloor": 1,
+        "modeledCostScenario": "LOW_MODELED",
+        "structuralEconomicsPassesAtInitialState": 2,
+        "entries": 2,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 67,
+          "SINGLE_POSITION_HELD": 10
+        },
+        "modeledNetPnlUsd": -3.9591717612512385,
+        "modeledRealizedSettlementMaxDrawdownUsd": 3.959171761251241,
+        "modeledEndingEquityUsd": 396.04082823874876
+      },
+      {
+        "pool": "PRIMARY_BTC_SOL_XRP",
+        "symbols": [
+          "BTC",
+          "SOL",
+          "XRP"
+        ],
+        "version": "v8",
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "netRewardRiskFloor": 1.5,
+        "modeledCostScenario": "HIGH_MODELED",
+        "structuralEconomicsPassesAtInitialState": 0,
+        "entries": 0,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 8
+        },
+        "modeledNetPnlUsd": 0,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 400
+      },
+      {
+        "pool": "PRIMARY_BTC_SOL_XRP",
+        "symbols": [
+          "BTC",
+          "SOL",
+          "XRP"
+        ],
+        "version": "v8",
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "netRewardRiskFloor": 1.5,
+        "modeledCostScenario": "HIGH_MODELED",
+        "structuralEconomicsPassesAtInitialState": 0,
+        "entries": 0,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 8
+        },
+        "modeledNetPnlUsd": 0,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 400
+      },
+      {
+        "pool": "PRIMARY_BTC_SOL_XRP",
+        "symbols": [
+          "BTC",
+          "SOL",
+          "XRP"
+        ],
+        "version": "v9",
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "netRewardRiskFloor": 1.5,
+        "modeledCostScenario": "HIGH_MODELED",
+        "structuralEconomicsPassesAtInitialState": 0,
+        "entries": 0,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 79
+        },
+        "modeledNetPnlUsd": 0,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 400
+      },
+      {
+        "pool": "PRIMARY_BTC_SOL_XRP",
+        "symbols": [
+          "BTC",
+          "SOL",
+          "XRP"
+        ],
+        "version": "v9",
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "netRewardRiskFloor": 1.5,
+        "modeledCostScenario": "HIGH_MODELED",
+        "structuralEconomicsPassesAtInitialState": 0,
+        "entries": 0,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 79
+        },
+        "modeledNetPnlUsd": 0,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 400
+      },
+      {
+        "pool": "PRIMARY_BTC_SOL_XRP",
+        "symbols": [
+          "BTC",
+          "SOL",
+          "XRP"
+        ],
+        "version": "v8",
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "netRewardRiskFloor": 1.25,
+        "modeledCostScenario": "HIGH_MODELED",
+        "structuralEconomicsPassesAtInitialState": 0,
+        "entries": 0,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 8
+        },
+        "modeledNetPnlUsd": 0,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 400
+      },
+      {
+        "pool": "PRIMARY_BTC_SOL_XRP",
+        "symbols": [
+          "BTC",
+          "SOL",
+          "XRP"
+        ],
+        "version": "v8",
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "netRewardRiskFloor": 1.25,
+        "modeledCostScenario": "HIGH_MODELED",
+        "structuralEconomicsPassesAtInitialState": 0,
+        "entries": 0,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 8
+        },
+        "modeledNetPnlUsd": 0,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 400
+      },
+      {
+        "pool": "PRIMARY_BTC_SOL_XRP",
+        "symbols": [
+          "BTC",
+          "SOL",
+          "XRP"
+        ],
+        "version": "v9",
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "netRewardRiskFloor": 1.25,
+        "modeledCostScenario": "HIGH_MODELED",
+        "structuralEconomicsPassesAtInitialState": 0,
+        "entries": 0,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 79
+        },
+        "modeledNetPnlUsd": 0,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 400
+      },
+      {
+        "pool": "PRIMARY_BTC_SOL_XRP",
+        "symbols": [
+          "BTC",
+          "SOL",
+          "XRP"
+        ],
+        "version": "v9",
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "netRewardRiskFloor": 1.25,
+        "modeledCostScenario": "HIGH_MODELED",
+        "structuralEconomicsPassesAtInitialState": 0,
+        "entries": 0,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 79
+        },
+        "modeledNetPnlUsd": 0,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 400
+      },
+      {
+        "pool": "PRIMARY_BTC_SOL_XRP",
+        "symbols": [
+          "BTC",
+          "SOL",
+          "XRP"
+        ],
+        "version": "v8",
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "netRewardRiskFloor": 1,
+        "modeledCostScenario": "HIGH_MODELED",
+        "structuralEconomicsPassesAtInitialState": 1,
+        "entries": 1,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 7
+        },
+        "modeledNetPnlUsd": -1.9227268170424847,
+        "modeledRealizedSettlementMaxDrawdownUsd": 1.9227268170424736,
+        "modeledEndingEquityUsd": 398.0772731829575
+      },
+      {
+        "pool": "PRIMARY_BTC_SOL_XRP",
+        "symbols": [
+          "BTC",
+          "SOL",
+          "XRP"
+        ],
+        "version": "v8",
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "netRewardRiskFloor": 1,
+        "modeledCostScenario": "HIGH_MODELED",
+        "structuralEconomicsPassesAtInitialState": 1,
+        "entries": 1,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 7
+        },
+        "modeledNetPnlUsd": -1.9227268170424847,
+        "modeledRealizedSettlementMaxDrawdownUsd": 1.9227268170424736,
+        "modeledEndingEquityUsd": 398.0772731829575
+      },
+      {
+        "pool": "PRIMARY_BTC_SOL_XRP",
+        "symbols": [
+          "BTC",
+          "SOL",
+          "XRP"
+        ],
+        "version": "v9",
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "netRewardRiskFloor": 1,
+        "modeledCostScenario": "HIGH_MODELED",
+        "structuralEconomicsPassesAtInitialState": 1,
+        "entries": 1,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 71,
+          "SINGLE_POSITION_HELD": 7
+        },
+        "modeledNetPnlUsd": -1.9227268170424847,
+        "modeledRealizedSettlementMaxDrawdownUsd": 1.9227268170424736,
+        "modeledEndingEquityUsd": 398.0772731829575
+      },
+      {
+        "pool": "PRIMARY_BTC_SOL_XRP",
+        "symbols": [
+          "BTC",
+          "SOL",
+          "XRP"
+        ],
+        "version": "v9",
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "netRewardRiskFloor": 1,
+        "modeledCostScenario": "HIGH_MODELED",
+        "structuralEconomicsPassesAtInitialState": 1,
+        "entries": 1,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 71,
+          "SINGLE_POSITION_HELD": 7
+        },
+        "modeledNetPnlUsd": -1.9227268170424847,
+        "modeledRealizedSettlementMaxDrawdownUsd": 1.9227268170424736,
+        "modeledEndingEquityUsd": 398.0772731829575
+      },
+      {
+        "pool": "SUPPLEMENTARY_ETH_LINK",
+        "symbols": [
+          "ETH",
+          "LINK"
+        ],
+        "version": "v8",
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "netRewardRiskFloor": 1.5,
+        "modeledCostScenario": "LOW_MODELED",
+        "structuralEconomicsPassesAtInitialState": 1,
+        "entries": 1,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 2
+        },
+        "modeledNetPnlUsd": 6.692754820936936,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 406.69275482093695
+      },
+      {
+        "pool": "SUPPLEMENTARY_ETH_LINK",
+        "symbols": [
+          "ETH",
+          "LINK"
+        ],
+        "version": "v8",
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "netRewardRiskFloor": 1.5,
+        "modeledCostScenario": "LOW_MODELED",
+        "structuralEconomicsPassesAtInitialState": 1,
+        "entries": 1,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 2
+        },
+        "modeledNetPnlUsd": 6.692754820936936,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 406.69275482093695
+      },
+      {
+        "pool": "SUPPLEMENTARY_ETH_LINK",
+        "symbols": [
+          "ETH",
+          "LINK"
+        ],
+        "version": "v9",
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "netRewardRiskFloor": 1.5,
+        "modeledCostScenario": "LOW_MODELED",
+        "structuralEconomicsPassesAtInitialState": 3,
+        "entries": 2,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 37,
+          "SINGLE_POSITION_HELD": 4
+        },
+        "modeledNetPnlUsd": 8.299619410742007,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 408.299619410742
+      },
+      {
+        "pool": "SUPPLEMENTARY_ETH_LINK",
+        "symbols": [
+          "ETH",
+          "LINK"
+        ],
+        "version": "v9",
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "netRewardRiskFloor": 1.5,
+        "modeledCostScenario": "LOW_MODELED",
+        "structuralEconomicsPassesAtInitialState": 3,
+        "entries": 2,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 37,
+          "SINGLE_POSITION_HELD": 4
+        },
+        "modeledNetPnlUsd": 8.299619410742007,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 408.299619410742
+      },
+      {
+        "pool": "SUPPLEMENTARY_ETH_LINK",
+        "symbols": [
+          "ETH",
+          "LINK"
+        ],
+        "version": "v8",
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "netRewardRiskFloor": 1.25,
+        "modeledCostScenario": "LOW_MODELED",
+        "structuralEconomicsPassesAtInitialState": 1,
+        "entries": 1,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 2
+        },
+        "modeledNetPnlUsd": 6.692754820936936,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 406.69275482093695
+      },
+      {
+        "pool": "SUPPLEMENTARY_ETH_LINK",
+        "symbols": [
+          "ETH",
+          "LINK"
+        ],
+        "version": "v8",
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "netRewardRiskFloor": 1.25,
+        "modeledCostScenario": "LOW_MODELED",
+        "structuralEconomicsPassesAtInitialState": 1,
+        "entries": 1,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 2
+        },
+        "modeledNetPnlUsd": 6.692754820936936,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 406.69275482093695
+      },
+      {
+        "pool": "SUPPLEMENTARY_ETH_LINK",
+        "symbols": [
+          "ETH",
+          "LINK"
+        ],
+        "version": "v9",
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "netRewardRiskFloor": 1.25,
+        "modeledCostScenario": "LOW_MODELED",
+        "structuralEconomicsPassesAtInitialState": 3,
+        "entries": 2,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 37,
+          "SINGLE_POSITION_HELD": 4
+        },
+        "modeledNetPnlUsd": 8.299619410742007,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 408.299619410742
+      },
+      {
+        "pool": "SUPPLEMENTARY_ETH_LINK",
+        "symbols": [
+          "ETH",
+          "LINK"
+        ],
+        "version": "v9",
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "netRewardRiskFloor": 1.25,
+        "modeledCostScenario": "LOW_MODELED",
+        "structuralEconomicsPassesAtInitialState": 3,
+        "entries": 2,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 37,
+          "SINGLE_POSITION_HELD": 4
+        },
+        "modeledNetPnlUsd": 8.299619410742007,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 408.299619410742
+      },
+      {
+        "pool": "SUPPLEMENTARY_ETH_LINK",
+        "symbols": [
+          "ETH",
+          "LINK"
+        ],
+        "version": "v8",
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "netRewardRiskFloor": 1,
+        "modeledCostScenario": "LOW_MODELED",
+        "structuralEconomicsPassesAtInitialState": 1,
+        "entries": 1,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 2
+        },
+        "modeledNetPnlUsd": 6.692754820936936,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 406.69275482093695
+      },
+      {
+        "pool": "SUPPLEMENTARY_ETH_LINK",
+        "symbols": [
+          "ETH",
+          "LINK"
+        ],
+        "version": "v8",
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "netRewardRiskFloor": 1,
+        "modeledCostScenario": "LOW_MODELED",
+        "structuralEconomicsPassesAtInitialState": 1,
+        "entries": 1,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 2
+        },
+        "modeledNetPnlUsd": 6.692754820936936,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 406.69275482093695
+      },
+      {
+        "pool": "SUPPLEMENTARY_ETH_LINK",
+        "symbols": [
+          "ETH",
+          "LINK"
+        ],
+        "version": "v9",
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "netRewardRiskFloor": 1,
+        "modeledCostScenario": "LOW_MODELED",
+        "structuralEconomicsPassesAtInitialState": 3,
+        "entries": 2,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 37,
+          "SINGLE_POSITION_HELD": 4
+        },
+        "modeledNetPnlUsd": 8.299619410742007,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 408.299619410742
+      },
+      {
+        "pool": "SUPPLEMENTARY_ETH_LINK",
+        "symbols": [
+          "ETH",
+          "LINK"
+        ],
+        "version": "v9",
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "netRewardRiskFloor": 1,
+        "modeledCostScenario": "LOW_MODELED",
+        "structuralEconomicsPassesAtInitialState": 3,
+        "entries": 2,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 37,
+          "SINGLE_POSITION_HELD": 4
+        },
+        "modeledNetPnlUsd": 8.299619410742007,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 408.299619410742
+      },
+      {
+        "pool": "SUPPLEMENTARY_ETH_LINK",
+        "symbols": [
+          "ETH",
+          "LINK"
+        ],
+        "version": "v8",
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "netRewardRiskFloor": 1.5,
+        "modeledCostScenario": "HIGH_MODELED",
+        "structuralEconomicsPassesAtInitialState": 0,
+        "entries": 0,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 3
+        },
+        "modeledNetPnlUsd": 0,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 400
+      },
+      {
+        "pool": "SUPPLEMENTARY_ETH_LINK",
+        "symbols": [
+          "ETH",
+          "LINK"
+        ],
+        "version": "v8",
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "netRewardRiskFloor": 1.5,
+        "modeledCostScenario": "HIGH_MODELED",
+        "structuralEconomicsPassesAtInitialState": 0,
+        "entries": 0,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 3
+        },
+        "modeledNetPnlUsd": 0,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 400
+      },
+      {
+        "pool": "SUPPLEMENTARY_ETH_LINK",
+        "symbols": [
+          "ETH",
+          "LINK"
+        ],
+        "version": "v9",
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "netRewardRiskFloor": 1.5,
+        "modeledCostScenario": "HIGH_MODELED",
+        "structuralEconomicsPassesAtInitialState": 0,
+        "entries": 0,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 43
+        },
+        "modeledNetPnlUsd": 0,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 400
+      },
+      {
+        "pool": "SUPPLEMENTARY_ETH_LINK",
+        "symbols": [
+          "ETH",
+          "LINK"
+        ],
+        "version": "v9",
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "netRewardRiskFloor": 1.5,
+        "modeledCostScenario": "HIGH_MODELED",
+        "structuralEconomicsPassesAtInitialState": 0,
+        "entries": 0,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 43
+        },
+        "modeledNetPnlUsd": 0,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 400
+      },
+      {
+        "pool": "SUPPLEMENTARY_ETH_LINK",
+        "symbols": [
+          "ETH",
+          "LINK"
+        ],
+        "version": "v8",
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "netRewardRiskFloor": 1.25,
+        "modeledCostScenario": "HIGH_MODELED",
+        "structuralEconomicsPassesAtInitialState": 1,
+        "entries": 1,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 2
+        },
+        "modeledNetPnlUsd": 5.903415977961705,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 405.9034159779617
+      },
+      {
+        "pool": "SUPPLEMENTARY_ETH_LINK",
+        "symbols": [
+          "ETH",
+          "LINK"
+        ],
+        "version": "v8",
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "netRewardRiskFloor": 1.25,
+        "modeledCostScenario": "HIGH_MODELED",
+        "structuralEconomicsPassesAtInitialState": 1,
+        "entries": 1,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 2
+        },
+        "modeledNetPnlUsd": 5.903415977961705,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 405.9034159779617
+      },
+      {
+        "pool": "SUPPLEMENTARY_ETH_LINK",
+        "symbols": [
+          "ETH",
+          "LINK"
+        ],
+        "version": "v9",
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "netRewardRiskFloor": 1.25,
+        "modeledCostScenario": "HIGH_MODELED",
+        "structuralEconomicsPassesAtInitialState": 3,
+        "entries": 2,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 37,
+          "SINGLE_POSITION_HELD": 4
+        },
+        "modeledNetPnlUsd": 6.783490107521287,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 406.7834901075213
+      },
+      {
+        "pool": "SUPPLEMENTARY_ETH_LINK",
+        "symbols": [
+          "ETH",
+          "LINK"
+        ],
+        "version": "v9",
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "netRewardRiskFloor": 1.25,
+        "modeledCostScenario": "HIGH_MODELED",
+        "structuralEconomicsPassesAtInitialState": 3,
+        "entries": 2,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 37,
+          "SINGLE_POSITION_HELD": 4
+        },
+        "modeledNetPnlUsd": 6.783490107521287,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 406.7834901075213
+      },
+      {
+        "pool": "SUPPLEMENTARY_ETH_LINK",
+        "symbols": [
+          "ETH",
+          "LINK"
+        ],
+        "version": "v8",
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "netRewardRiskFloor": 1,
+        "modeledCostScenario": "HIGH_MODELED",
+        "structuralEconomicsPassesAtInitialState": 1,
+        "entries": 1,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 2
+        },
+        "modeledNetPnlUsd": 5.903415977961705,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 405.9034159779617
+      },
+      {
+        "pool": "SUPPLEMENTARY_ETH_LINK",
+        "symbols": [
+          "ETH",
+          "LINK"
+        ],
+        "version": "v8",
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "netRewardRiskFloor": 1,
+        "modeledCostScenario": "HIGH_MODELED",
+        "structuralEconomicsPassesAtInitialState": 1,
+        "entries": 1,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 2
+        },
+        "modeledNetPnlUsd": 5.903415977961705,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 405.9034159779617
+      },
+      {
+        "pool": "SUPPLEMENTARY_ETH_LINK",
+        "symbols": [
+          "ETH",
+          "LINK"
+        ],
+        "version": "v9",
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "netRewardRiskFloor": 1,
+        "modeledCostScenario": "HIGH_MODELED",
+        "structuralEconomicsPassesAtInitialState": 3,
+        "entries": 2,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 37,
+          "SINGLE_POSITION_HELD": 4
+        },
+        "modeledNetPnlUsd": 6.783490107521287,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 406.7834901075213
+      },
+      {
+        "pool": "SUPPLEMENTARY_ETH_LINK",
+        "symbols": [
+          "ETH",
+          "LINK"
+        ],
+        "version": "v9",
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "netRewardRiskFloor": 1,
+        "modeledCostScenario": "HIGH_MODELED",
+        "structuralEconomicsPassesAtInitialState": 3,
+        "entries": 2,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 37,
+          "SINGLE_POSITION_HELD": 4
+        },
+        "modeledNetPnlUsd": 6.783490107521287,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 406.7834901075213
+      }
+    ],
+    "modeledTrades": {
+      "PRIMARY_BTC_SOL_XRP_v8_RR1.5_LOW_MODELED_POLICY_HALF_AFTER_2_LOSSES_4H": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "entries": 0,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 8
+        },
+        "modeledNetPnlUsd": 0,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 400,
+        "outcomes": []
+      },
+      "PRIMARY_BTC_SOL_XRP_v8_RR1.5_LOW_MODELED_NO_HALF_RISK_SENSITIVITY": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "entries": 0,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 8
+        },
+        "modeledNetPnlUsd": 0,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 400,
+        "outcomes": []
+      },
+      "PRIMARY_BTC_SOL_XRP_v9_RR1.5_LOW_MODELED_POLICY_HALF_AFTER_2_LOSSES_4H": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "entries": 0,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 79
+        },
+        "modeledNetPnlUsd": 0,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 400,
+        "outcomes": []
+      },
+      "PRIMARY_BTC_SOL_XRP_v9_RR1.5_LOW_MODELED_NO_HALF_RISK_SENSITIVITY": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "entries": 0,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 79
+        },
+        "modeledNetPnlUsd": 0,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 400,
+        "outcomes": []
+      },
+      "PRIMARY_BTC_SOL_XRP_v8_RR1.25_LOW_MODELED_POLICY_HALF_AFTER_2_LOSSES_4H": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "entries": 1,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 7
+        },
+        "modeledNetPnlUsd": -1.1593583959898413,
+        "modeledRealizedSettlementMaxDrawdownUsd": 1.159358395989841,
+        "modeledEndingEquityUsd": 398.84064160401016,
+        "outcomes": [
+          {
+            "symbol": "XRP",
+            "entryAt": 1790923500000,
+            "side": "SHORT",
+            "setup": "RANGE_MEAN_REVERSION",
+            "entryPrice": 1.52292,
+            "stopPrice": 1.52691,
+            "targetPrice": 1.51101,
+            "notionalUsd": 763.3684210526434,
+            "modeledCostUsd": 0.7633684210526434,
+            "leverage": 10,
+            "marginUsd": 76.33684210526434,
+            "exitPrice": 1.52371,
+            "exitAt": 1790927100000,
+            "exitReason": "TIME_EXIT",
+            "modeledGrossPnlUsd": -0.39598997493719795,
+            "modeledNetPnlUsd": -1.1593583959898413,
+            "modeledNetRewardRisk": 1.3016390977443821
+          }
+        ]
+      },
+      "PRIMARY_BTC_SOL_XRP_v8_RR1.25_LOW_MODELED_NO_HALF_RISK_SENSITIVITY": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "entries": 1,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 7
+        },
+        "modeledNetPnlUsd": -1.1593583959898413,
+        "modeledRealizedSettlementMaxDrawdownUsd": 1.159358395989841,
+        "modeledEndingEquityUsd": 398.84064160401016,
+        "outcomes": [
+          {
+            "symbol": "XRP",
+            "entryAt": 1790923500000,
+            "side": "SHORT",
+            "setup": "RANGE_MEAN_REVERSION",
+            "entryPrice": 1.52292,
+            "stopPrice": 1.52691,
+            "targetPrice": 1.51101,
+            "notionalUsd": 763.3684210526434,
+            "modeledCostUsd": 0.7633684210526434,
+            "leverage": 10,
+            "marginUsd": 76.33684210526434,
+            "exitPrice": 1.52371,
+            "exitAt": 1790927100000,
+            "exitReason": "TIME_EXIT",
+            "modeledGrossPnlUsd": -0.39598997493719795,
+            "modeledNetPnlUsd": -1.1593583959898413,
+            "modeledNetRewardRisk": 1.3016390977443821
+          }
+        ]
+      },
+      "PRIMARY_BTC_SOL_XRP_v9_RR1.25_LOW_MODELED_POLICY_HALF_AFTER_2_LOSSES_4H": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "entries": 1,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 71,
+          "SINGLE_POSITION_HELD": 7
+        },
+        "modeledNetPnlUsd": -1.1593583959898413,
+        "modeledRealizedSettlementMaxDrawdownUsd": 1.159358395989841,
+        "modeledEndingEquityUsd": 398.84064160401016,
+        "outcomes": [
+          {
+            "symbol": "XRP",
+            "entryAt": 1790923500000,
+            "side": "SHORT",
+            "setup": "RANGE_MEAN_REVERSION",
+            "entryPrice": 1.52292,
+            "stopPrice": 1.52691,
+            "targetPrice": 1.51101,
+            "notionalUsd": 763.3684210526434,
+            "modeledCostUsd": 0.7633684210526434,
+            "leverage": 10,
+            "marginUsd": 76.33684210526434,
+            "exitPrice": 1.52371,
+            "exitAt": 1790927100000,
+            "exitReason": "TIME_EXIT",
+            "modeledGrossPnlUsd": -0.39598997493719795,
+            "modeledNetPnlUsd": -1.1593583959898413,
+            "modeledNetRewardRisk": 1.3016390977443821
+          }
+        ]
+      },
+      "PRIMARY_BTC_SOL_XRP_v9_RR1.25_LOW_MODELED_NO_HALF_RISK_SENSITIVITY": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "entries": 1,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 71,
+          "SINGLE_POSITION_HELD": 7
+        },
+        "modeledNetPnlUsd": -1.1593583959898413,
+        "modeledRealizedSettlementMaxDrawdownUsd": 1.159358395989841,
+        "modeledEndingEquityUsd": 398.84064160401016,
+        "outcomes": [
+          {
+            "symbol": "XRP",
+            "entryAt": 1790923500000,
+            "side": "SHORT",
+            "setup": "RANGE_MEAN_REVERSION",
+            "entryPrice": 1.52292,
+            "stopPrice": 1.52691,
+            "targetPrice": 1.51101,
+            "notionalUsd": 763.3684210526434,
+            "modeledCostUsd": 0.7633684210526434,
+            "leverage": 10,
+            "marginUsd": 76.33684210526434,
+            "exitPrice": 1.52371,
+            "exitAt": 1790927100000,
+            "exitReason": "TIME_EXIT",
+            "modeledGrossPnlUsd": -0.39598997493719795,
+            "modeledNetPnlUsd": -1.1593583959898413,
+            "modeledNetRewardRisk": 1.3016390977443821
+          }
+        ]
+      },
+      "PRIMARY_BTC_SOL_XRP_v8_RR1_LOW_MODELED_POLICY_HALF_AFTER_2_LOSSES_4H": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "entries": 1,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 7
+        },
+        "modeledNetPnlUsd": -1.1593583959898413,
+        "modeledRealizedSettlementMaxDrawdownUsd": 1.159358395989841,
+        "modeledEndingEquityUsd": 398.84064160401016,
+        "outcomes": [
+          {
+            "symbol": "XRP",
+            "entryAt": 1790923500000,
+            "side": "SHORT",
+            "setup": "RANGE_MEAN_REVERSION",
+            "entryPrice": 1.52292,
+            "stopPrice": 1.52691,
+            "targetPrice": 1.51101,
+            "notionalUsd": 763.3684210526434,
+            "modeledCostUsd": 0.7633684210526434,
+            "leverage": 10,
+            "marginUsd": 76.33684210526434,
+            "exitPrice": 1.52371,
+            "exitAt": 1790927100000,
+            "exitReason": "TIME_EXIT",
+            "modeledGrossPnlUsd": -0.39598997493719795,
+            "modeledNetPnlUsd": -1.1593583959898413,
+            "modeledNetRewardRisk": 1.3016390977443821
+          }
+        ]
+      },
+      "PRIMARY_BTC_SOL_XRP_v8_RR1_LOW_MODELED_NO_HALF_RISK_SENSITIVITY": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "entries": 1,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 7
+        },
+        "modeledNetPnlUsd": -1.1593583959898413,
+        "modeledRealizedSettlementMaxDrawdownUsd": 1.159358395989841,
+        "modeledEndingEquityUsd": 398.84064160401016,
+        "outcomes": [
+          {
+            "symbol": "XRP",
+            "entryAt": 1790923500000,
+            "side": "SHORT",
+            "setup": "RANGE_MEAN_REVERSION",
+            "entryPrice": 1.52292,
+            "stopPrice": 1.52691,
+            "targetPrice": 1.51101,
+            "notionalUsd": 763.3684210526434,
+            "modeledCostUsd": 0.7633684210526434,
+            "leverage": 10,
+            "marginUsd": 76.33684210526434,
+            "exitPrice": 1.52371,
+            "exitAt": 1790927100000,
+            "exitReason": "TIME_EXIT",
+            "modeledGrossPnlUsd": -0.39598997493719795,
+            "modeledNetPnlUsd": -1.1593583959898413,
+            "modeledNetRewardRisk": 1.3016390977443821
+          }
+        ]
+      },
+      "PRIMARY_BTC_SOL_XRP_v9_RR1_LOW_MODELED_POLICY_HALF_AFTER_2_LOSSES_4H": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "entries": 2,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 48,
+          "SINGLE_POSITION_HELD": 10,
+          "ASSUMED_RISK_BUDGET_TOO_SMALL": 19
+        },
+        "modeledNetPnlUsd": -3.9591717612512385,
+        "modeledRealizedSettlementMaxDrawdownUsd": 3.959171761251241,
+        "modeledEndingEquityUsd": 396.04082823874876,
+        "outcomes": [
+          {
+            "symbol": "SOL",
+            "entryAt": 1790881200000,
+            "side": "LONG",
+            "setup": "TREND_PULLBACK",
+            "entryPrice": 118.34,
+            "stopPrice": 118.05,
+            "targetPrice": 119.07,
+            "notionalUsd": 816.1379310344653,
+            "modeledCostUsd": 0.8161379310344653,
+            "leverage": 10,
+            "marginUsd": 81.61379310344653,
+            "exitPrice": 118.05,
+            "exitAt": 1790883000000,
+            "exitReason": "STOP",
+            "modeledGrossPnlUsd": -1.9999999999999827,
+            "modeledNetPnlUsd": -2.816137931034448,
+            "modeledNetRewardRisk": 1.0545862068965046
+          },
+          {
+            "symbol": "XRP",
+            "entryAt": 1790923500000,
+            "side": "SHORT",
+            "setup": "RANGE_MEAN_REVERSION",
+            "entryPrice": 1.52292,
+            "stopPrice": 1.52691,
+            "targetPrice": 1.51101,
+            "notionalUsd": 752.6196672232423,
+            "modeledCostUsd": 0.7526196672232424,
+            "leverage": 10,
+            "marginUsd": 75.26196672232423,
+            "exitPrice": 1.52371,
+            "exitAt": 1790927100000,
+            "exitReason": "TIME_EXIT",
+            "modeledGrossPnlUsd": -0.39041416299354786,
+            "modeledNetPnlUsd": -1.1430338302167902,
+            "modeledNetRewardRisk": 1.2924101345720596
+          }
+        ]
+      },
+      "PRIMARY_BTC_SOL_XRP_v9_RR1_LOW_MODELED_NO_HALF_RISK_SENSITIVITY": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "entries": 2,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 67,
+          "SINGLE_POSITION_HELD": 10
+        },
+        "modeledNetPnlUsd": -3.9591717612512385,
+        "modeledRealizedSettlementMaxDrawdownUsd": 3.959171761251241,
+        "modeledEndingEquityUsd": 396.04082823874876,
+        "outcomes": [
+          {
+            "symbol": "SOL",
+            "entryAt": 1790881200000,
+            "side": "LONG",
+            "setup": "TREND_PULLBACK",
+            "entryPrice": 118.34,
+            "stopPrice": 118.05,
+            "targetPrice": 119.07,
+            "notionalUsd": 816.1379310344653,
+            "modeledCostUsd": 0.8161379310344653,
+            "leverage": 10,
+            "marginUsd": 81.61379310344653,
+            "exitPrice": 118.05,
+            "exitAt": 1790883000000,
+            "exitReason": "STOP",
+            "modeledGrossPnlUsd": -1.9999999999999827,
+            "modeledNetPnlUsd": -2.816137931034448,
+            "modeledNetRewardRisk": 1.0545862068965046
+          },
+          {
+            "symbol": "XRP",
+            "entryAt": 1790923500000,
+            "side": "SHORT",
+            "setup": "RANGE_MEAN_REVERSION",
+            "entryPrice": 1.52292,
+            "stopPrice": 1.52691,
+            "targetPrice": 1.51101,
+            "notionalUsd": 752.6196672232423,
+            "modeledCostUsd": 0.7526196672232424,
+            "leverage": 10,
+            "marginUsd": 75.26196672232423,
+            "exitPrice": 1.52371,
+            "exitAt": 1790927100000,
+            "exitReason": "TIME_EXIT",
+            "modeledGrossPnlUsd": -0.39041416299354786,
+            "modeledNetPnlUsd": -1.1430338302167902,
+            "modeledNetRewardRisk": 1.2924101345720596
+          }
+        ]
+      },
+      "PRIMARY_BTC_SOL_XRP_v8_RR1.5_HIGH_MODELED_POLICY_HALF_AFTER_2_LOSSES_4H": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "entries": 0,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 8
+        },
+        "modeledNetPnlUsd": 0,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 400,
+        "outcomes": []
+      },
+      "PRIMARY_BTC_SOL_XRP_v8_RR1.5_HIGH_MODELED_NO_HALF_RISK_SENSITIVITY": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "entries": 0,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 8
+        },
+        "modeledNetPnlUsd": 0,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 400,
+        "outcomes": []
+      },
+      "PRIMARY_BTC_SOL_XRP_v9_RR1.5_HIGH_MODELED_POLICY_HALF_AFTER_2_LOSSES_4H": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "entries": 0,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 79
+        },
+        "modeledNetPnlUsd": 0,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 400,
+        "outcomes": []
+      },
+      "PRIMARY_BTC_SOL_XRP_v9_RR1.5_HIGH_MODELED_NO_HALF_RISK_SENSITIVITY": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "entries": 0,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 79
+        },
+        "modeledNetPnlUsd": 0,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 400,
+        "outcomes": []
+      },
+      "PRIMARY_BTC_SOL_XRP_v8_RR1.25_HIGH_MODELED_POLICY_HALF_AFTER_2_LOSSES_4H": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "entries": 0,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 8
+        },
+        "modeledNetPnlUsd": 0,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 400,
+        "outcomes": []
+      },
+      "PRIMARY_BTC_SOL_XRP_v8_RR1.25_HIGH_MODELED_NO_HALF_RISK_SENSITIVITY": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "entries": 0,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 8
+        },
+        "modeledNetPnlUsd": 0,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 400,
+        "outcomes": []
+      },
+      "PRIMARY_BTC_SOL_XRP_v9_RR1.25_HIGH_MODELED_POLICY_HALF_AFTER_2_LOSSES_4H": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "entries": 0,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 79
+        },
+        "modeledNetPnlUsd": 0,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 400,
+        "outcomes": []
+      },
+      "PRIMARY_BTC_SOL_XRP_v9_RR1.25_HIGH_MODELED_NO_HALF_RISK_SENSITIVITY": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "entries": 0,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 79
+        },
+        "modeledNetPnlUsd": 0,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 400,
+        "outcomes": []
+      },
+      "PRIMARY_BTC_SOL_XRP_v8_RR1_HIGH_MODELED_POLICY_HALF_AFTER_2_LOSSES_4H": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "entries": 1,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 7
+        },
+        "modeledNetPnlUsd": -1.9227268170424847,
+        "modeledRealizedSettlementMaxDrawdownUsd": 1.9227268170424736,
+        "modeledEndingEquityUsd": 398.0772731829575,
+        "outcomes": [
+          {
+            "symbol": "XRP",
+            "entryAt": 1790923500000,
+            "side": "SHORT",
+            "setup": "RANGE_MEAN_REVERSION",
+            "entryPrice": 1.52292,
+            "stopPrice": 1.52691,
+            "targetPrice": 1.51101,
+            "notionalUsd": 763.3684210526434,
+            "modeledCostUsd": 1.5267368421052867,
+            "leverage": 10,
+            "marginUsd": 76.33684210526434,
+            "exitPrice": 1.52371,
+            "exitAt": 1790927100000,
+            "exitReason": "TIME_EXIT",
+            "modeledGrossPnlUsd": -0.39598997493719795,
+            "modeledNetPnlUsd": -1.9227268170424847,
+            "modeledNetRewardRisk": 1.1107969924812213
+          }
+        ]
+      },
+      "PRIMARY_BTC_SOL_XRP_v8_RR1_HIGH_MODELED_NO_HALF_RISK_SENSITIVITY": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "entries": 1,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 7
+        },
+        "modeledNetPnlUsd": -1.9227268170424847,
+        "modeledRealizedSettlementMaxDrawdownUsd": 1.9227268170424736,
+        "modeledEndingEquityUsd": 398.0772731829575,
+        "outcomes": [
+          {
+            "symbol": "XRP",
+            "entryAt": 1790923500000,
+            "side": "SHORT",
+            "setup": "RANGE_MEAN_REVERSION",
+            "entryPrice": 1.52292,
+            "stopPrice": 1.52691,
+            "targetPrice": 1.51101,
+            "notionalUsd": 763.3684210526434,
+            "modeledCostUsd": 1.5267368421052867,
+            "leverage": 10,
+            "marginUsd": 76.33684210526434,
+            "exitPrice": 1.52371,
+            "exitAt": 1790927100000,
+            "exitReason": "TIME_EXIT",
+            "modeledGrossPnlUsd": -0.39598997493719795,
+            "modeledNetPnlUsd": -1.9227268170424847,
+            "modeledNetRewardRisk": 1.1107969924812213
+          }
+        ]
+      },
+      "PRIMARY_BTC_SOL_XRP_v9_RR1_HIGH_MODELED_POLICY_HALF_AFTER_2_LOSSES_4H": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "entries": 1,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 71,
+          "SINGLE_POSITION_HELD": 7
+        },
+        "modeledNetPnlUsd": -1.9227268170424847,
+        "modeledRealizedSettlementMaxDrawdownUsd": 1.9227268170424736,
+        "modeledEndingEquityUsd": 398.0772731829575,
+        "outcomes": [
+          {
+            "symbol": "XRP",
+            "entryAt": 1790923500000,
+            "side": "SHORT",
+            "setup": "RANGE_MEAN_REVERSION",
+            "entryPrice": 1.52292,
+            "stopPrice": 1.52691,
+            "targetPrice": 1.51101,
+            "notionalUsd": 763.3684210526434,
+            "modeledCostUsd": 1.5267368421052867,
+            "leverage": 10,
+            "marginUsd": 76.33684210526434,
+            "exitPrice": 1.52371,
+            "exitAt": 1790927100000,
+            "exitReason": "TIME_EXIT",
+            "modeledGrossPnlUsd": -0.39598997493719795,
+            "modeledNetPnlUsd": -1.9227268170424847,
+            "modeledNetRewardRisk": 1.1107969924812213
+          }
+        ]
+      },
+      "PRIMARY_BTC_SOL_XRP_v9_RR1_HIGH_MODELED_NO_HALF_RISK_SENSITIVITY": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "entries": 1,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 71,
+          "SINGLE_POSITION_HELD": 7
+        },
+        "modeledNetPnlUsd": -1.9227268170424847,
+        "modeledRealizedSettlementMaxDrawdownUsd": 1.9227268170424736,
+        "modeledEndingEquityUsd": 398.0772731829575,
+        "outcomes": [
+          {
+            "symbol": "XRP",
+            "entryAt": 1790923500000,
+            "side": "SHORT",
+            "setup": "RANGE_MEAN_REVERSION",
+            "entryPrice": 1.52292,
+            "stopPrice": 1.52691,
+            "targetPrice": 1.51101,
+            "notionalUsd": 763.3684210526434,
+            "modeledCostUsd": 1.5267368421052867,
+            "leverage": 10,
+            "marginUsd": 76.33684210526434,
+            "exitPrice": 1.52371,
+            "exitAt": 1790927100000,
+            "exitReason": "TIME_EXIT",
+            "modeledGrossPnlUsd": -0.39598997493719795,
+            "modeledNetPnlUsd": -1.9227268170424847,
+            "modeledNetRewardRisk": 1.1107969924812213
+          }
+        ]
+      },
+      "SUPPLEMENTARY_ETH_LINK_v8_RR1.5_LOW_MODELED_POLICY_HALF_AFTER_2_LOSSES_4H": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "entries": 1,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 2
+        },
+        "modeledNetPnlUsd": 6.692754820936936,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 406.69275482093695,
+        "outcomes": [
+          {
+            "symbol": "LINK",
+            "entryAt": 1790927100000,
+            "side": "LONG",
+            "setup": "RANGE_MEAN_REVERSION",
+            "entryPrice": 14.3265,
+            "stopPrice": 14.2902,
+            "targetPrice": 14.4623,
+            "notionalUsd": 789.3388429752307,
+            "modeledCostUsd": 0.7893388429752307,
+            "leverage": 10,
+            "marginUsd": 78.93388429752306,
+            "exitPrice": 14.4623,
+            "exitAt": 1790929800000,
+            "exitReason": "TARGET",
+            "modeledGrossPnlUsd": 7.482093663912167,
+            "modeledNetPnlUsd": 6.692754820936936,
+            "modeledNetRewardRisk": 1.673188705234234
+          }
+        ]
+      },
+      "SUPPLEMENTARY_ETH_LINK_v8_RR1.5_LOW_MODELED_NO_HALF_RISK_SENSITIVITY": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "entries": 1,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 2
+        },
+        "modeledNetPnlUsd": 6.692754820936936,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 406.69275482093695,
+        "outcomes": [
+          {
+            "symbol": "LINK",
+            "entryAt": 1790927100000,
+            "side": "LONG",
+            "setup": "RANGE_MEAN_REVERSION",
+            "entryPrice": 14.3265,
+            "stopPrice": 14.2902,
+            "targetPrice": 14.4623,
+            "notionalUsd": 789.3388429752307,
+            "modeledCostUsd": 0.7893388429752307,
+            "leverage": 10,
+            "marginUsd": 78.93388429752306,
+            "exitPrice": 14.4623,
+            "exitAt": 1790929800000,
+            "exitReason": "TARGET",
+            "modeledGrossPnlUsd": 7.482093663912167,
+            "modeledNetPnlUsd": 6.692754820936936,
+            "modeledNetRewardRisk": 1.673188705234234
+          }
+        ]
+      },
+      "SUPPLEMENTARY_ETH_LINK_v9_RR1.5_LOW_MODELED_POLICY_HALF_AFTER_2_LOSSES_4H": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "entries": 2,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 37,
+          "SINGLE_POSITION_HELD": 4
+        },
+        "modeledNetPnlUsd": 8.299619410742007,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 408.299619410742,
+        "outcomes": [
+          {
+            "symbol": "ETH",
+            "entryAt": 1790920800000,
+            "side": "LONG",
+            "setup": "RANGE_MEAN_REVERSION",
+            "entryPrice": 2719.47,
+            "stopPrice": 2711.7,
+            "targetPrice": 2746.4,
+            "notionalUsd": 699.9922779922796,
+            "modeledCostUsd": 0.6999922779922796,
+            "leverage": 10,
+            "marginUsd": 69.99922779922795,
+            "exitPrice": 2728.23,
+            "exitAt": 1790924400000,
+            "exitReason": "TIME_EXIT",
+            "modeledGrossPnlUsd": 2.2548262548262876,
+            "modeledNetPnlUsd": 1.554833976834008,
+            "modeledNetRewardRisk": 1.557949163449181
+          },
+          {
+            "symbol": "LINK",
+            "entryAt": 1790927100000,
+            "side": "LONG",
+            "setup": "RANGE_MEAN_REVERSION",
+            "entryPrice": 14.3265,
+            "stopPrice": 14.2902,
+            "targetPrice": 14.4623,
+            "notionalUsd": 795.4752972366946,
+            "modeledCostUsd": 0.7954752972366946,
+            "leverage": 10,
+            "marginUsd": 79.54752972366946,
+            "exitPrice": 14.4623,
+            "exitAt": 1790929800000,
+            "exitReason": "TARGET",
+            "modeledGrossPnlUsd": 7.540260731144694,
+            "modeledNetPnlUsd": 6.744785433908,
+            "modeledNetRewardRisk": 1.6796673488176985
+          }
+        ]
+      },
+      "SUPPLEMENTARY_ETH_LINK_v9_RR1.5_LOW_MODELED_NO_HALF_RISK_SENSITIVITY": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "entries": 2,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 37,
+          "SINGLE_POSITION_HELD": 4
+        },
+        "modeledNetPnlUsd": 8.299619410742007,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 408.299619410742,
+        "outcomes": [
+          {
+            "symbol": "ETH",
+            "entryAt": 1790920800000,
+            "side": "LONG",
+            "setup": "RANGE_MEAN_REVERSION",
+            "entryPrice": 2719.47,
+            "stopPrice": 2711.7,
+            "targetPrice": 2746.4,
+            "notionalUsd": 699.9922779922796,
+            "modeledCostUsd": 0.6999922779922796,
+            "leverage": 10,
+            "marginUsd": 69.99922779922795,
+            "exitPrice": 2728.23,
+            "exitAt": 1790924400000,
+            "exitReason": "TIME_EXIT",
+            "modeledGrossPnlUsd": 2.2548262548262876,
+            "modeledNetPnlUsd": 1.554833976834008,
+            "modeledNetRewardRisk": 1.557949163449181
+          },
+          {
+            "symbol": "LINK",
+            "entryAt": 1790927100000,
+            "side": "LONG",
+            "setup": "RANGE_MEAN_REVERSION",
+            "entryPrice": 14.3265,
+            "stopPrice": 14.2902,
+            "targetPrice": 14.4623,
+            "notionalUsd": 795.4752972366946,
+            "modeledCostUsd": 0.7954752972366946,
+            "leverage": 10,
+            "marginUsd": 79.54752972366946,
+            "exitPrice": 14.4623,
+            "exitAt": 1790929800000,
+            "exitReason": "TARGET",
+            "modeledGrossPnlUsd": 7.540260731144694,
+            "modeledNetPnlUsd": 6.744785433908,
+            "modeledNetRewardRisk": 1.6796673488176985
+          }
+        ]
+      },
+      "SUPPLEMENTARY_ETH_LINK_v8_RR1.25_LOW_MODELED_POLICY_HALF_AFTER_2_LOSSES_4H": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "entries": 1,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 2
+        },
+        "modeledNetPnlUsd": 6.692754820936936,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 406.69275482093695,
+        "outcomes": [
+          {
+            "symbol": "LINK",
+            "entryAt": 1790927100000,
+            "side": "LONG",
+            "setup": "RANGE_MEAN_REVERSION",
+            "entryPrice": 14.3265,
+            "stopPrice": 14.2902,
+            "targetPrice": 14.4623,
+            "notionalUsd": 789.3388429752307,
+            "modeledCostUsd": 0.7893388429752307,
+            "leverage": 10,
+            "marginUsd": 78.93388429752306,
+            "exitPrice": 14.4623,
+            "exitAt": 1790929800000,
+            "exitReason": "TARGET",
+            "modeledGrossPnlUsd": 7.482093663912167,
+            "modeledNetPnlUsd": 6.692754820936936,
+            "modeledNetRewardRisk": 1.673188705234234
+          }
+        ]
+      },
+      "SUPPLEMENTARY_ETH_LINK_v8_RR1.25_LOW_MODELED_NO_HALF_RISK_SENSITIVITY": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "entries": 1,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 2
+        },
+        "modeledNetPnlUsd": 6.692754820936936,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 406.69275482093695,
+        "outcomes": [
+          {
+            "symbol": "LINK",
+            "entryAt": 1790927100000,
+            "side": "LONG",
+            "setup": "RANGE_MEAN_REVERSION",
+            "entryPrice": 14.3265,
+            "stopPrice": 14.2902,
+            "targetPrice": 14.4623,
+            "notionalUsd": 789.3388429752307,
+            "modeledCostUsd": 0.7893388429752307,
+            "leverage": 10,
+            "marginUsd": 78.93388429752306,
+            "exitPrice": 14.4623,
+            "exitAt": 1790929800000,
+            "exitReason": "TARGET",
+            "modeledGrossPnlUsd": 7.482093663912167,
+            "modeledNetPnlUsd": 6.692754820936936,
+            "modeledNetRewardRisk": 1.673188705234234
+          }
+        ]
+      },
+      "SUPPLEMENTARY_ETH_LINK_v9_RR1.25_LOW_MODELED_POLICY_HALF_AFTER_2_LOSSES_4H": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "entries": 2,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 37,
+          "SINGLE_POSITION_HELD": 4
+        },
+        "modeledNetPnlUsd": 8.299619410742007,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 408.299619410742,
+        "outcomes": [
+          {
+            "symbol": "ETH",
+            "entryAt": 1790920800000,
+            "side": "LONG",
+            "setup": "RANGE_MEAN_REVERSION",
+            "entryPrice": 2719.47,
+            "stopPrice": 2711.7,
+            "targetPrice": 2746.4,
+            "notionalUsd": 699.9922779922796,
+            "modeledCostUsd": 0.6999922779922796,
+            "leverage": 10,
+            "marginUsd": 69.99922779922795,
+            "exitPrice": 2728.23,
+            "exitAt": 1790924400000,
+            "exitReason": "TIME_EXIT",
+            "modeledGrossPnlUsd": 2.2548262548262876,
+            "modeledNetPnlUsd": 1.554833976834008,
+            "modeledNetRewardRisk": 1.557949163449181
+          },
+          {
+            "symbol": "LINK",
+            "entryAt": 1790927100000,
+            "side": "LONG",
+            "setup": "RANGE_MEAN_REVERSION",
+            "entryPrice": 14.3265,
+            "stopPrice": 14.2902,
+            "targetPrice": 14.4623,
+            "notionalUsd": 795.4752972366946,
+            "modeledCostUsd": 0.7954752972366946,
+            "leverage": 10,
+            "marginUsd": 79.54752972366946,
+            "exitPrice": 14.4623,
+            "exitAt": 1790929800000,
+            "exitReason": "TARGET",
+            "modeledGrossPnlUsd": 7.540260731144694,
+            "modeledNetPnlUsd": 6.744785433908,
+            "modeledNetRewardRisk": 1.6796673488176985
+          }
+        ]
+      },
+      "SUPPLEMENTARY_ETH_LINK_v9_RR1.25_LOW_MODELED_NO_HALF_RISK_SENSITIVITY": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "entries": 2,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 37,
+          "SINGLE_POSITION_HELD": 4
+        },
+        "modeledNetPnlUsd": 8.299619410742007,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 408.299619410742,
+        "outcomes": [
+          {
+            "symbol": "ETH",
+            "entryAt": 1790920800000,
+            "side": "LONG",
+            "setup": "RANGE_MEAN_REVERSION",
+            "entryPrice": 2719.47,
+            "stopPrice": 2711.7,
+            "targetPrice": 2746.4,
+            "notionalUsd": 699.9922779922796,
+            "modeledCostUsd": 0.6999922779922796,
+            "leverage": 10,
+            "marginUsd": 69.99922779922795,
+            "exitPrice": 2728.23,
+            "exitAt": 1790924400000,
+            "exitReason": "TIME_EXIT",
+            "modeledGrossPnlUsd": 2.2548262548262876,
+            "modeledNetPnlUsd": 1.554833976834008,
+            "modeledNetRewardRisk": 1.557949163449181
+          },
+          {
+            "symbol": "LINK",
+            "entryAt": 1790927100000,
+            "side": "LONG",
+            "setup": "RANGE_MEAN_REVERSION",
+            "entryPrice": 14.3265,
+            "stopPrice": 14.2902,
+            "targetPrice": 14.4623,
+            "notionalUsd": 795.4752972366946,
+            "modeledCostUsd": 0.7954752972366946,
+            "leverage": 10,
+            "marginUsd": 79.54752972366946,
+            "exitPrice": 14.4623,
+            "exitAt": 1790929800000,
+            "exitReason": "TARGET",
+            "modeledGrossPnlUsd": 7.540260731144694,
+            "modeledNetPnlUsd": 6.744785433908,
+            "modeledNetRewardRisk": 1.6796673488176985
+          }
+        ]
+      },
+      "SUPPLEMENTARY_ETH_LINK_v8_RR1_LOW_MODELED_POLICY_HALF_AFTER_2_LOSSES_4H": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "entries": 1,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 2
+        },
+        "modeledNetPnlUsd": 6.692754820936936,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 406.69275482093695,
+        "outcomes": [
+          {
+            "symbol": "LINK",
+            "entryAt": 1790927100000,
+            "side": "LONG",
+            "setup": "RANGE_MEAN_REVERSION",
+            "entryPrice": 14.3265,
+            "stopPrice": 14.2902,
+            "targetPrice": 14.4623,
+            "notionalUsd": 789.3388429752307,
+            "modeledCostUsd": 0.7893388429752307,
+            "leverage": 10,
+            "marginUsd": 78.93388429752306,
+            "exitPrice": 14.4623,
+            "exitAt": 1790929800000,
+            "exitReason": "TARGET",
+            "modeledGrossPnlUsd": 7.482093663912167,
+            "modeledNetPnlUsd": 6.692754820936936,
+            "modeledNetRewardRisk": 1.673188705234234
+          }
+        ]
+      },
+      "SUPPLEMENTARY_ETH_LINK_v8_RR1_LOW_MODELED_NO_HALF_RISK_SENSITIVITY": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "entries": 1,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 2
+        },
+        "modeledNetPnlUsd": 6.692754820936936,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 406.69275482093695,
+        "outcomes": [
+          {
+            "symbol": "LINK",
+            "entryAt": 1790927100000,
+            "side": "LONG",
+            "setup": "RANGE_MEAN_REVERSION",
+            "entryPrice": 14.3265,
+            "stopPrice": 14.2902,
+            "targetPrice": 14.4623,
+            "notionalUsd": 789.3388429752307,
+            "modeledCostUsd": 0.7893388429752307,
+            "leverage": 10,
+            "marginUsd": 78.93388429752306,
+            "exitPrice": 14.4623,
+            "exitAt": 1790929800000,
+            "exitReason": "TARGET",
+            "modeledGrossPnlUsd": 7.482093663912167,
+            "modeledNetPnlUsd": 6.692754820936936,
+            "modeledNetRewardRisk": 1.673188705234234
+          }
+        ]
+      },
+      "SUPPLEMENTARY_ETH_LINK_v9_RR1_LOW_MODELED_POLICY_HALF_AFTER_2_LOSSES_4H": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "entries": 2,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 37,
+          "SINGLE_POSITION_HELD": 4
+        },
+        "modeledNetPnlUsd": 8.299619410742007,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 408.299619410742,
+        "outcomes": [
+          {
+            "symbol": "ETH",
+            "entryAt": 1790920800000,
+            "side": "LONG",
+            "setup": "RANGE_MEAN_REVERSION",
+            "entryPrice": 2719.47,
+            "stopPrice": 2711.7,
+            "targetPrice": 2746.4,
+            "notionalUsd": 699.9922779922796,
+            "modeledCostUsd": 0.6999922779922796,
+            "leverage": 10,
+            "marginUsd": 69.99922779922795,
+            "exitPrice": 2728.23,
+            "exitAt": 1790924400000,
+            "exitReason": "TIME_EXIT",
+            "modeledGrossPnlUsd": 2.2548262548262876,
+            "modeledNetPnlUsd": 1.554833976834008,
+            "modeledNetRewardRisk": 1.557949163449181
+          },
+          {
+            "symbol": "LINK",
+            "entryAt": 1790927100000,
+            "side": "LONG",
+            "setup": "RANGE_MEAN_REVERSION",
+            "entryPrice": 14.3265,
+            "stopPrice": 14.2902,
+            "targetPrice": 14.4623,
+            "notionalUsd": 795.4752972366946,
+            "modeledCostUsd": 0.7954752972366946,
+            "leverage": 10,
+            "marginUsd": 79.54752972366946,
+            "exitPrice": 14.4623,
+            "exitAt": 1790929800000,
+            "exitReason": "TARGET",
+            "modeledGrossPnlUsd": 7.540260731144694,
+            "modeledNetPnlUsd": 6.744785433908,
+            "modeledNetRewardRisk": 1.6796673488176985
+          }
+        ]
+      },
+      "SUPPLEMENTARY_ETH_LINK_v9_RR1_LOW_MODELED_NO_HALF_RISK_SENSITIVITY": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "entries": 2,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 37,
+          "SINGLE_POSITION_HELD": 4
+        },
+        "modeledNetPnlUsd": 8.299619410742007,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 408.299619410742,
+        "outcomes": [
+          {
+            "symbol": "ETH",
+            "entryAt": 1790920800000,
+            "side": "LONG",
+            "setup": "RANGE_MEAN_REVERSION",
+            "entryPrice": 2719.47,
+            "stopPrice": 2711.7,
+            "targetPrice": 2746.4,
+            "notionalUsd": 699.9922779922796,
+            "modeledCostUsd": 0.6999922779922796,
+            "leverage": 10,
+            "marginUsd": 69.99922779922795,
+            "exitPrice": 2728.23,
+            "exitAt": 1790924400000,
+            "exitReason": "TIME_EXIT",
+            "modeledGrossPnlUsd": 2.2548262548262876,
+            "modeledNetPnlUsd": 1.554833976834008,
+            "modeledNetRewardRisk": 1.557949163449181
+          },
+          {
+            "symbol": "LINK",
+            "entryAt": 1790927100000,
+            "side": "LONG",
+            "setup": "RANGE_MEAN_REVERSION",
+            "entryPrice": 14.3265,
+            "stopPrice": 14.2902,
+            "targetPrice": 14.4623,
+            "notionalUsd": 795.4752972366946,
+            "modeledCostUsd": 0.7954752972366946,
+            "leverage": 10,
+            "marginUsd": 79.54752972366946,
+            "exitPrice": 14.4623,
+            "exitAt": 1790929800000,
+            "exitReason": "TARGET",
+            "modeledGrossPnlUsd": 7.540260731144694,
+            "modeledNetPnlUsd": 6.744785433908,
+            "modeledNetRewardRisk": 1.6796673488176985
+          }
+        ]
+      },
+      "SUPPLEMENTARY_ETH_LINK_v8_RR1.5_HIGH_MODELED_POLICY_HALF_AFTER_2_LOSSES_4H": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "entries": 0,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 3
+        },
+        "modeledNetPnlUsd": 0,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 400,
+        "outcomes": []
+      },
+      "SUPPLEMENTARY_ETH_LINK_v8_RR1.5_HIGH_MODELED_NO_HALF_RISK_SENSITIVITY": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "entries": 0,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 3
+        },
+        "modeledNetPnlUsd": 0,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 400,
+        "outcomes": []
+      },
+      "SUPPLEMENTARY_ETH_LINK_v9_RR1.5_HIGH_MODELED_POLICY_HALF_AFTER_2_LOSSES_4H": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "entries": 0,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 43
+        },
+        "modeledNetPnlUsd": 0,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 400,
+        "outcomes": []
+      },
+      "SUPPLEMENTARY_ETH_LINK_v9_RR1.5_HIGH_MODELED_NO_HALF_RISK_SENSITIVITY": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "entries": 0,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 43
+        },
+        "modeledNetPnlUsd": 0,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 400,
+        "outcomes": []
+      },
+      "SUPPLEMENTARY_ETH_LINK_v8_RR1.25_HIGH_MODELED_POLICY_HALF_AFTER_2_LOSSES_4H": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "entries": 1,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 2
+        },
+        "modeledNetPnlUsd": 5.903415977961705,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 405.9034159779617,
+        "outcomes": [
+          {
+            "symbol": "LINK",
+            "entryAt": 1790927100000,
+            "side": "LONG",
+            "setup": "RANGE_MEAN_REVERSION",
+            "entryPrice": 14.3265,
+            "stopPrice": 14.2902,
+            "targetPrice": 14.4623,
+            "notionalUsd": 789.3388429752307,
+            "modeledCostUsd": 1.5786776859504614,
+            "leverage": 10,
+            "marginUsd": 78.93388429752306,
+            "exitPrice": 14.4623,
+            "exitAt": 1790929800000,
+            "exitReason": "TARGET",
+            "modeledGrossPnlUsd": 7.482093663912167,
+            "modeledNetPnlUsd": 5.903415977961705,
+            "modeledNetRewardRisk": 1.4758539944904263
+          }
+        ]
+      },
+      "SUPPLEMENTARY_ETH_LINK_v8_RR1.25_HIGH_MODELED_NO_HALF_RISK_SENSITIVITY": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "entries": 1,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 2
+        },
+        "modeledNetPnlUsd": 5.903415977961705,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 405.9034159779617,
+        "outcomes": [
+          {
+            "symbol": "LINK",
+            "entryAt": 1790927100000,
+            "side": "LONG",
+            "setup": "RANGE_MEAN_REVERSION",
+            "entryPrice": 14.3265,
+            "stopPrice": 14.2902,
+            "targetPrice": 14.4623,
+            "notionalUsd": 789.3388429752307,
+            "modeledCostUsd": 1.5786776859504614,
+            "leverage": 10,
+            "marginUsd": 78.93388429752306,
+            "exitPrice": 14.4623,
+            "exitAt": 1790929800000,
+            "exitReason": "TARGET",
+            "modeledGrossPnlUsd": 7.482093663912167,
+            "modeledNetPnlUsd": 5.903415977961705,
+            "modeledNetRewardRisk": 1.4758539944904263
+          }
+        ]
+      },
+      "SUPPLEMENTARY_ETH_LINK_v9_RR1.25_HIGH_MODELED_POLICY_HALF_AFTER_2_LOSSES_4H": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "entries": 2,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 37,
+          "SINGLE_POSITION_HELD": 4
+        },
+        "modeledNetPnlUsd": 6.783490107521287,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 406.7834901075213,
+        "outcomes": [
+          {
+            "symbol": "ETH",
+            "entryAt": 1790920800000,
+            "side": "LONG",
+            "setup": "RANGE_MEAN_REVERSION",
+            "entryPrice": 2719.47,
+            "stopPrice": 2711.7,
+            "targetPrice": 2746.4,
+            "notionalUsd": 699.9922779922796,
+            "modeledCostUsd": 1.3999845559845592,
+            "leverage": 10,
+            "marginUsd": 69.99922779922795,
+            "exitPrice": 2728.23,
+            "exitAt": 1790924400000,
+            "exitReason": "TIME_EXIT",
+            "modeledGrossPnlUsd": 2.2548262548262876,
+            "modeledNetPnlUsd": 0.8548416988417284,
+            "modeledNetRewardRisk": 1.3829510939511112
+          },
+          {
+            "symbol": "LINK",
+            "entryAt": 1790927100000,
+            "side": "LONG",
+            "setup": "RANGE_MEAN_REVERSION",
+            "entryPrice": 14.3265,
+            "stopPrice": 14.2902,
+            "targetPrice": 14.4623,
+            "notionalUsd": 792.7126417626844,
+            "modeledCostUsd": 1.5854252835253686,
+            "leverage": 10,
+            "marginUsd": 79.27126417626843,
+            "exitPrice": 14.4623,
+            "exitAt": 1790929800000,
+            "exitReason": "TARGET",
+            "modeledGrossPnlUsd": 7.514073692204926,
+            "modeledNetPnlUsd": 5.928648408679558,
+            "modeledNetRewardRisk": 1.4790013221628224
+          }
+        ]
+      },
+      "SUPPLEMENTARY_ETH_LINK_v9_RR1.25_HIGH_MODELED_NO_HALF_RISK_SENSITIVITY": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "entries": 2,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 37,
+          "SINGLE_POSITION_HELD": 4
+        },
+        "modeledNetPnlUsd": 6.783490107521287,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 406.7834901075213,
+        "outcomes": [
+          {
+            "symbol": "ETH",
+            "entryAt": 1790920800000,
+            "side": "LONG",
+            "setup": "RANGE_MEAN_REVERSION",
+            "entryPrice": 2719.47,
+            "stopPrice": 2711.7,
+            "targetPrice": 2746.4,
+            "notionalUsd": 699.9922779922796,
+            "modeledCostUsd": 1.3999845559845592,
+            "leverage": 10,
+            "marginUsd": 69.99922779922795,
+            "exitPrice": 2728.23,
+            "exitAt": 1790924400000,
+            "exitReason": "TIME_EXIT",
+            "modeledGrossPnlUsd": 2.2548262548262876,
+            "modeledNetPnlUsd": 0.8548416988417284,
+            "modeledNetRewardRisk": 1.3829510939511112
+          },
+          {
+            "symbol": "LINK",
+            "entryAt": 1790927100000,
+            "side": "LONG",
+            "setup": "RANGE_MEAN_REVERSION",
+            "entryPrice": 14.3265,
+            "stopPrice": 14.2902,
+            "targetPrice": 14.4623,
+            "notionalUsd": 792.7126417626844,
+            "modeledCostUsd": 1.5854252835253686,
+            "leverage": 10,
+            "marginUsd": 79.27126417626843,
+            "exitPrice": 14.4623,
+            "exitAt": 1790929800000,
+            "exitReason": "TARGET",
+            "modeledGrossPnlUsd": 7.514073692204926,
+            "modeledNetPnlUsd": 5.928648408679558,
+            "modeledNetRewardRisk": 1.4790013221628224
+          }
+        ]
+      },
+      "SUPPLEMENTARY_ETH_LINK_v8_RR1_HIGH_MODELED_POLICY_HALF_AFTER_2_LOSSES_4H": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "entries": 1,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 2
+        },
+        "modeledNetPnlUsd": 5.903415977961705,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 405.9034159779617,
+        "outcomes": [
+          {
+            "symbol": "LINK",
+            "entryAt": 1790927100000,
+            "side": "LONG",
+            "setup": "RANGE_MEAN_REVERSION",
+            "entryPrice": 14.3265,
+            "stopPrice": 14.2902,
+            "targetPrice": 14.4623,
+            "notionalUsd": 789.3388429752307,
+            "modeledCostUsd": 1.5786776859504614,
+            "leverage": 10,
+            "marginUsd": 78.93388429752306,
+            "exitPrice": 14.4623,
+            "exitAt": 1790929800000,
+            "exitReason": "TARGET",
+            "modeledGrossPnlUsd": 7.482093663912167,
+            "modeledNetPnlUsd": 5.903415977961705,
+            "modeledNetRewardRisk": 1.4758539944904263
+          }
+        ]
+      },
+      "SUPPLEMENTARY_ETH_LINK_v8_RR1_HIGH_MODELED_NO_HALF_RISK_SENSITIVITY": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "entries": 1,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 2
+        },
+        "modeledNetPnlUsd": 5.903415977961705,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 405.9034159779617,
+        "outcomes": [
+          {
+            "symbol": "LINK",
+            "entryAt": 1790927100000,
+            "side": "LONG",
+            "setup": "RANGE_MEAN_REVERSION",
+            "entryPrice": 14.3265,
+            "stopPrice": 14.2902,
+            "targetPrice": 14.4623,
+            "notionalUsd": 789.3388429752307,
+            "modeledCostUsd": 1.5786776859504614,
+            "leverage": 10,
+            "marginUsd": 78.93388429752306,
+            "exitPrice": 14.4623,
+            "exitAt": 1790929800000,
+            "exitReason": "TARGET",
+            "modeledGrossPnlUsd": 7.482093663912167,
+            "modeledNetPnlUsd": 5.903415977961705,
+            "modeledNetRewardRisk": 1.4758539944904263
+          }
+        ]
+      },
+      "SUPPLEMENTARY_ETH_LINK_v9_RR1_HIGH_MODELED_POLICY_HALF_AFTER_2_LOSSES_4H": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "POLICY_HALF_AFTER_2_LOSSES_4H",
+        "entries": 2,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 37,
+          "SINGLE_POSITION_HELD": 4
+        },
+        "modeledNetPnlUsd": 6.783490107521287,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 406.7834901075213,
+        "outcomes": [
+          {
+            "symbol": "ETH",
+            "entryAt": 1790920800000,
+            "side": "LONG",
+            "setup": "RANGE_MEAN_REVERSION",
+            "entryPrice": 2719.47,
+            "stopPrice": 2711.7,
+            "targetPrice": 2746.4,
+            "notionalUsd": 699.9922779922796,
+            "modeledCostUsd": 1.3999845559845592,
+            "leverage": 10,
+            "marginUsd": 69.99922779922795,
+            "exitPrice": 2728.23,
+            "exitAt": 1790924400000,
+            "exitReason": "TIME_EXIT",
+            "modeledGrossPnlUsd": 2.2548262548262876,
+            "modeledNetPnlUsd": 0.8548416988417284,
+            "modeledNetRewardRisk": 1.3829510939511112
+          },
+          {
+            "symbol": "LINK",
+            "entryAt": 1790927100000,
+            "side": "LONG",
+            "setup": "RANGE_MEAN_REVERSION",
+            "entryPrice": 14.3265,
+            "stopPrice": 14.2902,
+            "targetPrice": 14.4623,
+            "notionalUsd": 792.7126417626844,
+            "modeledCostUsd": 1.5854252835253686,
+            "leverage": 10,
+            "marginUsd": 79.27126417626843,
+            "exitPrice": 14.4623,
+            "exitAt": 1790929800000,
+            "exitReason": "TARGET",
+            "modeledGrossPnlUsd": 7.514073692204926,
+            "modeledNetPnlUsd": 5.928648408679558,
+            "modeledNetRewardRisk": 1.4790013221628224
+          }
+        ]
+      },
+      "SUPPLEMENTARY_ETH_LINK_v9_RR1_HIGH_MODELED_NO_HALF_RISK_SENSITIVITY": {
+        "modeledOnly": true,
+        "assumedInitialEquityUsd": 400,
+        "riskMode": "NO_HALF_RISK_SENSITIVITY",
+        "entries": 2,
+        "blocked": {
+          "MODELED_NET_RR_BELOW_FLOOR": 37,
+          "SINGLE_POSITION_HELD": 4
+        },
+        "modeledNetPnlUsd": 6.783490107521287,
+        "modeledRealizedSettlementMaxDrawdownUsd": 0,
+        "modeledEndingEquityUsd": 406.7834901075213,
+        "outcomes": [
+          {
+            "symbol": "ETH",
+            "entryAt": 1790920800000,
+            "side": "LONG",
+            "setup": "RANGE_MEAN_REVERSION",
+            "entryPrice": 2719.47,
+            "stopPrice": 2711.7,
+            "targetPrice": 2746.4,
+            "notionalUsd": 699.9922779922796,
+            "modeledCostUsd": 1.3999845559845592,
+            "leverage": 10,
+            "marginUsd": 69.99922779922795,
+            "exitPrice": 2728.23,
+            "exitAt": 1790924400000,
+            "exitReason": "TIME_EXIT",
+            "modeledGrossPnlUsd": 2.2548262548262876,
+            "modeledNetPnlUsd": 0.8548416988417284,
+            "modeledNetRewardRisk": 1.3829510939511112
+          },
+          {
+            "symbol": "LINK",
+            "entryAt": 1790927100000,
+            "side": "LONG",
+            "setup": "RANGE_MEAN_REVERSION",
+            "entryPrice": 14.3265,
+            "stopPrice": 14.2902,
+            "targetPrice": 14.4623,
+            "notionalUsd": 792.7126417626844,
+            "modeledCostUsd": 1.5854252835253686,
+            "leverage": 10,
+            "marginUsd": 79.27126417626843,
+            "exitPrice": 14.4623,
+            "exitAt": 1790929800000,
+            "exitReason": "TARGET",
+            "modeledGrossPnlUsd": 7.514073692204926,
+            "modeledNetPnlUsd": 5.928648408679558,
+            "modeledNetRewardRisk": 1.4790013221628224
+          }
+        ]
+      }
+    }
+  },
+  "recommendation": "Keep net RR floor 1.5 unless point-in-time exact-notional cost evidence shows it prevents all feasible opportunities; these modeled sensitivities cannot justify relaxing it."
+}

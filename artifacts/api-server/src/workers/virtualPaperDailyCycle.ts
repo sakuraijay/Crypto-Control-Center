@@ -5,7 +5,7 @@ import type {VirtualPaper400CycleDeps} from './virtualPaper400Cycle';
 import type {DailyPaperCandidate} from './virtualPaperDailyCandidate';
 import {ADAPTIVE_SIGNAL_VERSION} from './virtualPaperDailyCandidate';
 import {DAILY_PAPER_POLICY as policy, LEGACY_DAILY_PAPER_POLICY as legacyPolicy,
-  dailyPaperProfile, dailyPaperRiskPct} from './virtualPaperDailyPolicy';
+  V8_DAILY_PAPER_POLICY as v8Policy, dailyPaperProfile, dailyPaperRiskPct} from './virtualPaperDailyPolicy';
 import {evaluateVirtualPaper400SessionState} from './virtualPaper400SessionState';
 import {evaluateVirtualPaper400Account} from './virtualPaper400Accounting';
 import {buildAdaptiveDailyTradePlan, buildDailyTradePlan, buildFilteredTradePlan, DAILY_ENTRY_OPTIONS,
@@ -14,7 +14,7 @@ import type {PaperComparisonProposal} from './virtualPaperComparison';
 import {validateExecutionEligibleSnapshot} from '../lib/costSnapshot';
 
 export type DailyComparisonLeg = {
-  version:'virtual400-daily/v7'|'virtual400-daily/v8';
+  version:'virtual400-daily/v7'|'virtual400-daily/v8'|'virtual400-daily/v9';
   eligible:boolean;reason:string;side:'LONG'|'SHORT';stopFraction:number|null;
   notionalUsd:number|null;targetPrice:number|null;estimatedRoundTripCostUsd:number|null;netRewardRisk:number|null;
   plan?:VirtualTradePlan|null;
@@ -27,9 +27,18 @@ export interface PairedDailyCandidateComparison {
   adaptive:DailyComparisonLeg&{setup:string|null;score:number};
 }
 export interface PaperEntryEvaluation {
-  id:string;symbol:string;policyVersion:'virtual400-daily/v7'|'virtual400-daily/v8';
+  id:string;symbol:string;policyVersion:'virtual400-daily/v7'|'virtual400-daily/v8'|'virtual400-daily/v9';
   closedAt:number;evaluatedAt:string;eligible:boolean;reason:string;kind:'SIGNAL'|'SAFETY'|'ECONOMICS';
   conditions:Array<{name:string;value:number|null;operator:string;threshold:number|null;passed:boolean|null}>;
+  evidence?:{candidateId:string;source:string;referencePrice:number;currentEntryPrice:number|null;
+    executionEntryPrice:number|null;
+    direction:'LONG'|'SHORT';observedStopPrice:number|null;observedTargetPrice:number|null;
+    actualStopDistanceFraction:number|null;stopBounds:{minimum:.002;maximum:.008};
+    candidateReason:string;
+    selectedSetup:string|null;
+    selectedScore:number;
+    signalConditions:NonNullable<DailyPaperCandidate['evaluation']>['signalConditions'];
+    stopFailure:NonNullable<DailyPaperCandidate['evaluation']>['stopFailure']};
 }
 export interface DailyCycleDeps extends VirtualPaper400CycleDeps {
   readDailyCandidates():Promise<DailyPaperCandidate[]>;
@@ -61,7 +70,7 @@ export async function runVirtualPaperDailyCycle(d:DailyCycleDeps){
   const evaluations:PaperEntryEvaluation[]=[];
   const mode=d.tradingMode??'INTRADAY';
   const adaptivePolicyApplied=d.policyVersion===policy.version;
-  const activePolicy=adaptivePolicyApplied?policy:legacyPolicy;
+  const activePolicy=adaptivePolicyApplied?policy:d.policyVersion===v8Policy.version?v8Policy:legacyPolicy;
   const lastCloseAtMs=d.rows.filter(r=>r.action==='CLOSE'&&r.closeKind==='FULL')
     .reduce<number|null>((latest,r)=>Math.max(latest??0,new Date(r.timestamp).getTime()),null);
   const riskPct=dailyPaperRiskPct(account.next.risk.consecutiveLossCount,lastCloseAtMs,d.now.getTime());
@@ -111,25 +120,34 @@ export async function runVirtualPaperDailyCycle(d:DailyCycleDeps){
     const conditions:Condition[]=[];
       let finalReason='PAPER_CANDIDATE_EVALUATED';
     let finalKind:PaperEntryEvaluation['kind']='SIGNAL';
-    const reject=(reason:string,kind:PaperEntryEvaluation['kind']='SAFETY')=>{
-      diagnostics.push({symbol:candidate.symbol,reason,details:['PAPER_POLICY_COMPARISON: both v7 and v8 outcomes retained']});
-      finalReason=reason;
-      finalKind=kind;
-    };
-    const evaluation:PaperEntryEvaluation={
-      id,symbol:candidate.symbol,policyVersion:adaptivePolicyApplied?policy.version:legacyPolicy.version,
-      closedAt:candidate.closedAt,evaluatedAt:now.toISOString(),eligible:false,reason:'PAPER_CANDIDATE_EVALUATED',
-      kind:'SIGNAL',conditions,
-    };
     const candidateEvaluation=candidate.evaluation;
     const adaptive=candidateEvaluation?.version===ADAPTIVE_SIGNAL_VERSION;
     const signal=adaptive&&candidateEvaluation
       ?candidateEvaluation.signals.find(s=>s.kind===candidateEvaluation.selectedSetup):undefined;
+    const observedTargetPrice=signal?.targetPrice??candidateEvaluation?.signals
+      .filter(s=>s.side===candidate.side&&s.targetPrice!==null).sort((a,b)=>b.score-a.score)[0]?.targetPrice??null;
+    const reject=(reason:string,kind:PaperEntryEvaluation['kind']='SAFETY')=>{
+      diagnostics.push({symbol:candidate.symbol,reason,details:['PAPER_POLICY_COMPARISON: v7 baseline and v9 assessment retained']});
+      finalReason=reason;
+      finalKind=kind;
+    };
+    const evaluation:PaperEntryEvaluation={
+      id,symbol:candidate.symbol,policyVersion:activePolicy.version,
+      closedAt:candidate.closedAt,evaluatedAt:now.toISOString(),eligible:false,reason:'PAPER_CANDIDATE_EVALUATED',
+      kind:'SIGNAL',conditions,
+      evidence:{candidateId:id,source:candidate.source,referencePrice:candidate.referencePrice,currentEntryPrice:null,
+        executionEntryPrice:null,
+        direction:candidate.side,observedStopPrice:candidate.evaluation?.observedStopPrice??null,
+         observedTargetPrice,actualStopDistanceFraction:null,stopBounds:{minimum:.002,maximum:.008},
+        candidateReason:candidate.evaluation?.reason??candidate.quality?.reason??'CANDIDATE_EVALUATION_MISSING',
+        selectedSetup:candidate.evaluation?.selectedSetup??null,selectedScore:candidate.evaluation?.selectedScore??0,
+        signalConditions:candidate.evaluation?.signalConditions??[],stopFailure:candidate.evaluation?.stopFailure??'NO_SIGNAL'},
+    };
     const legacyQuality=candidate.legacyQuality??candidate.quality;
     const legacySide=candidate.legacySide??candidate.side;
     const legacyStopFraction=candidate.legacyStopFraction??candidate.stopFraction;
     let activeBranch:BranchAssessment|null=null;
-    let adaptiveLeg:DailyComparisonLeg={version:policy.version,eligible:false,reason:'V8_SIGNAL_EVIDENCE_MISSING',
+    let adaptiveLeg:DailyComparisonLeg={version:policy.version,eligible:false,reason:'V9_SIGNAL_EVIDENCE_MISSING',
       side:signal?.side??candidate.side,stopFraction:candidate.evaluation?.stopFraction??null,notionalUsd:null,
       targetPrice:signal?.targetPrice??null,estimatedRoundTripCostUsd:null,netRewardRisk:null,
       plan:null,costEvidence:null,conditions:[],setup:signal?.kind??null,
@@ -151,41 +169,53 @@ export async function runVirtualPaperDailyCycle(d:DailyCycleDeps){
         &&candidate.closedAt<=now.getTime()&&now.getTime()-candidate.closedAt<=960_000
         &&Number.isFinite(candidate.referencePrice)&&candidate.referencePrice>0;
       const referenceDeviation=freshQuote?Math.abs(q!.priceUsd/candidate.referencePrice-1):NaN;
+       if(freshQuote)evaluation.evidence!.currentEntryPrice=q!.priceUsd;
       addSharedCondition(condition('quote_age_ms',q?.ageMs??null,'<=',60_000,freshQuote));
       addSharedCondition(condition('candidate_age_ms',Number.isFinite(candidate.evaluatedAt)?now.getTime()-candidate.evaluatedAt:null,'<=',60_000,freshCandidate));
       addSharedCondition(condition('quote_reference_deviation_pct',referenceDeviation*100,'<=',2,Number.isFinite(referenceDeviation)&&referenceDeviation<=.02));
       if(!market||!freshQuote||!freshCandidate||referenceDeviation>.02){
+         if(freshQuote&&referenceDeviation>.02)evaluation.evidence!.stopFailure='REFERENCE_PRICE_DRIFT';
         reject('PAPER_EXPERIMENT_DATA_STALE','SAFETY');return null;
       }
       const current=q!;
       const entry=current.priceUsd;
+      evaluation.evidence!.currentEntryPrice=entry;
       const adaptiveSide=signal?.side??candidate.side;
       const adaptiveStop=candidate.evaluation?.stopPrice;
       const adaptiveStopDistance=Number.isFinite(adaptiveStop)&&adaptiveStop!>0
         ?Math.abs(entry-adaptiveStop!)/entry:NaN;
       const adaptiveStopValid=adaptiveStopDistance>=.002-1e-10&&adaptiveStopDistance<=.008+1e-10
         &&(adaptiveSide==='LONG'?adaptiveStop!<entry:adaptiveStop!>entry);
+      evaluation.evidence!.direction=adaptiveSide;
+      evaluation.evidence!.actualStopDistanceFraction=Number.isFinite(adaptiveStopDistance)?adaptiveStopDistance:null;
+      if(adaptive&&candidateEvaluation?.selectedSetup!==null){
+        if(adaptiveStopValid)evaluation.evidence!.stopFailure=null;
+        else if(!Number.isFinite(adaptiveStop)||adaptiveStop!<=0)evaluation.evidence!.stopFailure='NO_OBSERVED_STOP';
+        else if(adaptiveSide==='LONG'?adaptiveStop!>=entry:adaptiveStop!<=entry)
+          evaluation.evidence!.stopFailure='WRONG_SIDE';
+        else evaluation.evidence!.stopFailure='OUTSIDE_EXECUTOR_BOUNDS';
+      }
       const adaptiveTarget=signal?.targetPrice??null;
       const adaptiveTargetMove=adaptiveTarget!==null?Math.abs(adaptiveTarget-entry)/entry:NaN;
       const observedHorizon=adaptive&&candidateEvaluation?candidateEvaluation.observedHorizonMoveFraction[mode]:NaN;
       const adaptiveHorizonValid=Number.isFinite(adaptiveTargetMove)&&Number.isFinite(observedHorizon)
         &&adaptiveTargetMove<=observedHorizon+1e-10;
-      addArmCondition(adaptiveLeg,condition('v8_signal_score',candidate.evaluation?.selectedScore??null,'>=',
+      addArmCondition(adaptiveLeg,condition('v9_signal_score',candidate.evaluation?.selectedScore??null,'>=',
         candidateEvaluation?.scoreThreshold??null,!!signal?.eligible&&!!candidateEvaluation
           &&candidateEvaluation.selectedScore>=candidateEvaluation.scoreThreshold));
       const setupAllowed=mode==='INTRADAY'||signal?.kind==='TREND_PULLBACK';
-      addArmCondition(adaptiveLeg,condition('v8_setup_allowed_for_mode',setupAllowed?1:0,'=',1,setupAllowed));
-      addArmCondition(adaptiveLeg,condition('v8_atr_fraction',candidate.evaluation?.atrFraction??null,'between',
+      addArmCondition(adaptiveLeg,condition('v9_setup_allowed_for_mode',setupAllowed?1:0,'=',1,setupAllowed));
+      addArmCondition(adaptiveLeg,condition('v9_atr_fraction',candidate.evaluation?.atrFraction??null,'between',
         candidate.evaluation?candidate.evaluation.adaptiveVolatilityMin:null,
         !!candidate.evaluation&&candidate.evaluation.atrFraction>=candidate.evaluation.adaptiveVolatilityMin
           &&candidate.evaluation.atrFraction<=candidate.evaluation.adaptiveVolatilityMax));
-      addArmCondition(adaptiveLeg,condition('v8_atr_fraction_max',candidate.evaluation?.atrFraction??null,'<=',
+      addArmCondition(adaptiveLeg,condition('v9_atr_fraction_max',candidate.evaluation?.atrFraction??null,'<=',
         candidate.evaluation?.adaptiveVolatilityMax??null,
         !!candidate.evaluation&&candidate.evaluation.atrFraction<=candidate.evaluation.adaptiveVolatilityMax));
-      addArmCondition(adaptiveLeg,condition('v8_stop_fraction',adaptiveStopDistance,'between',.002,
+      addArmCondition(adaptiveLeg,condition('v9_stop_fraction',adaptiveStopDistance,'between',.002,
         adaptiveStopValid));
-      addArmCondition(adaptiveLeg,condition('v8_observed_target_move_fraction',adaptiveTargetMove,'<=',observedHorizon,adaptiveHorizonValid));
-      const adaptiveSignalValid=adaptive&&!!candidateEvaluation?.eligible&&!!signal?.eligible
+      addArmCondition(adaptiveLeg,condition('v9_observed_target_move_fraction',adaptiveTargetMove,'<=',observedHorizon,adaptiveHorizonValid));
+      const adaptiveSignalValid=adaptive&&!!candidateEvaluation?.eligible&&!!signal?.eligible&&signal.admissionEligible
         &&signal.side===candidate.side&&signal.side===adaptiveSide&&signal.targetPrice!==null
         &&(signal.targetBasis==='OBSERVED_SWING'||signal.targetBasis==='OBSERVED_RANGE_PROJECTION')
         &&adaptiveStopValid&&adaptiveHorizonValid&&setupAllowed;
@@ -195,20 +225,37 @@ export async function runVirtualPaperDailyCycle(d:DailyCycleDeps){
       addArmCondition(legacyLeg,condition('v7_legacy_quality',legacyQuality?.eligible?1:0,'=',1,!!legacyQuality?.eligible));
       addArmCondition(legacyLeg,condition('v7_legacy_stop_fraction',legacyDistance,'between',.002,legacyStopValid));
 
-      const assessBranch=async(adaptiveBranch:boolean):Promise<BranchAssessment|null>=>{
+       const assessBranch=async(adaptiveBranch:boolean):Promise<BranchAssessment|null>=>{
         const side=adaptiveBranch?adaptiveSide:legacySide;
         const distance=adaptiveBranch?adaptiveStopDistance:legacyDistance;
         const stop=adaptiveBranch?adaptiveStop!:legacyStop;
         const target=adaptiveBranch?adaptiveTarget:null;
         const signalValid=adaptiveBranch?adaptiveSignalValid:!!legacyQuality?.eligible&&legacyStopValid;
-        const reasonPrefix=adaptiveBranch?'V8':'V7';
+        const reasonPrefix=adaptiveBranch?'V9':'V7';
         const report=adaptiveBranch?adaptiveLeg:legacyLeg;
         report.side=side;report.stopFraction=Number.isFinite(distance)?distance:null;report.targetPrice=target;
-        if(!Number.isFinite(distance)||distance<=0){report.reason=`${reasonPrefix}_STOP_INVALID`;return null;}
+         if(adaptiveBranch&&!adaptive){report.reason='V9_SIGNAL_EVIDENCE_MISSING';return null;}
+         if(adaptiveBranch&&candidateEvaluation?.selectedSetup===null){
+           report.reason=candidateEvaluation.stopFailure==='WRONG_SIDE'?'V9_STOP_WRONG_SIDE'
+             :candidateEvaluation.stopFailure==='OUTSIDE_EXECUTOR_BOUNDS'?'V9_STOP_OUTSIDE_EXECUTOR_BOUNDS'
+               :candidateEvaluation.stopFailure==='NO_OBSERVED_STOP'?'V9_STOP_UNOBSERVED'
+                 :candidateEvaluation.reason||'V9_NO_SIGNAL';
+           return null;
+         }
+         if(adaptiveBranch&&(!Number.isFinite(stop)||stop<=0)){
+           report.reason='V9_STOP_UNOBSERVED';return null;
+         }
+         if(adaptiveBranch&&((side==='LONG'&&stop>=entry)||(side==='SHORT'&&stop<=entry))){
+           report.reason='V9_STOP_WRONG_SIDE';return null;
+         }
+         if(adaptiveBranch&&(!Number.isFinite(distance)||distance<.002-1e-10||distance>.008+1e-10)){
+           report.reason='V9_STOP_OUTSIDE_EXECUTOR_BOUNDS';return null;
+         }
+         if(!adaptiveBranch&&(!Number.isFinite(distance)||distance<=0)){report.reason=`${reasonPrefix}_STOP_INVALID`;return null;}
         const requested=Math.min(profile.derivedLimits.maxTotalExposureUsd,Math.max(0,budget-2)/distance);
         report.notionalUsd=requested;
         if(requested<2.2){report.reason='PAPER_EXPERIMENT_BUDGET_EXHAUSTED';return null;}
-        if(!signalValid){report.reason=adaptiveBranch?candidate.evaluation?.reason??'V8_SIGNAL_INELIGIBLE'
+         if(!signalValid){report.reason=adaptiveBranch?candidate.evaluation?.reason??'V9_SIGNAL_INELIGIBLE'
           :legacyQuality?.reason??'V7_QUALITY_EVIDENCE_MISSING';return null;}
         const cost=await d.readCost(candidate.symbol,side==='LONG',requested);
         const validationAt=d.clock?.()??d.now;
@@ -243,7 +290,7 @@ export async function runVirtualPaperDailyCycle(d:DailyCycleDeps){
           maxLeverage:10,estimatedRoundTripCostUsd:roundTrip,riskBudgetUsd:budget,openedAtMs:now.getTime()};
         const planResult=adaptiveBranch&&target!==null
           ?buildAdaptiveDailyTradePlan({...planInput,targetPrice:target})
-          :adaptiveBranch?{ok:false as const,reason:'V8_OBSERVED_TARGET_MISSING'}
+           :adaptiveBranch?{ok:false as const,reason:'V9_OBSERVED_TARGET_MISSING'}
             :buildFilteredTradePlan(planInput);
         if(!planResult.ok){report.reason=planResult.reason;report.plan=null;return null;}
         const plan=planResult.plan;
@@ -278,10 +325,10 @@ export async function runVirtualPaperDailyCycle(d:DailyCycleDeps){
       legacyLeg.eligible=!!legacyAssessed;
       if(legacyAssessed)legacyLeg.reason='V7_CANDIDATE_ACCEPTED';
       adaptiveLeg.eligible=!!adaptiveAssessed;
-      if(adaptiveAssessed)adaptiveLeg.reason='V8_CANDIDATE_ACCEPTED';
+       if(adaptiveAssessed)adaptiveLeg.reason='V9_CANDIDATE_ACCEPTED';
       if(!selected){
         const selectedLeg=adaptivePolicyApplied?adaptiveLeg:legacyLeg;
-        reject(selectedLeg.reason,selectedLeg.reason.includes('QUALITY')||selectedLeg.reason.includes('SIGNAL')
+        reject(selectedLeg.reason,/QUALITY|SIGNAL|SCORE|PATTERN|TARGET|VOLATILITY|REGIME|MOMENTUM/.test(selectedLeg.reason)
           ?'SIGNAL':selectedLeg.reason.includes('PLAN')||selectedLeg.reason.includes('REWARD')||selectedLeg.reason.includes('COST')
             ?'ECONOMICS':'SAFETY');
       }else{
@@ -330,13 +377,27 @@ export async function runVirtualPaperDailyCycle(d:DailyCycleDeps){
       ||!validateExecutionEligibleSnapshot(cost,{market:market.marketToken,isLong:direction===1,
         orderType:'MarketIncrease',notionalUsd:notional},submitNow.getTime()).ok){reject('PAPER_RANKED_QUOTE_CHANGED');continue;}
     if(adaptivePolicyApplied){
+      evaluation.evidence!.executionEntryPrice=current.priceUsd;
+      const executionStopDistance=Math.abs(current.priceUsd-rankedPlan.structuralStop)/current.priceUsd;
+      const executionStopWrongSide=side==='LONG'?rankedPlan.structuralStop>=current.priceUsd:rankedPlan.structuralStop<=current.priceUsd;
+      evaluation.conditions.push(condition('v9_execution_stop_direction',executionStopWrongSide?0:1,'=',1,!executionStopWrongSide));
+      evaluation.conditions.push(condition('v9_execution_stop_distance_fraction',executionStopDistance,'between',.002,
+        !executionStopWrongSide&&executionStopDistance>=.002-1e-10&&executionStopDistance<=.008+1e-10));
+      if(executionStopWrongSide){
+        evaluation.evidence!.stopFailure='EXECUTION_STOP_WRONG_SIDE';
+        reject('V9_EXECUTION_STOP_WRONG_SIDE');continue;
+      }
+      if(executionStopDistance<.002-1e-10||executionStopDistance>.008+1e-10){
+        evaluation.evidence!.stopFailure='EXECUTION_STOP_OUTSIDE_EXECUTOR_BOUNDS';
+        reject('V9_EXECUTION_STOP_OUTSIDE_EXECUTOR_BOUNDS');continue;
+      }
       const executionTargetMove=Math.abs(rankedPlan.tpPrice/current.priceUsd-1);
       const observedBound=candidate.evaluation?.observedHorizonMoveFraction[mode];
       const withinObservedHorizon=typeof observedBound==='number'&&Number.isFinite(observedBound)
         &&observedBound>0&&executionTargetMove<=observedBound+1e-10;
-      evaluation.conditions.push(condition('v8_execution_target_move_fraction',executionTargetMove,'<=',
+       evaluation.conditions.push(condition('v9_execution_target_move_fraction',executionTargetMove,'<=',
         observedBound??null,withinObservedHorizon));
-      if(!withinObservedHorizon){reject('V8_EXECUTION_TARGET_OUTSIDE_OBSERVED_HORIZON');continue;}
+       if(!withinObservedHorizon){reject('V9_EXECUTION_TARGET_OUTSIDE_OBSERVED_HORIZON');continue;}
     }
     const refreshedInput={mode,entryPrice:current.priceUsd,structuralStop:rankedPlan.structuralStop,
       targetPrice:rankedPlan.tpPrice,notionalUsd:notional,maxLeverage:rankedPlan.leverage,
@@ -349,10 +410,10 @@ export async function runVirtualPaperDailyCycle(d:DailyCycleDeps){
     if(d.rows.some(r=>r.openDecisionId===id)){reject('PAPER_EXPERIMENT_DUPLICATE');continue;}
     const activePolicy=adaptivePolicyApplied?policy:legacyPolicy;
     const audit={mode:'VIRTUAL_PAPER_400',policy:activePolicy,sessionId:session.state.session.sessionId,candidate,
-      selection:{score,kind:adaptivePolicyApplied?'V8_SCORE_NET_RISK':'V7_NET_TARGET_COST_QUALITY',riskPct,
+       selection:{score,kind:adaptivePolicyApplied?'V9_SCORE_NET_RISK':'V7_NET_TARGET_COST_QUALITY',riskPct,
         ...(candidate.patternAnalysis?{patternReferenceAdjustment:patternReferenceAdjustment(candidate.patternAnalysis,side,submitNow.getTime())}:{})},
-      signal:{strategyId:adaptivePolicyApplied?'PAPER_V8_STRUCTURAL_SIGNAL':'PAPER_COST_FILTERED_EXPERIMENT',
-        reasons:[adaptivePolicyApplied?`v8 ${candidate.evaluation?.selectedSetup??'UNSELECTED'} score ${candidate.evaluation?.selectedScore??0}; ${candidate.evaluation?.reason??'V8_SIGNAL_EVIDENCE_MISSING'}; not a probability estimate`
+       signal:{strategyId:adaptivePolicyApplied?'PAPER_V9_STRUCTURAL_SIGNAL':'PAPER_COST_FILTERED_EXPERIMENT',
+         reasons:[adaptivePolicyApplied?`v9 ${candidate.evaluation?.selectedSetup??'UNSELECTED'} score ${candidate.evaluation?.selectedScore??0}; ${candidate.evaluation?.reason??'V9_SIGNAL_EVIDENCE_MISSING'}; not a probability estimate`
           :`v7 ${candidate.momentum} completed-candle momentum; losses retained; not ensemble success`],
         strategyTargetPrice:plan.tpPrice},
       tradePlan:plan,sizing:{finalNotionalUsd:notional},cost};

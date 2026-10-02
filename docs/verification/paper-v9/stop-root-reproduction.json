@@ -1,0 +1,318 @@
+{
+  "baselineSha": "e8a6502618a2e971c6e5f91a3d43dcea2aff71bd",
+  "baselineCandidateSha256": "c1be76e7213bc0aefed5d162d7c35f28ed052f68b33da921343a8837e7a17ded",
+  "source": "GMX_OFFICIAL_COMPLETED_CANDLES_AND_PUBLIC_READONLY_PRICE_CACHE",
+  "results": [
+    {
+      "historical": {
+        "symbol": "ETH",
+        "evaluatedAt": "2026-10-02T13:33:00.000Z",
+        "closedAt": "2026-10-02T13:30:00.000Z",
+        "direction": "LONG",
+        "directionBasis": "MOMENTUM_FALLBACK_NOT_ENTRY_PERMISSION",
+        "referencePrice": 2749.75,
+        "observedEntryQuote": null,
+        "quoteObservedAt": null,
+        "stopPrice": null,
+        "stopDistance": null,
+        "selectedSetup": null,
+        "selectedScore": 0,
+        "signalEligible": false,
+        "candidateReason": "NO_EXPLAINABLE_PATTERN_SCORE",
+        "previousReportedReason": "V8_STOP_INVALID",
+        "signalDetails": [
+          {
+            "kind": "TREND_PULLBACK",
+            "side": null,
+            "score": 42,
+            "threshold": 45,
+            "eligible": false,
+            "reason": "REGIME_NOT_TREND",
+            "targetPrice": 2750.56,
+            "targetBasis": "OBSERVED_SWING"
+          },
+          {
+            "kind": "VOLATILITY_BREAKOUT",
+            "side": null,
+            "score": 51,
+            "threshold": 50,
+            "eligible": false,
+            "reason": "NO_CLOSED_BAR_RANGE_BREAK",
+            "targetPrice": null,
+            "targetBasis": null
+          },
+          {
+            "kind": "RANGE_MEAN_REVERSION",
+            "side": null,
+            "score": 35,
+            "threshold": 45,
+            "eligible": false,
+            "reason": "NO_CLOSED_BAR_RANGE_REJECTION",
+            "targetPrice": null,
+            "targetBasis": null
+          }
+        ],
+        "root": "NO_SELECTED_SIGNAL_STOP_NOT_CONSTRUCTED"
+      },
+      "currentObserved": {
+        "symbol": "ETH",
+        "evaluatedAt": "2026-10-02T13:47:21.589Z",
+        "closedAt": "2026-10-02T13:45:00.000Z",
+        "direction": "LONG",
+        "directionBasis": "MOMENTUM_FALLBACK_NOT_ENTRY_PERMISSION",
+        "referencePrice": 2761.49,
+        "observedEntryQuote": 2760.219708351604,
+        "quoteObservedAt": "2026-10-02T13:47:20.012Z",
+        "stopPrice": null,
+        "stopDistance": null,
+        "selectedSetup": null,
+        "selectedScore": 0,
+        "signalEligible": false,
+        "candidateReason": "NO_EXPLAINABLE_PATTERN_SCORE",
+        "previousReportedReason": "V8_STOP_INVALID",
+        "signalDetails": [
+          {
+            "kind": "TREND_PULLBACK",
+            "side": null,
+            "score": 55,
+            "threshold": 45,
+            "eligible": false,
+            "reason": "REGIME_NOT_TREND",
+            "targetPrice": 2764.88,
+            "targetBasis": "OBSERVED_SWING"
+          },
+          {
+            "kind": "VOLATILITY_BREAKOUT",
+            "side": null,
+            "score": 52,
+            "threshold": 50,
+            "eligible": false,
+            "reason": "NO_CLOSED_BAR_RANGE_BREAK",
+            "targetPrice": null,
+            "targetBasis": null
+          },
+          {
+            "kind": "RANGE_MEAN_REVERSION",
+            "side": null,
+            "score": 35,
+            "threshold": 45,
+            "eligible": false,
+            "reason": "NO_CLOSED_BAR_RANGE_REJECTION",
+            "targetPrice": null,
+            "targetBasis": null
+          }
+        ],
+        "root": "NO_SELECTED_SIGNAL_STOP_NOT_CONSTRUCTED"
+      }
+    },
+    {
+      "historical": {
+        "symbol": "LINK",
+        "evaluatedAt": "2026-10-02T13:33:00.000Z",
+        "closedAt": "2026-10-02T13:30:00.000Z",
+        "direction": "SHORT",
+        "directionBasis": "MOMENTUM_FALLBACK_NOT_ENTRY_PERMISSION",
+        "referencePrice": 14.3392,
+        "observedEntryQuote": null,
+        "quoteObservedAt": null,
+        "stopPrice": null,
+        "stopDistance": null,
+        "selectedSetup": null,
+        "selectedScore": 0,
+        "signalEligible": false,
+        "candidateReason": "NO_EXPLAINABLE_PATTERN_SCORE",
+        "previousReportedReason": "V8_STOP_INVALID",
+        "signalDetails": [
+          {
+            "kind": "TREND_PULLBACK",
+            "side": null,
+            "score": 46,
+            "threshold": 45,
+            "eligible": false,
+            "reason": "REGIME_NOT_TREND",
+            "targetPrice": 14.327,
+            "targetBasis": "OBSERVED_SWING"
+          },
+          {
+            "kind": "VOLATILITY_BREAKOUT",
+            "side": null,
+            "score": 65,
+            "threshold": 50,
+            "eligible": false,
+            "reason": "NO_CLOSED_BAR_RANGE_BREAK",
+            "targetPrice": null,
+            "targetBasis": null
+          },
+          {
+            "kind": "RANGE_MEAN_REVERSION",
+            "side": null,
+            "score": 50,
+            "threshold": 45,
+            "eligible": false,
+            "reason": "NO_CLOSED_BAR_RANGE_REJECTION",
+            "targetPrice": null,
+            "targetBasis": null
+          }
+        ],
+        "root": "NO_SELECTED_SIGNAL_STOP_NOT_CONSTRUCTED"
+      },
+      "currentObserved": {
+        "symbol": "LINK",
+        "evaluatedAt": "2026-10-02T13:47:21.589Z",
+        "closedAt": "2026-10-02T13:45:00.000Z",
+        "direction": "LONG",
+        "directionBasis": "MOMENTUM_FALLBACK_NOT_ENTRY_PERMISSION",
+        "referencePrice": 14.4162,
+        "observedEntryQuote": 14.412938091414,
+        "quoteObservedAt": "2026-10-02T13:47:20.012Z",
+        "stopPrice": null,
+        "stopDistance": null,
+        "selectedSetup": null,
+        "selectedScore": 0,
+        "signalEligible": false,
+        "candidateReason": "NO_EXPLAINABLE_PATTERN_SCORE",
+        "previousReportedReason": "V8_STOP_INVALID",
+        "signalDetails": [
+          {
+            "kind": "TREND_PULLBACK",
+            "side": null,
+            "score": 39,
+            "threshold": 45,
+            "eligible": false,
+            "reason": "REGIME_NOT_TREND",
+            "targetPrice": 14.4544,
+            "targetBasis": "OBSERVED_SWING"
+          },
+          {
+            "kind": "VOLATILITY_BREAKOUT",
+            "side": null,
+            "score": 51,
+            "threshold": 50,
+            "eligible": false,
+            "reason": "NO_CLOSED_BAR_RANGE_BREAK",
+            "targetPrice": null,
+            "targetBasis": null
+          },
+          {
+            "kind": "RANGE_MEAN_REVERSION",
+            "side": null,
+            "score": 35,
+            "threshold": 45,
+            "eligible": false,
+            "reason": "NO_CLOSED_BAR_RANGE_REJECTION",
+            "targetPrice": null,
+            "targetBasis": null
+          }
+        ],
+        "root": "NO_SELECTED_SIGNAL_STOP_NOT_CONSTRUCTED"
+      }
+    },
+    {
+      "historical": {
+        "symbol": "XRP",
+        "evaluatedAt": "2026-10-02T13:33:00.000Z",
+        "closedAt": "2026-10-02T13:30:00.000Z",
+        "direction": "SHORT",
+        "directionBasis": "MOMENTUM_FALLBACK_NOT_ENTRY_PERMISSION",
+        "referencePrice": 1.53747,
+        "observedEntryQuote": null,
+        "quoteObservedAt": null,
+        "stopPrice": null,
+        "stopDistance": null,
+        "selectedSetup": null,
+        "selectedScore": 0,
+        "signalEligible": false,
+        "candidateReason": "NO_EXPLAINABLE_PATTERN_SCORE",
+        "previousReportedReason": "V8_STOP_INVALID",
+        "signalDetails": [
+          {
+            "kind": "TREND_PULLBACK",
+            "side": null,
+            "score": 32,
+            "threshold": 45,
+            "eligible": false,
+            "reason": "REGIME_NOT_TREND",
+            "targetPrice": 1.53602,
+            "targetBasis": "OBSERVED_SWING"
+          },
+          {
+            "kind": "VOLATILITY_BREAKOUT",
+            "side": null,
+            "score": 47,
+            "threshold": 50,
+            "eligible": false,
+            "reason": "NO_CLOSED_BAR_RANGE_BREAK",
+            "targetPrice": null,
+            "targetBasis": null
+          },
+          {
+            "kind": "RANGE_MEAN_REVERSION",
+            "side": null,
+            "score": 50,
+            "threshold": 45,
+            "eligible": false,
+            "reason": "NO_CLOSED_BAR_RANGE_REJECTION",
+            "targetPrice": null,
+            "targetBasis": null
+          }
+        ],
+        "root": "NO_SELECTED_SIGNAL_STOP_NOT_CONSTRUCTED"
+      },
+      "currentObserved": {
+        "symbol": "XRP",
+        "evaluatedAt": "2026-10-02T13:47:21.589Z",
+        "closedAt": "2026-10-02T13:45:00.000Z",
+        "direction": "LONG",
+        "directionBasis": "MOMENTUM_FALLBACK_NOT_ENTRY_PERMISSION",
+        "referencePrice": 1.54036,
+        "observedEntryQuote": 1.5387810165985996,
+        "quoteObservedAt": "2026-10-02T13:47:20.012Z",
+        "stopPrice": null,
+        "stopDistance": null,
+        "selectedSetup": null,
+        "selectedScore": 0,
+        "signalEligible": false,
+        "candidateReason": "NO_EXPLAINABLE_PATTERN_SCORE",
+        "previousReportedReason": "V8_STOP_INVALID",
+        "signalDetails": [
+          {
+            "kind": "TREND_PULLBACK",
+            "side": null,
+            "score": 45,
+            "threshold": 45,
+            "eligible": false,
+            "reason": "REGIME_NOT_TREND",
+            "targetPrice": 1.54977,
+            "targetBasis": "OBSERVED_SWING"
+          },
+          {
+            "kind": "VOLATILITY_BREAKOUT",
+            "side": null,
+            "score": 54,
+            "threshold": 50,
+            "eligible": false,
+            "reason": "NO_CLOSED_BAR_RANGE_BREAK",
+            "targetPrice": null,
+            "targetBasis": null
+          },
+          {
+            "kind": "RANGE_MEAN_REVERSION",
+            "side": null,
+            "score": 35,
+            "threshold": 45,
+            "eligible": false,
+            "reason": "NO_CLOSED_BAR_RANGE_REJECTION",
+            "targetPrice": null,
+            "targetBasis": null
+          }
+        ],
+        "root": "NO_SELECTED_SIGNAL_STOP_NOT_CONSTRUCTED"
+      }
+    }
+  ],
+  "limitations": [
+    "Historical 21:33 PHT execution quote was not persisted; reference close is not a fill.",
+    "Captured current quotes belong to their recorded observation, not the historical request.",
+    "A missing selected signal is not proof of a wrong-side stop. All genuine stop invalidity remains blocked."
+  ]
+}
