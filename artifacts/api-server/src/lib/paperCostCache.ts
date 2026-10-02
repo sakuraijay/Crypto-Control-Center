@@ -35,10 +35,9 @@ export interface PaperTradeCostBinding {
 
 /** 거래 삽입 시점의 비용 결속 — 신선한 스냅샷이 없으면 null (0 대체 금지) */
 export function getPaperCostBinding(symbol: string, nowMs = Date.now()): PaperTradeCostBinding | null {
-  const e = cache.get(symbol.toUpperCase());
-  if (!e) return null;
-  if (nowMs - e.storedAtMs > PAPER_COST_BINDING_MAX_AGE_MS) return null;
-  const s = e.snapshot;
+  const snapshot=getPaperCostSnapshot(symbol,nowMs);
+  if(!snapshot)return null;
+  const s=snapshot;
   return {
     costSource: 'PAPER_GMX_ESTIMATE',
     estEntryCostUsd: s.positionFeeUsd + s.executionFeeUsd / 2 + Math.max(s.estimatedPriceImpactUsd, 0),
@@ -47,6 +46,16 @@ export function getPaperCostBinding(symbol: string, nowMs = Date.now()): PaperTr
     borrowingRatePerHourFraction: s.borrowingRatePerHourFraction,
     costFetchedAt: s.fetchedAt,
   };
+}
+
+/** Exact recent snapshot for independent v10 audit/executor binding. */
+export function getPaperCostSnapshot(symbol:string,nowMs=Date.now()):CostSnapshot|null {
+  const e = cache.get(symbol.toUpperCase());
+  if (!e) return null;
+  const age=nowMs-e.storedAtMs;
+  if(!Number.isFinite(nowMs)||!Number.isFinite(e.storedAtMs)||age<0||age>PAPER_COST_BINDING_MAX_AGE_MS)return null;
+  const s = e.snapshot;
+  return {...s};
 }
 
 export function __clearPaperCostCacheForTests(): void {

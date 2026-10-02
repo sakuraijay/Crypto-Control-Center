@@ -5,7 +5,7 @@ interface Cache {bucket:number;fetchedAt:number;raw:RawCandles}
 export async function readPatternCandles(symbol:string,deps:{
   read(key:string):Promise<string|null>;write(key:string,value:unknown):Promise<void>;
   fetch(symbol:string,tf:Timeframe,count:number):Promise<RawCandles>;now():number;
-}):Promise<{raw:RawCandles;analysis:PatternAnalysis}> {
+}):Promise<{raw:RawCandles;rawCandlesByTimeframe:Partial<Record<Timeframe,RawCandles>>;analysis:PatternAnalysis}> {
   const frames=await Promise.all((Object.keys(TIMEFRAMES) as Timeframe[]).map(async tf=>{
     const now=deps.now(),bucket=Math.floor((now-2000)/TIMEFRAMES[tf]);
     const key=`paper_chart_reference_v1:${symbol}:${tf}`;
@@ -24,7 +24,9 @@ export async function readPatternCandles(symbol:string,deps:{
     return {tf,raw};
   }));
   const now=deps.now();
-  return {raw:frames.find(f=>f.tf==='15m')?.raw??null,analysis:{version:PATTERN_VERSION,
+  const rawCandlesByTimeframe:Partial<Record<Timeframe,RawCandles>>={};
+  for(const frame of frames)rawCandlesByTimeframe[frame.tf]=frame.raw;
+  return {raw:frames.find(f=>f.tf==='15m')?.raw??null,rawCandlesByTimeframe,analysis:{version:PATTERN_VERSION,
     purpose:'REFERENCE_ONLY_UNVALIDATED',evaluatedAt:now,
     frames:frames.map(f=>analyzePatternFrame(f.raw,f.tf,now))}};
 }

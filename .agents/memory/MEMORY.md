@@ -112,3 +112,4 @@
 - [Owner Approval durable 복구](owner-approval-durable-recovery.md) — READY는 canonical binding·digest·decrypt·EIP-712 재검증 필수; 만료 evidence는 보존하되 복원 금지
 - [Screenshot analysis trust boundary](screenshot-analysis-trust-boundary.md) — 승인 전 browser-local 이미지; 시각적 근거는 제한된 어휘·요청 identity 결속, 주문 권한과 분리
 - [PAPER 신호·위험 분리](paper-signal-risk-separation.md) — 손실 연속 횟수만의 장기 대기는 제거하되 계좌 보호·원장 보존 유지; 가정 비용으로 경제성 승격 금지
+- [GitHub CI 파일 쓰기 권한](github-workflow-permissions.md) — repo 권한만으로 workflow 수정 불가; fine-grained 자격증명은 OAuth scope 헤더가 없을 수 있음

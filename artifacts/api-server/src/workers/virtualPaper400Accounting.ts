@@ -1,5 +1,5 @@
 import { validatePaperContributions, type PaperContribution } from './virtualPaperContribution';
-import { evaluateDailyPaperRisk, dailyPaperBudget } from './virtualPaperDailyPolicy';
+import { evaluateDailyPaperRisk, evaluatePatternDailyPaperRisk, dailyPaperBudget, patternDailyPaperBudget } from './virtualPaperDailyPolicy';
 import type { DbTrade } from '@workspace/db';
 import { accrueHoldingCostsFromEntryRates } from '../lib/holdingCosts';
 import { initialRiskEngineState, rollRiskPeriods, type PersistedRiskEngineState } from '../lib/riskEngineState';
@@ -58,6 +58,7 @@ export function evaluateVirtualPaper400Account(args: {
   quote: PriceLookup;
   now: Date;
   aggressiveDaily?: boolean;
+  patternDaily?: boolean;
 }) {
   const { session, rows, now, quote } = args;
   const previous = parseVirtualPaper400RiskState(JSON.stringify(args.previous), session);
@@ -167,7 +168,9 @@ export function evaluateVirtualPaper400Account(args: {
     weeklyRealizedNetPnlUsd: weeklyNet,
     dailyEntryCount: opens.filter(row => new Date(row.timestamp).getTime() >= dayStart).length,
     consecutiveLossCount: args.aggressiveDaily?sessionLossStreak:losses, lastUpdatedAt: now.toISOString() };
-  const evaluation: RiskEvaluationResult = args.aggressiveDaily ? evaluateDailyPaperRisk({equity,referenceCapital:ledger.fundedCapitalUsd,
+  const evaluation: RiskEvaluationResult = args.patternDaily ? evaluatePatternDailyPaperRisk({equity,referenceCapital:ledger.fundedCapitalUsd,
+    dailyLossAware:risk.dailyLossAwareNetPnlUsd,dailyRealized:dailyNet,entries:risk.dailyEntryCount,held:held.length,
+    fresh:quotesFresh,locks:risk.locks,weeklyLossAware:weeklyNet+Math.min(unrealizedNet,0)}) : args.aggressiveDaily ? evaluateDailyPaperRisk({equity,referenceCapital:ledger.fundedCapitalUsd,
     dailyLossAware:risk.dailyLossAwareNetPnlUsd,dailyRealized:dailyNet,entries:risk.dailyEntryCount,held:held.length,fresh:quotesFresh,locks:risk.locks,weeklyLossAware:weeklyNet+Math.min(unrealizedNet,0),consecutiveLosses:risk.consecutiveLossCount,lastCloseAtMs:closes.some(r=>r.closeKind==='FULL')?new Date(closes.filter(r=>r.closeKind==='FULL').at(-1)!.timestamp).getTime():undefined,nowMs}) : evaluateRiskState({
     dailyRiskCapitalUsd: Math.min(ledger.fundedCapitalUsd, risk.startOfDayEquityUsd),
     weeklyRiskCapitalUsd: Math.min(ledger.fundedCapitalUsd, risk.startOfWeekEquityUsd),
@@ -184,6 +187,7 @@ export function evaluateVirtualPaper400Account(args: {
     ledgerRowCount: rows.length, settlementCount: closes.length,
     settlementSha256: fixedBetaLedgerBinding(closes).sha256,
     risk: { ...risk, riskOperatingState: evaluation.state, locks: evaluation.locks } };
-  return { ledger, dailyBudget: args.aggressiveDaily ? dailyPaperBudget(ledger.fundedCapitalUsd, dailyNet, risk.dailyLossAwareNetPnlUsd) : null, equityUsd: equity, unrealizedNetPnlUsd: quotesFresh ? unrealizedNet : null,
+  return { ledger, dailyBudget: args.patternDaily ? patternDailyPaperBudget(ledger.fundedCapitalUsd,dailyNet,risk.dailyLossAwareNetPnlUsd)
+    : args.aggressiveDaily ? dailyPaperBudget(ledger.fundedCapitalUsd, dailyNet, risk.dailyLossAwareNetPnlUsd) : null, equityUsd: equity, unrealizedNetPnlUsd: quotesFresh ? unrealizedNet : null,
     held, evaluation, next, lastOpenAtMs: opens.length ? Math.max(...opens.map(row => new Date(row.timestamp).getTime())) : null };
 }

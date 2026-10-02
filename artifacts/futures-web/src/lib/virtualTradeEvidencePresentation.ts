@@ -1,4 +1,7 @@
 export interface TradeEntryEvidence {
+  policyVersion?: string;
+  patternEntry?: import('./patternEntryEvidence').PatternEntryEvidence | null;
+  auxiliaryConditions?: import('./patternEntryEvidence').AuxiliaryEntryCondition[];
   source:string;evaluatedAt:number;closedAt:number;momentumPct:number|null;
   quality:{regime:string|null;eligible:boolean|null;reason:string|null;efficiency:number|null;atrPct:number|null};
   patternStatus:string;patternVersion:string|null;patternAdjustment:number|null;
@@ -42,6 +45,7 @@ const basisLabels:Record<string,string>={
 };
 export const patternBasis=(basis:string|null)=>basis?basisLabels[basis]??basis:'세부 탐지 조건 기록 없음';
 export function entryPatternSummary(e:TradeEntryEvidence|null|undefined):string {
+  if(e?.patternEntry)return `진입 주도: ${timeframeName(e.patternEntry.timeframe)} ${patternName(e.patternEntry.patternId)}`;
   if(!e||e.patternStatus!=='RECORDED')return '패턴 기록 없음';
   const found=e.frames.flatMap(f=>f.findings.map(p=>`${timeframeName(f.timeframe)} ${patternName(p.id)}`));
   if(found.length)return found.slice(0,2).join(' · ')+(found.length>2?` 외 ${found.length-2}개`:'');

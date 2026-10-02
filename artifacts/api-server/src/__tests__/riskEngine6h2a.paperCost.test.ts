@@ -14,7 +14,7 @@ import {
   HOLDING_COST_UNAVAILABLE,
 } from '../lib/holdingCosts';
 import {
-  storePaperCostSnapshot, getPaperCostBinding, __clearPaperCostCacheForTests,
+  storePaperCostSnapshot, getPaperCostBinding, getPaperCostSnapshot, __clearPaperCostCacheForTests,
 } from '../lib/paperCostCache';
 import { pnlForTargets, reconcileLiveSettlements, recordTradeSettlement } from '../lib/tradeSettlement';
 import type { CostSnapshot } from '../lib/costSnapshot';
@@ -185,6 +185,9 @@ describe('§11-4·5·6 보유비용 누적·순 PnL 추정', () => {
       fetchedAt: new Date(t0).toISOString(), expiresAt: new Date(t0 + 60_000).toISOString(),
     };
     storePaperCostSnapshot('ETH', snap, t0);
+    expect(getPaperCostSnapshot('ETH',t0-1)).toBeNull();
+    expect(getPaperCostBinding('ETH',t0-1)).toBeNull();
+    expect(getPaperCostSnapshot('ETH',t0)).toEqual(snap);
     const fresh = getPaperCostBinding('ETH', t0 + 60_000);
     expect(fresh).not.toBeNull();
     expect(fresh!.costSource).toBe('PAPER_GMX_ESTIMATE');

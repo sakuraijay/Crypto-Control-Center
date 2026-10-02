@@ -11,12 +11,13 @@ export interface VirtualPaper400Snapshot {
   activity?: VirtualActivity | null;
   activityFresh?: boolean;
   tradingModeSelection?: { version: string; mode: 'INTRADAY' | 'SWING'; sessionId: string; updatedAt: string } | null;
-  tradingModeOptions?: Record<'INTRADAY' | 'SWING', { label: string; minTargetRoePct: number; maxTargetRoePct: number;
-    targetRoePct: number | null; stopRoePct: number; maxHoldHours: number; exitBasis?: string }>;
+   tradingModeOptions?: Record<'INTRADAY' | 'SWING', { label: string; minTargetRoePct: number | null; maxTargetRoePct: number | null;
+     targetRoePct: number | null; stopRoePct: number | null; maxHoldHours: number; exitBasis?: string }>;
   runtime: null | {
+    patternEntries?: import('../patternEntryEvidence').PatternEntrySnapshot | null;
     calendar?: { version: 'paper-calendar/v1'; status: 'AVAILABLE' | 'UNAVAILABLE'; timezone: 'Asia/Manila'; coverageStart: string | null; throughDate: string | null; observedAt: string | null; days: { date: string; netPnlUsd: number; grossPnlUsd: number; costUsd: number; entries: number; completedTrades: number; settlements: number }[] };
     tradingMode?: { mode: 'INTRADAY' | 'SWING'; targetRoePct: number | null; stopRoePct: number; maxHoldHours: number } | null;
-    policy?: { version: string; appliedAt: string; symbols: string[]; riskPerTradePct: number; minLeverage?: number; maxLeverage: number; cooldownMinutes: number; maxDailyEntries?: number; dailyProfitCapPct?: number; minimumNetRewardRisk?: number } | null;
+    policy?: { version: string; appliedAt: string; symbols: string[]; riskPerTradePct: number; minLeverage?: number; maxLeverage: number; cooldownMinutes: number; maxDailyEntries?: number | null; dailyProfitCapPct?: number | null; minimumNetRewardRisk?: number | null } | null;
     comparison?: {
       version?: string; status: string; candidates?: number; completedPairs?: number;
       baseline?: { trades?: number; netPnlUsd?: number | null; costUsd?: number | null; expectancyUsd?: number | null; winRate?: number | null };
@@ -69,6 +70,7 @@ export interface VirtualPaper400Snapshot {
           eligible: boolean; reason: string; targetPrice: number | null; targetBasis: string | null }[] };
       eligible: boolean; reason: string; kind: 'SIGNAL' | 'SAFETY'; conditions: {
         name: string; value: number | null; operator: string; threshold: number | null; passed: boolean | null;
+        role?: 'AUXILIARY' | 'EXECUTION';
       }[] }[];
     diagnostics?: { symbol: string; reason: string; details?: string[] }[];
     analysis?: { symbol: string; reason: string }[];

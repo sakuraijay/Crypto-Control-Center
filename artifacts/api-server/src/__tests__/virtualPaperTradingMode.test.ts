@@ -14,10 +14,10 @@ describe('PAPER mode plans and immutable exit contract', () => {
     const p = result.plan;
     expect(p.structuralStop).toBe(99.8); expect(p.notionalUsd).toBe(200);
     expect(p.leverage).toBeGreaterThanOrEqual(5); expect(p.leverage).toBeLessThanOrEqual(10);
-    expect(p.plannedRiskUsd / p.collateralUsd * 100).toBeLessThanOrEqual(p.stopRoePct + 1e-8);
+    expect(p.plannedRiskUsd / p.collateralUsd * 100).toBeLessThanOrEqual(p.stopRoePct! + 1e-8);
     expect(p.stopRoePct).toBeLessThan(10);
-    expect((p.tpPrice / 100 - 1) * 200 - .4).toBeCloseTo(p.targetRoePct / 100 * p.collateralUsd);
-    expect(p.targetRoePct / 100 * p.collateralUsd).toBeGreaterThanOrEqual(p.plannedRiskUsd * 2);
+    expect((p.tpPrice / 100 - 1) * 200 - .4).toBeCloseTo(p.targetRoePct! / 100 * p.collateralUsd);
+    expect(p.targetRoePct! / 100 * p.collateralUsd).toBeGreaterThanOrEqual(p.plannedRiskUsd * 2);
     expect(parseVirtualTradePlan(JSON.parse(JSON.stringify(p)))).toEqual(p);
   });
   it('rejects structural risk incompatible with five times leverage, instead of tightening the stop', () => {

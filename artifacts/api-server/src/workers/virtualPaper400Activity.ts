@@ -1,4 +1,5 @@
 import { VIRTUAL_GMX_SYMBOLS } from '../lib/virtualGmxUniverse';
+import type { PatternEntryConflict, PatternEntryWaiting } from '../intel/patterns/patternEntryStrategies';
 /** Observational, process-local telemetry. Never grants trading permission and
  * never writes to the financial ledger. Restart intentionally clears live work. */
 export type VirtualActivityPhase = 'CHECKING_ACCOUNT' | 'CHECKING_COSTS' | 'ANALYZING_MARKETS'
@@ -10,6 +11,8 @@ export interface VirtualActivitySnapshot {
   sessionId: string; cycleNumber: number; startedAt: string; updatedAt: string;
   phase: VirtualActivityPhase; symbols: string[]; outcome: string | null; reason: string | null;
   analysisCompletedAt: string | null; results: VirtualActivityResult[]; events: VirtualActivityEvent[];
+  patternEntries?: {version:string;evaluatedAt:number|null;waiting:Array<PatternEntryWaiting&{symbol:string}>;
+    conflicts:Array<PatternEntryConflict&{symbol:string}>};
 }
 export const VIRTUAL_ACTIVITY_MAX_AGE_MS = 120_000;
 export class VirtualActivityTracker {
@@ -43,6 +46,12 @@ export class VirtualActivityTracker {
     if (!this.current || generation !== this.generation) return;
     this.current = { ...this.current, results: this.current.results.map(row => ({ ...row,
       reason: diagnostics.find(d => d.symbol === row.symbol)?.reason ?? row.reason })) };
+  }
+  patternEntries(generation:number,value:VirtualActivitySnapshot['patternEntries']):void {
+    if(!this.current||generation!==this.generation||!value)return;
+    this.current={...this.current,patternEntries:{version:value.version,evaluatedAt:value.evaluatedAt,
+      waiting:structuredClone(value.waiting.slice(0,120)),
+      conflicts:structuredClone(value.conflicts.slice(0,120))}};
   }
   finish(generation: number, outcome: string, reason: string | null = null): void {
     if (!this.current || generation !== this.generation) return;

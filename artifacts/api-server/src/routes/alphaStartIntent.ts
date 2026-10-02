@@ -2,7 +2,7 @@ import { buildPaperLearningDataset } from '../workers/virtualPaperLearningDatase
 import { evaluatePaperLearningValidation } from '../workers/virtualPaperLearningValidation';
 import { evaluatePaperLearningWalkForward } from '../workers/virtualPaperLearningWalkForward';
 import { evaluateVirtualPaper400Account, parseVirtualPaper400RiskState, virtualPaper400RiskKey } from '../workers/virtualPaper400Accounting';
-import { DAILY_ENTRY_OPTIONS, VIRTUAL_ENTRY_OPTIONS } from '../workers/virtualPaperTradingMode';
+import { DAILY_ENTRY_OPTIONS, PATTERN_DAILY_ENTRY_OPTIONS, VIRTUAL_ENTRY_OPTIONS } from '../workers/virtualPaperTradingMode';
 import { randomUUID } from 'node:crypto';
 import { Router } from 'express';
 import { db, workerStateTable, tradesTable } from '@workspace/db';
@@ -314,7 +314,8 @@ router.get('/data/virtual-paper-400-session', async (_req, res) => {
       session,
       runtime,
       tradingModeSelection,
-      tradingModeOptions: ['virtual400-daily/v3', 'virtual400-daily/v4', 'virtual400-daily/v5', 'virtual400-daily/v6', 'virtual400-daily/v7', 'virtual400-daily/v8', 'virtual400-daily/v9'].includes(runtime?.policy?.version) ? DAILY_ENTRY_OPTIONS : VIRTUAL_ENTRY_OPTIONS,
+       tradingModeOptions: runtime?.policy?.version==='virtual400-daily/v10' ? PATTERN_DAILY_ENTRY_OPTIONS
+         : ['virtual400-daily/v3', 'virtual400-daily/v4', 'virtual400-daily/v5', 'virtual400-daily/v6', 'virtual400-daily/v7', 'virtual400-daily/v8', 'virtual400-daily/v9'].includes(runtime?.policy?.version) ? DAILY_ENTRY_OPTIONS : VIRTUAL_ENTRY_OPTIONS,
       runtimeFresh: Number.isFinite(age) && age >= 0 && age <= 120_000,
       ...virtualPaper400Activity.read(session.state?.session.sessionId ?? null),
     };

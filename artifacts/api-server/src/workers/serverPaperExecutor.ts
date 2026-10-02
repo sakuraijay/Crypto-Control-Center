@@ -1,9 +1,12 @@
-import { DAILY_PAPER_POLICY, LEGACY_DAILY_PAPER_POLICY, isDailyPaperProfile } from './virtualPaperDailyPolicy';
+import {createHash} from 'node:crypto';
+import { DAILY_PAPER_POLICY, LEGACY_DAILY_PAPER_POLICY, PATTERN_DAILY_PAPER_POLICY, isDailyPaperProfile } from './virtualPaperDailyPolicy';
 import { adaptivePaperAuditMatches } from './adaptivePaperAudit';
 import type { DailyPaperCandidate } from './virtualPaperDailyCandidate';
 import { isVirtualActiveProfile, VIRTUAL_ACTIVE_POLICY } from './virtualPaper400Policy';
 import { virtualLeverageCeiling } from './virtualPaper400Sizing';
-import { ADAPTIVE_DAILY_PLAN_VERSION, FILTERED_PLAN_VERSION, DAILY_PLAN_VERSION, STRUCTURAL_PLAN_VERSION, MODE_DECISION_PREFIX, parseVirtualTradePlan, tradingModeExit, modeHoldingCost } from './virtualPaperTradingMode';
+import { ADAPTIVE_DAILY_PLAN_VERSION, FILTERED_PLAN_VERSION, DAILY_PLAN_VERSION, STRUCTURAL_PLAN_VERSION, PATTERN_DAILY_PLAN_VERSION, MODE_DECISION_PREFIX, parseVirtualTradePlan, tradingModeExit, modeHoldingCost } from './virtualPaperTradingMode';
+import { isValidPatternEntryAudit } from './virtualPaperPatternDailyCycle';
+import type { PatternEntryEvidence } from '../intel/patterns/patternEntryStrategies';
 /**
  * serverPaperExecutor — 서버 권위 PAPER 체결·관리·정산 (Task #111).
  *
@@ -29,15 +32,36 @@ import { ADAPTIVE_DAILY_PLAN_VERSION, FILTERED_PLAN_VERSION, DAILY_PLAN_VERSION,
 
 import { db, tradesTable, workerStateTable } from "@workspace/db";
 import { and, eq, like } from "drizzle-orm";
-import { getPaperCostBinding } from "../lib/paperCostCache";
+import { getPaperCostBinding,getPaperCostSnapshot } from "../lib/paperCostCache";
+import { validateExecutionEligibleSnapshot,type CostSnapshot } from "../lib/costSnapshot";
+import { MARKET_BY_SYMBOL_SERVER } from "../lib/gmxMarkets";
 import { accrueHoldingCostsFromEntryRates, computePaperNetPnl } from "../lib/holdingCosts";
 import { computeStopTrigger } from "../lib/stopLossPlan";
 import { computeReduction, GMX_MIN_POSITION_NOTIONAL_USD, canExecuteReduction, buildProfitProtectKey, manilaDayKey, type ProfitProtectRecord } from "../lib/profitProtection";
 import { RISK_POLICY } from "../lib/riskPolicy";
 import { isAppliedRiskProfileSnapshot } from "../lib/riskProfiles";
-import { isVirtualPaper400StrategyTag } from "./virtualPaper400Ledger";
+import { isVirtualPaper400StrategyTag,virtualPaper400StrategyTag } from "./virtualPaper400Ledger";
 
 const fin = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+const sameFlatSnapshot=(a:unknown,b:unknown):a is CostSnapshot=>{
+  if(!a||typeof a!=='object'||Array.isArray(a)||!b||typeof b!=='object'||Array.isArray(b))return false;
+  const x=a as Record<string,unknown>,y=b as Record<string,unknown>,keys=Object.keys(x).sort(),otherKeys=Object.keys(y).sort();
+  return keys.length===otherKeys.length&&keys.every((key,i)=>key===otherKeys[i]&&x[key]===y[key]);
+};
+const bindingMatchesCostSnapshot=(binding:ReturnType<typeof getPaperCostBinding>,snapshot:CostSnapshot):boolean=>
+  !!binding&&binding.costSource===snapshot.source
+  &&binding.estEntryCostUsd===snapshot.positionFeeUsd+snapshot.executionFeeUsd/2+Math.max(snapshot.estimatedPriceImpactUsd,0)
+  &&binding.estExitCostUsd===snapshot.estimatedExitFeeUsd+snapshot.executionFeeUsd/2+Math.max(snapshot.estimatedExitPriceImpactUsd,0)
+  &&binding.fundingRatePerHourFraction===snapshot.fundingRatePerHourFraction
+  &&binding.borrowingRatePerHourFraction===snapshot.borrowingRatePerHourFraction
+  &&binding.costFetchedAt===snapshot.fetchedAt;
+const sameIssuedEvidence=(a:unknown,b:unknown):boolean=>{
+  if(!a||typeof a!=='object'||Array.isArray(a)||!b||typeof b!=='object'||Array.isArray(b))return false;
+  const canonical=(value:unknown):string=>Array.isArray(value)?`[${value.map(canonical).join(',')}]`
+    :value!==null&&typeof value==='object'?`{${Object.entries(value).sort(([x],[y])=>x.localeCompare(y))
+      .map(([k,v])=>`${JSON.stringify(k)}:${canonical(v)}`).join(',')}}`:JSON.stringify(value);
+  return canonical(a)===canonical(b);
+};
 type PaperDb = Pick<typeof db, "select" | "insert" | "update" | "delete">;
 const LIFECYCLE_ROLLBACK = "SERVER_PAPER_LIFECYCLE_ROLLBACK";
 
@@ -313,7 +337,8 @@ export async function openServerPaperPosition(
 
   const dailyExperiment = isVirtualPaper400StrategyTag(strategy) && isDailyPaperProfile(args.riskProfileSnapshot);
   const virtualActive = isVirtualPaper400StrategyTag(strategy) && (isVirtualActiveProfile(args.riskProfileSnapshot) || dailyExperiment);
-  const virtualCostCap = dailyExperiment ? 2 : VIRTUAL_ACTIVE_POLICY.maxRoundTripCostUsd;
+  const virtualCostCap = dailyExperiment ? (args.decisionId.startsWith(MODE_DECISION_PREFIX+'pattern:')
+    ?PATTERN_DAILY_PAPER_POLICY.maxRoundTripCostUsd:2) : VIRTUAL_ACTIVE_POLICY.maxRoundTripCostUsd;
   const virtualV2 = virtualActive && args.riskProfileSnapshot.derivedLimits.maxLeverage === VIRTUAL_ACTIVE_POLICY.maxLeverage;
   if (virtualV2 && (process.env.WORKER_ENGINE_MODE ?? 'PAPER') !== 'PAPER') {
     return record({ ok: false, reason: 'VIRTUAL_PAPER_MODE_REQUIRED' });
@@ -338,7 +363,8 @@ export async function openServerPaperPosition(
   if (args.openPositionCount >= maxConcurrentPositions) {
     return record({ ok: false, reason: `동시 포지션 한도 (${args.openPositionCount}/${maxConcurrentPositions}) — 진입 거부` });
   }
-  if (args.entriesManilaDay >= (dailyExperiment ? DAILY_PAPER_POLICY.maxDailyEntries : RISK_POLICY.maxDailyEntries)) {
+  if (!args.decisionId.startsWith(MODE_DECISION_PREFIX+'pattern:')
+    && args.entriesManilaDay >= (dailyExperiment ? DAILY_PAPER_POLICY.maxDailyEntries : RISK_POLICY.maxDailyEntries)) {
     return record({ ok: false, reason: `Manila 일일 진입 한도 (${args.entriesManilaDay}/${RISK_POLICY.maxDailyEntries}) — 진입 거부` });
   }
   if (!fin(args.sizeUsd) || args.sizeUsd < GMX_MIN_POSITION_NOTIONAL_USD) {
@@ -394,32 +420,73 @@ export async function openServerPaperPosition(
     }
   }
 
-  if (dailyExperiment && !args.decisionId.startsWith(MODE_DECISION_PREFIX+'daily:'))
+  if (dailyExperiment && !args.decisionId.startsWith(MODE_DECISION_PREFIX+'daily:')
+    && !args.decisionId.startsWith(MODE_DECISION_PREFIX+'pattern:'))
     return record({ok:false,reason:'PAPER_EXPERIMENT_PLAN_REQUIRED'});
   let tp: number | null = null;
   if (args.decisionId.startsWith(MODE_DECISION_PREFIX)) {
     const records = await db.select().from(workerStateTable).where(eq(workerStateTable.key, args.decisionId)).limit(2);
-    let audit: { tradePlan?: unknown; signal?: { strategyTargetPrice?: number }; policy?:{version?:string};candidate?:DailyPaperCandidate } | null = null;
+    let audit: { tradePlan?: unknown; signal?: { strategyTargetPrice?: number|null }; policy?:{version?:string};
+      candidate?:(Omit<DailyPaperCandidate,'purpose'>&{purpose:DailyPaperCandidate['purpose']|'PATTERN_ENTRY_EVIDENCE';patternEntry?:PatternEntryEvidence});
+      patternEntry?:unknown;patternEntryVersion?:string;cost?:unknown;sessionId?:string } | null = null;
     try { audit = records.length === 1 ? JSON.parse(records[0].value) : null; } catch { /* refuse malformed intent */ }
     const plan = parseVirtualTradePlan(audit?.tradePlan);
     const holding = plan ? modeHoldingCost({ notionalUsd: args.sizeUsd,
       fundingRatePerHourFraction: binding.fundingRatePerHourFraction,
       borrowingRatePerHourFraction: binding.borrowingRatePerHourFraction }, plan.maxHoldHours) : null;
-    if ((plan?.version === ADAPTIVE_DAILY_PLAN_VERSION || plan?.version === FILTERED_PLAN_VERSION || plan?.version === STRUCTURAL_PLAN_VERSION || plan?.version === DAILY_PLAN_VERSION) && (audit?.signal?.strategyTargetPrice !== plan.tpPrice
+    const patternDaily=plan?.version===PATTERN_DAILY_PLAN_VERSION;
+    const patternEntry=isValidPatternEntryAudit(audit?.patternEntry)?audit!.patternEntry:null;
+    const auditSessionMatches=typeof audit?.sessionId==='string'&&(()=>{try{return strategy===virtualPaper400StrategyTag(audit.sessionId!);}catch{return false;}})();
+    const expectedPatternDecisionId=patternDaily&&patternEntry&&auditSessionMatches
+      ?MODE_DECISION_PREFIX+'pattern:'+createHash('sha256').update(`${audit!.sessionId}:${patternEntry.eventId}`).digest('hex'):null;
+    const expectedMarket=MARKET_BY_SYMBOL_SERVER.get(args.symbol)?.marketToken;
+    const cachedPatternCost=patternDaily?getPaperCostSnapshot(args.symbol,nowMs):null;
+    const costExpectation=expectedMarket?{market:expectedMarket,isLong:args.side==='LONG',
+      orderType:'MarketIncrease' as const,notionalUsd:args.sizeUsd}:null;
+    const validPatternCost=!!patternDaily&&!!cachedPatternCost&&!!costExpectation
+      &&sameFlatSnapshot(audit?.cost,cachedPatternCost)
+      &&bindingMatchesCostSnapshot(binding,cachedPatternCost)
+      &&validateExecutionEligibleSnapshot(cachedPatternCost,costExpectation,nowMs).ok
+      &&validateExecutionEligibleSnapshot(audit?.cost as CostSnapshot,costExpectation,nowMs).ok;
+    if(patternDaily&&!validPatternCost)return record({ok:false,reason:'PAPER_PATTERN_COST_SNAPSHOT_INVALID'});
+    const expectedPatternHoldMs=plan?.mode==='INTRADAY'?3_600_000:plan?.mode==='SWING'?14_400_000:null;
+    const expectedPlanRoundTripCost=binding.estEntryCostUsd+binding.estExitCostUsd+(holding??0)
+      +(patternDaily&&cachedPatternCost?cachedPatternCost.fundingFeeUsd+cachedPatternCost.borrowingFeeUsd:0);
+    if ((plan?.version === ADAPTIVE_DAILY_PLAN_VERSION || plan?.version === FILTERED_PLAN_VERSION || plan?.version === STRUCTURAL_PLAN_VERSION || plan?.version === DAILY_PLAN_VERSION || patternDaily) && (audit?.signal?.strategyTargetPrice !== plan.tpPrice
       || holding === null || !fin(plan.estimatedRoundTripCostUsd)
-      || Math.abs(plan.estimatedRoundTripCostUsd - (binding.estEntryCostUsd + binding.estExitCostUsd + holding)) > 1e-8)) {
+      || Math.abs(plan.estimatedRoundTripCostUsd - expectedPlanRoundTripCost) > 1e-8)) {
       return record({ ok: false, reason: 'VIRTUAL_STRATEGY_TARGET_OR_COST_MISMATCH' });
     }
     const adaptiveDaily = plan?.version === ADAPTIVE_DAILY_PLAN_VERSION;
-    const dailyPlan = adaptiveDaily || plan?.version === FILTERED_PLAN_VERSION;
+    const dailyPlan = adaptiveDaily || patternDaily || plan?.version === FILTERED_PLAN_VERSION;
     if (dailyExperiment !== dailyPlan
       || (dailyExperiment && (args.riskProfileSnapshot.derivedLimits.maxRiskPerTradePct>1
-        || (adaptiveDaily ? audit?.policy?.version !== DAILY_PAPER_POLICY.version || !adaptivePaperAuditMatches(audit?.candidate, plan!, {symbol:args.symbol,side:args.side,nowMs})
+        || (patternDaily ? audit?.policy?.version!==PATTERN_DAILY_PAPER_POLICY.version
+          || audit?.patternEntryVersion!=='paper-pattern-entry/v10'||!patternEntry
+          ||args.decisionId!==expectedPatternDecisionId
+          || patternEntry.symbol!==args.symbol||patternEntry.direction!==args.side
+          || patternEntry.conflictingPatternIds.length>0||patternEntry.expiresAt<nowMs
+          || patternEntry.stopPrice!==plan!.structuralStop||patternEntry.targetPrice!==plan!.tpPrice
+           || patternEntry.maxHoldMs!==plan!.maxHoldMs||patternEntry.maxHoldMs!==expectedPatternHoldMs
+           || plan!.maxHoldHours!==patternEntry.maxHoldMs/3_600_000
+           || patternEntry.eventId!==patternEntry.durableFormationId
+          || (patternEntry.direction==='LONG'?q.priceUsd+1e-10<patternEntry.triggerPrice:q.priceUsd-1e-10>patternEntry.triggerPrice)
+          || Math.abs(q.priceUsd/patternEntry.referencePrice-1)>.02
+          || Math.abs(q.priceUsd-patternEntry.stopPrice)/q.priceUsd<.002-1e-10
+          || Math.abs(q.priceUsd-patternEntry.stopPrice)/q.priceUsd>.008+1e-10
+           || patternEntry.confirmedAt>nowMs||patternEntry.formationAt>patternEntry.confirmedAt
+          || !audit?.candidate||audit.candidate.symbol!==args.symbol||audit.candidate.side!==args.side
+           ||audit.candidate.closedAt!==patternEntry.confirmedAt||patternEntry.confirmedAt>audit.candidate.evaluatedAt
+           ||!sameIssuedEvidence(audit.candidate.patternEntry,patternEntry)
+          : adaptiveDaily ? audit?.policy?.version !== DAILY_PAPER_POLICY.version || !adaptivePaperAuditMatches(audit?.candidate as DailyPaperCandidate|undefined, plan!, {symbol:args.symbol,side:args.side,nowMs})
           : (audit?.candidate?.legacyQuality ?? audit?.candidate?.quality)?.eligible!==true || audit?.policy?.version !== LEGACY_DAILY_PAPER_POLICY.version)
-        || audit?.candidate?.purpose !== 'AGGRESSIVE_PAPER_EXPERIMENT' || audit.candidate.side !== args.side || audit.candidate.symbol !== args.symbol
-        || !fin(audit.candidate.closedAt) || audit.candidate.closedAt > nowMs || nowMs-audit.candidate.closedAt > 960_000
-        || !fin(audit.candidate.evaluatedAt) || audit.candidate.evaluatedAt > nowMs || nowMs-audit.candidate.evaluatedAt > 60_000
-        || !fin(audit.candidate.stopFraction) || (!adaptiveDaily && Math.abs(audit.candidate.stopFraction-stop.plan.stopDistanceFraction)>1e-8))))
+        || (!patternDaily&&(audit?.candidate?.purpose !== 'AGGRESSIVE_PAPER_EXPERIMENT' || audit.candidate.side !== args.side || audit.candidate.symbol !== args.symbol
+        || !fin(audit.candidate.closedAt) || audit.candidate.closedAt > nowMs || nowMs-audit.candidate.closedAt > 960_000))
+        || (patternDaily&&(!audit?.candidate||audit.candidate.purpose!=='PATTERN_ENTRY_EVIDENCE'
+          ||audit.candidate.patternEntry?.eventId!==patternEntry?.eventId
+          ||!fin(audit.candidate.evaluatedAt)||audit.candidate.evaluatedAt>nowMs||nowMs-audit.candidate.evaluatedAt>60_000))
+        || !audit?.candidate || !fin(audit.candidate.evaluatedAt) || audit.candidate.evaluatedAt > nowMs || nowMs-audit.candidate.evaluatedAt > 60_000
+        || !patternDaily&&(!fin(audit.candidate.stopFraction) || (!adaptiveDaily && Math.abs(audit.candidate.stopFraction-stop.plan.stopDistanceFraction)>1e-8)))))
       return record({ok:false,reason:'PAPER_EXPERIMENT_AUDIT_INVALID'});
     if (!virtualV2 || !plan || holding === null || !shouldContinue()
       || plan.entryPrice !== q.priceUsd || plan.structuralStop !== args.stopPriceUsd

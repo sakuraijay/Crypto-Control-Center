@@ -6,12 +6,14 @@ import {recordContinuousPaperComparison,summarizeContinuousPaperComparison,
 import { buildVirtualPaperCalendar } from './virtualPaperCalendar';
 import { PAPER_LEARNING_CONTRACT } from './virtualPaperLearningDataset';
 import { applyAuthorizedPaperCredit } from './virtualPaperContribution';
-import { DAILY_PAPER_POLICY, LEGACY_DAILY_PAPER_POLICY, V8_DAILY_PAPER_POLICY } from './virtualPaperDailyPolicy';
+import { DAILY_PAPER_POLICY, LEGACY_DAILY_PAPER_POLICY, V8_DAILY_PAPER_POLICY, PATTERN_DAILY_PAPER_POLICY } from './virtualPaperDailyPolicy';
 import { runVirtualPaperDailyCycle, type DailyCycleDeps, type PairedDailyCandidateComparison,
   type DailyComparisonLeg, type PaperEntryEvaluation as CycleEntryEvaluation } from './virtualPaperDailyCycle';
 import { dailyPaperCandidate } from './virtualPaperDailyCandidate';
 import { readPatternCandles } from '../intel/patterns/patternReader';
 import { patternSummary } from '../intel/patterns/chartPatterns';
+import { PATTERN_ENTRY_VERSION, evaluatePatternEntries } from '../intel/patterns/patternEntryStrategies';
+import { runVirtualPaperPatternDailyCycle, type PatternDailyCycleDeps } from './virtualPaperPatternDailyCycle';
 import { advanceVirtualDiagnostics, virtualDiagnosticsKey,
   type PaperDiagnosticEvaluation as DiagnosticEntryEvaluation } from './virtualPaper400Diagnostics';
 import type { StrategyShadowRecord } from '../intel/strategyShadowAdapterV2';
@@ -39,6 +41,7 @@ import {
 
 export const VIRTUAL_PAPER_400_RUNTIME_KEY = 'virtual_paper_400_runtime_v1';
 const dailyPolicyVersions: readonly string[] = [DAILY_PAPER_POLICY.version, LEGACY_DAILY_PAPER_POLICY.version, V8_DAILY_PAPER_POLICY.version,
+  PATTERN_DAILY_PAPER_POLICY.version,
   'virtual400-daily/v3', 'virtual400-daily/v4', 'virtual400-daily/v5', 'virtual400-daily/v6'];
 const isDailyPolicy = (version: string | undefined) => dailyPolicyVersions.includes(version ?? '');
 // Shared with START/STOP. This is a coordination lock, not a trading permission.
@@ -97,8 +100,9 @@ export async function maybeRunVirtualPaper400Cycle(args: {
     }
     const executor = getServerPaperStatus();
     const dailyRequested = args.dailyExperiment === true || isDailyPolicy(applied?.version);
-    const desiredPolicy = dailyRequested ? DAILY_PAPER_POLICY : VIRTUAL_ACTIVE_POLICY;
-    const accountBefore = evaluateVirtualPaper400Account({ session: identity, previous, rows, now, quote: args.quote, aggressiveDaily:isDailyPolicy(applied?.version) });
+    const desiredPolicy = dailyRequested ? PATTERN_DAILY_PAPER_POLICY : VIRTUAL_ACTIVE_POLICY;
+    const accountBefore = evaluateVirtualPaper400Account({ session: identity, previous, rows, now, quote: args.quote,
+      aggressiveDaily:isDailyPolicy(applied?.version),patternDaily:applied?.version===PATTERN_DAILY_PAPER_POLICY.version });
     const universe = session.active && accountBefore.evaluation.entryAllowed && !executor.pendingClose && !executor.unresolved
       ? await discoverVirtualGmxUniverse() : null;
     const markets = new Map((universe?.complete ? universe.markets : []).map(m => [m.name.split('/')[0], m]));
@@ -126,12 +130,12 @@ export async function maybeRunVirtualPaper400Cycle(args: {
       if (!args.shouldContinue()) throw new Error('VIRTUAL_WORKER_STOPPED');
       // Append-only policy provenance, not an account reset. The ledger, deposits,
       // baselines, HWM and loss locks remain exactly where they were.
-      if(desiredPolicy.version===DAILY_PAPER_POLICY.version){
+      if(desiredPolicy.version===PATTERN_DAILY_PAPER_POLICY.version){
         const activationKey = `virtual_paper_policy_activation_v1:${identity.sessionId}:${desiredPolicy.version}`;
         await tx.insert(workerStateTable).values({key:activationKey,value:JSON.stringify({
           version:'paper-policy-activation/v1',sessionId:identity.sessionId,
           previousPolicy:applied,policyVersion:desiredPolicy.version,appliedAt:now.toISOString(),
-          reason:'ACTIVE_FLAT_NO_PENDING_OR_UNRESOLVED',approvalScope:'USER_APPROVED_PAPER_V9_ONLY',realFundsUsed:false,
+           reason:'ACTIVE_FLAT_NO_PENDING_OR_UNRESOLVED',approvalScope:'USER_APPROVED_PAPER_PATTERN_ENTRY_V10_ONLY',realFundsUsed:false,
         }),updatedAt:now}).onConflictDoNothing({target:workerStateTable.key});
       }
       applied = { version: desiredPolicy.version, appliedAt: now.toISOString(), sessionId: identity.sessionId };
@@ -163,6 +167,7 @@ export async function maybeRunVirtualPaper400Cycle(args: {
       return { ...result.snapshot, source: 'PAPER_GMX_ESTIMATE' };
     };
     const dailyEnabled=isDailyPolicy(applied?.version);
+    const patternEnabled=applied?.version===PATTERN_DAILY_PAPER_POLICY.version;
     const adaptiveEnabled=applied?.version===DAILY_PAPER_POLICY.version;
     const comparisonKey=`virtual_paper_comparison_v1:${identity.sessionId}`;
     let comparison: ReturnType<typeof restorePaperComparison>|null=null;
@@ -173,6 +178,15 @@ export async function maybeRunVirtualPaper400Cycle(args: {
     } catch { /* Preserve malformed evidence; diagnostics must not disable protective exits. */ }
     const pairedComparisons:PairedDailyCandidateComparison[]=[];
     const entryEvaluations:CycleEntryEvaluation[]=[];
+    let patternEntries:{version:typeof PATTERN_ENTRY_VERSION;evaluatedAt:number|null;
+      candidates:Array<import('../intel/patterns/patternEntryStrategies').PatternEntryEvidence&{
+        auxiliaryConditions:import('./virtualPaperPatternDailyCycle').PatternAuxiliaryCondition[]}>;
+      waiting:Array<import('../intel/patterns/patternEntryStrategies').PatternEntryWaiting&{symbol:string}>;
+      conflicts:Array<import('../intel/patterns/patternEntryStrategies').PatternEntryConflict&{symbol:string}>}=
+      {version:PATTERN_ENTRY_VERSION,evaluatedAt:null,candidates:[],waiting:[],conflicts:[]};
+    let patternEntryEvaluations:import('./virtualPaperPatternDailyCycle').PatternEntryEvaluation[]=[];
+    let patternEntryCandidates:Array<{patternEntry:import('../intel/patterns/patternEntryStrategies').PatternEntryEvidence;
+      auxiliaryConditions:import('./virtualPaperPatternDailyCycle').PatternAuxiliaryCondition[]}>=[];
     const continuousStore:ContinuousPaperComparisonStore={
       read,shouldContinue:args.shouldContinue,
       write:async(key,value)=>{
@@ -184,7 +198,7 @@ export async function maybeRunVirtualPaper400Cycle(args: {
           .onConflictDoUpdate({target:workerStateTable.key,set:{value,updatedAt}});
       },
     };
-    const cycleDeps: DailyCycleDeps = { sessionRaw: raw!, policyAppliedAt: applied?.appliedAt, policyVersion: applied?.version,
+    const cycleDeps: DailyCycleDeps&Pick<PatternDailyCycleDeps,'readPatternCandidates'> = { sessionRaw: raw!, policyAppliedAt: applied?.appliedAt, policyVersion: applied?.version,
       tradingMode: selectedMode?.mode, structuralTargets: true, markets,
       entryBlockedReason: executor.unresolved || executor.pendingClose ? 'EXECUTOR_RECOVERY_PENDING'
         : !dailyEnabled && continuity.status === 'BLOCKED' ? continuity.reason
@@ -202,7 +216,7 @@ export async function maybeRunVirtualPaper400Cycle(args: {
       recordComparison: proposal => {if(comparison&&!adaptiveEnabled)addPaperComparison(comparison,proposal);},
       recordPairedComparison:proposal=>{pairedComparisons.push(proposal);},
       recordEntryEvaluation:evaluation=>{entryEvaluations.push(evaluation);},
-      readDailyCandidates: async () => {
+     readDailyCandidates: async () => {
         if (!universe?.complete || !symbols.length || !args.shouldContinue()) return [];
         await write(rotationKey,{...rotation,...Object.fromEntries(symbols.map(s=>[s,Date.now()]))});
         activity.stage(run,'ANALYZING_MARKETS',symbols);
@@ -217,6 +231,89 @@ export async function maybeRunVirtualPaper400Cycle(args: {
           : 'PAPER_EXPERIMENT_CANDLE_UNAVAILABLE'}));
         activity.analyzed(run,analysis.map((r,i)=>({...r,evaluated:!!candidates[i]})));
         return candidates.filter((c):c is NonNullable<typeof c>=>c!==null);
+      },
+      readPatternCandidates: async () => {
+        if(!patternEnabled||!universe?.complete||!symbols.length||!args.shouldContinue())return [];
+        await write(rotationKey,{...rotation,...Object.fromEntries(symbols.map(s=>[s,Date.now()]))});
+        activity.stage(run,'ANALYZING_MARKETS',symbols);
+        const {fetchGmxCandles}=await import('../routes/gmx');
+        const gathered=await Promise.all(symbols.map(async symbol=>{
+          const nowMs=Date.now();
+          const data=await readPatternCandles(symbol,{read,write,fetch:fetchGmxCandles,now:Date.now});
+          const result=evaluatePatternEntries(symbol,data.rawCandlesByTimeframe,nowMs,selectedMode?.mode??'INTRADAY');
+          const auxiliary=dailyPaperCandidate(symbol,data.raw,nowMs,'v9',selectedMode?.mode??'INTRADAY');
+          const auxiliaryConditions=[
+            {name:'v9_signal_quality',value:auxiliary?.quality.eligible?1:0,operator:'AUXILIARY',threshold:null,
+              passed:auxiliary?.quality.eligible??null,role:'AUXILIARY' as const},
+            {name:'v9_momentum_fraction',value:auxiliary?.momentum??null,operator:'AUXILIARY',threshold:null,
+              passed:null,role:'AUXILIARY' as const},
+            {name:'v9_regime_trend',value:auxiliary?.quality.regime==='TREND'?1:auxiliary?0:null,operator:'AUXILIARY',
+              threshold:null,passed:null,role:'AUXILIARY' as const},
+            {name:'v9_atr_fraction',value:auxiliary?.quality.atrFraction??null,operator:'AUXILIARY',threshold:null,
+              passed:null,role:'AUXILIARY' as const},
+            {name:'v9_score',value:auxiliary?.evaluation?.selectedScore??null,operator:'AUXILIARY',threshold:null,
+              passed:null,role:'AUXILIARY' as const},
+            {name:'v9_minimum_net_reward_risk',value:null,operator:'AUXILIARY',threshold:1.5,
+              passed:null,role:'AUXILIARY' as const},
+            {name:'v9_expected_net_positive',value:null,operator:'AUXILIARY',threshold:0,
+              passed:null,role:'AUXILIARY' as const},
+            ...(auxiliary?.evaluation?.signalConditions??[]).flatMap(signal=>[
+              {name:`v9_${signal.setup.toLowerCase()}_score`,value:signal.score,operator:'AUXILIARY',
+                threshold:signal.threshold,passed:null,role:'AUXILIARY' as const},
+              {name:`v9_${signal.setup.toLowerCase()}_mode_allowed`,value:signal.modeAllowed===null?null:signal.modeAllowed?1:0,
+                operator:'AUXILIARY',threshold:1,passed:null,role:'AUXILIARY' as const},
+              {name:`v9_${signal.setup.toLowerCase()}_horizon_move_fraction`,value:signal.observedHorizonMoveFraction,
+                operator:'AUXILIARY',threshold:signal.targetMoveFraction,passed:null,role:'AUXILIARY' as const},
+              {name:`v9_${signal.setup.toLowerCase()}_stop_failure`,value:signal.stopFailure==='NO_SIGNAL'?0:1,
+                operator:'AUXILIARY',threshold:null,passed:null,role:'AUXILIARY' as const},
+            ]),
+          ];
+          return {symbol,result,evaluatedAt:nowMs,auxiliaryConditions,analysis:auxiliary
+            ?`${auxiliary.side}; v9 AUX: ${auxiliary.quality.reason}; ${patternSummary(data.analysis)}`
+            :`PATTERN_ONLY; ${patternSummary(data.analysis)}`};
+        }));
+        const allCandidates=gathered.flatMap(x=>x.result.candidates);
+        const candidates=allCandidates.filter(c=>c.timeframe==='15m'||c.timeframe==='1h'||c.timeframe==='4h');
+        const unsupportedCandidates=allCandidates.filter(c=>!['15m','1h','4h'].includes(c.timeframe));
+        const crossSideSymbols=new Set([...new Set(candidates.map(c=>c.symbol))].filter(symbol=>{
+          const sides=new Set(candidates.filter(c=>c.symbol===symbol).map(c=>c.direction));
+          return sides.size>1;
+        }));
+        const crossTfConflicts=[...crossSideSymbols].flatMap(symbol=>{
+          const rows=candidates.filter(c=>c.symbol===symbol);
+          return [...new Set(rows.map(c=>c.timeframe))].map(timeframe=>{
+            const local=rows.filter(c=>c.timeframe===timeframe);
+            const formationAt=Math.max(...local.map(c=>c.formationAt));
+            return {symbol,eventId:`${symbol}:CROSS_TIMEFRAME_CONFLICT:${timeframe}:${formationAt}`,
+              timeframe,formationAt,
+              reason:`Opposite issued pattern directions across ${[...new Set(rows.map(c=>c.timeframe))].join(', ')}; all entries withheld pending explicit deterministic arbitration.`,
+              longPatternIds:rows.filter(x=>x.direction==='LONG').flatMap(x=>x.supportingPatternIds),
+              shortPatternIds:rows.filter(x=>x.direction==='SHORT').flatMap(x=>x.supportingPatternIds)};
+          });
+        });
+        patternEntries={version:PATTERN_ENTRY_VERSION,evaluatedAt:Math.max(...gathered.map(x=>x.evaluatedAt)),
+           candidates:candidates.filter(c=>!crossSideSymbols.has(c.symbol)).map(patternEntry=>({
+             ...patternEntry,auxiliaryConditions:gathered.find(x=>x.symbol===patternEntry.symbol)?.auxiliaryConditions??[]})),
+           waiting:[...gathered.flatMap(x=>x.result.waiting.map(w=>({...w,symbol:x.symbol}))),
+             ...unsupportedCandidates.map(c=>({symbol:c.symbol,eventId:c.eventId,patternId:c.patternId,
+               timeframe:c.timeframe,formationAt:c.formationAt,reason:'UNSUPPORTED_ENTRY_TIMEFRAME',
+               upperTrigger:null,lowerTrigger:null})),
+            ...candidates.filter(c=>crossSideSymbols.has(c.symbol)).map(c=>({symbol:c.symbol,eventId:c.eventId,
+              patternId:c.patternId,timeframe:c.timeframe,formationAt:c.formationAt,
+              reason:'CROSS_TIMEFRAME_OPPOSING_EVIDENCE_WITHHELD',upperTrigger:null,lowerTrigger:null}))],
+          conflicts:[...gathered.flatMap(x=>x.result.conflicts.map(c=>({...c,symbol:x.symbol}))),...crossTfConflicts]};
+        patternEntryCandidates=gathered.filter(x=>!crossSideSymbols.has(x.symbol))
+          .flatMap(x=>x.result.candidates.map(patternEntry=>({patternEntry,auxiliaryConditions:x.auxiliaryConditions})));
+        analysis=symbols.map(symbol=>{
+          const item=gathered.find(x=>x.symbol===symbol)!;
+          const waits=patternEntries.waiting.filter(w=>w.symbol===symbol).map(w=>`${w.eventId}:${w.reason}`);
+          const conflicts=patternEntries.conflicts.filter(c=>c.symbol===symbol).map(c=>`${c.eventId}:${c.reason}`);
+          return {symbol,reason:`${item.analysis}; issued=${item.result.candidates.length}; waiting=${waits.join('|')||'none'}; conflicts=${conflicts.join('|')||'none'}`};
+        });
+        activity.analyzed(run,analysis.map(row=>({...row,evaluated:true})));
+        activity.patternEntries(run,patternEntries);
+        return gathered.filter(x=>!crossSideSymbols.has(x.symbol))
+          .flatMap(x=>x.result.candidates.map(patternEntry=>({patternEntry,auxiliaryConditions:x.auxiliaryConditions})));
       },
       readSignals: async () => {
         if (getServerPaperStatus().unresolved) return [];
@@ -290,14 +387,19 @@ export async function maybeRunVirtualPaper400Cycle(args: {
           shouldContinue: args.shouldContinue })).ok;
       },
     };
-    const result = await (dailyEnabled ? runVirtualPaperDailyCycle(cycleDeps) : runVirtualPaper400Cycle(cycleDeps));
+     const result = patternEnabled
+       ? await runVirtualPaperPatternDailyCycle({...cycleDeps,readPatternCandidates:cycleDeps.readPatternCandidates})
+       : await (dailyEnabled ? runVirtualPaperDailyCycle(cycleDeps) : runVirtualPaper400Cycle(cycleDeps));
+     if('entryEvaluations' in result&&Array.isArray(result.entryEvaluations)) {
+       if(patternEnabled)patternEntryEvaluations=result.entryEvaluations as typeof patternEntryEvaluations;
+     }
     activity.decisions(run, result.diagnostics);
     activity.stage(run, 'RECONCILING');
     // Read back the durable executor rows after OPEN/CLOSE/REDUCE. No invented PnL.
     const finalRows = await loadTrades();
     const currentRisk = parseVirtualPaper400RiskState((await read(riskKey))!, identity);
-    const final = evaluateVirtualPaper400Account({ session: identity, rows: finalRows,
-      previous: currentRisk, now: new Date(), quote: args.quote, aggressiveDaily:dailyEnabled });
+     const final = evaluateVirtualPaper400Account({ session: identity, rows: finalRows,
+       previous: currentRisk, now: new Date(), quote: args.quote, aggressiveDaily:dailyEnabled,patternDaily:patternEnabled });
     await write(riskKey, final.next);
     const journal = await Promise.all([...finalRows].filter(row => row.action === 'CLOSE')
       .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()).slice(0, 10).map(async close => {
@@ -383,8 +485,11 @@ export async function maybeRunVirtualPaper400Cycle(args: {
       }
     }
     await write(VIRTUAL_PAPER_400_RUNTIME_KEY, { ...result, performance:paperPerformance(finalRows),
-       comparison:comparison?{...summarizePaperComparison(comparison),...(adaptiveEnabled?{archive:true,collectionStoppedAtPolicy:'virtual400-daily/v9'}:{})}:{status:'UNAVAILABLE'},
+       comparison:comparison?{...summarizePaperComparison(comparison),
+         ...((adaptiveEnabled||patternEnabled)?{archive:true,
+           collectionStoppedAtPolicy:patternEnabled?'virtual400-daily/v10':'virtual400-daily/v9'}:{})}:{status:'UNAVAILABLE'},
       continuousComparison,entryEvaluations:diagnosticEvaluations,
+       patternEntries:patternEnabled?patternEntries:null,patternEntryCandidates,patternEntryEvaluations,
       learning: { ...PAPER_LEARNING_CONTRACT, settledRows: final.ledger.settlementCount }, tradingDiagnostics: diagnostic.summary, universe: universe ? { ...universe, batchSymbols: symbols } : null, analysis, journal, calendar: buildVirtualPaperCalendar(identity, finalRows, new Date()), sessionId: identity.sessionId,
       strategyContinuity: summarizeVirtualPaper400StrategyContinuity(continuity),
       at: new Date().toISOString(), account: { ...result.account, ledger: final.ledger, dailyBudget: final.dailyBudget,

@@ -9,6 +9,7 @@ import { VirtualTradingModeControls } from './VirtualTradingModeControls';
 import { VirtualPerformanceChart } from './VirtualPerformanceChart';
 import { VirtualTradeJournal } from './VirtualTradeJournal';
 import { AiAnalysisActivity } from './AiAnalysisActivity';
+import { PatternEntryDiagnostics } from './PatternEntryDiagnostics';
 
 function Metric({ label, value, unit = 'USDC', note, icon: Icon, tone = '', featured = false, initial }: {
   label: string; value: string; unit?: string; note: string; icon: typeof Wallet; tone?: string; featured?: boolean; initial?: string;
@@ -186,15 +187,26 @@ export function VirtualPaper400Card() {
     <div className="ccc-overview-grid"><VirtualPerformanceChart runtime={runtime} fresh={fresh} />
       <section className="ccc-panel ccc-strategy-panel" aria-label="자동매매 상태와 설정"><div className="ccc-panel-heading"><div><p className="ccc-eyebrow">AUTOMATION</p><h2>자동매매 상태</h2></div><span className={`ccc-radar-icon ${active&&!blocked?'is-active':''}`}><Radar size={20} /></span></div>
         <div className="ccc-strategy-message"><h3>{headline}</h3><p>{stopped?'기존 포지션의 손절·익절 보호는 계속됩니다.':explainReason(runtime?.reason)}</p></div>
-         {policy ? <div className="ccc-policy" data-testid="virtual-active-policy"><div className="ccc-policy-name"><SlidersHorizontal size={15} /><strong>{policy.version==='virtual400-daily/v9'?'완화형 PAPER 시험':policy.version==='virtual400-daily/v7'?'비용 선별 PAPER 시험':['virtual400-daily/v3','virtual400-daily/v4','virtual400-daily/v5','virtual400-daily/v6','virtual400-daily/v7','virtual400-daily/v8'].includes(policy.version)?'적극적 PAPER 시험':['virtual400-active/v1','virtual400-active/v2'].includes(policy.version)?'적극적 가상 매매':'저장된 운용 설정'}</strong><span>서버 적용</span></div><dl><div><dt>1회 위험 예산</dt><dd>{policy.riskPerTradePct}%</dd></div><div><dt>레버리지 {policy.minLeverage ? '범위' : '상한'}</dt><dd>{policy.minLeverage ? `${policy.minLeverage}–${policy.maxLeverage}x` : `최대 ${policy.maxLeverage}x`}</dd></div><div><dt>진입 간격</dt><dd>{policy.cooldownMinutes}분</dd></div></dl><p className="ccc-policy-symbols">{policy.symbols.join(' · ')}</p><p className="ccc-diagnostics-note">{policy.version} · 적용 {timestamp(policy.appliedAt)} PHT{policy.minimumNetRewardRisk !== undefined ? ` · 최소 비용 차감 손익비 ${policy.minimumNetRewardRisk}` : ''}</p>{policy.version==='virtual400-daily/v9' && <p className="ccc-diagnostics-note">연속 손실만으로 장시간 진입을 중단하지 않습니다. 신호·비용·남은 손실 예산과 손절 조건을 다시 평가합니다.</p>}</div>
+         {policy ? <div className="ccc-policy" data-testid="virtual-active-policy">
+           <div className="ccc-policy-name"><SlidersHorizontal size={15} /><strong>{policy.version==='virtual400-daily/v10'?'38개 패턴 주도 PAPER 시험':policy.version==='virtual400-daily/v9'?'완화형 PAPER 시험':policy.version==='virtual400-daily/v7'?'비용 선별 PAPER 시험':['virtual400-daily/v3','virtual400-daily/v4','virtual400-daily/v5','virtual400-daily/v6','virtual400-daily/v7','virtual400-daily/v8'].includes(policy.version)?'적극적 PAPER 시험':['virtual400-active/v1','virtual400-active/v2'].includes(policy.version)?'적극적 가상 매매':'저장된 운용 설정'}</strong><span>서버 적용</span></div>
+           <dl><div><dt>1회 위험 예산</dt><dd>{policy.riskPerTradePct}%</dd></div><div><dt>레버리지 {policy.minLeverage ? '범위' : '상한'}</dt><dd>{policy.minLeverage ? `${policy.minLeverage}–${policy.maxLeverage}x` : `최대 ${policy.maxLeverage}x`}</dd></div><div><dt>{policy.version==='virtual400-daily/v10'?'주문 중복 방지':'진입 간격'}</dt><dd>{policy.version==='virtual400-daily/v10'?'패턴 사건별 1회':`${policy.cooldownMinutes}분`}</dd></div></dl>
+           <p className="ccc-policy-symbols">{policy.symbols.join(' · ')}</p>
+           <p className="ccc-diagnostics-note">{policy.version} · 적용 {timestamp(policy.appliedAt)} PHT{policy.version!=='virtual400-daily/v10' && typeof policy.minimumNetRewardRisk==='number' ? ` · 최소 비용 차감 손익비 ${policy.minimumNetRewardRisk}` : ''}</p>
+           {['virtual400-daily/v9','virtual400-daily/v10'].includes(policy.version) && <p className="ccc-diagnostics-note">연속 손실만으로 장시간 진입을 중단하지 않습니다. 비용·남은 손실 예산과 손절을 다시 확인합니다.</p>}
+           {policy.version==='virtual400-daily/v10' && <p className="ccc-callout">38개 패턴이 독립 후보를 생성합니다. 중립은 후속 완료봉 돌파까지 대기합니다. 기존 점수·국면·모멘텀·비용 후 손익비는 보조 정보이며 문턱 미충족만으로 진입을 거부하지 않습니다. 손실 한도·손절·위험 예산·시세·비용 증거·단일 포지션 보호는 유지합니다.</p>}
+         </div>
         : <div className="ccc-callout">적용된 설정을 확인하고 있습니다. 기본값으로 대체하지 않습니다.</div>}
          {policy && ['virtual400-daily/v3','virtual400-daily/v4','virtual400-daily/v5','virtual400-daily/v6','virtual400-daily/v7','virtual400-daily/v8','virtual400-daily/v9'].includes(policy.version) && <p className="ccc-callout">미검증 PAPER 전략 · 하루 최대 {policy.maxDailyEntries ?? 24}회 · 일손실 {account?.dailyBudget?.lossLimitPct ?? 5}% 제한{policy.dailyProfitCapPct ? ` · 일일 실현 순수익 ${policy.dailyProfitCapPct}% 도달 시 신규 진입 중지 (PHT)` : ''}. 일반 전략 성과와 구분하며 손실도 그대로 기록합니다.</p>}
-        {account?.dailyBudget && <p className="ccc-callout" data-testid="virtual-daily-budget">투입 원금 {amount(account.dailyBudget.referenceCapitalUsd)} USDC 기준 · 일일 수익 목표 {account.dailyBudget.profitTargetMinPct}–{account.dailyBudget.profitCapPct}% ({amount(account.dailyBudget.profitTargetMinUsd)}–{amount(account.dailyBudget.profitCapUsd)} USDC) · 일일 손실 한도 {account.dailyBudget.lossLimitPct}% ({amount(account.dailyBudget.lossLimitUsd)} USDC) · 남은 손실 예산 {amount(account.dailyBudget.remainingLossBudgetUsd)} USDC. 목표는 수익 보장이 아니며, 입금은 손익에서 제외합니다. 한도 도달 시 진입을 중지하며 손절 체결 오차로 실제 손실은 한도를 넘을 수 있습니다.</p>}
+        {account?.dailyBudget && <p className="ccc-callout" data-testid="virtual-daily-budget">
+          투입 원금 {amount(account.dailyBudget.referenceCapitalUsd)} USDC 기준 · 일일 수익 {policy?.version==='virtual400-daily/v10'?'참고 KPI':'목표'} {account.dailyBudget.profitTargetMinPct}–{account.dailyBudget.profitCapPct}% ({amount(account.dailyBudget.profitTargetMinUsd)}–{amount(account.dailyBudget.profitCapUsd)} USDC) · 일일 손실 한도 {account.dailyBudget.lossLimitPct}% ({amount(account.dailyBudget.lossLimitUsd)} USDC) · 남은 손실 예산 {amount(account.dailyBudget.remainingLossBudgetUsd)} USDC.
+          {' '}목표는 수익 보장이 아니며, 입금은 손익에서 제외합니다. {policy?.version==='virtual400-daily/v10'?'수익 KPI만으로 새 진입을 막지 않습니다. 손실 한도 도달 시 진입을 중지합니다.':'한도 도달 시 진입을 중지합니다.'} 손절 체결 오차로 실제 손실은 한도를 넘을 수 있습니다.
+        </p>}
         <VirtualTradingModeControls /><p className="ccc-caption">가상 기록은 AI 학습·검증 후보 자료입니다. 모델 학습 완료나 실자금 적용 승인을 뜻하지 않습니다.</p>
         <div className="ccc-automation-note"><ShieldCheck size={15} /><span>활성 세션은 웹페이지를 닫아도 서버에서 계속 실행됩니다.</span></div>
       </section>
     </div>
     <MarketDecisions runtime={runtime} fresh={fresh} />
+    <PatternEntryDiagnostics snapshot={runtime?.patternEntries} fresh={fresh} />
     <PaperEvaluationDiagnostics runtime={runtime} fresh={fresh} />
     <PositionPanel runtime={runtime} fresh={fresh} />
     <VirtualTradeJournal />

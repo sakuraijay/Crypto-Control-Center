@@ -63,10 +63,11 @@ jobs:
           test -f artifacts/futures-web/dist/public/index.html
           test -f artifacts/api-server/dist/index.mjs
 
-      - name: PAPER replay — causal evidence and stop diagnosis
+      - name: PAPER replay — causal evidence, pattern entries and stop diagnosis
         id: tests-paper-replay
         run: |
           node --test scripts/paper-v9-replay.test.mjs
+          node --test scripts/paper-v10-replay.test.mjs
           node scripts/paper-v9-root-repro.mjs > /tmp/paper-stop-reproduction.json
 
       # ── Step 4: Regression tests (api-server) ──────────────────────────────

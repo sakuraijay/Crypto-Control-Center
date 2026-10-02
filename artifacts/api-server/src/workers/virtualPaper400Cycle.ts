@@ -171,7 +171,7 @@ export async function runVirtualPaper400Cycle(d: VirtualPaper400CycleDeps) {
         ? buildStructuralTradePlan({ ...planInput, targetPrice: signal.strategyTargetPrice ?? NaN, estimatedRoundTripCostUsd: entryExit + holding })
         : buildVirtualTradePlan(planInput);
       if (!planned.ok) { reject(planned.reason); continue; }
-      if (!d.structuralTargets && (signal.expectedNetEdgeBps === null || !Number.isFinite(signal.expectedNetEdgeBps)
+      if (!d.structuralTargets && (planned.plan.targetRoePct===null||signal.expectedNetEdgeBps === null || !Number.isFinite(signal.expectedNetEdgeBps)
         || sizing.finalNotionalUsd * signal.expectedNetEdgeBps / 10_000 - holding
           < planned.plan.collateralUsd * planned.plan.targetRoePct / 100)) {
         reject('MODE_TARGET_EXCEEDS_SIGNAL_EDGE'); continue;

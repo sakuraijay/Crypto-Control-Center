@@ -1,4 +1,5 @@
 import { virtualActiveProfile } from '../workers/virtualPaper400Policy';
+import {createHash} from 'node:crypto';
 /**
  * Task #111 — 서버 권위 PAPER 실행기 adversarial 테스트.
  *
@@ -47,10 +48,11 @@ vi.mock('@workspace/db', () => {
 
 vi.mock('../lib/paperCostCache', () => ({
   getPaperCostBinding: vi.fn(() => null),
+  getPaperCostSnapshot: vi.fn(() => null),
 }));
 
-import { db, tradesTable } from '@workspace/db';
-import { getPaperCostBinding } from '../lib/paperCostCache';
+import { db, tradesTable, workerStateTable } from '@workspace/db';
+import { getPaperCostBinding,getPaperCostSnapshot } from '../lib/paperCostCache';
 import { buildProfitProtectKey, manilaDayKey } from '../lib/profitProtection';
 import { buildVirtualPaper400Session, deriveVirtualPaper400Ledger, virtualPaper400StrategyTag } from '../workers/virtualPaper400Ledger';
 import type { Candle } from '../intel/types';
@@ -63,6 +65,12 @@ import {
   getServerPaperStatus, __resetServerPaperStateForTests,
   MAX_ENTRY_PRICE_AGE_MS, MAX_MANAGE_PRICE_AGE_MS, PENDING_CLOSE_KEY,
 } from '../workers/serverPaperExecutor';
+import {dailyPaperProfile,PATTERN_DAILY_PAPER_POLICY} from '../workers/virtualPaperDailyPolicy';
+import {MODE_DECISION_PREFIX,buildPatternDailyTradePlan,modeHoldingCost} from '../workers/virtualPaperTradingMode';
+import {evaluatePatternEntries} from '../intel/patterns/patternEntryStrategies';
+import type {RawCandles} from '../intel/patterns/chartPatterns';
+import {MARKET_BY_SYMBOL_SERVER} from '../lib/gmxMarkets';
+import type {CostSnapshot} from '../lib/costSnapshot';
 
 function makeChain(getResult: () => unknown) {
   const c: Record<string, unknown> = {};
@@ -174,6 +182,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   __resetServerPaperStateForTests();
   vi.mocked(getPaperCostBinding).mockReturnValue(FRESH_BINDING as ReturnType<typeof getPaperCostBinding>);
+  vi.mocked(getPaperCostSnapshot).mockReturnValue(null);
   vi.mocked(db.select).mockImplementation(() => makeChain(() => []) as never);
   vi.mocked(db.insert).mockImplementation(() => makeChain(() => [{ id: 'ins' }]) as never);
   vi.mocked(db.update).mockImplementation(() => makeChain(() => [{ id: 'updated' }]) as never);
@@ -218,6 +227,122 @@ describe('VIRTUAL/PAPER400 real executor namespace lifecycle', () => {
     expect(db.insert).not.toHaveBeenCalled();
     const virtual = await openServerPaperPosition({ ...args, strategy: session.strategyTag, stopPriceUsd: 49_000 });
     expect(virtual.ok).toBe(true);
+  });
+  it('opens an engine-issued v10 null-target plan at the executor boundary without the v9 32-entry gate',async()=>{
+    const now=Date.now(),step=900_000,evaluatedAt=Math.floor(now/step)*step,base=evaluatedAt-step*70,prices:number[][]=[];
+    for(let i=0;i<67;i++)prices.push([base+i*step,100,100.1,99.9,100.05]);
+    prices.push([base+67*step,100,100.2,99.8,100]);
+    prices.push([base+68*step,100,100.3,99.9,100.21]);
+    const raw:RawCandles={source:'gmx-official-api',prices};
+    const result=evaluatePatternEntries('BTC',{'15m':raw},evaluatedAt,'INTRADAY');
+    const candidate=result.candidates[0];
+    if(!candidate)throw Error(`engine-issued pattern evidence unavailable: ${JSON.stringify(result)}`);
+    const fetchedAt=new Date(now).toISOString();
+    const costSnapshot:CostSnapshot={market:MARKET_BY_SYMBOL_SERVER.get('BTC')!.marketToken,isLong:true,orderType:'MarketIncrease',
+      notionalUsd:400,positionFeeUsd:.8,executionFeeUsd:.2,estimatedPriceImpactUsd:0,fundingFeeUsd:.001,
+      borrowingFeeUsd:.002,estimatedExitFeeUsd:.6,estimatedExitPriceImpactUsd:0,
+      fundingRatePerHourFraction:.00001,borrowingRatePerHourFraction:.00002,
+      totalEstimatedRoundTripCostUsd:1.603,source:'PAPER_GMX_ESTIMATE' as const,blockNumber:null,
+      apiTimestamp:fetchedAt,fetchedAt,expiresAt:new Date(now+60_000).toISOString()};
+    vi.mocked(getPaperCostSnapshot).mockReturnValue(costSnapshot);
+    vi.mocked(getPaperCostBinding).mockReturnValue({costSource:'PAPER_GMX_ESTIMATE',estEntryCostUsd:.9,estExitCostUsd:.7,
+      fundingRatePerHourFraction:.00001,borrowingRatePerHourFraction:.00002,costFetchedAt:fetchedAt});
+    const appliedAt=new Date(now-1000).toISOString(),profile=dailyPaperProfile(400,appliedAt,1);
+    const notional=400,hold=modeHoldingCost({notionalUsd:notional,fundingRatePerHourFraction:.00001,
+      borrowingRatePerHourFraction:.00002},candidate.maxHoldMs/3_600_000);
+    if(hold===null)throw Error('pattern hold-cost fixture unavailable');
+    const roundTrip=FRESH_BINDING.estEntryCostUsd+FRESH_BINDING.estExitCostUsd
+      +costSnapshot.fundingFeeUsd+costSnapshot.borrowingFeeUsd+hold;
+    const built=buildPatternDailyTradePlan({mode:'INTRADAY',entryPrice:100.21,structuralStop:candidate.stopPrice,
+      targetPrice:null,maxHoldMs:candidate.maxHoldMs,notionalUsd:notional,maxLeverage:10,
+      estimatedRoundTripCostUsd:roundTrip,riskBudgetUsd:4,openedAtMs:now});
+    if(!built.ok)throw Error(built.reason);
+    const auditSessionId=session.sessionId;
+    const decisionId=MODE_DECISION_PREFIX+'pattern:'+createHash('sha256').update(`${auditSessionId}:${candidate.eventId}`).digest('hex');
+    const audit={policy:PATTERN_DAILY_PAPER_POLICY,policyVersion:'virtual400-daily/v10',sessionId:auditSessionId,patternEntry:candidate,
+      patternEntryVersion:'paper-pattern-entry/v10',signal:{strategyTargetPrice:null},
+      candidate:{symbol:'BTC',side:'LONG',purpose:'PATTERN_ENTRY_EVIDENCE',evaluatedAt:now,
+        closedAt:candidate.confirmedAt,stopFraction:Math.abs(100.21-candidate.stopPrice)/100.21,
+        patternEntry:candidate},tradePlan:built.plan,cost:costSnapshot,
+      sizing:{finalNotionalUsd:notional}};
+    vi.mocked(db.select).mockImplementation((() => {
+      let selected:unknown;
+      const c:Record<string,unknown>={};
+      for(const method of ['where','limit','offset','orderBy','set','values','onConflictDoNothing','onConflictDoUpdate','returning','for'])
+        c[method]=()=>c;
+      c.from=(table:unknown)=>{selected=table;return c;};
+      (c as {then(resolve:(value:unknown)=>unknown):Promise<unknown>}).then=resolve=>
+        Promise.resolve(selected===workerStateTable?[{key:decisionId,value:JSON.stringify(audit)}]:[]).then(resolve);
+      return c;
+    }) as never);
+    const opened=await openServerPaperPosition({decisionId,strategy:session.strategyTag,symbol:'BTC',side:'LONG',
+      sizeUsd:notional,leverage:built.plan.leverage,quote:{priceUsd:100.21,ageMs:1},stopPriceUsd:candidate.stopPrice,
+      tpPriceUsd:null,openPositionCount:0,entriesManilaDay:32,riskProfileSnapshot:profile,nowMs:now});
+    expect(opened.ok).toBe(true);
+  });
+  it('rejects v10 snapshots that differ from the cached exact cost evidence despite matching aggregate fees',async()=>{
+    const now=Date.now(),step=900_000,evaluatedAt=Math.floor(now/step)*step,base=evaluatedAt-step*70,prices:number[][]=[];
+    for(let i=0;i<67;i++)prices.push([base+i*step,100,100.1,99.9,100.05]);
+    prices.push([base+67*step,100,100.2,99.8,100]);
+    prices.push([base+68*step,100,100.3,99.9,100.21]);
+    const candidate=evaluatePatternEntries('BTC',{'15m':{source:'gmx-official-api',prices}},evaluatedAt,'INTRADAY').candidates[0];
+    if(!candidate)throw Error('engine-issued pattern evidence unavailable');
+    const fetchedAt=new Date(now).toISOString();
+    const costSnapshot:CostSnapshot={market:MARKET_BY_SYMBOL_SERVER.get('BTC')!.marketToken,isLong:true,orderType:'MarketIncrease',
+      notionalUsd:400,positionFeeUsd:.8,executionFeeUsd:.2,estimatedPriceImpactUsd:0,fundingFeeUsd:.001,
+      borrowingFeeUsd:.002,estimatedExitFeeUsd:.6,estimatedExitPriceImpactUsd:0,
+      fundingRatePerHourFraction:.00001,borrowingRatePerHourFraction:.00002,
+      totalEstimatedRoundTripCostUsd:1.603,source:'PAPER_GMX_ESTIMATE' as const,blockNumber:null,
+      apiTimestamp:fetchedAt,fetchedAt,expiresAt:new Date(now+60_000).toISOString()};
+    vi.mocked(getPaperCostSnapshot).mockReturnValue(costSnapshot);
+    vi.mocked(getPaperCostBinding).mockReturnValue({costSource:'PAPER_GMX_ESTIMATE',estEntryCostUsd:.9,estExitCostUsd:.7,
+      fundingRatePerHourFraction:.00001,borrowingRatePerHourFraction:.00002,costFetchedAt:fetchedAt});
+    const profile=dailyPaperProfile(400,new Date(now-1000).toISOString(),1),hold=modeHoldingCost({notionalUsd:400,
+      fundingRatePerHourFraction:.00001,borrowingRatePerHourFraction:.00002},candidate.maxHoldMs/3_600_000)!;
+    const total=1.6+costSnapshot.fundingFeeUsd+costSnapshot.borrowingFeeUsd+hold,
+      plan=buildPatternDailyTradePlan({mode:'INTRADAY',entryPrice:100.21,structuralStop:candidate.stopPrice,
+      targetPrice:null,maxHoldMs:candidate.maxHoldMs,notionalUsd:400,maxLeverage:10,estimatedRoundTripCostUsd:total,
+      riskBudgetUsd:4,openedAtMs:now});
+    if(!plan.ok)throw Error(plan.reason);
+    const auditSessionId=session.sessionId;
+    const decisionId=MODE_DECISION_PREFIX+'pattern:'+createHash('sha256').update(`${auditSessionId}:${candidate.eventId}`).digest('hex');
+    const audit={policy:PATTERN_DAILY_PAPER_POLICY,policyVersion:'virtual400-daily/v10',sessionId:auditSessionId,patternEntry:candidate,
+      patternEntryVersion:'paper-pattern-entry/v10',signal:{strategyTargetPrice:null},
+      candidate:{symbol:'BTC',side:'LONG',purpose:'PATTERN_ENTRY_EVIDENCE',evaluatedAt:now,closedAt:candidate.confirmedAt,
+        stopFraction:Math.abs(100.21-candidate.stopPrice)/100.21,patternEntry:candidate},tradePlan:plan.plan,
+      cost:costSnapshot,sizing:{finalNotionalUsd:400}};
+    vi.mocked(db.select).mockImplementation((() => {
+      let selected:unknown;const c:Record<string,unknown>={};
+      for(const method of ['where','limit','offset','orderBy','set','values','onConflictDoNothing','onConflictDoUpdate','returning','for'])
+        c[method]=()=>c;
+      c.from=(table:unknown)=>{selected=table;return c;};
+      (c as {then(resolve:(value:unknown)=>unknown):Promise<unknown>}).then=resolve=>
+        Promise.resolve(selected===workerStateTable?[{key:decisionId,value:JSON.stringify(audit)}]:[]).then(resolve);
+      return c;
+    }) as never);
+    const args={decisionId,strategy:session.strategyTag,symbol:'BTC',side:'LONG' as const,sizeUsd:400,leverage:plan.plan.leverage,
+      quote:{priceUsd:100.21,ageMs:1},stopPriceUsd:candidate.stopPrice,tpPriceUsd:null,openPositionCount:0,
+      entriesManilaDay:0,riskProfileSnapshot:profile,nowMs:now};
+    const shiftedFetch={...costSnapshot,fetchedAt:new Date(now-1000).toISOString(),apiTimestamp:new Date(now-1000).toISOString()};
+    const mutations=[
+      {...costSnapshot,positionFeeUsd:.7,executionFeeUsd:.4,estimatedExitFeeUsd:.5}, // identical aggregate entry/exit cost
+      {...costSnapshot,blockNumber:1234},shiftedFetch,
+      {...costSnapshot,isLong:false},
+      {...costSnapshot,notionalUsd:401},
+      {...costSnapshot,market:'forged-market'},
+    ];
+    for(const mutated of mutations) {
+      audit.cost=mutated;
+      expect(await openServerPaperPosition(args)).toMatchObject({ok:false,reason:'PAPER_PATTERN_COST_SNAPSHOT_INVALID'});
+    }
+    expect(db.insert).not.toHaveBeenCalled();
+    audit.cost=costSnapshot;
+    vi.mocked(getPaperCostBinding).mockReturnValue({costSource:'PAPER_GMX_ESTIMATE',estEntryCostUsd:.9,estExitCostUsd:.7,
+      fundingRatePerHourFraction:.00001,borrowingRatePerHourFraction:.00003,costFetchedAt:fetchedAt});
+    expect(await openServerPaperPosition(args)).toMatchObject({ok:false,reason:'PAPER_PATTERN_COST_SNAPSHOT_INVALID'});
+    vi.mocked(getPaperCostBinding).mockReturnValue({costSource:'PAPER_GMX_ESTIMATE',estEntryCostUsd:.9,estExitCostUsd:.7,
+      fundingRatePerHourFraction:.00001,borrowingRatePerHourFraction:.00002,costFetchedAt:fetchedAt});
+    expect((await openServerPaperPosition(args)).ok).toBe(true);
   });
   it('rejects oversized dedicated virtual orders at the executor boundary', async () => {
     const result = await openServerPaperPosition({ ...BASE_OPEN, strategy: session.strategyTag,

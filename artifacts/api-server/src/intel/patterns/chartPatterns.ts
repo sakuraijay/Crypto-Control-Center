@@ -9,6 +9,8 @@ export interface PatternEvidence {
   id:string; family:'CANDLE'|'REVERSAL'|'CONSOLIDATION'; direction:Direction;
   state:'SHAPE'|'BREAKOUT'; timeframe:Timeframe; availableAt:number;
   trigger:number|null; invalidation:number|null; basis:string;
+  /** Stable timestamp anchor(s) of the completed formation, not a sliding row index. */
+  formationAt?:number; formationKey?:string;
 }
 export interface PatternFrame {
   timeframe:Timeframe; status:'OK'|'UNAVAILABLE'|'INVALID'|'STALE'; closedAt:number|null;
@@ -53,9 +55,10 @@ export function analyzePatternFrame(raw:RawCandles,timeframe:Timeframe,now:numbe
   const atr=closed.slice(-14).reduce((s,r,i)=>s+Math.max(r.h-r.l,Math.abs(r.h-closed[closed.length-15+i].c),Math.abs(r.l-closed[closed.length-15+i].c)),0)/14;
   if(atr<=0)return result;
   const emit=(id:string,family:PatternEvidence['family'],direction:Direction,basis:string,
-    trigger:number|null=null,invalidation:number|null=null,state:PatternEvidence['state']='SHAPE')=>{
+    trigger:number|null=null,invalidation:number|null=null,state:PatternEvidence['state']='SHAPE',
+    formationAt:number=a.t,formationKey=`${id}:${formationAt}`)=>{
     if(!result.findings.some(p=>p.id===id))result.findings.push({id,family,direction,timeframe,
-      availableAt:result.closedAt!,trigger,invalidation,state,basis});
+      availableAt:result.closedAt!,trigger,invalidation,state,basis,formationAt,formationKey});
   };
   // Context excludes every candle in a multi-candle formation.
   const trend=(length:number)=>closed[closed.length-length-1].c-closed[closed.length-length-6].c;
@@ -75,26 +78,26 @@ export function analyzePatternFrame(raw:RawCandles,timeframe:Timeframe,now:numbe
   if(up(a)!==up(b)&&body(b)>atr*.1&&Math.abs(two)>atr) {
     const reversal=up(a)?two<0:two>0;
     if(reversal&&lowBody(a)<=lowBody(b)&&highBody(a)>=highBody(b)&&size>body(b))
-      emit(up(a)?'BULLISH_ENGULFING':'BEARISH_ENGULFING','CANDLE',up(a)?'LONG':'SHORT','opposite body engulfment after prior trend',null,up(a)?Math.min(a.l,b.l):Math.max(a.h,b.h));
+       emit(up(a)?'BULLISH_ENGULFING':'BEARISH_ENGULFING','CANDLE',up(a)?'LONG':'SHORT','opposite body engulfment after prior trend',null,up(a)?Math.min(a.l,b.l):Math.max(a.h,b.h),'SHAPE',b.t,`${up(a)?'BULLISH_ENGULFING':'BEARISH_ENGULFING'}:${b.t},${a.t}`);
     if(reversal&&lowBody(a)>lowBody(b)&&highBody(a)<highBody(b)&&size<body(b)*.6)
-      emit(up(a)?'BULLISH_HARAMI':'BEARISH_HARAMI','CANDLE',up(a)?'LONG':'SHORT','small opposite body contained in prior body',null,up(a)?Math.min(a.l,b.l):Math.max(a.h,b.h));
+       emit(up(a)?'BULLISH_HARAMI':'BEARISH_HARAMI','CANDLE',up(a)?'LONG':'SHORT','small opposite body contained in prior body',null,up(a)?Math.min(a.l,b.l):Math.max(a.h,b.h),'SHAPE',b.t,`${up(a)?'BULLISH_HARAMI':'BEARISH_HARAMI'}:${b.t},${a.t}`);
     if(reversal&&up(a)&&a.o<=b.c&&a.c>(b.o+b.c)/2&&a.c<b.o)
-      emit('PIERCING','CANDLE','LONG','close recovers midpoint after downtrend',null,Math.min(a.l,b.l));
+       emit('PIERCING','CANDLE','LONG','close recovers midpoint after downtrend',null,Math.min(a.l,b.l),'SHAPE',b.t,`PIERCING:${b.t},${a.t}`);
     if(reversal&&!up(a)&&a.o>=b.c&&a.c<(b.o+b.c)/2&&a.c>b.o)
-      emit('DARK_CLOUD_COVER','CANDLE','SHORT','close loses midpoint after uptrend',null,Math.max(a.h,b.h));
+       emit('DARK_CLOUD_COVER','CANDLE','SHORT','close loses midpoint after uptrend',null,Math.max(a.h,b.h),'SHAPE',b.t,`DARK_CLOUD_COVER:${b.t},${a.t}`);
   }
   if(body(c)>atr*.7&&body(b)<body(c)*.35&&size>atr*.5) {
     if(three<-atr&&!up(c)&&up(a)&&a.c>(c.o+c.c)/2&&highBody(b)<=lowBody(c)+atr*.2)
-      emit('MORNING_STAR','CANDLE','LONG','three-body reversal, continuous-market gap relaxation',null,Math.min(a.l,b.l,c.l));
+       emit('MORNING_STAR','CANDLE','LONG','three-body reversal, continuous-market gap relaxation',null,Math.min(a.l,b.l,c.l),'SHAPE',c.t,`MORNING_STAR:${c.t},${b.t},${a.t}`);
     if(three>atr&&up(c)&&!up(a)&&a.c<(c.o+c.c)/2&&lowBody(b)>=highBody(c)-atr*.2)
-      emit('EVENING_STAR','CANDLE','SHORT','three-body reversal, continuous-market gap relaxation',null,Math.max(a.h,b.h,c.h));
+       emit('EVENING_STAR','CANDLE','SHORT','three-body reversal, continuous-market gap relaxation',null,Math.max(a.h,b.h,c.h),'SHAPE',c.t,`EVENING_STAR:${c.t},${b.t},${a.t}`);
   }
   const within=(x:number,r:Candle)=>x>=lowBody(r)&&x<=highBody(r);
   if([a,b,c].every(r=>body(r)>atr*.5)&&within(b.o,c)&&within(a.o,b)) {
     if(three<-atr&&[a,b,c].every(up)&&a.c>b.h&&b.c>c.h&&[a,b,c].every(r=>r.h-r.c<body(r)*.3))
-      emit('THREE_WHITE_SOLDIERS','CANDLE','LONG','three rising strong bodies after downtrend',null,c.l);
+       emit('THREE_WHITE_SOLDIERS','CANDLE','LONG','three rising strong bodies after downtrend',null,c.l,'SHAPE',c.t,`THREE_WHITE_SOLDIERS:${c.t},${b.t},${a.t}`);
     if(three>atr&&[a,b,c].every(r=>!up(r))&&a.c<b.l&&b.c<c.l&&[a,b,c].every(r=>r.c-r.l<body(r)*.3))
-      emit('THREE_BLACK_CROWS','CANDLE','SHORT','three falling strong bodies after uptrend',null,c.h);
+       emit('THREE_BLACK_CROWS','CANDLE','SHORT','three falling strong bodies after uptrend',null,c.h,'SHAPE',c.t,`THREE_BLACK_CROWS:${c.t},${b.t},${a.t}`);
   }
   const pivots=confirmedPivots(closed.slice(0,-1),step);
   const n=closed.length-1;
@@ -117,16 +120,23 @@ export function analyzePatternFrame(raw:RawCandles,timeframe:Timeframe,now:numbe
       const neck=sign===1?Math.min(...necks):Math.max(...necks);
       const tolerance=atr*.7;
       if(Math.max(...p.map(q=>q.p))-Math.min(...p.map(q=>q.p))<=tolerance
-        &&p.every(q=>sign*(q.p-neck)>atr*2)&&cross(neck))
+         &&p.every(q=>sign*(q.p-neck)>atr*2)&&cross(neck)) {
+         const selectedValleys=valleys.map((v,i)=>v.find(q=>q.p===necks[i])!);
+         const anchorTimes=[...p.map(q=>closed[q.i].t),...selectedValleys.map(q=>closed[q.i].t)].sort((x,y)=>x-y);
         emit(`${count===2?'DOUBLE':'TRIPLE'}_${sign===1?'TOP':'BOTTOM'}`,'REVERSAL',direction,
-          'confirmed spaced pivots, prior trend, neckline close break',neck,sign===1?Math.max(...p.map(q=>q.p)):Math.min(...p.map(q=>q.p)),'BREAKOUT');
+           'confirmed spaced pivots, prior trend, neckline close break',neck,sign===1?Math.max(...p.map(q=>q.p)):Math.min(...p.map(q=>q.p)),'BREAKOUT',
+           anchorTimes[0],`${count===2?'DOUBLE':'TRIPLE'}_${sign===1?'TOP':'BOTTOM'}:${anchorTimes.join(',')}`);
+       }
       if(count===3&&Math.abs(p[0].p-p[2].p)<=tolerance
         &&sign*(p[1].p-p[0].p)>atr&&sign*(p[1].p-p[2].p)>atr) {
         const v1=valleys[0].find(q=>q.p===necks[0])!,v2=valleys[1].find(q=>q.p===necks[1])!;
         const line=(i:number)=>v1.p+(v2.p-v1.p)*(i-v1.i)/(v2.i-v1.i);
-        if(sign*a.c<sign*line(n)-atr*.1&&sign*b.c>=sign*line(n-1)-atr*.1)
+         if(sign*a.c<sign*line(n)-atr*.1&&sign*b.c>=sign*line(n-1)-atr*.1) {
+           const anchorTimes=[...p.map(q=>closed[q.i].t),closed[v1.i].t,closed[v2.i].t].sort((x,y)=>x-y);
           emit(sign===1?'HEAD_SHOULDERS':'INVERSE_HEAD_SHOULDERS','REVERSAL',direction,
-            'three confirmed peaks, central extreme, sloped neckline close break',line(n),p[2].p,'BREAKOUT');
+             'three confirmed peaks, central extreme, sloped neckline close break',line(n),p[2].p,'BREAKOUT',
+             anchorTimes[0],`${sign===1?'HEAD_SHOULDERS':'INVERSE_HEAD_SHOULDERS'}:${anchorTimes.join(',')}`);
+         }
       }
     }
   }
@@ -157,13 +167,21 @@ export function analyzePatternFrame(raw:RawCandles,timeframe:Timeframe,now:numbe
         const bull=a.c>h.at(n)+atr*.1&&b.c<=h.at(n-1)+atr*.1;
         const bear=a.c<l.at(n)-atr*.1&&b.c>=l.at(n-1)-atr*.1;
         if(bull||bear) {
-          emit(id,'CONSOLIDATION',bull?'LONG':'SHORT','three confirmed touches per boundary; fresh close beyond fitted line',bull?h.at(n):l.at(n),bull?l.at(n):h.at(n),'BREAKOUT');
+          const boundaryAnchors=[...hs,...ls].map(q=>closed[q.i].t).sort((x,y)=>x-y);
+          const formationAt=boundaryAnchors[0];
+          const geometryKey=`${id}:${boundaryAnchors.join(',')}`;
+          emit(id,'CONSOLIDATION',bull?'LONG':'SHORT','three confirmed touches per boundary; fresh close beyond fitted line',bull?h.at(n):l.at(n),bull?l.at(n):h.at(n),'BREAKOUT',formationAt,geometryKey);
           const pole=closed[start].c-closed[Math.max(0,start-8)].c;
           if(n-start<=30&&Math.abs(pole)>atr*4&&w0<Math.abs(pole)*.5&&((bull&&pole>0)||(bear&&pole<0))) {
             const flag=id==='PRICE_CHANNEL'&&h.slope*pole<0;
             const pennant=id==='SYMMETRICAL_TRIANGLE';
-            if(flag||pennant)emit(`${bull?'BULL':'BEAR'}_${flag?'FLAG':'PENNANT'}`,'CONSOLIDATION',bull?'LONG':'SHORT',
-              'prior eight-bar pole > 4 ATR; consolidation < half pole; continuation close break',bull?h.at(n):l.at(n),bull?l.at(n):h.at(n),'BREAKOUT');
+             if(flag||pennant) {
+               const id2=`${bull?'BULL':'BEAR'}_${flag?'FLAG':'PENNANT'}`;
+               const flagAnchors=[...boundaryAnchors,closed[Math.max(0,start-8)].t].sort((x,y)=>x-y);
+               emit(id2,'CONSOLIDATION',bull?'LONG':'SHORT',
+                 'prior eight-bar pole > 4 ATR; consolidation < half pole; continuation close break',bull?h.at(n):l.at(n),bull?l.at(n):h.at(n),'BREAKOUT',
+                 flagAnchors[0],`${id2}:${flagAnchors.join(',')}`);
+             }
           }
         }
       }

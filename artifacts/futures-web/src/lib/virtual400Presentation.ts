@@ -21,6 +21,14 @@ export function timestamp(value: string | null | undefined, date = false): strin
     hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
 }
 export const REASON_LABELS: Record<string, string> = {
+  PATTERN_EVENT_OPENED: '확정 패턴 사건으로 가상 진입했습니다.',
+  NO_ISSUED_PATTERN_ENTRY: '확인된 패턴 진입 사건을 기다립니다. 중립·충돌 상태는 아래에서 확인할 수 있습니다.',
+  PATTERN_ENTRY_CANDIDATES_REJECTED: '확인된 패턴의 실행 안전 조건을 통과하지 못했습니다.',
+  PATTERN_EVENT_CLAIM_EXISTS: '이미 처리한 패턴 사건입니다. 같은 사건으로 재주문하지 않습니다.',
+  PATTERN_EVENT_ALREADY_CLAIMED: '이미 진입한 패턴 사건입니다.',
+  PATTERN_COST_EVIDENCE_UNAVAILABLE: '정확 주문 규모의 유효한 추정 비용 확인 대기',
+  PATTERN_COST_CAP: '왕복 추정 비용 한도 초과',
+  PATTERN_EXECUTION_STOP_INVALID: '실행 시세에서 관측 손절이 무효 · 손절을 조작하지 않습니다.',
   PAPER_ENTRY_COOLDOWN: '다음 진입 간격을 기다리고 있습니다.',
   PAPER_HOURLY_COOLDOWN: '다음 진입 간격을 기다리고 있습니다.',
   PAPER_POSITION_HELD: '보유 포지션의 손절·익절을 관리하고 있습니다.',
